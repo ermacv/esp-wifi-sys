@@ -11,6 +11,7 @@ fn main() {
         "espnow",
         "mesh",
         "net80211",
+        "wifi_support",
         "phy",
         "pp",
         "smartconfig",
