@@ -17,10 +17,6 @@ fn main() {
         "smartconfig",
         "wapi",
         "wpa_supplicant",
-        // ESP-IDF 6's supplicant uses the PSA Crypto API and X.509 helpers
-        // provided by the matching mbedTLS build.
-        "mbedx509",
-        "mbedcrypto",
         "printf",
         "regulatory",
     ];
