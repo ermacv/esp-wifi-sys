@@ -12,7 +12,6 @@
 #include "esp_err.h"
 #include "esp_attr.h"
 #include "esp_bit_defs.h"
-#include "esp_idf_version.h"
 
 #ifdef __cplusplus
 extern "C" {

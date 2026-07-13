@@ -88,6 +88,13 @@ fn generate_bindings_for_chip(
 
     // Generate the bindings using `bindgen`:
     log::info!("Generating bindings for: {chip}");
+    let chip_header = c_path.join("headers").join(chip).join("include.h");
+    let header = if chip_header.is_file() {
+        chip_header
+    } else {
+        c_path.join("include/include.h")
+    };
+
     let bindings = Builder::default()
         .clang_args([
             &format!("-DCONFIG_IDF_TARGET_{}", chip.to_uppercase()),
@@ -166,7 +173,7 @@ fn generate_bindings_for_chip(
         ])
         .ctypes_prefix("crate::c_types")
         .derive_debug(false)
-        .header(c_path.join("include/include.h").to_string_lossy())
+        .header(header.to_string_lossy())
         .layout_tests(false)
         .raw_line("#![allow(non_camel_case_types,non_snake_case,non_upper_case_globals,dead_code,improper_ctypes)]")
         .use_core()
