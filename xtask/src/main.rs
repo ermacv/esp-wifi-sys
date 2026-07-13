@@ -36,6 +36,7 @@ fn main() -> Result<()> {
         tools = PathBuf::from(std::env::var("ESP_TOOLS_DIR")?);
     }
 
+    let requested_chip = std::env::args().nth(1);
     let chips = [
         ("esp32", "xtensa-esp-elf", Arch::Xtensa),
         ("esp32s2", "xtensa-esp-elf", Arch::Xtensa),
@@ -46,9 +47,16 @@ fn main() -> Result<()> {
         ("esp32c6", "riscv32-esp-elf", Arch::RiscV),
         ("esp32c5", "riscv32-esp-elf", Arch::RiscV),
         ("esp32c61", "riscv32-esp-elf", Arch::RiscV),
+        ("esp32s31", "riscv32-esp-elf", Arch::RiscV),
     ];
 
     for (chip, tool, arch) in chips {
+        if requested_chip
+            .as_deref()
+            .is_some_and(|requested| requested != chip)
+        {
+            continue;
+        }
         generate_bindings_for_chip(chip, arch, &workspace, &tools, tool)?;
     }
 
@@ -62,7 +70,7 @@ fn generate_bindings_for_chip(
     tools: &Path,
     tool: &str,
 ) -> Result<()> {
-    let sysroot_path = tools.join(format!("{tool}/esp-13.2.0_20230928/{tool}"));
+    let sysroot_path = find_sysroot(tools, tool)?;
     let include_path = sysroot_path.join(format!("{tool}/include"));
     let c_path = workspace.join("c");
     let crate_path = workspace.join(format!("esp-wifi-sys-{chip}"));
@@ -87,6 +95,7 @@ fn generate_bindings_for_chip(
                 "-I{}",
                 c_path
                     .join("headers")
+                    .join(chip)
                     .display()
                     .to_string()
                     .replace("\\", "/")
@@ -96,7 +105,6 @@ fn generate_bindings_for_chip(
                 "-I{}",
                 c_path
                     .join("headers")
-                    .join(chip)
                     .display()
                     .to_string()
                     .replace("\\", "/")
@@ -184,4 +192,18 @@ fn generate_bindings_for_chip(
         .output()?;
 
     Ok(())
+}
+
+fn find_sysroot(tools: &Path, tool: &str) -> Result<PathBuf> {
+    let tool_dir = tools.join(tool);
+    let mut candidates = std::fs::read_dir(&tool_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(tool))
+        .filter(|path| path.join(format!("{tool}/include")).is_dir())
+        .collect::<Vec<_>>();
+
+    candidates.sort();
+    candidates
+        .pop()
+        .ok_or_else(|| anyhow!("No {tool} sysroot found below {}", tool_dir.display()))
 }
