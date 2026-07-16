@@ -7,6 +7,23 @@ pub mod c_types;
 mod fmt;
 pub mod include;
 
+// ESP-IDF builds the vendor library with GCC, whose bitfield placement here
+// differs from libclang's. Keep these checks active in normal (non-test)
+// builds, because both the broken and correct layouts have the same size.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+
+    use include::wifi_sta_config_t;
+
+    assert!(size_of::<wifi_sta_config_t>() == 184);
+    assert!(offset_of!(wifi_sta_config_t, pmf_cfg) == 128);
+    assert!(offset_of!(wifi_sta_config_t, _bitfield_1) == 130);
+    assert!(offset_of!(wifi_sta_config_t, sae_pwe_h2e) == 136);
+    assert!(offset_of!(wifi_sta_config_t, failure_retry_cnt) == 144);
+    assert!(offset_of!(wifi_sta_config_t, _bitfield_2) == 145);
+    assert!(offset_of!(wifi_sta_config_t, sae_h2e_identifier) == 151);
+};
+
 #[cfg(test)]
 mod tests {
     use core::mem::{offset_of, size_of, MaybeUninit};

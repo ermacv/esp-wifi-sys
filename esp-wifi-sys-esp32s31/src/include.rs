@@ -4969,14 +4969,8 @@ pub struct wifi_ap_record_t {
     pub group_cipher: wifi_cipher_type_t,
     #[doc = "< Antenna used to receive beacon from AP"]
     pub ant: wifi_ant_t,
-    // GCC places the first seven bitfields in the two bytes immediately after
-    // `pmf_cfg`, then starts `reserved1` in the next 32-bit allocation unit.
-    // Bindgen aligns this group to four bytes, which does not match the ABI of
-    // the ESP32-S31 vendor library. Keep a four-byte accessor window at the
-    // correct start and extend it to the next naturally aligned field.
-    pub _bitfield_align_1: [u8; 0],
+    pub _bitfield_align_1: [u32; 0],
     pub _bitfield_1: __BindgenBitfieldUnit<[u8; 4usize]>,
-    pub _bitfield_tail_1: [u8; 2usize],
     #[doc = "< Country information of AP"]
     pub country: wifi_country_t,
     #[doc = "< HE AP info"]
@@ -5855,8 +5849,14 @@ pub struct wifi_sta_config_t {
     pub threshold: wifi_scan_threshold_t,
     #[doc = "< Configuration for Protected Management Frame. Will be advertised in RSN Capabilities in RSN IE."]
     pub pmf_cfg: wifi_pmf_config_t,
-    pub _bitfield_align_1: [u32; 0],
+    // GCC places the first seven bitfields in the two bytes immediately after
+    // `pmf_cfg`, then starts `reserved1` in the next 32-bit allocation unit.
+    // Bindgen aligns this group to four bytes, which does not match the ABI of
+    // the ESP32-S31 vendor library. Keep a four-byte accessor window at the
+    // correct start and extend it to the next naturally aligned field.
+    pub _bitfield_align_1: [u8; 0],
     pub _bitfield_1: __BindgenBitfieldUnit<[u8; 4usize]>,
+    pub _bitfield_tail_1: [u8; 2usize],
     #[doc = "< Configuration for SAE PWE derivation method. Default value :2 (WPA3_SAE_PWE_BOTH)"]
     pub sae_pwe_h2e: wifi_sae_pwe_method_t,
     #[doc = "< Configuration for SAE-PK (Public Key) Authentication method"]
