@@ -4969,8 +4969,14 @@ pub struct wifi_ap_record_t {
     pub group_cipher: wifi_cipher_type_t,
     #[doc = "< Antenna used to receive beacon from AP"]
     pub ant: wifi_ant_t,
-    pub _bitfield_align_1: [u32; 0],
+    // GCC places the first seven bitfields in the two bytes immediately after
+    // `pmf_cfg`, then starts `reserved1` in the next 32-bit allocation unit.
+    // Bindgen aligns this group to four bytes, which does not match the ABI of
+    // the ESP32-S31 vendor library. Keep a four-byte accessor window at the
+    // correct start and extend it to the next naturally aligned field.
+    pub _bitfield_align_1: [u8; 0],
     pub _bitfield_1: __BindgenBitfieldUnit<[u8; 4usize]>,
+    pub _bitfield_tail_1: [u8; 2usize],
     #[doc = "< Country information of AP"]
     pub country: wifi_country_t,
     #[doc = "< HE AP info"]
@@ -5857,8 +5863,12 @@ pub struct wifi_sta_config_t {
     pub sae_pk_mode: wifi_sae_pk_mode_t,
     #[doc = "< Number of connection retries station will do before moving to next AP. scan_method should be set as WIFI_ALL_CHANNEL_SCAN to use this config.\nNote: Enabling this may cause connection time to increase in case best AP doesn't behave properly."]
     pub failure_retry_cnt: u8,
-    pub _bitfield_align_2: [u32; 0],
+    // Likewise, GCC starts this bitfield group in the byte immediately after
+    // `failure_retry_cnt`. The named feature bits occupy the first 13 bits;
+    // the tail preserves the vendor ABI through `sae_h2e_identifier`.
+    pub _bitfield_align_2: [u8; 0],
     pub _bitfield_2: __BindgenBitfieldUnit<[u8; 4usize]>,
+    pub _bitfield_tail_2: [u8; 2usize],
     #[doc = "< Password identifier for H2E. Strings null-terminated (length < SAE_H2E_IDENTIFIER_LEN) or non-null terminated (length = SAE_H2E_IDENTIFIER_LEN) are accepted. Non-null terminated string with 0xFF for full length of SAE_H2E_IDENTIFIER_LEN is not considered a valid identifier"]
     pub sae_h2e_identifier: [u8; 32usize],
 }

@@ -1,4 +1,5 @@
 use std::{
+    fs,
     fs::File,
     io::Write,
     path::{Path, PathBuf},
@@ -185,6 +186,10 @@ fn generate_bindings_for_chip(
     log::info!("Writing out bindings to: {}", path.display());
     bindings.write_to_file(&path)?;
 
+    if chip == "esp32s31" {
+        fix_esp32s31_sta_config_layout(&path)?;
+    }
+
     // We additionally need to implement a `Send` for a couple types:
     let mut file = File::options().append(true).open(&path)?;
     writeln!(
@@ -198,6 +203,53 @@ fn generate_bindings_for_chip(
         .arg(path.to_string_lossy().to_string())
         .output()?;
 
+    Ok(())
+}
+
+/// Match the GCC layout used to build the ESP32-S31 Wi-Fi binary.
+///
+/// Clang/bindgen aligns the `uint32_t` bitfield groups in
+/// `wifi_sta_config_t` to the next four-byte boundary. GCC instead reuses the
+/// bytes following `pmf_cfg` and `failure_retry_cnt`. Both layouts are 184
+/// bytes, so a size check alone cannot detect this ABI mismatch.
+fn fix_esp32s31_sta_config_layout(path: &Path) -> Result<()> {
+    let source = fs::read_to_string(path)?;
+    let start = source
+        .find("pub struct wifi_sta_config_t {")
+        .ok_or_else(|| anyhow!("wifi_sta_config_t was not generated"))?;
+    let end = source[start..]
+        .find("impl wifi_sta_config_t {")
+        .map(|offset| start + offset)
+        .ok_or_else(|| anyhow!("wifi_sta_config_t implementation was not generated"))?;
+
+    let body = source[start..end].replace(
+        "    pub _bitfield_align_1: [u32; 0],\n    pub _bitfield_1: __BindgenBitfieldUnit<[u8; 4usize]>,",
+        "    // GCC places this group immediately after `pmf_cfg`; bindgen's u32\n\
+         // alignment does not match the ESP32-S31 vendor-library ABI.\n\
+         pub _bitfield_align_1: [u8; 0],\n\
+         pub _bitfield_1: __BindgenBitfieldUnit<[u8; 4usize]>,\n\
+         pub _bitfield_tail_1: [u8; 2usize],",
+    );
+    let body = body.replace(
+        "    pub _bitfield_align_2: [u32; 0],\n    pub _bitfield_2: __BindgenBitfieldUnit<[u8; 4usize]>,",
+        "    // GCC places this group immediately after `failure_retry_cnt`;\n\
+         // the tail preserves the following C-field offsets.\n\
+         pub _bitfield_align_2: [u8; 0],\n\
+         pub _bitfield_2: __BindgenBitfieldUnit<[u8; 4usize]>,\n\
+         pub _bitfield_tail_2: [u8; 2usize],",
+    );
+    if !body.contains("pub _bitfield_tail_1: [u8; 2usize]")
+        || !body.contains("pub _bitfield_tail_2: [u8; 2usize]")
+    {
+        return Err(anyhow!(
+            "wifi_sta_config_t no longer matches the expected bindgen output"
+        ));
+    }
+
+    fs::write(
+        path,
+        format!("{}{}{}", &source[..start], body, &source[end..]),
+    )?;
     Ok(())
 }
 
