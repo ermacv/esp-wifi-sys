@@ -827,6 +827,27 @@ unsafe extern "C" fn semphr_take(handle: *mut c_void, timeout: u32) -> i32 {
     if slot.try_take() {
         return 1;
     }
+    #[cfg(target_arch = "riscv32")]
+    if timeout != 0 && STATE.virtual_task.is_started() && !crate::critical::strict_wifi_hart_armed()
+    {
+        // The pinned initialization path posts PP work and immediately waits
+        // for its completion semaphore. There is no worker task in the cold
+        // runtime, so consume only work that is already ready on this stack.
+        // Queue exhaustion or a missing token fails immediately; this loop
+        // never waits for a producer and has an explicit finite budget.
+        let mut dispatcher = VendorPpDispatcher::for_initialization();
+        for _ in 0..DEFAULT_EVENT_BUDGET {
+            let Some(event) = STATE.queue.try_pop() else {
+                break;
+            };
+            if !matches!(dispatcher.dispatch(event), Ok(DispatchControl::Continue)) {
+                break;
+            }
+            if slot.try_take() {
+                return 1;
+            }
+        }
+    }
     #[cfg(all(target_arch = "riscv32", feature = "wpa-async-eap"))]
     if crate::eap::is_sync_semaphore(handle) {
         // `wpa2_post` ignores the take result and used this semaphore only to
