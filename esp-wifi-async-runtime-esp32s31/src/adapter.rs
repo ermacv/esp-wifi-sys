@@ -480,7 +480,7 @@ pub(crate) fn virtual_pp_task_started() -> bool {
 /// path fail closed.
 #[cfg(target_arch = "riscv32")]
 pub fn drain_wifi_initialization_events(budget: usize) -> Result<usize, InitializationDrainError> {
-    let mut dispatcher = VendorPpDispatcher::new();
+    let mut dispatcher = VendorPpDispatcher::for_initialization();
     let mut processed = 0;
     while processed < budget {
         let Some(event) = STATE.queue.try_pop() else {

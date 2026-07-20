@@ -13,7 +13,6 @@ use crate::{
 
 #[cfg(not(feature = "strict-no-wait"))]
 type NoArgCallback = unsafe extern "C" fn();
-#[cfg(not(feature = "strict-no-wait"))]
 type EventCallback = unsafe extern "C" fn(*mut c_void);
 
 unsafe extern "C" {
@@ -22,7 +21,6 @@ unsafe extern "C" {
     static mut pp_sig_cnt: [u8; 36];
     #[cfg(not(feature = "strict-no-wait"))]
     static mut g_net80211_tx_func: Option<NoArgCallback>;
-    #[cfg(not(feature = "strict-no-wait"))]
     static mut g_config_func: Option<EventCallback>;
     #[cfg(not(feature = "strict-no-wait"))]
     static mut g_timer_func: Option<EventCallback>;
@@ -30,6 +28,8 @@ unsafe extern "C" {
     fn ppProcessTxQ(queue: u8);
     #[cfg(feature = "strict-no-wait")]
     fn ieee80211_output_process();
+    #[cfg(feature = "strict-no-wait")]
+    fn ieee80211_ioctl_process(argument: *mut c_void) -> i32;
     fn pp_timer_do_process(argument: *mut c_void);
     fn pp_default_event_handler(kind: u32, argument: *mut c_void);
     #[cfg(not(feature = "strict-no-wait"))]
@@ -80,6 +80,8 @@ pub enum VendorDispatchError {
     #[cfg(feature = "strict-no-wait")]
     PromiscuousRxUnsupported,
     #[cfg(feature = "strict-no-wait")]
+    UnexpectedInitializationConfigCallback(usize),
+    #[cfg(feature = "strict-no-wait")]
     Net80211Timer(crate::net80211_timer::Net80211TimerError),
     #[cfg(feature = "strict-no-wait")]
     RxPump(crate::rx::RxPumpError),
@@ -87,7 +89,9 @@ pub enum VendorDispatchError {
 
 /// Calls the original finite PP handlers selected by the recovered `ppTask`
 /// jump table. The infinite `ppTask` function itself is never entered.
-pub struct VendorPpDispatcher;
+pub struct VendorPpDispatcher {
+    allow_initialization_config: bool,
+}
 
 /// Laboratory-only observation of the strict event-17 boundary.
 ///
@@ -117,7 +121,21 @@ pub fn vendor_rx_diagnostic_snapshot() -> VendorRxDiagnosticSnapshot {
 
 impl VendorPpDispatcher {
     pub const fn new() -> Self {
-        Self
+        Self {
+            allow_initialization_config: false,
+        }
+    }
+
+    /// Construct the finite dispatcher used only by the cold-start drain.
+    ///
+    /// Event 6 is accepted only when the blob registered the pinned
+    /// `ieee80211_ioctl_process` callback. The normal async dispatcher keeps
+    /// rejecting event 6 because its envelope may carry synchronous API
+    /// completion ownership.
+    pub(crate) const fn for_initialization() -> Self {
+        Self {
+            allow_initialization_config: true,
+        }
     }
 
     unsafe fn account_received_event(event: PpEvent) -> Result<(), VendorDispatchError> {
@@ -285,9 +303,26 @@ impl PpDispatcher for VendorPpDispatcher {
                 // timer callbacks. The net80211 TX callback is not optional.
                 PpAction::Config => {
                     #[cfg(feature = "strict-no-wait")]
-                    return Err(VendorDispatchError::UnsupportedStrictAction(
-                        PpAction::Config,
-                    ));
+                    {
+                        if !self.allow_initialization_config {
+                            return Err(VendorDispatchError::UnsupportedStrictAction(
+                                PpAction::Config,
+                            ));
+                        }
+                        let callback = ptr::addr_of!(g_config_func)
+                            .read()
+                            .ok_or(VendorDispatchError::CallbackNotRegistered(PpAction::Config))?;
+                        if callback as *const () as usize
+                            != ieee80211_ioctl_process as *const () as usize
+                        {
+                            return Err(
+                                VendorDispatchError::UnexpectedInitializationConfigCallback(
+                                    callback as *const () as usize,
+                                ),
+                            );
+                        }
+                        let _ = ieee80211_ioctl_process(event.argument);
+                    }
                     #[cfg(not(feature = "strict-no-wait"))]
                     Self::optional_event(ptr::addr_of!(g_config_func), event.argument)
                 }
