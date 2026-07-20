@@ -1,0 +1,24 @@
+[package]
+name = "esp-wifi-async-runtime-esp32s31"
+version = "0.1.0"
+edition = "2021"
+description = "Experimental stackless async runtime for the ESP32-S31 Wi-Fi blobs"
+repository = "https://github.com/esp-rs/esp-wifi-sys"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+wpa-async-mic = []
+wpa-async-eap = []
+wpa-async = ["wpa-async-mic", "wpa-async-eap"]
+strict-no-wait = []
+# HIL-only oracle for separating frame construction from the reconstructed
+# strict TX leaf path. Never enable in a production strict image.
+hil-vendor-tx = []
+
+[target.'cfg(target_arch = "riscv32")'.dependencies]
+esp-wifi-sys-esp32s31 = { path = "../esp-wifi-sys-esp32s31" }
+
+[dev-dependencies]
+sha1 = "0.10"

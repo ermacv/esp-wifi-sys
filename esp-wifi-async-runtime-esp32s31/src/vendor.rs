@@ -1,0 +1,388 @@
+use core::{ffi::c_void, ptr};
+
+#[cfg(feature = "hil-vendor-tx")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
+
+use crate::{
+    context::RadioContextGuard,
+    event::{PpAction, PpEvent},
+    radio::{DispatchControl, PpDispatcher},
+};
+
+#[cfg(not(feature = "strict-no-wait"))]
+type NoArgCallback = unsafe extern "C" fn();
+#[cfg(not(feature = "strict-no-wait"))]
+type EventCallback = unsafe extern "C" fn(*mut c_void);
+
+unsafe extern "C" {
+    static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
+    static mut g_intr_lock_mux: *mut c_void;
+    static mut pp_sig_cnt: [u8; 36];
+    #[cfg(not(feature = "strict-no-wait"))]
+    static mut g_net80211_tx_func: Option<NoArgCallback>;
+    #[cfg(not(feature = "strict-no-wait"))]
+    static mut g_config_func: Option<EventCallback>;
+    #[cfg(not(feature = "strict-no-wait"))]
+    static mut g_timer_func: Option<EventCallback>;
+
+    fn ppProcessTxQ(queue: u8);
+    #[cfg(feature = "strict-no-wait")]
+    fn ieee80211_output_process();
+    fn pp_timer_do_process(argument: *mut c_void);
+    fn pp_default_event_handler(kind: u32, argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn ppProcessRxPktHdr(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn ppProcTxDone(force: u32);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn ppRxPkt();
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn ppResortTxAMPDU(queue: u8);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn lmacProcessTxTimeout();
+    fn lmacProcessTxComplete();
+    fn lmacProcessCollisions_task();
+    fn wdevProcessRxSucDataAll();
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn pm_on_tbtt(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn pm_on_tsf_timer(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn pm_on_beacon_rx(interface: u32, frame: u32, length: u32, from_task: u32);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn wifi_process_bsscolor_collision();
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn pm_on_mac_modem_beacon_miss(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn wdevProcessModemStateRxBeacon(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
+    fn pm_on_coex_preemption_end(argument: *mut c_void);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VendorDispatchError {
+    OsiNotRegistered,
+    CriticalSectionCallbackMissing,
+    SignalCounterUnderflow(u32),
+    CallbackNotRegistered(PpAction),
+    FatalEvent(usize),
+    InternalQueueFull,
+    #[cfg(feature = "strict-no-wait")]
+    LmacContinuation(crate::lmac::LmacAsyncError),
+    #[cfg(feature = "strict-no-wait")]
+    UnsupportedStrictAction(PpAction),
+    #[cfg(feature = "strict-no-wait")]
+    TxDoneContinuation(crate::txdone::TxDoneError),
+    #[cfg(feature = "strict-no-wait")]
+    FtmUnsupported,
+    #[cfg(feature = "strict-no-wait")]
+    PromiscuousRxUnsupported,
+    #[cfg(feature = "strict-no-wait")]
+    Net80211Timer(crate::net80211_timer::Net80211TimerError),
+    #[cfg(feature = "strict-no-wait")]
+    RxPump(crate::rx::RxPumpError),
+}
+
+/// Calls the original finite PP handlers selected by the recovered `ppTask`
+/// jump table. The infinite `ppTask` function itself is never entered.
+pub struct VendorPpDispatcher;
+
+/// Laboratory-only observation of the strict event-17 boundary.
+///
+/// A completed count smaller than the entered count means the vendor RX leaf
+/// did not return. Equal counts prove only that the queued RX pump remained
+/// finite; a separate ingress counter is needed to observe EAPOL delivery.
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VendorRxDiagnosticSnapshot {
+    pub entered: usize,
+    pub completed: usize,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+static RX_DISPATCH_ENTERED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static RX_DISPATCH_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+
+/// Read the event-17 counters without calling into the vendor library.
+#[cfg(feature = "hil-vendor-tx")]
+pub fn vendor_rx_diagnostic_snapshot() -> VendorRxDiagnosticSnapshot {
+    VendorRxDiagnosticSnapshot {
+        entered: RX_DISPATCH_ENTERED.load(Ordering::Acquire),
+        completed: RX_DISPATCH_COMPLETED.load(Ordering::Acquire),
+    }
+}
+
+impl VendorPpDispatcher {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    unsafe fn account_received_event(event: PpEvent) -> Result<(), VendorDispatchError> {
+        if !event.has_signal_counter() {
+            return Ok(());
+        }
+
+        let strict = crate::critical::strict_wifi_hart_armed();
+        let (restore, mux, saved) = if strict {
+            (
+                None,
+                ptr::null_mut(),
+                crate::critical::strict_wifi_int_disable(),
+            )
+        } else {
+            let osi = ptr::addr_of!(g_osi_funcs_p).read();
+            let Some(osi) = osi.as_ref() else {
+                return Err(VendorDispatchError::OsiNotRegistered);
+            };
+            let disable = osi
+                ._wifi_int_disable
+                .ok_or(VendorDispatchError::CriticalSectionCallbackMissing)?;
+            let restore = osi
+                ._wifi_int_restore
+                .ok_or(VendorDispatchError::CriticalSectionCallbackMissing)?;
+            let mux = ptr::addr_of!(g_intr_lock_mux).read();
+            let saved = disable(mux);
+            (Some(restore), mux, saved)
+        };
+
+        let counter = ptr::addr_of_mut!(pp_sig_cnt)
+            .cast::<u8>()
+            .add(event.kind as usize);
+        let value = counter.read();
+        if value == 0 {
+            if let Some(restore) = restore {
+                restore(mux, saved);
+            } else {
+                crate::critical::strict_wifi_int_restore(saved);
+            }
+            return Err(VendorDispatchError::SignalCounterUnderflow(event.kind));
+        }
+        counter.write(value.wrapping_sub(1));
+        if let Some(restore) = restore {
+            restore(mux, saved);
+        } else {
+            crate::critical::strict_wifi_int_restore(saved);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "strict-no-wait"))]
+    unsafe fn registered_no_arg(
+        callback: *const Option<NoArgCallback>,
+        action: PpAction,
+    ) -> Result<(), VendorDispatchError> {
+        let callback = callback
+            .read()
+            .ok_or(VendorDispatchError::CallbackNotRegistered(action))?;
+        callback();
+        Ok(())
+    }
+
+    #[cfg(not(feature = "strict-no-wait"))]
+    unsafe fn optional_event(callback: *const Option<EventCallback>, argument: *mut c_void) {
+        if let Some(callback) = callback.read() {
+            callback(argument);
+        }
+    }
+}
+
+impl Default for VendorPpDispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PpDispatcher for VendorPpDispatcher {
+    type Error = VendorDispatchError;
+
+    fn dispatch(&mut self, event: PpEvent) -> Result<DispatchControl, Self::Error> {
+        let _context = RadioContextGuard::enter(event.kind);
+        unsafe {
+            #[cfg(feature = "strict-no-wait")]
+            if crate::lmac::txq_split_failed() {
+                return Err(VendorDispatchError::LmacContinuation(
+                    crate::lmac::LmacAsyncError::TxQueueSplitFailed,
+                ));
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if crate::lmac::is_continuation(event.kind) {
+                crate::lmac::dispatch_continuation()
+                    .map_err(VendorDispatchError::LmacContinuation)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if crate::txdone::is_continuation(event.kind) {
+                crate::txdone::dispatch_continuation()
+                    .map_err(VendorDispatchError::TxDoneContinuation)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if crate::txdone::is_lmac_continuation(event.kind) {
+                crate::txdone::dispatch_lmac_continuation()
+                    .map_err(VendorDispatchError::TxDoneContinuation)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if crate::rx::is_continuation(event.kind) {
+                crate::rx::dispatch().map_err(VendorDispatchError::RxPump)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if event.kind == crate::net80211_timer::NET80211_TIMER_EVENT {
+                crate::net80211_timer::dispatch(event.argument)
+                    .map_err(VendorDispatchError::Net80211Timer)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "wpa-async-eap")]
+            if crate::eap::is_async_work(event.kind) {
+                let follow_up = match crate::eap::dispatch(event.kind) {
+                    crate::eap::DispatchResult::Complete => None,
+                    crate::eap::DispatchResult::Deferred => Some(event.kind),
+                    crate::eap::DispatchResult::ContinueRx => Some(crate::eap::EAP_RX_CONTINUATION),
+                };
+                if let Some(kind) = follow_up {
+                    if !crate::adapter::enqueue_internal_event(PpEvent {
+                        kind,
+                        argument: ptr::null_mut(),
+                    }) {
+                        return Err(VendorDispatchError::InternalQueueFull);
+                    }
+                }
+                return Ok(DispatchControl::Continue);
+            }
+
+            Self::account_received_event(event)?;
+
+            match event.action() {
+                PpAction::ProcessTxQueue(queue) => ppProcessTxQ(queue),
+                PpAction::Net80211Tx => {
+                    #[cfg(feature = "strict-no-wait")]
+                    {
+                        // `ieee80211_output_init` registers this exact symbol
+                        // as `g_net80211_tx_func`. Calling it directly removes
+                        // the indirect callback edge. The strict init policy
+                        // disables cache TX, AMSDU and power save, while the
+                        // final-link ESF wrappers constrain the loop to the
+                        // finite static TX pool.
+                        ieee80211_output_process();
+                    }
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    Self::registered_no_arg(
+                        ptr::addr_of!(g_net80211_tx_func),
+                        PpAction::Net80211Tx,
+                    )?;
+                }
+                // The original dispatcher explicitly skips null config and
+                // timer callbacks. The net80211 TX callback is not optional.
+                PpAction::Config => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::Config,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    Self::optional_event(ptr::addr_of!(g_config_func), event.argument)
+                }
+                PpAction::TimerCallback => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::TimerCallback,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    Self::optional_event(ptr::addr_of!(g_timer_func), event.argument)
+                }
+                PpAction::PpTimer => pp_timer_do_process(event.argument),
+                PpAction::Default => pp_default_event_handler(event.kind, event.argument),
+                PpAction::ProcessRxHeader => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::PromiscuousRxUnsupported);
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    ppProcessRxPktHdr(event.argument)
+                }
+                PpAction::Fatal => {
+                    return Err(VendorDispatchError::FatalEvent(event.argument as usize))
+                }
+                PpAction::Shutdown => {
+                    crate::adapter::mark_shutdown_processed();
+                    return Ok(DispatchControl::Stop);
+                }
+                PpAction::ProcessTxDone => {
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::txdone::begin().map_err(VendorDispatchError::TxDoneContinuation)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    ppProcTxDone(1);
+                }
+                PpAction::ProcessRxPacket => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    RX_DISPATCH_ENTERED.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::rx::dispatch().map_err(VendorDispatchError::RxPump)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    ppRxPkt();
+                    #[cfg(feature = "hil-vendor-tx")]
+                    RX_DISPATCH_COMPLETED.fetch_add(1, Ordering::Release);
+                }
+                PpAction::ResortTxAmpdu => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::ResortTxAmpdu,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    ppResortTxAMPDU(event.argument as usize as u8);
+                }
+                PpAction::Noop => {}
+                PpAction::LmacTxTimeout => {
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::lmac::begin_tx_timeout()
+                        .map_err(VendorDispatchError::LmacContinuation)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    lmacProcessTxTimeout();
+                }
+                PpAction::LmacTxComplete => lmacProcessTxComplete(),
+                PpAction::LmacCollision => lmacProcessCollisions_task(),
+                PpAction::WdevRxSuccess => {
+                    wdevProcessRxSucDataAll();
+                    #[cfg(feature = "strict-no-wait")]
+                    if crate::wdev::take_ftm_attempted() {
+                        return Err(VendorDispatchError::FtmUnsupported);
+                    }
+                }
+                action @ (PpAction::PowerSaveTbtt
+                | PpAction::PowerSaveTsfTimer
+                | PpAction::PowerSaveBeaconRx
+                | PpAction::BssColorCollision
+                | PpAction::PowerSaveBeaconMiss
+                | PpAction::WdevModemStateRxBeacon
+                | PpAction::CoexPreemptionEnd) => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(action));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    match action {
+                        PpAction::PowerSaveTbtt => pm_on_tbtt(event.argument),
+                        PpAction::PowerSaveTsfTimer => pm_on_tsf_timer(event.argument),
+                        PpAction::PowerSaveBeaconRx => pm_on_beacon_rx(0, 0, 0, 1),
+                        PpAction::BssColorCollision => wifi_process_bsscolor_collision(),
+                        PpAction::PowerSaveBeaconMiss => {
+                            pm_on_mac_modem_beacon_miss(event.argument)
+                        }
+                        PpAction::WdevModemStateRxBeacon => {
+                            wdevProcessModemStateRxBeacon(event.argument)
+                        }
+                        PpAction::CoexPreemptionEnd => pm_on_coex_preemption_end(event.argument),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+
+        Ok(DispatchControl::Continue)
+    }
+}

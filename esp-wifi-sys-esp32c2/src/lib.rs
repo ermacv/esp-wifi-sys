@@ -11,7 +11,11 @@ pub mod include;
 #[no_mangle]
 extern "C" fn __esp_radio_printf(tag: *const core::ffi::c_char, msg: *const core::ffi::c_char) {
     unsafe {
-        info!("{} {}", core::ffi::CStr::from_ptr(tag).to_str().unwrap(), core::ffi::CStr::from_ptr(msg).to_str().unwrap());
+        info!(
+            "{} {}",
+            core::ffi::CStr::from_ptr(tag).to_str().unwrap(),
+            core::ffi::CStr::from_ptr(msg).to_str().unwrap()
+        );
     }
 }
 

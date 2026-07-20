@@ -1,0 +1,184 @@
+use core::{
+    cell::UnsafeCell,
+    ffi::c_void,
+    mem, ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+use crate::diagnostics::BlockingCall;
+use crate::event::PpEvent;
+
+pub(crate) const NET80211_TIMER_EVENT: u32 = 0xffff_ff70;
+const TIMER_SLOT_CAPACITY: usize = 16;
+const TIMER_SLOT_MASK: usize = (1 << TIMER_SLOT_CAPACITY) - 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TimerEnvelope {
+    id: u8,
+    padding: [u8; 3],
+    argument: *mut c_void,
+}
+
+#[repr(C)]
+struct TimerSlot {
+    envelope: UnsafeCell<TimerEnvelope>,
+}
+
+unsafe impl Sync for TimerSlot {}
+
+impl TimerSlot {
+    const fn new() -> Self {
+        Self {
+            envelope: UnsafeCell::new(TimerEnvelope {
+                id: 0,
+                padding: [0; 3],
+                argument: ptr::null_mut(),
+            }),
+        }
+    }
+}
+
+static TIMER_SLOTS: [TimerSlot; TIMER_SLOT_CAPACITY] =
+    [const { TimerSlot::new() }; TIMER_SLOT_CAPACITY];
+static CLAIMED_TIMER_SLOTS: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_TIMER_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" {
+    fn ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
+    fn __real_ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
+}
+
+pub(crate) fn timer_process_link_wrapper_active() -> bool {
+    core::ptr::eq(
+        ieee80211_timer_process as *const (),
+        __wrap_ieee80211_timer_process as *const (),
+    )
+}
+
+const fn supported_strict_timer(id: u8) -> bool {
+    id == 0
+}
+
+fn claim_slot() -> Option<usize> {
+    let claimed = CLAIMED_TIMER_SLOTS.load(Ordering::Acquire);
+    let free = !claimed & TIMER_SLOT_MASK;
+    if free == 0 {
+        return None;
+    }
+    let index = free.trailing_zeros() as usize;
+    let bit = 1_usize << index;
+    CLAIMED_TIMER_SLOTS
+        .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| index)
+}
+
+fn release_slot(index: usize) {
+    CLAIMED_TIMER_SLOTS.fetch_and(!(1_usize << index), Ordering::AcqRel);
+}
+
+fn slot_index(argument: *mut c_void) -> Option<usize> {
+    let base = ptr::addr_of!(TIMER_SLOTS) as usize;
+    let address = argument as usize;
+    let stride = mem::size_of::<TimerSlot>();
+    let offset = address.checked_sub(base)?;
+    if stride == 0 || offset % stride != 0 {
+        return None;
+    }
+    let index = offset / stride;
+    (index < TIMER_SLOT_CAPACITY).then_some(index)
+}
+
+/// Final-link replacement for the heap-owning timer-event producer.
+///
+/// Before the strict proof this delegates to the original initialization
+/// path. Afterwards it claims one fixed envelope and posts one executor event.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_ieee80211_timer_process(
+    kind: u32,
+    id: u32,
+    argument: *mut c_void,
+) -> i32 {
+    if !crate::critical::strict_wifi_hart_armed() {
+        return __real_ieee80211_timer_process(kind, id, argument);
+    }
+    if !crate::critical::on_strict_wifi_hart()
+        || kind != 7
+        || id > u32::from(u8::MAX)
+        || !supported_strict_timer(id as u8)
+    {
+        REJECTED_TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
+        crate::adapter::blocking_probe().record(
+            BlockingCall::Net80211TimerRejected,
+            kind,
+            id as usize,
+        );
+        return -1;
+    }
+    let Some(index) = claim_slot() else {
+        REJECTED_TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
+        crate::adapter::blocking_probe().record(
+            BlockingCall::Net80211TimerRejected,
+            kind,
+            id as usize,
+        );
+        return -1;
+    };
+    let slot = &TIMER_SLOTS[index];
+    slot.envelope.get().write(TimerEnvelope {
+        id: id as u8,
+        padding: [0; 3],
+        argument,
+    });
+    let queued = crate::adapter::enqueue_internal_event(PpEvent {
+        kind: NET80211_TIMER_EVENT,
+        argument: slot.envelope.get().cast(),
+    });
+    if !queued {
+        release_slot(index);
+        REJECTED_TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
+        crate::adapter::blocking_probe().record(
+            BlockingCall::Net80211TimerRejected,
+            kind,
+            id as usize,
+        );
+        return -1;
+    }
+    0
+}
+
+pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211TimerError> {
+    let Some(index) = slot_index(argument) else {
+        return Err(Net80211TimerError::InvalidSlot);
+    };
+    let bit = 1_usize << index;
+    if CLAIMED_TIMER_SLOTS.load(Ordering::Acquire) & bit == 0 {
+        return Err(Net80211TimerError::InvalidSlot);
+    }
+    let envelope = TIMER_SLOTS[index].envelope.get();
+    let id = (*envelope).id;
+    if !supported_strict_timer(id) {
+        release_slot(index);
+        return Err(Net80211TimerError::UnsupportedId(id));
+    }
+
+    // Timer ID 0 maps to `ieee80211_timer_connect`, whose recovered body only
+    // returns success. Completing it locally avoids both the vendor timer
+    // table's indirect callback and its heap-owned envelope. Other IDs are
+    // rejected by the producer before a slot is claimed.
+    release_slot(index);
+    Ok(())
+}
+
+pub fn rejected_net80211_timer_events() -> usize {
+    REJECTED_TIMER_EVENTS.load(Ordering::Acquire)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Net80211TimerError {
+    InvalidSlot,
+    UnsupportedId(u8),
+}
+
+const _: () = assert!(mem::size_of::<TimerEnvelope>() == 8);

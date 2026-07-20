@@ -1,0 +1,105 @@
+use core::{
+    ffi::c_void,
+    sync::atomic::{AtomicBool, Ordering},
+};
+
+static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" {
+    #[link_name = "wDev_record_ftm_data"]
+    fn vendor_record_ftm_data(rx_control: *mut c_void, frame: *mut c_void);
+    #[link_name = "pm_on_beacon_rx"]
+    fn vendor_pm_on_beacon_rx(
+        interface: *mut c_void,
+        frame: *mut u8,
+        frame_end: *mut u8,
+        from_task: u32,
+    );
+    #[link_name = "pm_on_data_tx"]
+    fn vendor_pm_on_data_tx();
+    #[link_name = "wDev_ftm_set_t1t4"]
+    fn vendor_ftm_set_t1t4(frame: *mut c_void);
+    #[link_name = "wDev_isNANPktInValidSlot"]
+    fn vendor_is_nan_packet_in_valid_slot(frame: *mut u8) -> i32;
+    fn __real_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32;
+}
+
+pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
+    core::ptr::eq(
+        vendor_record_ftm_data as *const (),
+        __wrap_wDev_record_ftm_data as *const (),
+    ) && core::ptr::eq(
+        vendor_pm_on_beacon_rx as *const (),
+        __wrap_pm_on_beacon_rx as *const (),
+    ) && core::ptr::eq(
+        vendor_pm_on_data_tx as *const (),
+        __wrap_pm_on_data_tx as *const (),
+    ) && core::ptr::eq(
+        vendor_ftm_set_t1t4 as *const (),
+        __wrap_wDev_ftm_set_t1t4 as *const (),
+    ) && core::ptr::eq(
+        vendor_is_nan_packet_in_valid_slot as *const (),
+        __wrap_wDev_isNANPktInValidSlot as *const (),
+    )
+}
+
+pub(crate) fn take_ftm_attempted() -> bool {
+    FTM_ATTEMPTED.swap(false, Ordering::AcqRel)
+}
+
+/// Reject Fine Timing Measurement RX accounting in the strict profile.
+///
+/// The pinned vendor implementation starts with `ets_delay_us(50)`. The final
+/// link must use `--wrap=wDev_record_ftm_data`; the enclosing event handler
+/// observes this marker and fails after returning from its finite RX section.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wDev_record_ftm_data(
+    _rx_control: *mut c_void,
+    _frame: *mut c_void,
+) {
+    FTM_ATTEMPTED.store(true, Ordering::Release);
+}
+
+/// Reject the optional TX FTM timestamp callback under the disabled-FTM
+/// invariant.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wDev_ftm_set_t1t4(_frame: *mut c_void) {
+    FTM_ATTEMPTED.store(true, Ordering::Release);
+}
+
+/// Preserve ordinary AP/STA TX while rejecting the callback-driven NAN path.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32 {
+    if !crate::critical::strict_wifi_hart_armed() {
+        return __real_wDev_isNANPktInValidSlot(frame);
+    }
+    if frame.is_null() {
+        return 0;
+    }
+    let descriptor = frame.add(0x34).cast::<*mut u8>().read();
+    if descriptor.is_null() {
+        return 0;
+    }
+    let packet_kind = descriptor.add(0x10).cast::<u32>().read() & 0x00c0_0000;
+    i32::from(packet_kind != 0x0080_0000)
+}
+
+/// Remove the vendor power-save/mesh beacon tail under `WIFI_PS_NONE`.
+///
+/// PP/net80211 has already parsed and delivered the beacon before this hook.
+/// The stock function only updates power-save state and contains the path from
+/// TIM processing to radio shutdown and `ets_delay_us`.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pm_on_beacon_rx(
+    _interface: *mut c_void,
+    _frame: *mut u8,
+    _frame_end: *mut u8,
+    _from_task: u32,
+) {
+}
+
+/// Remove TX power-management accounting under the verified `WIFI_PS_NONE`
+/// invariant. The stock eight-byte trampoline enters the complete sleep/null
+/// frame state machine even though that mode is disabled.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pm_on_data_tx() {}
