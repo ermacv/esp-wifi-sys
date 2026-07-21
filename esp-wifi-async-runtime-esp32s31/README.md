@@ -393,8 +393,11 @@ posts another event for a captured remainder. `hal_mac_get_txq_complete` is
 also a late ROM alias: its wrapper performs only the fixed basic-HT register
 decode and traps on HE, BAR, A-MPDU, or live MPLEN state before the vendor
 caller can misinterpret an unsupported record. Event 23 itself is dispatched
-in Rust one queue at a time and uses a direct outcome `match`; the five vendor
-success/error outcome bodies remain strict audit roots. It is expected to fail
+in Rust one queue at a time from SRAM and uses a direct outcome `match`. The
+HIL feature exposes `lmac_tx_complete_snapshot()` so TX stress can prove the
+queue-kind, TXOP/list, and descriptor invariants without allocating or changing
+the selected outcome. The five vendor success/error outcome bodies remain
+strict audit roots. It is expected to fail
 until all reported roots are replaced or their exact indirect target and loop
 bound are proven.
 

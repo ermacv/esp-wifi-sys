@@ -5,6 +5,9 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(feature = "hil-vendor-tx")]
+use core::sync::atomic::AtomicU32;
+
 use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
 
 pub(crate) const TX_DISCARD_CONTINUATION: u32 = u32::MAX - 1;
@@ -15,6 +18,7 @@ const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
+const TX_QUEUE_TXOP_OUTSTANDING_OFFSET: usize = 0x1c;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const TX_QUEUE_DROP_COUNT_OFFSET: usize = 0x24;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
@@ -134,6 +138,104 @@ unsafe impl Sync for TimerCell {}
 static STATE: StateCell = StateCell(UnsafeCell::new(TxTimeoutState::new()));
 static TIMER: TimerCell = TimerCell::new();
 static TXQ_SPLIT_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// HIL-only observations captured immediately before the selected completion
+/// outcome runs. They let us prove the narrow basic-HT success invariants
+/// before replacing the remaining vendor success/recycle bodies.
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LmacTxCompleteSnapshot {
+    pub completions: u32,
+    pub stale: u32,
+    pub success: u32,
+    pub rts_error: u32,
+    pub cts_timeout: u32,
+    pub tx_error: u32,
+    pub ack_timeout: u32,
+    pub unexpected_status: u32,
+    pub success_queue_mask: u32,
+    pub success_queue_kind_mask: u32,
+    pub success_txop_nonzero: u32,
+    pub success_txop_max: u8,
+    pub success_next_nonnull: u32,
+    pub success_descriptor_flags_or: u32,
+    pub last_queue: u8,
+    pub last_queue_kind: u8,
+    pub last_txop_outstanding: u8,
+    pub last_response: u8,
+    pub last_descriptor_flags: u32,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+struct TxCompleteCounters {
+    completions: AtomicU32,
+    stale: AtomicU32,
+    outcomes: [AtomicU32; 6],
+    unexpected_status: AtomicU32,
+    success_queue_mask: AtomicU32,
+    success_queue_kind_mask: AtomicU32,
+    success_txop_nonzero: AtomicU32,
+    success_txop_max: AtomicU32,
+    success_next_nonnull: AtomicU32,
+    success_descriptor_flags_or: AtomicU32,
+    last_queue: AtomicU32,
+    last_queue_kind: AtomicU32,
+    last_txop_outstanding: AtomicU32,
+    last_response: AtomicU32,
+    last_descriptor_flags: AtomicU32,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+impl TxCompleteCounters {
+    const fn new() -> Self {
+        Self {
+            completions: AtomicU32::new(0),
+            stale: AtomicU32::new(0),
+            outcomes: [const { AtomicU32::new(0) }; 6],
+            unexpected_status: AtomicU32::new(0),
+            success_queue_mask: AtomicU32::new(0),
+            success_queue_kind_mask: AtomicU32::new(0),
+            success_txop_nonzero: AtomicU32::new(0),
+            success_txop_max: AtomicU32::new(0),
+            success_next_nonnull: AtomicU32::new(0),
+            success_descriptor_flags_or: AtomicU32::new(0),
+            last_queue: AtomicU32::new(0),
+            last_queue_kind: AtomicU32::new(0),
+            last_txop_outstanding: AtomicU32::new(0),
+            last_response: AtomicU32::new(0),
+            last_descriptor_flags: AtomicU32::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+static TX_COMPLETE_COUNTERS: TxCompleteCounters = TxCompleteCounters::new();
+
+#[cfg(feature = "hil-vendor-tx")]
+pub fn lmac_tx_complete_snapshot() -> LmacTxCompleteSnapshot {
+    let counters = &TX_COMPLETE_COUNTERS;
+    LmacTxCompleteSnapshot {
+        completions: counters.completions.load(Ordering::Acquire),
+        stale: counters.stale.load(Ordering::Acquire),
+        success: counters.outcomes[0].load(Ordering::Acquire),
+        rts_error: counters.outcomes[1].load(Ordering::Acquire),
+        cts_timeout: counters.outcomes[2].load(Ordering::Acquire),
+        tx_error: counters.outcomes[4].load(Ordering::Acquire),
+        ack_timeout: counters.outcomes[5].load(Ordering::Acquire),
+        unexpected_status: counters.unexpected_status.load(Ordering::Acquire),
+        success_queue_mask: counters.success_queue_mask.load(Ordering::Acquire),
+        success_queue_kind_mask: counters.success_queue_kind_mask.load(Ordering::Acquire),
+        success_txop_nonzero: counters.success_txop_nonzero.load(Ordering::Acquire),
+        success_txop_max: counters.success_txop_max.load(Ordering::Acquire) as u8,
+        success_next_nonnull: counters.success_next_nonnull.load(Ordering::Acquire),
+        success_descriptor_flags_or: counters.success_descriptor_flags_or.load(Ordering::Acquire),
+        last_queue: counters.last_queue.load(Ordering::Acquire) as u8,
+        last_queue_kind: counters.last_queue_kind.load(Ordering::Acquire) as u8,
+        last_txop_outstanding: counters.last_txop_outstanding.load(Ordering::Acquire) as u8,
+        last_response: counters.last_response.load(Ordering::Acquire) as u8,
+        last_descriptor_flags: counters.last_descriptor_flags.load(Ordering::Acquire),
+    }
+}
 
 /// Final-link replacement for `hal_mac_get_txq_state`. The vendor complete
 /// and collision handlers consume every returned bitmap bit in one call. The
@@ -280,6 +382,7 @@ pub(crate) fn txq_split_failed() -> bool {
 /// `__wrap_hal_mac_get_txq_state(2)` exposes at most one queue and posts a new
 /// event for a captured remainder. This function therefore performs exactly
 /// one fixed completion decode and one statically selected outcome call.
+#[link_section = ".rwtext.wifi_strict.tx_complete_dispatch"]
 pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     let bits = __wrap_hal_mac_get_txq_state(2);
     if txq_split_failed() {
@@ -297,6 +400,8 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     let queue_state = instances.add(usize::from(queue) * TX_QUEUE_STATE_SIZE);
     if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 1 {
         // Match the stock stale-completion branch without its formatter/log.
+        #[cfg(feature = "hil-vendor-tx")]
+        TX_COMPLETE_COUNTERS.stale.fetch_add(1, Ordering::Relaxed);
         hal_mac_clr_txq_state(2, queue);
         return Ok(());
     }
@@ -328,10 +433,14 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         .add(0x31)
         .write(((auxiliary[0] >> 21) & 0x7f) as u8);
 
+    let status = completion[1] >> 4;
+    #[cfg(feature = "hil-vendor-tx")]
+    record_tx_complete(queue_state, queue, status, completion[2]);
+
     // `esp_test_tx_tb_complete` is diagnostic-only. The strict path omits it
     // and clears the hardware completion bit before entering the outcome.
     hal_mac_clr_txq_state(2, queue);
-    match completion[1] >> 4 {
+    match status {
         0 => lmacProcessTxSuccess(queue, completion[2]),
         1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
         2 => lmacProcessCtsTimeout(queue, 0),
@@ -340,6 +449,73 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
     }
     Ok(())
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn record_tx_complete(queue_state: *mut u8, queue: u8, status: u8, response: u8) {
+    let counters = &TX_COMPLETE_COUNTERS;
+    counters.completions.fetch_add(1, Ordering::Relaxed);
+    match status {
+        0 | 1 | 2 | 4 | 5 => {
+            counters.outcomes[usize::from(status)].fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            counters.unexpected_status.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    if status != 0 {
+        return;
+    }
+
+    let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
+    let txop_outstanding = queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read();
+    let frame = queue_state.cast::<*mut u8>().read();
+    let next = frame.add(TX_FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u32>()
+        .read();
+    let descriptor_flags = descriptor.read();
+
+    counters
+        .success_queue_mask
+        .fetch_or(1_u32 << queue, Ordering::Relaxed);
+    if queue_kind < 32 {
+        counters
+            .success_queue_kind_mask
+            .fetch_or(1_u32 << queue_kind, Ordering::Relaxed);
+    }
+    if txop_outstanding != 0 {
+        counters
+            .success_txop_nonzero
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    counters
+        .success_txop_max
+        .fetch_max(u32::from(txop_outstanding), Ordering::Relaxed);
+    if !next.is_null() {
+        counters
+            .success_next_nonnull
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    counters
+        .success_descriptor_flags_or
+        .fetch_or(descriptor_flags, Ordering::Relaxed);
+    counters
+        .last_queue
+        .store(u32::from(queue), Ordering::Relaxed);
+    counters
+        .last_queue_kind
+        .store(u32::from(queue_kind), Ordering::Relaxed);
+    counters
+        .last_txop_outstanding
+        .store(u32::from(txop_outstanding), Ordering::Relaxed);
+    counters
+        .last_response
+        .store(u32::from(response), Ordering::Relaxed);
+    counters
+        .last_descriptor_flags
+        .store(descriptor_flags, Ordering::Release);
 }
 
 pub(crate) fn runtime_tx_link_wrappers_active() -> bool {

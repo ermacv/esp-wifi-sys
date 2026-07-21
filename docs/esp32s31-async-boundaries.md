@@ -486,6 +486,11 @@ The stock outer loop, test hook, formatter, and indirect outcome jump table are
 therefore absent. The five vendor outcome bodies are still explicit strict
 roots; replacing their retry/recycle/resort paths is the next TX-completion
 boundary and is required before the completion tract is fully Rust-owned.
+The `hil-vendor-tx` build also records an allocation-free snapshot immediately
+before each selected outcome. In particular it observes the live queue kind,
+TXOP outstanding count, next-MPDU link, and descriptor flags for every success.
+This is a temporary oracle: the basic success path will only move to Rust after
+hardware stress proves which of the recovered TXOP/list branches are reachable.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys

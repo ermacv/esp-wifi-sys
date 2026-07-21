@@ -140,6 +140,12 @@ pub use handoff::{
     TaskDeleteCompletionRegistrar,
 };
 pub use interrupt::{InterruptSignal, WaitForInterrupt};
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-vendor-tx"
+))]
+pub use lmac::{lmac_tx_complete_snapshot, LmacTxCompleteSnapshot};
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-mic"))]
 pub use michael::{
     async_michael_callback_installed, install_async_michael_callback,
