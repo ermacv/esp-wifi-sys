@@ -184,6 +184,10 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_search_node",
     "__wrap_cnx_node_search",
     "__wrap_ets_delay_us",
+    "__wrap_vTaskDelay",
+    "__wrap_os_sleep",
+    "__wrap_sleep",
+    "__wrap_usleep",
     "__esp_hostap_sta_join",
     "__esp_hostap_sta_join_end",
     "__esp_wifi_async_wpa2_ap_join",
@@ -211,7 +215,13 @@ const DIRECT_HEAP_WRAPPERS: [(&str, &str); 4] = [
     ("free", "__wrap_free"),
 ];
 
-const DIRECT_DELAY_WRAPPERS: [(&str, &str); 1] = [("ets_delay_us", "__wrap_ets_delay_us")];
+const DIRECT_DELAY_WRAPPERS: [(&str, &str); 5] = [
+    ("ets_delay_us", "__wrap_ets_delay_us"),
+    ("vTaskDelay", "__wrap_vTaskDelay"),
+    ("os_sleep", "__wrap_os_sleep"),
+    ("sleep", "__wrap_sleep"),
+    ("usleep", "__wrap_usleep"),
+];
 
 const FORBIDDEN: &[(&str, &str)] = &[
     ("malloc", "heap"),
@@ -767,13 +777,11 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
                     .find(|(entry, _)| *entry == symbol)
                     .is_some_and(|(_, wrapper)| {
                         linked_symbol_kinds
-                            .get(symbol.as_str())
+                            .get(*wrapper)
                             .is_some_and(|kind| is_code_symbol_kind(kind))
-                            && linked_symbol_kinds
-                                .get(*wrapper)
-                                .is_some_and(|kind| is_code_symbol_kind(kind))
-                            && linked_symbol_addresses.get(symbol.as_str())
-                                == linked_symbol_addresses.get(*wrapper)
+                            && (symbol.as_str() != "ets_delay_us"
+                                || linked_symbol_addresses.get(symbol.as_str())
+                                    == linked_symbol_addresses.get(*wrapper))
                     })
             {
                 continue;

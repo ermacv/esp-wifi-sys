@@ -20,6 +20,18 @@ unsafe extern "C" {
     #[link_name = "ets_delay_us"]
     fn linked_ets_delay_us(microseconds: u32);
     fn __real_ets_delay_us(microseconds: u32);
+    #[link_name = "vTaskDelay"]
+    fn linked_vtask_delay(ticks: u32);
+    fn __real_vTaskDelay(ticks: u32);
+    #[link_name = "os_sleep"]
+    fn linked_os_sleep(seconds: i64, microseconds: i64);
+    fn __real_os_sleep(seconds: i64, microseconds: i64);
+    #[link_name = "sleep"]
+    fn linked_sleep(seconds: u32) -> u32;
+    fn __real_sleep(seconds: u32) -> u32;
+    #[link_name = "usleep"]
+    fn linked_usleep(microseconds: u32) -> i32;
+    fn __real_usleep(microseconds: u32) -> i32;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,7 +116,29 @@ pub(crate) fn runtime_delay_link_wrapper_active() -> bool {
     core::ptr::eq(
         linked_ets_delay_us as *const (),
         __wrap_ets_delay_us as *const (),
-    )
+    ) && core::ptr::eq(
+        linked_vtask_delay as *const (),
+        __wrap_vTaskDelay as *const (),
+    ) && core::ptr::eq(linked_os_sleep as *const (), __wrap_os_sleep as *const ())
+        && core::ptr::eq(linked_sleep as *const (), __wrap_sleep as *const ())
+        && core::ptr::eq(linked_usleep as *const (), __wrap_usleep as *const ())
+}
+
+#[inline(always)]
+unsafe fn return_address() -> usize {
+    let caller: usize;
+    core::arch::asm!(
+        "mv {caller}, ra",
+        caller = out(reg) caller,
+        options(nomem, nostack, preserves_flags)
+    );
+    caller
+}
+
+#[inline(never)]
+pub(crate) fn trap_blocking_delay(call: BlockingCall, caller: usize) -> ! {
+    blocking_probe().record(call, current_event(), caller);
+    unsafe { core::arch::asm!("ebreak", options(noreturn)) }
 }
 
 /// Reject a ROM busy-delay after strict takeover.
@@ -115,19 +149,50 @@ pub(crate) fn runtime_delay_link_wrapper_active() -> bool {
 /// allowed to enter the async execution phase.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_ets_delay_us(microseconds: u32) {
-    let caller: usize;
-    core::arch::asm!(
-        "mv {caller}, ra",
-        caller = out(reg) caller,
-        options(nomem, nostack, preserves_flags)
-    );
+    let caller = return_address();
     if crate::critical::strict_wifi_hart_armed() {
         LAST_CALLER.store(caller, Ordering::Relaxed);
         LAST_MICROSECONDS.store(microseconds, Ordering::Relaxed);
         CALLS.fetch_add(1, Ordering::Release);
         record_site(caller, microseconds);
-        blocking_probe().record(BlockingCall::EtsDelayUs, current_event(), caller);
-        core::arch::asm!("ebreak", options(noreturn));
+        trap_blocking_delay(BlockingCall::EtsDelayUs, caller);
     }
     __real_ets_delay_us(microseconds);
+}
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn __wrap_vTaskDelay(ticks: u32) {
+    let caller = return_address();
+    if crate::critical::strict_wifi_hart_armed() {
+        trap_blocking_delay(BlockingCall::TaskDelay, caller);
+    }
+    __real_vTaskDelay(ticks);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_os_sleep(seconds: i64, microseconds: i64) {
+    let caller = return_address();
+    if crate::critical::strict_wifi_hart_armed() {
+        trap_blocking_delay(BlockingCall::Sleep, caller);
+    }
+    __real_os_sleep(seconds, microseconds);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_sleep(seconds: u32) -> u32 {
+    let caller = return_address();
+    if crate::critical::strict_wifi_hart_armed() {
+        trap_blocking_delay(BlockingCall::Sleep, caller);
+    }
+    __real_sleep(seconds)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_usleep(microseconds: u32) -> i32 {
+    let caller = return_address();
+    if crate::critical::strict_wifi_hart_armed() {
+        trap_blocking_delay(BlockingCall::Sleep, caller);
+    }
+    __real_usleep(microseconds)
 }

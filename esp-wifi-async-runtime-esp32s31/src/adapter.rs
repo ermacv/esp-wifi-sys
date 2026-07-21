@@ -22,8 +22,8 @@ use crate::{
     event::PpEvent,
     osi::OsiPpQueue,
     queue::RadioQueue,
-    task::{VirtualPpTask, PP_TASK_HANDLE},
-    timer::{record_timer_failure, RuntimeTimerPool},
+    task::{PP_TASK_HANDLE, VirtualPpTask},
+    timer::{RuntimeTimerPool, record_timer_failure},
 };
 
 pub const PP_QUEUE_CAPACITY: usize = 256;
@@ -516,14 +516,14 @@ pub fn drain_wifi_initialization_events(budget: usize) -> Result<usize, Initiali
         match dispatcher.dispatch(event) {
             Ok(DispatchControl::Continue) => processed += 1,
             Ok(DispatchControl::Stop) => {
-                return Err(InitializationDrainError::UnexpectedShutdown { processed })
+                return Err(InitializationDrainError::UnexpectedShutdown { processed });
             }
             Err(error) => {
                 return Err(InitializationDrainError::Dispatch {
                     processed,
                     event,
                     error,
-                })
+                });
             }
         }
     }
@@ -1309,6 +1309,10 @@ unsafe extern "C" fn task_delay(ticks: u32) {
     STATE
         .probe
         .record(BlockingCall::TaskDelay, current_event(), ticks as usize);
+    #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+    if crate::critical::strict_wifi_hart_armed() {
+        crate::delay::trap_blocking_delay(BlockingCall::TaskDelay, caller);
+    }
 }
 
 unsafe extern "C" fn task_ms_to_tick(milliseconds: u32) -> i32 {
@@ -1327,7 +1331,7 @@ unsafe extern "C" fn task_max_priority() -> i32 {
 mod tests {
     use core::{ptr, sync::atomic::Ordering};
 
-    use super::{queue_send, MutexPool, SemaphorePool, NO_SEMAPHORE, STATE};
+    use super::{MutexPool, NO_SEMAPHORE, STATE, SemaphorePool, queue_send};
     use crate::event::PpEvent;
 
     #[test]

@@ -188,6 +188,10 @@ archive definitions and use LLD wrapping:
 -Wl,--wrap=hal_crypto_set_key_entry
 -Wl,--wrap=ieee80211_search_node
 -Wl,--wrap=cnx_node_search
+-Wl,--wrap=vTaskDelay
+-Wl,--wrap=os_sleep
+-Wl,--wrap=sleep
+-Wl,--wrap=usleep
 -Wl,--wrap=wifi_log
 ```
 
