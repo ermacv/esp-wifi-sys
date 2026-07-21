@@ -558,11 +558,21 @@ buffer path as EAPOL. AP additionally checks the destination against the live
 controlled-port table at submission time, so a queued frame cannot retain
 authorization after peer removal.
 
+Ordinary data TX exposes one hardware credit even though the application pool
+contains eight slots. The credit is reserved while copying the Ethernet frame,
+committed to the exact ESF frame address after successful radio submission,
+and released only by the matching hardware TX-done edge. The release wakes the
+network executor. This keeps temporary vendor descriptor exhaustion out of the
+radio-owner error path and provides interrupt-driven async backpressure without
+polling, delay, or retry loops.
+
 `wifi_data_tx_snapshot()` and `wifi_data_rx_snapshot()` expose cumulative
 claims, queue transfers, releases, rejection reasons, current ownership, and
 the occupied-slot high-water mark without allocating or locking. A quiescent
 TX/RX boundary must satisfy `claimed == released + occupied` and
-`enqueued == dequeued + queued`. `RadioQueue::snapshot()` and
+`enqueued == dequeued + queued`; after TX drains it additionally requires
+`hardware_committed == hardware_released` and a free hardware credit.
+`RadioQueue::snapshot()` and
 `RadioCommandQueue::snapshot()` provide the corresponding bounded scheduler
 and command-queue watermarks for load qualification.
 
