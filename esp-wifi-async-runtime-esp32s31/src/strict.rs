@@ -5,7 +5,7 @@ use core::{
 };
 
 use crate::{
-    adapter::blocking_probe,
+    adapter::{blocking_probe, clear_task_delay_snapshot},
     allocation::{allocation_probe, AllocationProbe, AllocationSnapshot},
     critical::{critical_section_probe, CriticalSectionProbe, CriticalSectionSnapshot},
     diagnostics::{BlockingCall, BlockingCallProbe},
@@ -83,6 +83,7 @@ impl<'a> StrictAudit<'a> {
         critical: &'a CriticalSectionProbe,
     ) -> Self {
         blocking.clear();
+        clear_task_delay_snapshot();
         critical.clear();
         Self {
             policy,

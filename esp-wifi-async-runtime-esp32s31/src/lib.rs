@@ -73,8 +73,9 @@ pub mod wpa2_state;
 pub mod wpa2_txdone;
 
 pub use adapter::{
-    blocking_probe, next_timer_deadline_us, radio_queue, timer_alarm_interrupt, ShutdownQueueFull,
-    DEFAULT_EVENT_BUDGET, PP_QUEUE_CAPACITY, TIMER_CAPACITY,
+    blocking_probe, next_timer_deadline_us, radio_queue, task_delay_snapshot,
+    timer_alarm_interrupt, ShutdownQueueFull, TaskDelaySnapshot, DEFAULT_EVENT_BUDGET,
+    PP_QUEUE_CAPACITY, TIMER_CAPACITY,
 };
 #[cfg(target_arch = "riscv32")]
 pub use adapter::{

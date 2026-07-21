@@ -39,6 +39,9 @@ const NO_SEMAPHORE: usize = usize::MAX;
 
 static STATE: AdapterState = AdapterState::new();
 static TIME_SOURCE: AtomicUsize = AtomicUsize::new(0);
+static TASK_DELAY_CALLER: AtomicUsize = AtomicUsize::new(0);
+static TASK_DELAY_TICKS: AtomicU32 = AtomicU32::new(0);
+static TASK_DELAY_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
@@ -91,6 +94,13 @@ unsafe fn leave_pp_counter_critical(critical: PpCounterCritical) {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownQueueFull;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskDelaySnapshot {
+    pub calls: usize,
+    pub ticks: u32,
+    pub caller: usize,
+}
 
 #[cfg(target_arch = "riscv32")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,6 +459,20 @@ pub fn radio_queue() -> &'static RadioQueue<PP_QUEUE_CAPACITY> {
 
 pub fn blocking_probe() -> &'static BlockingCallProbe {
     &STATE.probe
+}
+
+pub fn task_delay_snapshot() -> TaskDelaySnapshot {
+    TaskDelaySnapshot {
+        calls: TASK_DELAY_CALLS.load(Ordering::Acquire),
+        ticks: TASK_DELAY_TICKS.load(Ordering::Relaxed),
+        caller: TASK_DELAY_CALLER.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn clear_task_delay_snapshot() {
+    TASK_DELAY_CALLER.store(0, Ordering::Relaxed);
+    TASK_DELAY_TICKS.store(0, Ordering::Relaxed);
+    TASK_DELAY_CALLS.store(0, Ordering::Release);
 }
 
 pub fn timer_alarm_interrupt() {
@@ -1259,7 +1283,22 @@ unsafe extern "C" fn task_delete(handle: *mut c_void) {
     }
 }
 
+#[inline(never)]
 unsafe extern "C" fn task_delay(ticks: u32) {
+    #[cfg(target_arch = "riscv32")]
+    let caller = {
+        let caller: usize;
+        unsafe {
+            core::arch::asm!("mv {caller}, ra", caller = out(reg) caller, options(nomem, nostack))
+        };
+        caller
+    };
+    #[cfg(not(target_arch = "riscv32"))]
+    let caller = 0;
+
+    TASK_DELAY_CALLER.store(caller, Ordering::Relaxed);
+    TASK_DELAY_TICKS.store(ticks, Ordering::Relaxed);
+    TASK_DELAY_CALLS.fetch_add(1, Ordering::Release);
     STATE
         .probe
         .record(BlockingCall::TaskDelay, current_event(), ticks as usize);
