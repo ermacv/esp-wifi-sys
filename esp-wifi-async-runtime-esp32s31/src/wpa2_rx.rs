@@ -2,12 +2,12 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(target_arch = "riscv32")]
+use crate::wpa2::DEFAULT_EAPOL_FRAME_CAPACITY;
 #[cfg(any(test, target_arch = "riscv32"))]
 use crate::wpa2::Wpa2IngressError;
 #[cfg(any(test, target_arch = "riscv32"))]
 use crate::wpa2::Wpa2Interface;
-#[cfg(target_arch = "riscv32")]
-use crate::wpa2::DEFAULT_EAPOL_FRAME_CAPACITY;
 use crate::{
     channel::Receive,
     wpa2::{OwnedEapolFrame, Wpa2Ingress},
@@ -93,6 +93,73 @@ fn ingest(interface: Wpa2Interface, peer: [u8; 6], bytes: &[u8]) -> bool {
             false
         }
     }
+}
+
+/// Copy an unencrypted STA EAPOL-Key packet directly from a complete 802.11
+/// data MPDU into the fixed Rust ingress channel.
+///
+/// Rust-owned association deliberately leaves the vendor supplicant state
+/// absent, so the stock net80211 route does not reliably select
+/// `sta_rx_eapol`. Once LLC identifies EAPOL, the frame is always consumed:
+/// malformed/capacity failures are counted and cannot fall through into
+/// `wpa2_task`.
+#[cfg(any(test, target_arch = "riscv32"))]
+pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
+    const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
+
+    if frame.len() < 24 {
+        return false;
+    }
+    let frame_control = u16::from_le_bytes([frame[0], frame[1]]);
+    let frame_type = (frame_control >> 2) & 3;
+    let to_ds = frame_control & 0x0100 != 0;
+    let from_ds = frame_control & 0x0200 != 0;
+    if frame_type != 2 || to_ds || !from_ds || frame_control & 0x4000 != 0 {
+        return false;
+    }
+
+    let qos = frame_control & 0x0080 != 0;
+    let order = frame_control & 0x8000 != 0;
+    let mut header_len = 24_usize;
+    if qos {
+        header_len += 2;
+        if order {
+            header_len += 4;
+        }
+    }
+    let Some(llc_end) = header_len.checked_add(LLC_EAPOL.len()) else {
+        return false;
+    };
+    if frame.get(header_len..llc_end) != Some(LLC_EAPOL.as_slice()) {
+        return false;
+    }
+
+    #[cfg(feature = "hil-vendor-tx")]
+    STA_RAW_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let Some(header) = frame.get(llc_end..llc_end + 4) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let body_len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let Some(eapol_len) = 4_usize.checked_add(body_len) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let Some(bytes) = frame.get(llc_end..llc_end + eapol_len) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let mut peer = [0; 6];
+    peer.copy_from_slice(&frame[10..16]);
+    let _accepted = ingest(Wpa2Interface::Station, peer, bytes);
+    #[cfg(feature = "hil-vendor-tx")]
+    if _accepted {
+        STA_ACCEPTED.fetch_add(1, Ordering::Release);
+    }
+    true
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -283,6 +350,20 @@ mod tests {
     use super::*;
     use crate::wpa2_frames::{OwnedRsnIe, Wpa2TxFrame};
 
+    fn sta_mpdu<'a>(storage: &'a mut [u8], eapol: &[u8]) -> &'a [u8] {
+        const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
+        let frame_len = 24 + LLC_EAPOL.len() + eapol.len() + 4;
+        storage[..frame_len].fill(0);
+        storage[0] = 0x08;
+        storage[1] = 0x02;
+        storage[4..10].copy_from_slice(&[1; 6]);
+        storage[10..16].copy_from_slice(&[2; 6]);
+        storage[16..22].copy_from_slice(&[2; 6]);
+        storage[24..32].copy_from_slice(&LLC_EAPOL);
+        storage[32..32 + eapol.len()].copy_from_slice(eapol);
+        &storage[..frame_len]
+    }
+
     #[test]
     fn static_ingress_owns_sta_and_ap_frames() {
         while try_receive_wpa2_eapol().is_some() {}
@@ -298,5 +379,35 @@ mod tests {
         let ap = try_receive_wpa2_eapol().unwrap();
         assert_eq!(ap.interface(), Wpa2Interface::AccessPoint);
         assert_eq!(ap.peer(), &[6; 6]);
+    }
+
+    #[test]
+    fn direct_mpdu_ingress_uses_declared_eapol_length() {
+        while try_receive_wpa2_eapol().is_some() {}
+        let m3 = Wpa2TxFrame::<256>::message3([1; 6], 9, [3; 32], [4; 8], &[5; 80]).unwrap();
+        let mut storage = [0; 256];
+        let frame = sta_mpdu(&mut storage, m3.as_bytes());
+
+        assert!(frame.len() > 166);
+        assert!(ingest_sta_80211(frame));
+        let received = try_receive_wpa2_eapol().unwrap();
+        assert_eq!(received.peer(), &[2; 6]);
+        assert_eq!(
+            received.key_frame().message(),
+            crate::wpa2::EapolKeyMessage::PairwiseMessage3
+        );
+        assert_eq!(received.as_bytes(), m3.as_bytes());
+    }
+
+    #[test]
+    fn identified_truncated_eapol_is_consumed_and_rejected() {
+        while try_receive_wpa2_eapol().is_some() {}
+        let mut storage = [0; 64];
+        let malformed = [2, 3, 0, 95];
+        let before = rejected_wpa2_eapol();
+
+        assert!(ingest_sta_80211(sta_mpdu(&mut storage, &malformed)));
+        assert!(try_receive_wpa2_eapol().is_none());
+        assert_eq!(rejected_wpa2_eapol(), before + 1);
     }
 }
