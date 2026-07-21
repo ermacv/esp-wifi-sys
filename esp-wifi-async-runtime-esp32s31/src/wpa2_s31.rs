@@ -239,6 +239,7 @@ mod target {
     unsafe extern "C" {
         static ccmp: [u8; 24];
         static mut g_ic: u8;
+        static mut g_sta_connected_flag: u8;
         #[cfg(feature = "hil-vendor-tx")]
         static mut gWpaSm: u8;
 
@@ -614,6 +615,14 @@ mod target {
                 node.add(0x24).write(0);
                 let privacy = station.add(0xa4).cast::<u32>();
                 privacy.write(privacy.read() | 0x10);
+
+                // Minimal finite connection-state commit recovered from
+                // `cnx_auth_done`. Its omitted remainder enters NVS, event
+                // posting, power-save and AMPDU control; ordinary STA data
+                // paths consume only these state facts.
+                ptr::addr_of_mut!(g_ic).add(0x274).write(1);
+                ptr::addr_of_mut!(g_sta_connected_flag).write(1);
+                station.add(0x140).write(5);
             }
             Ok(())
         }
