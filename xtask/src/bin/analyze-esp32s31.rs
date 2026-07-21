@@ -51,7 +51,7 @@ const EXPECTED_LABELS: [&str; 34] = [
     ".L1024", ".L1017", ".L1023", ".L1022", ".L1021", ".L1020", ".L1018",
 ];
 
-const REQUIRED_GLOBALS: [(&str, &str); 39] = [
+const REQUIRED_GLOBALS: [(&str, &str); 45] = [
     ("ppTask", "0000023a"),
     ("pp_post", "00000160"),
     ("pp_sig_cnt", "00000024"),
@@ -72,6 +72,12 @@ const REQUIRED_GLOBALS: [(&str, &str); 39] = [
     ("esf_buf_recycle", "00000156"),
     ("lmacTxDone", "000000fc"),
     ("hal_mac_get_txq_complete", "0000081e"),
+    ("lmacProcessTxComplete", "0000025c"),
+    ("lmacProcessTxSuccess", "00000102"),
+    ("lmacProcessTxRtsError", "00000152"),
+    ("lmacProcessCtsTimeout", "00000070"),
+    ("lmacProcessTxError", "000000f8"),
+    ("lmacProcessAckTimeout", "0000013c"),
     ("ppProcTxCallback", "0000006e"),
     ("ppEnqueueTxDone", "00000062"),
     ("rcUpdateTxDone", "000000a0"),
@@ -704,7 +710,10 @@ fn report(
          `lmacTxDone`, `hal_mac_get_txq_state`, AP-beacon completion, and management \
          completion: the first replaces its inline callback/PM tail, while the TXQ wrapper \
          exposes one completion/collision bitmap bit per executor event without entering the \
-         HAL test/log hooks. The beacon wrapper only rearms its fixed timer. The management \
+         HAL test/log hooks. Strict event 23 also replaces the stock completion loop and its \
+         indirect jump table with one fixed MMIO decode and a direct Rust outcome match; the \
+         five vendor outcome bodies remain explicit audit roots. The beacon wrapper only \
+         rearms its fixed timer. The management \
          wrapper accepts ordinary auth/association/probe completion and rejects disconnect or \
          off-channel action subtypes before their node/key/channel state machines. \
          FTM capability bits are cleared and validated; `wDev_record_ftm_data` is additionally \

@@ -478,6 +478,15 @@ The independent `hal_mac_tx_get_blockack` leaf is only `0x3e` bytes, contains
 fixed MMIO loads/stores and no calls or cycles, and passes the strict auditor as
 the future Rust A-MPDU completion input.
 
+Strict event 23 no longer enters `lmacProcessTxComplete`. Rust selects one bit
+from the completion bitmap, decodes one fixed completion record, copies the six
+recovered queue-state fields, clears that queue's completion bit, and uses a
+direct `match` for success, RTS error, CTS timeout, TX error, or ACK timeout.
+The stock outer loop, test hook, formatter, and indirect outcome jump table are
+therefore absent. The five vendor outcome bodies are still explicit strict
+roots; replacing their retry/recycle/resort paths is the next TX-completion
+boundary and is required before the completion tract is fully Rust-owned.
+
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys
 up to 32 bytes and performs no temporary allocation irrespective of pointer

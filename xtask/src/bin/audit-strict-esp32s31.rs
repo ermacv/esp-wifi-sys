@@ -12,7 +12,13 @@ const ROOTS: &[&str] = &[
     "pp_timer_do_process",
     "pp_default_event_handler",
     "ppRxPkt",
-    "lmacProcessTxComplete",
+    // The Rust event-23 dispatcher performs the fixed MMIO decode and one
+    // direct outcome call; the vendor outer loop/jump table is replaced.
+    "lmacProcessTxSuccess",
+    "lmacProcessTxRtsError",
+    "lmacProcessCtsTimeout",
+    "lmacProcessTxError",
+    "lmacProcessAckTimeout",
     "lmacProcessCollisions_task",
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
@@ -65,6 +71,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacTxDone",
     "hal_mac_get_txq_state",
     "hal_mac_get_txq_complete",
+    "lmacProcessTxComplete",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",

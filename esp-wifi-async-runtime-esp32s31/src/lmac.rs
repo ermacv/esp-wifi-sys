@@ -43,6 +43,8 @@ unsafe extern "C" {
 
     fn hal_mac_tx_set_cca(value: u32);
     fn hal_mac_get_txq_state(kind: u32) -> u32;
+    fn hal_mac_clr_txq_state(kind: u32, queue: u8);
+    fn hal_mac_get_txq_in_trig_flow_state() -> u32;
     #[link_name = "hal_mac_get_txq_complete"]
     fn vendor_hal_mac_get_txq_complete(
         queue_state: *mut u8,
@@ -54,6 +56,11 @@ unsafe extern "C" {
     fn hal_mac_set_txq_invalid(queue: u8);
     fn hal_mac_txq_disable(queue: u8);
     fn lmacReleaseTxopQueue(queue: u8);
+    fn lmacProcessTxSuccess(queue: u8, response: u8);
+    fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
+    fn lmacProcessCtsTimeout(queue: u8, auxiliary: u32);
+    fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
+    fn lmacProcessAckTimeout(queue: u8, auxiliary: u32);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -70,6 +77,7 @@ pub enum LmacAsyncError {
     InvalidDiscardContinuation,
     TxDone(crate::txdone::TxDoneError),
     TxQueueSplitFailed,
+    UnsupportedTxCompletionStatus(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -265,6 +273,73 @@ unsafe fn decode_txq_completion_auxiliary(queue_offset: usize) -> (u32, u32) {
 
 pub(crate) fn txq_split_failed() -> bool {
     TXQ_SPLIT_FAILED.load(Ordering::Acquire)
+}
+
+/// Replace the outer event-23 queue loop and indirect outcome jump table.
+///
+/// `__wrap_hal_mac_get_txq_state(2)` exposes at most one queue and posts a new
+/// event for a captured remainder. This function therefore performs exactly
+/// one fixed completion decode and one statically selected outcome call.
+pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
+    let bits = __wrap_hal_mac_get_txq_state(2);
+    if txq_split_failed() {
+        return Err(LmacAsyncError::TxQueueSplitFailed);
+    }
+    if bits == 0 {
+        return Ok(());
+    }
+
+    let queue = bits.trailing_zeros() as u8;
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    if instances.is_null() {
+        return Err(LmacAsyncError::InstancesUnavailable);
+    }
+    let queue_state = instances.add(usize::from(queue) * TX_QUEUE_STATE_SIZE);
+    if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 1 {
+        // Match the stock stale-completion branch without its formatter/log.
+        hal_mac_clr_txq_state(2, queue);
+        return Ok(());
+    }
+
+    let mut completion = [0_u8; 6];
+    let mut auxiliary = [0_u32; 2];
+    __wrap_hal_mac_get_txq_complete(
+        queue_state,
+        queue,
+        completion.as_mut_ptr(),
+        auxiliary.as_mut_ptr().cast(),
+    );
+
+    let trigger_state = hal_mac_get_txq_in_trig_flow_state();
+    queue_state
+        .add(0x2d)
+        .write(u8::from(completion[1] & 0xf0 == 0));
+    queue_state
+        .add(0x34)
+        .write(((trigger_state >> queue) & 1) as u8);
+    queue_state
+        .add(0x2e)
+        .write(((auxiliary[0] >> 20) & 1) as u8);
+    queue_state.add(0x2f).write((auxiliary[1] >> 2) as u8);
+    queue_state
+        .add(0x30)
+        .write(((auxiliary[0] >> 13) & 0x7f) as u8);
+    queue_state
+        .add(0x31)
+        .write(((auxiliary[0] >> 21) & 0x7f) as u8);
+
+    // `esp_test_tx_tb_complete` is diagnostic-only. The strict path omits it
+    // and clears the hardware completion bit before entering the outcome.
+    hal_mac_clr_txq_state(2, queue);
+    match completion[1] >> 4 {
+        0 => lmacProcessTxSuccess(queue, completion[2]),
+        1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
+        2 => lmacProcessCtsTimeout(queue, 0),
+        4 => lmacProcessTxError(queue, completion[0], 0),
+        5 => lmacProcessAckTimeout(queue, 0),
+        status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
+    }
+    Ok(())
 }
 
 pub(crate) fn runtime_tx_link_wrappers_active() -> bool {

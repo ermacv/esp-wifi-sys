@@ -42,6 +42,7 @@ unsafe extern "C" {
     fn ppResortTxAMPDU(queue: u8);
     #[cfg(not(feature = "strict-no-wait"))]
     fn lmacProcessTxTimeout();
+    #[cfg(not(feature = "strict-no-wait"))]
     fn lmacProcessTxComplete();
     fn lmacProcessCollisions_task();
     fn wdevProcessRxSucDataAll();
@@ -406,7 +407,13 @@ impl PpDispatcher for VendorPpDispatcher {
                     #[cfg(not(feature = "strict-no-wait"))]
                     lmacProcessTxTimeout();
                 }
-                PpAction::LmacTxComplete => lmacProcessTxComplete(),
+                PpAction::LmacTxComplete => {
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::lmac::process_tx_complete()
+                        .map_err(VendorDispatchError::LmacContinuation)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    lmacProcessTxComplete();
+                }
                 PpAction::LmacCollision => lmacProcessCollisions_task(),
                 PpAction::WdevRxSuccess => {
                     wdevProcessRxSucDataAll();
