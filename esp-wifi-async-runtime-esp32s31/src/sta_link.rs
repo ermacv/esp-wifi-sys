@@ -101,6 +101,7 @@ pub struct StaAssocSnapshot {
     pub ht_negotiated: bool,
     pub wmm_negotiated: bool,
     pub ht_mcs_count: u8,
+    pub fixed_ht20_rate: Option<u8>,
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
     pub action_tx_done: u32,
@@ -397,6 +398,7 @@ mod target {
     static ASSOC_HT_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_WMM_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HT_MCS_COUNT: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_FIXED_HT20_RATE: AtomicU32 = AtomicU32::new(u32::MAX);
     static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
@@ -417,11 +419,25 @@ mod target {
             tid: u32,
             flags: u32,
         );
+        fn trc_set_80211_tx_rate_config(interface: u32, config: *const TxRateConfig);
         #[link_name = "ieee80211_set_tx_pti"]
         fn linked_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
         #[link_name = "ieee80211_mgmt_output"]
         fn linked_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
     }
+
+    #[repr(C)]
+    struct TxRateConfig {
+        phy_mode: u32,
+        rate: u32,
+        ersu: bool,
+        dcm: bool,
+    }
+
+    const _: () = assert!(core::mem::size_of::<TxRateConfig>() == 12);
+
+    const PHY_MODE_HT20: u32 = 4;
+    const PHY_RATE_MCS7_SGI: u32 = 0x21;
 
     fn decode_result(result: u32) -> Result<(), StaAuthError> {
         match result {
@@ -500,6 +516,10 @@ mod target {
             ht_negotiated: ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) != 0,
             wmm_negotiated: ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) != 0,
             ht_mcs_count: ASSOC_HT_MCS_COUNT.load(Ordering::Acquire) as u8,
+            fixed_ht20_rate: match ASSOC_FIXED_HT20_RATE.load(Ordering::Acquire) {
+                u32::MAX => None,
+                rate => Some(rate as u8),
+            },
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
             action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
@@ -1278,6 +1298,22 @@ mod target {
         ASSOC_HT_NEGOTIATED.store(u32::from(mcs_count != 0), Ordering::Release);
         ASSOC_WMM_NEGOTIATED.store(u32::from(wmm), Ordering::Release);
         ASSOC_HT_MCS_COUNT.store(u32::from(mcs_count), Ordering::Release);
+        if mcs_count >= 8 {
+            // Diagnostic first policy: prove the lower PP/LMAC path can use
+            // negotiated HT independently of the vendor connection/runtime
+            // state machine. This leaf is exactly one bounded 12-byte copy
+            // into the per-interface TRC configuration table.
+            let config = TxRateConfig {
+                phy_mode: PHY_MODE_HT20,
+                rate: PHY_RATE_MCS7_SGI,
+                ersu: false,
+                dcm: false,
+            };
+            trc_set_80211_tx_rate_config(0, &config);
+            ASSOC_FIXED_HT20_RATE.store(PHY_RATE_MCS7_SGI, Ordering::Release);
+        } else {
+            ASSOC_FIXED_HT20_RATE.store(u32::MAX, Ordering::Release);
+        }
         node.add(0x26).cast::<u16>().write_unaligned(association_id);
         interface.add(0x98).cast::<u32>().write(5);
         true

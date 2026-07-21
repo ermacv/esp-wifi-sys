@@ -22,8 +22,8 @@ use crate::{
     event::PpEvent,
     osi::OsiPpQueue,
     queue::RadioQueue,
-    task::{PP_TASK_HANDLE, VirtualPpTask},
-    timer::{RuntimeTimerPool, record_timer_failure},
+    task::{VirtualPpTask, PP_TASK_HANDLE},
+    timer::{record_timer_failure, RuntimeTimerPool},
 };
 
 pub const PP_QUEUE_CAPACITY: usize = 256;
@@ -1331,7 +1331,7 @@ unsafe extern "C" fn task_max_priority() -> i32 {
 mod tests {
     use core::{ptr, sync::atomic::Ordering};
 
-    use super::{MutexPool, NO_SEMAPHORE, STATE, SemaphorePool, queue_send};
+    use super::{queue_send, MutexPool, SemaphorePool, NO_SEMAPHORE, STATE};
     use crate::event::PpEvent;
 
     #[test]
