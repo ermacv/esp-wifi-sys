@@ -45,7 +45,7 @@ unsafe extern "C" {
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
     fn chm_end_op_timeout_process(which: u32);
-    fn scan_op_end(context: *mut c_void, result: u32);
+    fn __esp_scan_op_end(context: *mut c_void, result: u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,7 +178,7 @@ pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), Chan
             .add(24)
             .cast::<Option<ChannelCallback>>()
             .read_unaligned()
-            .is_none_or(|callback| callback as *const () != scan_op_end as *const ())
+            .is_none_or(|callback| callback as *const () != __esp_scan_op_end as *const ())
         || LEGACY_DWELL_ACCEPTED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()

@@ -159,6 +159,8 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_timer_process",
     "__wrap_chm_start_op",
     "__wrap_chm_return_home_channel",
+    "__esp_scan_op_end",
+    "__esp_scan_op_end_end",
     "__wrap_esf_buf_alloc",
     "__wrap_esf_buf_recycle",
     "__wrap_ieee80211_mgmt_output",
