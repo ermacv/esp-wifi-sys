@@ -423,6 +423,14 @@ mod target {
         interface.add(0xe4).cast::<*mut u8>().read()
     }
 
+    unsafe fn commit_sta_ptk_ready(station: *mut u8, node: *mut u8) {
+        let flags = node.add(0x0c).cast::<u32>();
+        flags.write((flags.read() & 0xfdff_ffff) | 1);
+        node.add(0x24).write(0);
+        let privacy = station.add(0xa4).cast::<u32>();
+        privacy.write(privacy.read() | 0x10);
+    }
+
     unsafe fn read_metadata(metadata: *const u8, offset: usize) -> u32 {
         u32::from(metadata.add(offset).read())
     }
@@ -689,13 +697,10 @@ mod target {
             }
             unsafe {
                 // Finite state tail of the pinned PTK-ready and STA privacy
-                // callbacks. It runs only after M4 TX completion; their
-                // event/log side effects are deliberately omitted.
-                let flags = node.add(0x0c).cast::<u32>();
-                flags.write((flags.read() & 0xfdff_ffff) | 1);
-                node.add(0x24).write(0);
-                let privacy = station.add(0xa4).cast::<u32>();
-                privacy.write(privacy.read() | 0x10);
+                // callbacks. Key installation commits these before M4; this
+                // idempotent call verifies them again when the controlled
+                // port is opened after M4 completion.
+                commit_sta_ptk_ready(station, node);
 
                 // Minimal finite connection-state commit recovered from
                 // `cnx_auth_done`. Its omitted remainder enters NVS, event
@@ -849,7 +854,7 @@ mod target {
             let interface = install.interface();
             let peer = *install.peer();
             let kind = install.kind();
-            let (hardware_index, key_index, spp, sta_gtk_node) = match kind {
+            let (hardware_index, key_index, spp, sta_gtk_node, sta_ptk_state) = match kind {
                 Wpa2KeyKind::Pairwise => {
                     let hardware_index = unsafe {
                         match interface {
@@ -861,11 +866,28 @@ mod target {
                         return Err((S31Wpa2IoError::MissingApPeerHardwareIndex, install));
                     }
                     let spp = unsafe { peer_spp(interface, peer.as_ptr()) };
+                    let sta_ptk_state = if interface == Wpa2Interface::Station {
+                        let station = unsafe { sta_interface_state() };
+                        let node = unsafe { sta_interface_node() };
+                        if station.is_null() || node.is_null() {
+                            return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
+                        }
+                        if unsafe { node.add(0x134).read() } != STA_PAIRWISE_HARDWARE_INDEX {
+                            return Err((
+                                S31Wpa2IoError::UnexpectedStaPairwiseHardwareIndex,
+                                install,
+                            ));
+                        }
+                        Some((station, node))
+                    } else {
+                        None
+                    };
                     (
                         hardware_index,
                         PAIRWISE_KEY_INDEX,
                         u32::from(spp != 0),
                         None,
+                        sta_ptk_state,
                     )
                 }
                 Wpa2KeyKind::Group { key_id, .. } => {
@@ -881,7 +903,7 @@ mod target {
                     } else {
                         None
                     };
-                    (hardware_index, u32::from(key_id), 0, sta_gtk_node)
+                    (hardware_index, u32::from(key_id), 0, sta_gtk_node, None)
                 }
             };
             if hardware_index > MAX_VENDOR_KEY_INDEX {
@@ -969,6 +991,12 @@ mod target {
                             .add(0x137 + usize::from(key_id))
                             .write(hardware_index);
                     }
+                }
+                if let Some((station, node)) = sta_ptk_state {
+                    // The pairwise key must be visible to hardware before M4
+                    // is constructed. This is the bounded state-only portion
+                    // of the pinned PTK-ready/privacy callbacks.
+                    commit_sta_ptk_ready(station, node);
                 }
             }
             Ok(())
