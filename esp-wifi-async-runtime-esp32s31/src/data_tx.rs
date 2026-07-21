@@ -53,7 +53,16 @@ static TX_SLOTS: [TxSlot; WIFI_DATA_TX_CAPACITY] = [const { TxSlot::new() }; WIF
     link_section = ".critical.bss.wifi_strict.data_tx_channel"
 )]
 static TX_CHANNEL: BoundedChannel<TxSlotToken, WIFI_DATA_TX_CAPACITY> = BoundedChannel::new();
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.data_tx_wakers"
+)]
 static TX_CAPACITY_WAKER: WakerCell = WakerCell::new();
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.data_tx_wakers"
+)]
+static TX_IDLE_WAKER: WakerCell = WakerCell::new();
 static TX_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 static TX_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
 static TX_DEQUEUED: AtomicUsize = AtomicUsize::new(0);
@@ -263,11 +272,15 @@ pub fn poll_wifi_data_tx_ready(cx: &mut Context<'_>) -> bool {
 /// Await the exact hardware-completion edge for every admitted data frame.
 ///
 /// This is an event-driven flush boundary: completions wake the future through
-/// `TX_CAPACITY_WAKER`; no timer, status loop, yield, or RTOS primitive is
+/// its dedicated completion waker; no timer, status loop, yield, or RTOS primitive is
 /// involved.
 pub async fn flush_wifi_data_tx() {
     poll_fn(|cx| {
-        TX_CAPACITY_WAKER.register(cx.waker());
+        // Capacity readiness and an exact flush can be awaited concurrently.
+        // They cannot share WakerCell's intentionally single registered waker:
+        // the network runner would otherwise be able to replace the flush
+        // waiter after its last observation and lose the final TX-done edge.
+        TX_IDLE_WAKER.register(cx.waker());
         if TX_CHANNEL.is_empty()
             && TX_SLOTS
                 .iter()
@@ -285,6 +298,7 @@ fn release_slot() {
     TX_RELEASED.fetch_add(1, Ordering::Relaxed);
     TX_OCCUPIED.fetch_sub(1, Ordering::AcqRel);
     TX_CAPACITY_WAKER.wake();
+    TX_IDLE_WAKER.wake();
 }
 
 /// Release one data descriptor credit from the matching hardware completion
