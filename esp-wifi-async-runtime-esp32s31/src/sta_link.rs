@@ -20,6 +20,21 @@ const RSN_CIPHER_CCMP: u8 = 4;
 const RSN_AKM_PSK: u8 = 2;
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
 const RSN_CAPABILITY_MFPR: u16 = 1 << 6;
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const HT20_CAPABILITY_IE: [u8; crate::scan::STRICT_SCAN_HT_CAPABILITY_IE_LEN] = [
+    45, 26,
+    // One-stream HT20 with short guard interval. Channel-width, STBC,
+    // LDPC, large A-MSDU, and 40 MHz claims remain disabled until their
+    // corresponding Rust-owned paths exist.
+    0x20, 0x00, // Smallest advertised receive A-MPDU and no required MPDU spacing.
+    0x00, // RX MCS 0..7.
+    0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    // RX highest rate is unspecified; TX MCS set is defined and equal to RX.
+    0, 0, 0x01, 0, 0, 0, // HT extended capabilities, transmit beamforming, and ASEL.
+    0, 0, 0, 0, 0, 0, 0,
+];
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const WMM_INFORMATION_IE: [u8; 9] = [221, 7, 0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaAssocSecurityError {
@@ -82,6 +97,10 @@ pub struct StaAssocSnapshot {
     pub last_status: u16,
     pub last_association_id: u16,
     pub last_request_body_len: u16,
+    pub ht_requested: bool,
+    pub ht_negotiated: bool,
+    pub wmm_negotiated: bool,
+    pub ht_mcs_count: u8,
 }
 
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
@@ -371,6 +390,10 @@ mod target {
     static ASSOC_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
     static ASSOC_LAST_ID: AtomicU32 = AtomicU32::new(0);
     static ASSOC_LAST_BODY_LEN: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HT_REQUESTED: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HT_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_WMM_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HT_MCS_COUNT: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -465,6 +488,10 @@ mod target {
             last_status: ASSOC_LAST_STATUS.load(Ordering::Acquire) as u16,
             last_association_id: ASSOC_LAST_ID.load(Ordering::Acquire) as u16,
             last_request_body_len: ASSOC_LAST_BODY_LEN.load(Ordering::Acquire) as u16,
+            ht_requested: ASSOC_HT_REQUESTED.load(Ordering::Acquire) != 0,
+            ht_negotiated: ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) != 0,
+            wmm_negotiated: ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) != 0,
+            ht_mcs_count: ASSOC_HT_MCS_COUNT.load(Ordering::Acquire) as u8,
         }
     }
 
@@ -736,6 +763,13 @@ mod target {
             .checked_add(2 + supported)?
             .checked_add(if extended == 0 { 0 } else { 2 + extended })?
             .checked_add(usize::from(selected_rsn.len))
+            .and_then(|length| {
+                access_point
+                    .ht_capability_ie_present
+                    .then_some(HT20_CAPABILITY_IE.len() + WMM_INFORMATION_IE.len())
+                    .unwrap_or(0)
+                    .checked_add(length)
+            })
             .filter(|length| *length <= ASSOC_BODY_CAPACITY)
     }
 
@@ -782,6 +816,20 @@ mod target {
         let selected_rsn = config.selected_rsn.as_bytes();
         ptr::copy_nonoverlapping(selected_rsn.as_ptr(), body.add(offset), selected_rsn.len());
         offset += selected_rsn.len();
+        if config.access_point.ht_capability_ie_present {
+            ptr::copy_nonoverlapping(
+                HT20_CAPABILITY_IE.as_ptr(),
+                body.add(offset),
+                HT20_CAPABILITY_IE.len(),
+            );
+            offset += HT20_CAPABILITY_IE.len();
+            ptr::copy_nonoverlapping(
+                WMM_INFORMATION_IE.as_ptr(),
+                body.add(offset),
+                WMM_INFORMATION_IE.len(),
+            );
+            offset += WMM_INFORMATION_IE.len();
+        }
         if offset != body_len {
             return Err(StaAssocError::RequestTooLarge);
         }
@@ -812,6 +860,13 @@ mod target {
             complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
             return;
         };
+        ASSOC_HT_REQUESTED.store(
+            u32::from(config.access_point.ht_capability_ie_present),
+            Ordering::Relaxed,
+        );
+        ASSOC_HT_NEGOTIATED.store(0, Ordering::Relaxed);
+        ASSOC_WMM_NEGOTIATED.store(0, Ordering::Relaxed);
+        ASSOC_HT_MCS_COUNT.store(0, Ordering::Relaxed);
         let node_rate_count = usize::from(node.add(0x73).read()).min(16);
         let Some(body_len) =
             association_body_len(&config.access_point, node_rate_count, config.selected_rsn)
@@ -973,6 +1028,76 @@ mod target {
         }
     }
 
+    fn association_response_ie(frame: &[u8], id: u8) -> Option<&[u8]> {
+        let mut offset = 30_usize;
+        while offset + 2 <= frame.len() {
+            let element_id = frame[offset];
+            let length = usize::from(frame[offset + 1]);
+            let end = offset.checked_add(2 + length)?;
+            if end > frame.len() {
+                return None;
+            }
+            if element_id == id {
+                return Some(&frame[offset..end]);
+            }
+            offset = end;
+        }
+        None
+    }
+
+    fn association_response_has_wmm(frame: &[u8]) -> bool {
+        let mut offset = 30_usize;
+        while offset + 2 <= frame.len() {
+            let length = usize::from(frame[offset + 1]);
+            let Some(end) = offset.checked_add(2 + length) else {
+                return false;
+            };
+            if end > frame.len() {
+                return false;
+            }
+            let element = &frame[offset..end];
+            if element[0] == 221 && length >= 6 && element[2..6] == [0x00, 0x50, 0xf2, 0x02] {
+                return true;
+            }
+            offset = end;
+        }
+        false
+    }
+
+    unsafe fn apply_static_ht_capability(node: *mut u8, element: &[u8]) -> u8 {
+        if element.len() != crate::scan::STRICT_SCAN_HT_CAPABILITY_IE_LEN
+            || element[0] != 45
+            || element[1] != 26
+        {
+            return 0;
+        }
+        let capability = u16::from_le_bytes([element[2], element[3]]);
+        let mut flags = node.add(0x0c).cast::<u32>().read();
+        flags |= 0x40;
+        if capability & 0x20 != 0 {
+            flags |= 0x8000;
+        }
+        node.add(0x0c).cast::<u32>().write(flags);
+        node.add(0x15c).cast::<u16>().write_unaligned(capability);
+        node.add(0x15e).write(element[4]);
+
+        // Pinned `ieee80211_setup_htrates` stores a count followed by an
+        // explicit MCS-index list. The strict local profile owns one spatial
+        // stream, so only the eight finite bits in the first peer MCS byte can
+        // enter the intersection.
+        ptr::write_bytes(node.add(0x163), 0, 128);
+        let mut count = 0_u8;
+        for mcs in 0_u8..8 {
+            if element[5] & (1 << mcs) != 0 {
+                node.add(0x164 + usize::from(count)).write(mcs);
+                count += 1;
+            }
+        }
+        node.add(0x163).write(count);
+        node.add(0x2f3).write(u8::from(count != 0));
+        count
+    }
+
     fn observe_assoc_response(frame: &[u8]) {
         let config = unsafe { ASSOC_CONFIG.0.get().read() };
         if frame[4..10] != config.local
@@ -984,6 +1109,8 @@ mod target {
         let capability = u16::from_le_bytes([frame[24], frame[25]]);
         let status = u16::from_le_bytes([frame[26], frame[27]]);
         let association_id = u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff;
+        let ht_capability = association_response_ie(frame, 45);
+        let wmm = association_response_has_wmm(frame);
         ASSOC_LAST_CAPABILITY.store(u32::from(capability), Ordering::Relaxed);
         ASSOC_LAST_STATUS.store(u32::from(status), Ordering::Relaxed);
         ASSOC_LAST_ID.store(u32::from(association_id), Ordering::Relaxed);
@@ -992,7 +1119,7 @@ mod target {
             let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
         }
         if status == 0 {
-            if unsafe { commit_static_association(association_id) } {
+            if unsafe { commit_static_association(association_id, ht_capability, wmm) } {
                 complete_assoc(RESULT_OK);
             } else {
                 complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
@@ -1002,7 +1129,11 @@ mod target {
         }
     }
 
-    unsafe fn commit_static_association(association_id: u16) -> bool {
+    unsafe fn commit_static_association(
+        association_id: u16,
+        ht_capability: Option<&[u8]>,
+        wmm: bool,
+    ) -> bool {
         if association_id == 0 || association_id > 0x3fff {
             return false;
         }
@@ -1020,6 +1151,16 @@ mod target {
         // These are the only net80211 facts needed after our Rust-owned
         // association response transition; no vendor connection callback or
         // supplicant state machine is entered.
+        let mcs_count = ht_capability
+            .map(|element| apply_static_ht_capability(node, element))
+            .unwrap_or(0);
+        if wmm {
+            let flags = node.add(0x0c).cast::<u32>().read();
+            node.add(0x0c).cast::<u32>().write(flags | 0x02);
+        }
+        ASSOC_HT_NEGOTIATED.store(u32::from(mcs_count != 0), Ordering::Release);
+        ASSOC_WMM_NEGOTIATED.store(u32::from(wmm), Ordering::Release);
+        ASSOC_HT_MCS_COUNT.store(u32::from(mcs_count), Ordering::Release);
         node.add(0x26).cast::<u16>().write_unaligned(association_id);
         interface.add(0x98).cast::<u32>().write(5);
         true
