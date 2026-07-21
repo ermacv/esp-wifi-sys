@@ -41,6 +41,8 @@ static MANAGEMENT_SLOTS: [ManagementSlot; MANAGEMENT_SLOT_CAPACITY] =
     [const { ManagementSlot::new() }; MANAGEMENT_SLOT_CAPACITY];
 static CLAIMED_MANAGEMENT_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static REJECTED_ESF_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
+const NO_PREARM_HART: usize = usize::MAX;
+static PREARM_MANAGEMENT_HART: AtomicUsize = AtomicUsize::new(NO_PREARM_HART);
 
 unsafe extern "C" {
     static mut g_eb_list_desc: u8;
@@ -58,6 +60,20 @@ pub(crate) fn link_wrappers_active() -> bool {
         esf_buf_recycle as *const (),
         __wrap_esf_buf_recycle as *const (),
     )
+}
+
+/// Route connection-time management frames into the fixed Rust pool before
+/// the general runtime heap/core-stall gates are armed.
+pub(crate) fn enable_prearm_management_pool(expected_hart: usize) {
+    PREARM_MANAGEMENT_HART.store(expected_hart, Ordering::Release);
+}
+
+fn prearm_management_pool_enabled() -> bool {
+    PREARM_MANAGEMENT_HART.load(Ordering::Acquire) != NO_PREARM_HART
+}
+
+fn on_prearm_management_hart() -> bool {
+    crate::critical::current_hart() == PREARM_MANAGEMENT_HART.load(Ordering::Acquire)
 }
 
 fn reject(kind: u32, argument: usize) {
@@ -294,6 +310,17 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
     length: u32,
 ) -> *mut u8 {
     if !crate::critical::strict_wifi_hart_armed() {
+        if prearm_management_pool_enabled() && is_management_kind(kind) {
+            if !on_prearm_management_hart() {
+                reject(kind, length as usize);
+                return ptr::null_mut();
+            }
+            let frame = allocate_management(source, kind, length as usize);
+            if frame.is_none() {
+                reject(kind, length as usize);
+            }
+            return frame.unwrap_or(ptr::null_mut());
+        }
         return __real_esf_buf_alloc(source, kind, length);
     }
     if !crate::critical::on_strict_wifi_hart() {
@@ -322,6 +349,20 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
     if !crate::critical::strict_wifi_hart_armed() {
+        if !frame.is_null() {
+            let strict_frame = frame.cast::<u8>();
+            if let Some(index) = management_slot_index(strict_frame) {
+                if !on_prearm_management_hart() {
+                    reject(u32::MAX, strict_frame as usize);
+                    return;
+                }
+                let bit = 1_usize << index;
+                if CLAIMED_MANAGEMENT_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+                    reject(u32::MAX, strict_frame as usize);
+                }
+                return;
+            }
+        }
         __real_esf_buf_recycle(frame);
         return;
     }

@@ -292,6 +292,14 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
         });
     }
 
+    #[cfg(feature = "strict-no-wait")]
+    {
+        if !crate::esf::link_wrappers_active() {
+            return Err(StrictRuntimeError::EsfBufferLinkWrappersMissing);
+        }
+        crate::esf::enable_prearm_management_pool(current_hart as usize);
+    }
+
     STRICT_PREPARATION_STAGE.store(8, Ordering::Release);
     Ok(StrictRuntimePreparation { configured_hart })
 }

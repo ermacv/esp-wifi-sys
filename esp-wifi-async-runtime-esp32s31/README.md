@@ -344,6 +344,9 @@ The generated S31 defaults are not strict: TX buffers are dynamic and the
 static TX count is zero. After the cold-start drain and before the executor,
 `prepare_strict_runtime_before_handoff(&config)` (legacy name) sets and verifies
 `WIFI_PS_NONE` and `WIFI_LOG_NONE` through the initialization OS adapter.
+That preparation also routes connection-time management frames into the fixed
+Rust pool before the connection request, so no heap-owned authentication,
+association, or probe frame can cross the strict boundary.
 `prepare_strict_runtime(&config, preparation)` then does not call a vendor
 control API; it refuses to issue a proof unless the `ppTask` entry was
 virtualized (or the explicitly selected legacy HIL handoff completed) and

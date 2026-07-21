@@ -376,6 +376,10 @@ do not enter the heap, and core-stall callbacks return immediately until
 explicit post-executor teardown; strict dispatch rejects
 unexpected aggregation, PM, BSS-color, modem-beacon, and coexistence events.
 
+Pre-handoff preparation switches connection-time management allocation to the
+fixed Rust pool. Authentication, association, and probe frames therefore
+cannot remain as heap-owned objects when the runtime heap gate is armed.
+
 PP event 16 is also replaced. The original `ppProcTxDone` drains the complete
 linked list, iterates callback bitmaps, and ends in power management. The Rust
 state machine performs one dequeue, one classified mode-0 callback, or one
