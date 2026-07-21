@@ -254,6 +254,7 @@ mod target {
         fn ieee80211_search_node(interface: u32, frame: *const u8, error: *mut u32) -> *mut u8;
         fn esf_buf_alloc(frame: *const u8, kind: u32, length: u32) -> *mut u8;
         fn ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
+        fn ic_del_key(hardware_index: u32);
         #[cfg(feature = "hil-vendor-tx")]
         fn ieee80211_output_do(
             interface: u32,
@@ -823,6 +824,18 @@ mod target {
                 Wpa2Interface::AccessPoint => wifi_interface_t_WIFI_IF_AP,
             };
             unsafe {
+                // Exact bounded hardware replacement prefix from the pinned
+                // non-delete `ppInstallKey` branch. `ic_del_key` is a finite
+                // bitmap update plus ten key-register clears; it has no loop,
+                // lock, allocation, callback, or wait edge.
+                ic_del_key(hardware_index.into());
+                let crypto_enable = u32::from(
+                    ptr::addr_of_mut!(g_ic)
+                        .add(0x210)
+                        .cast::<u16>()
+                        .read_volatile()
+                        == 0,
+                );
                 ic_set_key(
                     interface_number,
                     CCMP_ALGORITHM,
@@ -831,7 +844,7 @@ mod target {
                     hardware_index.into(),
                     key.key().as_bytes().as_ptr(),
                     WPA2_TK_LEN,
-                    1,
+                    crypto_enable,
                     spp,
                 );
 

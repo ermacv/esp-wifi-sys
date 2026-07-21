@@ -47,6 +47,7 @@ const ROOTS: &[&str] = &[
     // roots here.
     "ieee80211_search_node",
     "ieee80211_post_hmac_tx",
+    "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
     // Exact allocation-free AP association-response branch used after the
