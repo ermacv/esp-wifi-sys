@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 const ROOTS: &[&str] = &[
     "ppProcessTxQ",
@@ -210,6 +210,8 @@ const DIRECT_HEAP_WRAPPERS: [(&str, &str); 4] = [
     ("realloc", "__wrap_realloc"),
     ("free", "__wrap_free"),
 ];
+
+const DIRECT_DELAY_WRAPPERS: [(&str, &str); 1] = [("ets_delay_us", "__wrap_ets_delay_us")];
 
 const FORBIDDEN: &[(&str, &str)] = &[
     ("malloc", "heap"),
@@ -705,6 +707,17 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             Some((symbol, kind))
         })
         .collect::<BTreeMap<_, _>>();
+    let linked_symbol_addresses = symbols
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 3 {
+                return None;
+            }
+            let address = u64::from_str_radix(fields[0], 16).ok()?;
+            Some((normalize_symbol(fields.last()?), address))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut violations = BTreeSet::new();
     for (_, wrapper) in DIRECT_HEAP_WRAPPERS {
         let violation = match linked_symbol_kinds.get(wrapper) {
@@ -745,6 +758,23 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
                     .get(symbol.as_str())
                     .and_then(|wrapper| linked_symbol_kinds.get(*wrapper))
                     .is_some_and(|kind| is_code_symbol_kind(kind))
+            {
+                continue;
+            }
+            if *category == "delay"
+                && DIRECT_DELAY_WRAPPERS
+                    .iter()
+                    .find(|(entry, _)| *entry == symbol)
+                    .is_some_and(|(_, wrapper)| {
+                        linked_symbol_kinds
+                            .get(symbol.as_str())
+                            .is_some_and(|kind| is_code_symbol_kind(kind))
+                            && linked_symbol_kinds
+                                .get(*wrapper)
+                                .is_some_and(|kind| is_code_symbol_kind(kind))
+                            && linked_symbol_addresses.get(symbol.as_str())
+                                == linked_symbol_addresses.get(*wrapper)
+                    })
             {
                 continue;
             }

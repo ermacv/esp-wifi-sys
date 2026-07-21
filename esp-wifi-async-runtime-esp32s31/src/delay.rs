@@ -107,12 +107,11 @@ pub(crate) fn runtime_delay_link_wrapper_active() -> bool {
     )
 }
 
-/// Trace the still-unreconstructed ROM busy-delay after strict takeover.
+/// Reject a ROM busy-delay after strict takeover.
 ///
-/// This wrapper deliberately delegates after recording: returning early was
-/// proven on hardware to strand the channel-change PHY sequence in its next
-/// status loop. Consequently any non-zero post-takeover count is a strict
-/// audit failure, not an accepted runtime primitive.
+/// Initialization still delegates to the pinned ROM entry. Once the strict
+/// runtime owns Wi-Fi, an attempted delay is recorded and returns immediately;
+/// no synchronous wait is allowed to enter the async execution phase.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_ets_delay_us(microseconds: u32) {
     let caller: usize;
@@ -127,6 +126,7 @@ pub unsafe extern "C" fn __wrap_ets_delay_us(microseconds: u32) {
         CALLS.fetch_add(1, Ordering::Release);
         record_site(caller, microseconds);
         blocking_probe().record(BlockingCall::EtsDelayUs, current_event(), caller);
+        return;
     }
     __real_ets_delay_us(microseconds);
 }
