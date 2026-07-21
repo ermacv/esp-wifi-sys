@@ -119,6 +119,19 @@ const INVARIANT_EXCLUDED_INDIRECTS: &[&str] = &[
     "ieee80211_recycle_cache_eb",
 ];
 
+// `phy_get_romfunc_addr` overwrites these exact slots after obtaining the ROM
+// table. The pinned S31 object writes offset 20 to `phy_set_rx_comp_new` and
+// offset 36 to `phy_wifi_get_tx_tab_new`; both targets audit cleanly.
+const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
+    ("phy_chip_set_chan", "phy_set_rx_comp_new"),
+    ("phy_wifi_set_tx_gain_new", "phy_wifi_get_tx_tab_new"),
+];
+
+// `phy_wifi_set_tx_gain_new` calls this leaf with count=32. Its outer loop is
+// exactly that count and its inner loop copies four u16 words (offset 0..8 by
+// two), so neither cycle observes hardware state or has an unbounded exit.
+const PINNED_BOUNDED_CYCLES: &[&str] = &["phy_set_tx_gain_mem_new"];
+
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_lmacTxDone",
     "__wrap_hal_mac_get_txq_state",
@@ -244,6 +257,7 @@ fn main() -> Result<()> {
     let mut enforce = false;
     let mut verbose = false;
     let mut elf = None;
+    let mut requested_roots = Vec::<String>::new();
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -254,9 +268,15 @@ fn main() -> Result<()> {
                     arguments.next().context("--elf requires a path")?,
                 ));
             }
+            "--root" => requested_roots.push(arguments.next().context("--root requires a symbol")?),
             _ => bail!("unknown argument: {argument}"),
         }
     }
+    let roots = if requested_roots.is_empty() {
+        ROOTS.iter().map(|root| (*root).to_owned()).collect()
+    } else {
+        requested_roots
+    };
 
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -270,7 +290,14 @@ fn main() -> Result<()> {
     }
     fs::create_dir(&temporary)?;
 
-    let result = run(&library_dir, elf.as_deref(), &temporary, enforce, verbose);
+    let result = run(
+        &library_dir,
+        elf.as_deref(),
+        &temporary,
+        &roots,
+        enforce,
+        verbose,
+    );
     fs::remove_dir_all(&temporary)?;
     result
 }
@@ -279,16 +306,17 @@ fn run(
     library_dir: &Path,
     elf: Option<&Path>,
     temporary: &Path,
+    roots: &[String],
     enforce: bool,
     verbose: bool,
 ) -> Result<()> {
     let graph = build_graph(library_dir, temporary)?;
-    let mut violations = audit_graph(&graph);
+    let mut violations = audit_graph(&graph, roots);
     if let Some(elf) = elf {
         violations.extend(audit_elf(elf)?);
     }
 
-    print_report(&graph, &violations, elf, verbose);
+    print_report(&graph, &violations, roots, elf, verbose);
     if enforce && !violations.is_empty() {
         bail!(
             "strict ESP32-S31 audit rejected {} reachable or final-link paths",
@@ -441,11 +469,16 @@ fn parse_instruction(line: &str) -> Option<Instruction> {
     if mnemonic.starts_with("R_") {
         return None;
     }
-    let target = fields
-        .iter()
-        .skip(2)
-        .find_map(|field| field.strip_prefix("0x"))
-        .and_then(|target| u64::from_str_radix(target.trim_end_matches(','), 16).ok());
+    let has_control_target = mnemonic == "j" || (mnemonic.starts_with('b') && mnemonic != "break");
+    let target = has_control_target
+        .then(|| {
+            fields
+                .iter()
+                .skip(2)
+                .find_map(|field| field.strip_prefix("0x"))
+                .and_then(|target| u64::from_str_radix(target.trim_end_matches(','), 16).ok())
+        })
+        .flatten();
     Some(Instruction {
         address,
         mnemonic: mnemonic.to_owned(),
@@ -528,10 +561,11 @@ fn normalize_symbol(symbol: &str) -> String {
         .to_owned()
 }
 
-fn audit_graph(graph: &BTreeMap<String, FunctionInfo>) -> BTreeSet<Violation> {
+fn audit_graph(graph: &BTreeMap<String, FunctionInfo>, roots: &[String]) -> BTreeSet<Violation> {
     let forbidden = FORBIDDEN.iter().copied().collect::<BTreeMap<_, _>>();
     let mut violations = BTreeSet::new();
-    for &root in ROOTS {
+    for root in roots {
+        let root = root.as_str();
         if !graph.contains_key(root) {
             violations.insert(Violation::MissingRoot(root.to_owned()));
             continue;
@@ -559,7 +593,12 @@ fn audit_graph(graph: &BTreeMap<String, FunctionInfo>) -> BTreeSet<Violation> {
             let Some(info) = graph.get(&function) else {
                 continue;
             };
-            if !INVARIANT_EXCLUDED_INDIRECTS.contains(&function.as_str()) {
+            let pinned_indirect = PINNED_INDIRECT_TARGETS
+                .iter()
+                .find_map(|(caller, target)| (*caller == function).then_some(*target));
+            if pinned_indirect.is_none()
+                && !INVARIANT_EXCLUDED_INDIRECTS.contains(&function.as_str())
+            {
                 for site in &info.indirect_sites {
                     violations.insert(Violation::Indirect {
                         root: root.to_owned(),
@@ -569,13 +608,21 @@ fn audit_graph(graph: &BTreeMap<String, FunctionInfo>) -> BTreeSet<Violation> {
                     });
                 }
             }
-            for site in &info.control_flow_cycles {
-                violations.insert(Violation::ControlFlowCycle {
-                    root: root.to_owned(),
-                    function: function.clone(),
-                    site: site.clone(),
-                    path: path.clone(),
-                });
+            if !PINNED_BOUNDED_CYCLES.contains(&function.as_str()) {
+                for site in &info.control_flow_cycles {
+                    violations.insert(Violation::ControlFlowCycle {
+                        root: root.to_owned(),
+                        function: function.clone(),
+                        site: site.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+            if let Some(target) = pinned_indirect {
+                if !predecessor.contains_key(target) && target != root {
+                    predecessor.insert(target.to_owned(), function.clone());
+                }
+                queue.push_back(target.to_owned());
             }
             for target in &info.direct {
                 if !predecessor.contains_key(target) && target != root {
@@ -664,11 +711,12 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
 fn print_report(
     graph: &BTreeMap<String, FunctionInfo>,
     violations: &BTreeSet<Violation>,
+    roots: &[String],
     elf: Option<&Path>,
     verbose: bool,
 ) {
     println!("# ESP32-S31 strict no-wait/no-heap audit\n");
-    println!("- roots: {}", ROOTS.len());
+    println!("- roots: {} (`{}`)", roots.len(), roots.join("`, `"));
     println!(
         "- replaced vendor roots: `{}`",
         REPLACED_VENDOR_ROOTS.join("`, `")
@@ -827,5 +875,20 @@ mod tests {
         );
         assert_eq!(graph["looping"].control_flow_cycles.len(), 1);
         assert!(graph["layout"].control_flow_cycles.is_empty());
+    }
+
+    #[test]
+    fn data_immediates_are_not_control_flow_targets() {
+        let mut graph = BTreeMap::new();
+        parse_object(
+            "Disassembly of section .text.no_loop:\n\
+             00000000 <no_loop>:\n\
+                    0: li a0, 0x0\n\
+                    2: lui a1, 0x0\n\
+                    4: ret\n",
+            "test.o",
+            &mut graph,
+        );
+        assert!(graph["no_loop"].control_flow_cycles.is_empty());
     }
 }
