@@ -29,11 +29,10 @@ use crate::{
 pub const PP_QUEUE_CAPACITY: usize = 256;
 pub const DEFAULT_EVENT_BUDGET: usize = 16;
 const SEMAPHORE_CAPACITY: usize = 32;
-// The initialized S31 blob retains sixty-four timer identities before the
-// cold handoff. Strict channel switching adopts two pre-handoff `g_chm`
-// timers, and the remaining static reserve prevents those identities from
-// competing with executor continuations. This is BSS-only storage.
-pub const TIMER_CAPACITY: usize = 80;
+// All storage is BSS-only. Ordinary vendor identities cannot consume the tail
+// reserved for channel/TX executor continuations.
+pub const TIMER_CAPACITY: usize = 128;
+const INTERNAL_TIMER_RESERVE: usize = 8;
 const MUTEX_CAPACITY: usize = 64;
 const EVENT_GROUP_CAPACITY: usize = 32;
 const NO_SEMAPHORE: usize = usize::MAX;
@@ -538,10 +537,12 @@ pub(crate) unsafe fn schedule_internal_timer(
         );
         return false;
     };
-    STATE
-        .timers
-        .set_callback(timer, callback as *const () as *mut c_void, argument)
-        && STATE.timers.arm_at(timer, delay_us, false, now() as u32)
+    STATE.timers.set_internal_callback(
+        timer,
+        callback as *const () as *mut c_void,
+        argument,
+        INTERNAL_TIMER_RESERVE,
+    ) && STATE.timers.arm_at(timer, delay_us, false, now() as u32)
 }
 
 #[allow(dead_code)]
@@ -925,7 +926,12 @@ unsafe extern "C" fn mutex_unlock(handle: *mut c_void) -> i32 {
 }
 
 unsafe extern "C" fn timer_setfn(timer: *mut c_void, callback: *mut c_void, argument: *mut c_void) {
-    if !STATE.timers.set_callback(timer, callback, argument) {
+    if !STATE.timers.set_callback_with_reserved_tail(
+        timer,
+        callback,
+        argument,
+        INTERNAL_TIMER_RESERVE,
+    ) {
         record_timer_failure(&STATE.probe, timer);
     }
 }

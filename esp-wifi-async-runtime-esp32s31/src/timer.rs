@@ -89,6 +89,50 @@ impl<const N: usize> RuntimeTimerPool<N> {
             return false;
         };
 
+        self.configure_slot(slot, timer, callback, argument)
+    }
+
+    pub unsafe fn set_callback_with_reserved_tail(
+        &self,
+        timer: *mut c_void,
+        callback: *mut c_void,
+        argument: *mut c_void,
+        reserved_tail: usize,
+    ) -> bool {
+        let end = N.saturating_sub(reserved_tail.min(N));
+        let Some(slot) = self
+            .find(timer)
+            .or_else(|| self.find_or_claim_in(timer, 0, end))
+        else {
+            return false;
+        };
+        self.configure_slot(slot, timer, callback, argument)
+    }
+
+    pub unsafe fn set_internal_callback(
+        &self,
+        timer: *mut c_void,
+        callback: *mut c_void,
+        argument: *mut c_void,
+        reserved_tail: usize,
+    ) -> bool {
+        let start = N.saturating_sub(reserved_tail.min(N));
+        let Some(slot) = self
+            .find(timer)
+            .or_else(|| self.find_or_claim_in(timer, start, N))
+        else {
+            return false;
+        };
+        self.configure_slot(slot, timer, callback, argument)
+    }
+
+    unsafe fn configure_slot(
+        &self,
+        slot: &TimerSlot,
+        timer: *mut c_void,
+        callback: *mut c_void,
+        argument: *mut c_void,
+    ) -> bool {
         slot.armed.store(false, Ordering::Release);
         slot.argument.store(argument, Ordering::Release);
         slot.callback.store(callback as usize, Ordering::Release);
@@ -240,13 +284,15 @@ impl<const N: usize> RuntimeTimerPool<N> {
     }
 
     fn find_or_claim(&self, timer: *mut c_void) -> Option<&TimerSlot> {
+        self.find(timer)
+            .or_else(|| self.find_or_claim_in(timer, 0, N))
+    }
+
+    fn find_or_claim_in(&self, timer: *mut c_void, start: usize, end: usize) -> Option<&TimerSlot> {
         if timer.is_null() {
             return None;
         }
-        if let Some(slot) = self.find(timer) {
-            return Some(slot);
-        }
-        self.slots.iter().find(|slot| {
+        self.slots[start.min(N)..end.min(N)].iter().find(|slot| {
             slot.timer
                 .compare_exchange(ptr::null_mut(), timer, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -334,5 +380,30 @@ mod tests {
         assert_eq!(pool.dispatch_due_at(135, 1), 1);
         assert_eq!(timer.expire, 145);
         assert_eq!(pool.next_deadline_at(135), Some(145));
+    }
+
+    #[test]
+    fn internal_tail_is_reserved_from_vendor_timers() {
+        let pool = RuntimeTimerPool::<3>::new();
+        let mut vendor_a = raw_timer();
+        let mut vendor_b = raw_timer();
+        let mut internal = raw_timer();
+
+        unsafe {
+            for timer in [&mut vendor_a, &mut vendor_b] {
+                assert!(pool.set_callback_with_reserved_tail(
+                    core::ptr::from_mut(timer).cast(),
+                    one_shot_callback as *const () as *mut _,
+                    core::ptr::null_mut(),
+                    1,
+                ));
+            }
+            assert!(pool.set_internal_callback(
+                core::ptr::from_mut(&mut internal).cast(),
+                one_shot_callback as *const () as *mut _,
+                core::ptr::null_mut(),
+                1,
+            ));
+        }
     }
 }
