@@ -108,6 +108,7 @@ static OP_SIGNAL: InterruptSignal = InterruptSignal::new();
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 unsafe extern "C" {
+    fn wifi_set_rx_policy(policy: u32) -> i32;
     fn chm_start_op(
         channel: *const u8,
         first_dwell_ms: u32,
@@ -228,6 +229,12 @@ pub(crate) unsafe fn dispatch_channel() {
     }
     let channel = [OP_CHANNEL.load(Ordering::Acquire), 0];
     let dwell = OP_DWELL_MS.load(Ordering::Acquire);
+    if channel[0] == 1 && wifi_set_rx_policy(3) == 0 {
+        OP_RESULT.store(0x8000_0000, Ordering::Release);
+        OP_STATE.store(OP_IDLE, Ordering::Release);
+        OP_SIGNAL.notify_from_isr();
+        return;
+    }
     let result = chm_start_op(
         channel.as_ptr(),
         dwell,
@@ -237,6 +244,7 @@ pub(crate) unsafe fn dispatch_channel() {
         core::ptr::null_mut(),
     );
     if result != 0 {
+        let _ = wifi_set_rx_policy(0);
         OP_RESULT.store(0x8000_0000 | result as u32, Ordering::Release);
         OP_STATE.store(OP_IDLE, Ordering::Release);
         OP_SIGNAL.notify_from_isr();
@@ -245,6 +253,12 @@ pub(crate) unsafe fn dispatch_channel() {
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 unsafe extern "C" fn channel_complete(_context: *mut core::ffi::c_void, result: u32) {
+    if result != 0
+        || OP_CHANNEL.load(Ordering::Acquire) == 13
+        || SESSION.load(Ordering::Acquire) != SESSION_ACTIVE
+    {
+        let _ = wifi_set_rx_policy(0);
+    }
     OP_RESULT.store(result, Ordering::Release);
     OP_STATE.store(OP_IDLE, Ordering::Release);
     OP_SIGNAL.notify_from_isr();
