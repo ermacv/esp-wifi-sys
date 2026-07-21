@@ -196,7 +196,18 @@ unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
         // state machines in the stock callback. They require explicit async
         // commands and are not allowed to run implicitly from TX completion.
         0xa0 | 0xc0 | 0xd0 => Err(()),
-        _ => Ok(()),
+        _ => {
+            let descriptor = frame.add(0x34).cast::<*mut u8>().read();
+            if descriptor.is_null() {
+                return Err(());
+            }
+            crate::sta_link::management_tx_done(
+                u16::from_le_bytes([frame_control, header.add(1).read()]),
+                descriptor.add(19).read(),
+                descriptor.add(0x10).cast::<u32>().read(),
+            );
+            Ok(())
+        }
     }
 }
 

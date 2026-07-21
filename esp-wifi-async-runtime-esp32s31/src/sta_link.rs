@@ -21,6 +21,18 @@ pub enum StaAuthError {
     Status(u16),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StaAuthSnapshot {
+    pub attempts: u32,
+    pub submitted: u32,
+    pub tx_done: u32,
+    pub responses: u32,
+    pub timeouts: u32,
+    pub last_frame_control: u16,
+    pub last_hardware_status: u8,
+    pub last_descriptor_status: u32,
+}
+
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod target {
     use core::{
@@ -95,6 +107,14 @@ mod target {
     static PHASE: AtomicU8 = AtomicU8::new(PHASE_IDLE);
     static RESULT: AtomicU32 = AtomicU32::new(RESULT_PENDING);
     static SIGNAL: InterruptSignal = InterruptSignal::new();
+    static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+    static SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static TX_DONE: AtomicU32 = AtomicU32::new(0);
+    static RESPONSES: AtomicU32 = AtomicU32::new(0);
+    static TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+    static LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+    static LAST_HARDWARE_STATUS: AtomicU32 = AtomicU32::new(0);
+    static LAST_DESCRIPTOR_STATUS: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -143,6 +163,19 @@ mod target {
         {
             RESULT.store(result, Ordering::Release);
             SIGNAL.notify_from_isr();
+        }
+    }
+
+    pub fn sta_auth_snapshot() -> StaAuthSnapshot {
+        StaAuthSnapshot {
+            attempts: ATTEMPTS.load(Ordering::Acquire),
+            submitted: SUBMITTED.load(Ordering::Acquire),
+            tx_done: TX_DONE.load(Ordering::Acquire),
+            responses: RESPONSES.load(Ordering::Acquire),
+            timeouts: TIMEOUTS.load(Ordering::Acquire),
+            last_frame_control: LAST_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+            last_hardware_status: LAST_HARDWARE_STATUS.load(Ordering::Acquire) as u8,
+            last_descriptor_status: LAST_DESCRIPTOR_STATUS.load(Ordering::Acquire),
         }
     }
 
@@ -231,6 +264,7 @@ mod target {
     }
 
     pub(crate) unsafe fn dispatch_auth_tx() {
+        ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         if PHASE.load(Ordering::Acquire) != PHASE_WAITING
             || !crate::critical::on_strict_wifi_hart()
             || !crate::context::in_radio_context()
@@ -260,6 +294,7 @@ mod target {
             complete(RESULT_TX_REJECTED | u32::from(tx as u16));
             return;
         }
+        SUBMITTED.fetch_add(1, Ordering::Relaxed);
         if !crate::adapter::schedule_internal_timer(
             TIMER.0.get().cast(),
             auth_timeout,
@@ -272,7 +307,19 @@ mod target {
 
     unsafe extern "C" fn auth_timeout(_argument: *mut c_void) {
         let _ = crate::adapter::cancel_internal_timer(TIMER.0.get().cast());
+        TIMEOUTS.fetch_add(1, Ordering::Relaxed);
         complete(RESULT_TIMEOUT);
+    }
+
+    pub(crate) fn management_tx_done(
+        frame_control: u16,
+        hardware_status: u8,
+        descriptor_status: u32,
+    ) {
+        LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Relaxed);
+        LAST_HARDWARE_STATUS.store(u32::from(hardware_status), Ordering::Relaxed);
+        LAST_DESCRIPTOR_STATUS.store(descriptor_status, Ordering::Relaxed);
+        TX_DONE.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn observe_management(frame: &[u8]) {
@@ -293,6 +340,7 @@ mod target {
             return;
         }
         let status = u16::from_le_bytes([frame[28], frame[29]]);
+        RESPONSES.fetch_add(1, Ordering::Relaxed);
         unsafe {
             let _ = crate::adapter::cancel_internal_timer(TIMER.0.get().cast());
         }
@@ -307,7 +355,9 @@ mod target {
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::authenticate_open;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub(crate) use target::{dispatch_auth_tx, observe_management, STA_AUTH_EVENT};
+pub use target::sta_auth_snapshot;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub(crate) use target::{dispatch_auth_tx, management_tx_done, observe_management, STA_AUTH_EVENT};
 
 #[cfg(test)]
 mod tests {

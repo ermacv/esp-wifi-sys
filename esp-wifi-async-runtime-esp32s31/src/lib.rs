@@ -158,7 +158,11 @@ pub use scan::{
 pub use scan::{passive_scan_2_4ghz, tune_home_channel};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use sta_link::authenticate_open;
-pub use sta_link::{StaAuthError, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use sta_link::sta_auth_snapshot;
+pub use sta_link::{
+    StaAuthError, StaAuthSnapshot, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US,
+};
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
