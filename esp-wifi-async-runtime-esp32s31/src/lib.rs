@@ -122,7 +122,10 @@ pub use data_tx::{
     WIFI_DATA_TX_FRAME_CAPACITY,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use delay::{direct_delay_snapshot, DirectDelaySnapshot};
+pub use delay::{
+    direct_delay_snapshot, DirectDelaySiteSnapshot, DirectDelaySnapshot,
+    DIRECT_DELAY_SITE_CAPACITY,
+};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use esf::rejected_esf_operations;
 pub use event::{PpAction, PpEvent};
