@@ -45,14 +45,12 @@ const ROOTS: &[&str] = &[
     // Rust owns WPA2 PTK/MIC/framing and bypasses the stock allocating TX/key
     // wrappers. Only the exact lower leaves called by `S31StaticWpa2Io` remain
     // roots here.
-    "ieee80211_search_node",
     "ieee80211_post_hmac_tx",
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
     // Exact allocation-free AP association-response branch used after the
     // heap-backed WPA station callbacks have been patched.
-    "cnx_node_search",
     "ieee80211_assoc_resp_construct",
     "ieee80211_set_tx_desc",
     // Timer ID 0 is completed entirely by Rust; no vendor timer callback is a
@@ -91,6 +89,8 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "esf_buf_recycle",
     "ieee80211_mgmt_output",
     "ieee80211_set_tx_pti",
+    "ieee80211_search_node",
+    "cnx_node_search",
 ];
 
 // Calls to these archive symbols are redirected by mandatory final-link GNU
@@ -123,6 +123,8 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "esf_buf_recycle",
     "ieee80211_mgmt_output",
     "ieee80211_set_tx_pti",
+    "ieee80211_search_node",
+    "cnx_node_search",
 ];
 
 // These pinned register-indirect sites are excluded only after their live
@@ -145,7 +147,10 @@ const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
 // `phy_wifi_set_tx_gain_new` calls this leaf with count=32. Its outer loop is
 // exactly that count and its inner loop copies four u16 words (offset 0..8 by
 // two), so neither cycle observes hardware state or has an unbounded exit.
-const PINNED_BOUNDED_CYCLES: &[&str] = &["phy_set_tx_gain_mem_new"];
+const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
+    ("phy_set_tx_gain_mem_new", 0xaa),
+    ("phy_set_tx_gain_mem_new", 0x12e),
+];
 
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_lmacTxDone",
@@ -176,6 +181,8 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_esf_buf_recycle",
     "__wrap_ieee80211_mgmt_output",
     "__wrap_ieee80211_set_tx_pti",
+    "__wrap_ieee80211_search_node",
+    "__wrap_cnx_node_search",
     "__esp_hostap_sta_join",
     "__esp_hostap_sta_join_end",
     "__esp_wifi_async_wpa2_ap_join",
@@ -481,6 +488,15 @@ fn indirect_site(line: &str) -> Option<String> {
     matches!(*instruction, "jalr" | "jr").then(|| line.trim().to_owned())
 }
 
+fn instruction_site_address(site: &str) -> Option<u64> {
+    u64::from_str_radix(site.split_whitespace().next()?.trim_end_matches(':'), 16).ok()
+}
+
+fn is_pinned_bounded_cycle(function: &str, site: &str) -> bool {
+    instruction_site_address(site)
+        .is_some_and(|address| PINNED_BOUNDED_CYCLE_SITES.contains(&(function, address)))
+}
+
 fn parse_instruction(line: &str) -> Option<Instruction> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     let address = u64::from_str_radix(fields.first()?.trim_end_matches(':'), 16).ok()?;
@@ -627,8 +643,8 @@ fn audit_graph(graph: &BTreeMap<String, FunctionInfo>, roots: &[String]) -> BTre
                     });
                 }
             }
-            if !PINNED_BOUNDED_CYCLES.contains(&function.as_str()) {
-                for site in &info.control_flow_cycles {
+            for site in &info.control_flow_cycles {
+                if !is_pinned_bounded_cycle(&function, site) {
                     violations.insert(Violation::ControlFlowCycle {
                         root: root.to_owned(),
                         function: function.clone(),
@@ -849,7 +865,10 @@ fn text(output: Output) -> Result<String> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{definition_name, direct_relocation_target, indirect_site, parse_object};
+    use super::{
+        definition_name, direct_relocation_target, indirect_site, is_pinned_bounded_cycle,
+        parse_object,
+    };
 
     #[test]
     fn parses_function_and_call_relocations() {
@@ -868,6 +887,22 @@ mod tests {
     fn only_unresolved_register_calls_are_indirect() {
         assert!(indirect_site("  18:       jalr a5").is_some());
         assert!(indirect_site("  18:       jalr ra <function+0x4>").is_none());
+    }
+
+    #[test]
+    fn bounded_cycle_proofs_are_instruction_specific() {
+        assert!(is_pinned_bounded_cycle(
+            "phy_set_tx_gain_mem_new",
+            "aa: bne a5, s8, 0x94 <.L10>"
+        ));
+        assert!(!is_pinned_bounded_cycle(
+            "phy_set_tx_gain_mem_new",
+            "ac: j 0xac <.Lassert>"
+        ));
+        assert!(!is_pinned_bounded_cycle(
+            "different_function",
+            "aa: bne a5, s8, 0x94 <.L10>"
+        ));
     }
 
     #[test]

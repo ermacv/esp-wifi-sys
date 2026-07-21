@@ -239,7 +239,7 @@ pub struct HilStaPairwiseKeySnapshot {
 
 #[cfg(target_arch = "riscv32")]
 mod target {
-    use core::{ffi::c_void, ptr};
+    use core::{ffi::c_void, mem::size_of, ptr};
 
     use esp_wifi_sys_esp32s31::include::{
         wifi_interface_t_WIFI_IF_AP, wifi_interface_t_WIFI_IF_STA,
@@ -251,6 +251,7 @@ mod target {
         data_rx::WifiDataInterface,
         data_tx::OwnedWifiDataTxFrame,
         wpa2::Wpa2Interface,
+        wpa2_ap::WPA2_AP_ASSOC_CAPACITY,
         wpa2_io::{
             StaticWpa2Keys, TryWpa2Io, Wpa2IoCommand, Wpa2IoFailure, Wpa2KeyInstall, Wpa2KeyKind,
         },
@@ -266,6 +267,7 @@ mod target {
     unsafe extern "C" {
         static ccmp: [u8; 24];
         static mut g_ic: u8;
+        static mut g_wifi_nvs: *mut u8;
         static mut g_sta_connected_flag: u8;
         #[cfg(feature = "hil-vendor-tx")]
         static mut gWpaSm: u8;
@@ -280,6 +282,7 @@ mod target {
 
         fn cnx_node_search(peer: *const u8) -> *mut u8;
         fn ieee80211_search_node(interface: u32, frame: *const u8, error: *mut u32) -> *mut u8;
+        fn ieee80211_is_tx_allowed(node: *mut u8, authentication_frame: bool) -> bool;
         fn esf_buf_alloc(frame: *const u8, kind: u32, length: u32) -> *mut u8;
         fn ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
         fn ic_del_key(hardware_index: u32);
@@ -310,6 +313,166 @@ mod target {
             enable: u32,
             spp: u32,
         );
+    }
+
+    const SEARCH_ERROR_CACHED_TX_ENABLED: u32 = 0x3002;
+    const SEARCH_ERROR_INVALID_INTERFACE: u32 = 0x3004;
+    const SEARCH_ERROR_INTERFACE_NOT_RUNNING: u32 = 0x3006;
+    const SEARCH_ERROR_INTERFACE_MISSING: u32 = 0x3007;
+    const SEARCH_ERROR_NODE_MISSING: u32 = 0x3015;
+    const SEARCH_ERROR_TX_DISALLOWED: u32 = 0x3016;
+    const AP_INTERFACE_OFFSET: usize = 0x14;
+    const STA_INTERFACE_OFFSET: usize = 0x10;
+    const INTERFACE_STATE_OFFSET: usize = 0x98;
+    const INTERFACE_PRIMARY_NODE_OFFSET: usize = 0xec;
+    const STA_NODE_OFFSET: usize = 0xe4;
+    const NODE_FLAGS_OFFSET: usize = 0x0c;
+    const NODE_ASSOCIATION_ID_OFFSET: usize = 0x26;
+    const TX_CACHE_ENABLED_OFFSET: usize = 0x258;
+    const MAX_CONNECTION_INDEX_OFFSET: usize = 0x3f6;
+
+    unsafe fn set_search_error(error: *mut u32, value: u32) {
+        if !error.is_null() {
+            error.write(value);
+        }
+    }
+
+    unsafe fn strict_ap_node_search(peer: *const u8) -> *mut u8 {
+        if peer.is_null() {
+            return ptr::null_mut();
+        }
+        let interface = ptr::addr_of_mut!(g_ic)
+            .add(AP_INTERFACE_OFFSET)
+            .cast::<*mut u8>()
+            .read_volatile();
+        if interface.is_null() {
+            return ptr::null_mut();
+        }
+        if peer.read() & 1 != 0 {
+            return interface
+                .add(INTERFACE_PRIMARY_NODE_OFFSET)
+                .cast::<*mut u8>()
+                .read_volatile();
+        }
+        let config = ptr::addr_of_mut!(g_wifi_nvs).read_volatile();
+        if config.is_null() {
+            return ptr::null_mut();
+        }
+
+        // The pinned blob increments an eight-bit index and can spin forever
+        // when the configured limit is 255. Strict AP owns eight peer slots;
+        // the extra entry is the interface/BSS node. Bound the identical
+        // contiguous lookup to those statically provisioned entries.
+        let configured_limit = usize::from(config.add(MAX_CONNECTION_INDEX_OFFSET).read_volatile());
+        let slots = WPA2_AP_ASSOC_CAPACITY + 1;
+        let mut index = 0_usize;
+        while index < slots && index <= configured_limit {
+            let node = interface
+                .add(INTERFACE_PRIMARY_NODE_OFFSET + index * size_of::<*mut u8>())
+                .cast::<*mut u8>()
+                .read_volatile();
+            if !node.is_null() {
+                let mut byte = 0_usize;
+                while byte < 6 && node.add(4 + byte).read_volatile() == peer.add(byte).read() {
+                    byte += 1;
+                }
+                if byte == 6 {
+                    return node;
+                }
+            }
+            index += 1;
+        }
+        ptr::null_mut()
+    }
+
+    /// Finite replacement for the pinned AP node-table search.
+    ///
+    /// The final strict image must link with `-Wl,--wrap=cnx_node_search`.
+    #[no_mangle]
+    pub unsafe extern "C" fn __wrap_cnx_node_search(peer: *const u8) -> *mut u8 {
+        strict_ap_node_search(peer)
+    }
+
+    /// STA/AP-only replacement for the path-insensitive vendor node lookup.
+    ///
+    /// NAN is unsupported by the strict runtime and is rejected without
+    /// entering its assert loop. The final strict image must link with
+    /// `-Wl,--wrap=ieee80211_search_node`.
+    #[no_mangle]
+    pub unsafe extern "C" fn __wrap_ieee80211_search_node(
+        interface: u32,
+        frame: *const u8,
+        error: *mut u32,
+    ) -> *mut u8 {
+        if ptr::addr_of_mut!(g_ic)
+            .add(TX_CACHE_ENABLED_OFFSET)
+            .read_volatile()
+            != 0
+        {
+            set_search_error(error, SEARCH_ERROR_CACHED_TX_ENABLED);
+            return ptr::null_mut();
+        }
+        let interface_state = if interface == wifi_interface_t_WIFI_IF_STA {
+            ptr::addr_of_mut!(g_ic)
+                .add(STA_INTERFACE_OFFSET)
+                .cast::<*mut u8>()
+                .read_volatile()
+        } else if interface == wifi_interface_t_WIFI_IF_AP {
+            ptr::addr_of_mut!(g_ic)
+                .add(AP_INTERFACE_OFFSET)
+                .cast::<*mut u8>()
+                .read_volatile()
+        } else {
+            set_search_error(error, SEARCH_ERROR_INVALID_INTERFACE);
+            return ptr::null_mut();
+        };
+        if interface_state.is_null() {
+            set_search_error(error, SEARCH_ERROR_INTERFACE_MISSING);
+            return ptr::null_mut();
+        }
+        if interface_state
+            .add(INTERFACE_STATE_OFFSET)
+            .cast::<u32>()
+            .read_volatile()
+            != 5
+        {
+            set_search_error(error, SEARCH_ERROR_INTERFACE_NOT_RUNNING);
+            return ptr::null_mut();
+        }
+
+        let node = if interface == wifi_interface_t_WIFI_IF_STA {
+            interface_state
+                .add(STA_NODE_OFFSET)
+                .cast::<*mut u8>()
+                .read_volatile()
+        } else if frame.is_null() {
+            ptr::null_mut()
+        } else {
+            strict_ap_node_search(frame)
+        };
+        if node.is_null()
+            || (node
+                .add(NODE_ASSOCIATION_ID_OFFSET)
+                .cast::<u16>()
+                .read_volatile()
+                == 0
+                && node.add(NODE_FLAGS_OFFSET).cast::<u32>().read_volatile() & 0x0002_0000 != 0)
+        {
+            set_search_error(error, SEARCH_ERROR_NODE_MISSING);
+            return ptr::null_mut();
+        }
+
+        let authentication_frame = if frame.is_null() {
+            false
+        } else {
+            let protocol = u16::from_be_bytes([frame.add(12).read(), frame.add(13).read()]);
+            matches!(protocol, 0x888e | 0x88b4)
+        };
+        if !ieee80211_is_tx_allowed(node, authentication_frame) {
+            set_search_error(error, SEARCH_ERROR_TX_DISALLOWED);
+            return ptr::null_mut();
+        }
+        node
     }
 
     pub(crate) fn runtime_key_link_wrapper_active() -> bool {

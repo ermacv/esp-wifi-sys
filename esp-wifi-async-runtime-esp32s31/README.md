@@ -186,6 +186,8 @@ archive definitions and use LLD wrapping:
 -Wl,--wrap=wpa_sm_rx_eapol
 -Wl,--wrap=wpa_ap_rx_eapol
 -Wl,--wrap=hal_crypto_set_key_entry
+-Wl,--wrap=ieee80211_search_node
+-Wl,--wrap=cnx_node_search
 -Wl,--wrap=wifi_log
 ```
 
@@ -526,8 +528,11 @@ software-key object from `S31StaticKeyStorage<K>`. Before registration the
 backend reads the pinned `g_ic` key slot directly, verifies that it is empty or
 already points to the same static object, and then performs the exact pointer
 store itself; neither `ieee80211_get_key` nor the potentially freeing
-`ieee80211_set_key` remains a runtime root. AP PTK/SPP lookup and STA GTK
-metadata are likewise reduced to `cnx_node_search` plus their pinned byte
+`ieee80211_set_key` remains a runtime root. AP PTK/SPP lookup uses a mandatory
+finite `cnx_node_search` wrapper over the nine statically provisioned AP/BSS
+node entries; the original eight-bit wraparound/assert loop is unreachable.
+The adjacent `ieee80211_search_node` wrapper accepts STA/AP only and rejects
+NAN before its assert loop. STA GTK metadata is reduced to pinned byte
 loads/stores. The pinned `wifi_init_key` call is reduced to its exact two
 constant-length fills inside that object, so it is no longer a vendor runtime
 root. STA GTK ids share the chip's single hardware group slot and update

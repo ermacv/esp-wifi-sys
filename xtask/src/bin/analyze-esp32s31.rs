@@ -677,8 +677,11 @@ fn report(
          static storage. It reads the pinned `g_ic` key slot directly and proceeds only when the \
          slot is null or already equals that same object, then performs the exact pointer store; \
          neither the getter nor potentially freeing vendor setter remains a runtime root. AP \
-         PTK/SPP lookup and STA GTK metadata are reduced to `cnx_node_search` plus their recovered \
-         bounded byte loads/stores. The pinned `wifi_init_key` body is reproduced as \
+         PTK/SPP lookup uses a mandatory finite `cnx_node_search` wrapper over the nine static \
+         AP/BSS node entries, so its null-interface assert and eight-bit wraparound loop are \
+         unreachable. The adjacent `ieee80211_search_node` wrapper accepts STA/AP only and rejects \
+         NAN before its assert loop. STA GTK metadata is reduced to recovered bounded byte \
+         loads/stores. The pinned `wifi_init_key` body is reproduced as \
          its exact two constant-length fills in Rust-owned storage and is no longer a runtime \
          root. Final-link `esf_buf_alloc/recycle` wrappers use \
          the initialized vendor kind-1 free list under local MIE masking and eight Rust-owned \
