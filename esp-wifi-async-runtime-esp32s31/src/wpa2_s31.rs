@@ -626,30 +626,11 @@ mod target {
                 };
             }
 
-            let node = match frame_interface {
-                Wpa2Interface::Station => {
-                    let node = unsafe { sta_interface_node() };
-                    if node.is_null() {
-                        return Err(S31Wpa2IoError::MissingStaInterfaceState);
-                    }
-                    if frame.len() < 14
-                        || unsafe { core::slice::from_raw_parts(node.add(4), 6) } != &frame[..6]
-                    {
-                        return Err(S31Wpa2IoError::TxPeerNotFound(0));
-                    }
-                    node
-                }
-                Wpa2Interface::AccessPoint => {
-                    let mut peer_error = 0_u32;
-                    let node = unsafe {
-                        ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error)
-                    };
-                    if node.is_null() {
-                        return Err(S31Wpa2IoError::TxPeerNotFound(peer_error));
-                    }
-                    node
-                }
-            };
+            let mut peer_error = 0_u32;
+            let node = unsafe { ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error) };
+            if node.is_null() {
+                return Err(S31Wpa2IoError::TxPeerNotFound(peer_error));
+            }
             if frame_interface == Wpa2Interface::AccessPoint {
                 // The stock output wrapper branches into the AP power-save
                 // queue when either field is set. Strict mode rejects that

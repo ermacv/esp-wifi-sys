@@ -992,10 +992,37 @@ mod target {
             let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
         }
         if status == 0 {
-            complete_assoc(RESULT_OK);
+            if unsafe { commit_static_association(association_id) } {
+                complete_assoc(RESULT_OK);
+            } else {
+                complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
+            }
         } else {
             complete_assoc(RESULT_STATUS | u32::from(status));
         }
+    }
+
+    unsafe fn commit_static_association(association_id: u16) -> bool {
+        if association_id == 0 || association_id > 0x3fff {
+            return false;
+        }
+        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        if interface.is_null() {
+            return false;
+        }
+        let node = interface.add(0xe4).cast::<*mut u8>().read();
+        if node != NODE.0.get().cast::<u8>() {
+            return false;
+        }
+
+        // Pinned `ieee80211_search_node` admits STA data only in state RUN
+        // (interface+0x98 == 5). `ni_associd` is the 16-bit field at node+0x26.
+        // These are the only net80211 facts needed after our Rust-owned
+        // association response transition; no vendor connection callback or
+        // supplicant state machine is entered.
+        node.add(0x26).cast::<u16>().write_unaligned(association_id);
+        interface.add(0x98).cast::<u32>().write(5);
+        true
     }
 }
 
