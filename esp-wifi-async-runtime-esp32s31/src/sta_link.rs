@@ -7,6 +7,199 @@
 
 pub const OPEN_AUTH_DEFAULT_TIMEOUT_US: u32 = 500_000;
 pub const OPEN_AUTH_DEFAULT_ATTEMPTS: u8 = 3;
+pub const STA_ASSOC_DEFAULT_TIMEOUT_US: u32 = 500_000;
+pub const STA_ASSOC_DEFAULT_ATTEMPTS: u8 = 3;
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const SELECTED_RSN_IE_LEN: usize = 22;
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const RSN_OUI: [u8; 3] = [0x00, 0x0f, 0xac];
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const RSN_CIPHER_CCMP: u8 = 4;
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const RSN_AKM_PSK: u8 = 2;
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const RSN_CAPABILITY_MFPR: u16 = 1 << 6;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaAssocSecurityError {
+    MissingRsn,
+    MalformedRsn,
+    UnsupportedVersion,
+    UnsupportedGroupCipher,
+    UnsupportedPairwiseCipher,
+    UnsupportedAkm,
+    ManagementFrameProtectionRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StaAssocError {
+    Busy,
+    InvalidAccessPoint,
+    QueueFull,
+    InterfaceUnavailable,
+    ManagementBufferUnavailable,
+    RequestTooLarge,
+    TxRejected(i32),
+    TimerUnavailable,
+    Timeout,
+    Status(u16),
+    InvalidAssociationId(u16),
+    Security(StaAssocSecurityError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaAssociation {
+    capability_info: u16,
+    association_id: u16,
+    security_ies: Option<crate::wpa2_frames::OwnedAssociationSecurityIes>,
+}
+
+impl StaAssociation {
+    pub const fn capability_info(&self) -> u16 {
+        self.capability_info
+    }
+
+    pub const fn association_id(&self) -> u16 {
+        self.association_id
+    }
+
+    pub fn security_ies(&self) -> Option<&crate::wpa2_frames::OwnedAssociationSecurityIes> {
+        self.security_ies.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StaAssocSnapshot {
+    pub attempts: u32,
+    pub submitted: u32,
+    pub tx_done: u32,
+    pub responses: u32,
+    pub timeouts: u32,
+    pub last_frame_control: u16,
+    pub last_hardware_status: u8,
+    pub last_descriptor_status: u32,
+    pub last_status: u16,
+    pub last_association_id: u16,
+    pub last_request_body_len: u16,
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+#[derive(Clone, Copy, Debug)]
+struct SelectedRsn {
+    len: u8,
+    bytes: [u8; crate::scan::STRICT_SCAN_RSN_IE_CAPACITY],
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+impl SelectedRsn {
+    const EMPTY: Self = Self {
+        len: 0,
+        bytes: [0; crate::scan::STRICT_SCAN_RSN_IE_CAPACITY],
+    };
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn read_rsn_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, StaAssocSecurityError> {
+    let value = bytes
+        .get(*offset..*offset + 2)
+        .ok_or(StaAssocSecurityError::MalformedRsn)?;
+    *offset += 2;
+    Ok(u16::from_le_bytes([value[0], value[1]]))
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn read_rsn_suite(bytes: &[u8], offset: &mut usize) -> Result<[u8; 4], StaAssocSecurityError> {
+    let value = bytes
+        .get(*offset..*offset + 4)
+        .ok_or(StaAssocSecurityError::MalformedRsn)?;
+    *offset += 4;
+    Ok([value[0], value[1], value[2], value[3]])
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn is_rsn_suite(suite: [u8; 4], selector: u8) -> bool {
+    suite[..3] == RSN_OUI && suite[3] == selector
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn select_wpa2_psk_rsn(
+    access_point: &crate::scan::StrictScanRecord,
+) -> Result<SelectedRsn, StaAssocSecurityError> {
+    if !access_point.privacy && access_point.rsn_ie_len == 0 {
+        return Ok(SelectedRsn::EMPTY);
+    }
+    let rsn = access_point.rsn_ie_bytes();
+    if rsn.len() < 2 || rsn[0] != 48 || usize::from(rsn[1]) + 2 != rsn.len() {
+        return Err(if rsn.is_empty() {
+            StaAssocSecurityError::MissingRsn
+        } else {
+            StaAssocSecurityError::MalformedRsn
+        });
+    }
+    let body = &rsn[2..];
+    let mut offset = 0;
+    if read_rsn_u16(body, &mut offset)? != 1 {
+        return Err(StaAssocSecurityError::UnsupportedVersion);
+    }
+    if !is_rsn_suite(read_rsn_suite(body, &mut offset)?, RSN_CIPHER_CCMP) {
+        return Err(StaAssocSecurityError::UnsupportedGroupCipher);
+    }
+    let pairwise_count = usize::from(read_rsn_u16(body, &mut offset)?);
+    let mut has_ccmp = false;
+    for _ in 0..pairwise_count {
+        has_ccmp |= is_rsn_suite(read_rsn_suite(body, &mut offset)?, RSN_CIPHER_CCMP);
+    }
+    if !has_ccmp {
+        return Err(StaAssocSecurityError::UnsupportedPairwiseCipher);
+    }
+    let akm_count = usize::from(read_rsn_u16(body, &mut offset)?);
+    let mut has_psk = false;
+    for _ in 0..akm_count {
+        has_psk |= is_rsn_suite(read_rsn_suite(body, &mut offset)?, RSN_AKM_PSK);
+    }
+    if !has_psk {
+        return Err(StaAssocSecurityError::UnsupportedAkm);
+    }
+    if offset < body.len() {
+        let capabilities = read_rsn_u16(body, &mut offset)?;
+        if capabilities & RSN_CAPABILITY_MFPR != 0 {
+            return Err(StaAssocSecurityError::ManagementFrameProtectionRequired);
+        }
+    }
+
+    let mut selected = SelectedRsn::EMPTY;
+    selected.len = SELECTED_RSN_IE_LEN as u8;
+    selected.bytes[..SELECTED_RSN_IE_LEN].copy_from_slice(&[
+        48,
+        20,
+        1,
+        0,
+        0x00,
+        0x0f,
+        0xac,
+        RSN_CIPHER_CCMP,
+        1,
+        0,
+        0x00,
+        0x0f,
+        0xac,
+        RSN_CIPHER_CCMP,
+        1,
+        0,
+        0x00,
+        0x0f,
+        0xac,
+        RSN_AKM_PSK,
+        0,
+        0,
+    ]);
+    Ok(selected)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaAuthError {
@@ -48,6 +241,7 @@ mod target {
     use crate::{interrupt::InterruptSignal, scan::StrictScanRecord, timer::RawOsiTimer};
 
     pub(crate) const STA_AUTH_EVENT: u32 = u32::MAX - 12;
+    pub(crate) const STA_ASSOC_EVENT: u32 = u32::MAX - 13;
 
     const PHASE_IDLE: u8 = 0;
     const PHASE_ARMING: u8 = 1;
@@ -69,6 +263,12 @@ mod target {
     const AUTH_SUBTYPE: u8 = 0xb0;
     const AUTH_PTI: u32 = 6;
     const MANAGEMENT_RATE_POLICY: u32 = 7;
+    const ASSOC_SUBTYPE: u8 = 0x00;
+    const ASSOC_PTI: u32 = 6;
+    const ASSOC_BODY_CAPACITY: usize = 160;
+    const ASSOC_FIXED_BODY_LEN: usize = 4;
+    const ASSOC_CAPABILITY_MASK: u16 = 0x0431;
+    const ASSOC_LISTEN_INTERVAL: u16 = 1;
 
     #[derive(Clone, Copy)]
     struct AuthConfig {
@@ -95,8 +295,28 @@ mod target {
         };
     }
 
+    #[derive(Clone, Copy)]
+    struct AssocConfig {
+        local: [u8; 6],
+        access_point: StrictScanRecord,
+        selected_rsn: SelectedRsn,
+        timeout_us: u32,
+    }
+
+    impl AssocConfig {
+        const EMPTY: Self = Self {
+            local: [0; 6],
+            access_point: StrictScanRecord::EMPTY,
+            selected_rsn: SelectedRsn::EMPTY,
+            timeout_us: 0,
+        };
+    }
+
     struct ConfigCell(UnsafeCell<AuthConfig>);
     unsafe impl Sync for ConfigCell {}
+
+    struct AssocConfigCell(UnsafeCell<AssocConfig>);
+    unsafe impl Sync for AssocConfigCell {}
 
     #[repr(C, align(4))]
     struct NodeCell(UnsafeCell<[u8; VENDOR_NODE_LEN]>);
@@ -106,6 +326,7 @@ mod target {
     unsafe impl Sync for TimerCell {}
 
     static CONFIG: ConfigCell = ConfigCell(UnsafeCell::new(AuthConfig::EMPTY));
+    static ASSOC_CONFIG: AssocConfigCell = AssocConfigCell(UnsafeCell::new(AssocConfig::EMPTY));
     static NODE: NodeCell = NodeCell(UnsafeCell::new([0; VENDOR_NODE_LEN]));
     static TIMER: TimerCell = TimerCell(UnsafeCell::new(RawOsiTimer {
         next: ptr::null_mut(),
@@ -127,6 +348,29 @@ mod target {
     static LAST_DESCRIPTOR_STATUS: AtomicU32 = AtomicU32::new(0);
     static LAST_NODE_RATE_COUNT: AtomicU32 = AtomicU32::new(0);
     static LAST_NODE_FIRST_RATE: AtomicU32 = AtomicU32::new(0);
+
+    static ASSOC_TIMER: TimerCell = TimerCell(UnsafeCell::new(RawOsiTimer {
+        next: ptr::null_mut(),
+        expire: 0,
+        period: 0,
+        callback: None,
+        argument: ptr::null_mut(),
+    }));
+    static ASSOC_PHASE: AtomicU8 = AtomicU8::new(PHASE_IDLE);
+    static ASSOC_RESULT: AtomicU32 = AtomicU32::new(RESULT_PENDING);
+    static ASSOC_SIGNAL: InterruptSignal = InterruptSignal::new();
+    static ASSOC_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_TX_DONE: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_RESPONSES: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_HARDWARE_STATUS: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_DESCRIPTOR_STATUS: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_CAPABILITY: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_ID: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_LAST_BODY_LEN: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -193,11 +437,154 @@ mod target {
         }
     }
 
+    fn complete_assoc(result: u32) {
+        if ASSOC_PHASE
+            .compare_exchange(
+                PHASE_WAITING,
+                PHASE_COMPLETE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            ASSOC_RESULT.store(result, Ordering::Release);
+            ASSOC_SIGNAL.notify_from_isr();
+        }
+    }
+
+    pub fn sta_assoc_snapshot() -> StaAssocSnapshot {
+        StaAssocSnapshot {
+            attempts: ASSOC_ATTEMPTS.load(Ordering::Acquire),
+            submitted: ASSOC_SUBMITTED.load(Ordering::Acquire),
+            tx_done: ASSOC_TX_DONE.load(Ordering::Acquire),
+            responses: ASSOC_RESPONSES.load(Ordering::Acquire),
+            timeouts: ASSOC_TIMEOUTS.load(Ordering::Acquire),
+            last_frame_control: ASSOC_LAST_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+            last_hardware_status: ASSOC_LAST_HARDWARE_STATUS.load(Ordering::Acquire) as u8,
+            last_descriptor_status: ASSOC_LAST_DESCRIPTOR_STATUS.load(Ordering::Acquire),
+            last_status: ASSOC_LAST_STATUS.load(Ordering::Acquire) as u16,
+            last_association_id: ASSOC_LAST_ID.load(Ordering::Acquire) as u16,
+            last_request_body_len: ASSOC_LAST_BODY_LEN.load(Ordering::Acquire) as u16,
+        }
+    }
+
+    fn decode_assoc_result(
+        result: u32,
+        selected_rsn: SelectedRsn,
+    ) -> Result<StaAssociation, StaAssocError> {
+        match result {
+            RESULT_OK => {
+                let association_id = ASSOC_LAST_ID.load(Ordering::Acquire) as u16;
+                if association_id == 0 || association_id > 0x3fff {
+                    return Err(StaAssocError::InvalidAssociationId(association_id));
+                }
+                let security_ies = if selected_rsn.len == 0 {
+                    None
+                } else {
+                    let rsn: crate::wpa2_frames::OwnedRsnIe =
+                        crate::wpa2_frames::OwnedRsnIe::try_copy(selected_rsn.as_bytes()).map_err(
+                            |_| StaAssocError::Security(StaAssocSecurityError::MalformedRsn),
+                        )?;
+                    Some(
+                        crate::wpa2_frames::OwnedAssociationSecurityIes::try_copy(&rsn, &[])
+                            .map_err(|_| {
+                                StaAssocError::Security(StaAssocSecurityError::MalformedRsn)
+                            })?,
+                    )
+                };
+                Ok(StaAssociation {
+                    capability_info: ASSOC_LAST_CAPABILITY.load(Ordering::Acquire) as u16,
+                    association_id,
+                    security_ies,
+                })
+            }
+            RESULT_TIMEOUT => Err(StaAssocError::Timeout),
+            RESULT_INTERFACE_UNAVAILABLE => Err(StaAssocError::InterfaceUnavailable),
+            RESULT_BUFFER_UNAVAILABLE => Err(StaAssocError::ManagementBufferUnavailable),
+            RESULT_TIMER_UNAVAILABLE => Err(StaAssocError::TimerUnavailable),
+            value if value & RESULT_STATUS != 0 => Err(StaAssocError::Status(value as u16)),
+            value if value & RESULT_TX_REJECTED != 0 => Err(StaAssocError::TxRejected(i32::from(
+                (value & 0xffff) as u16 as i16,
+            ))),
+            value => Err(StaAssocError::TxRejected(value as i32)),
+        }
+    }
+
+    async fn associate_attempt(
+        access_point: &StrictScanRecord,
+        local: [u8; 6],
+        selected_rsn: SelectedRsn,
+        timeout_us: u32,
+    ) -> Result<StaAssociation, StaAssocError> {
+        if PHASE.load(Ordering::Acquire) != PHASE_IDLE {
+            return Err(StaAssocError::Busy);
+        }
+        ASSOC_PHASE
+            .compare_exchange(
+                PHASE_IDLE,
+                PHASE_ARMING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| StaAssocError::Busy)?;
+        unsafe {
+            ASSOC_CONFIG.0.get().write(AssocConfig {
+                local,
+                access_point: *access_point,
+                selected_rsn,
+                timeout_us,
+            });
+        }
+        ASSOC_RESULT.store(RESULT_PENDING, Ordering::Relaxed);
+        let observed = ASSOC_SIGNAL.generation();
+        ASSOC_PHASE.store(PHASE_WAITING, Ordering::Release);
+        if !crate::adapter::enqueue_internal_event(crate::event::PpEvent {
+            kind: STA_ASSOC_EVENT,
+            argument: ptr::null_mut(),
+        }) {
+            ASSOC_PHASE.store(PHASE_IDLE, Ordering::Release);
+            return Err(StaAssocError::QueueFull);
+        }
+        ASSOC_SIGNAL.wait_after(observed).await;
+        let result = ASSOC_RESULT.load(Ordering::Acquire);
+        ASSOC_PHASE.store(PHASE_IDLE, Ordering::Release);
+        decode_assoc_result(result, selected_rsn)
+    }
+
+    /// Associate with an already authenticated AP using bounded async retries.
+    pub async fn associate_sta(
+        access_point: &StrictScanRecord,
+        local: [u8; 6],
+        timeout_us: u32,
+        attempts: u8,
+    ) -> Result<StaAssociation, StaAssocError> {
+        if !(1..=13).contains(&access_point.channel)
+            || access_point.ssid_len == 0
+            || access_point.bssid == [0; 6]
+            || local == [0; 6]
+            || timeout_us == 0
+            || attempts == 0
+        {
+            return Err(StaAssocError::InvalidAccessPoint);
+        }
+        let selected_rsn = select_wpa2_psk_rsn(access_point).map_err(StaAssocError::Security)?;
+        let mut remaining = attempts;
+        loop {
+            match associate_attempt(access_point, local, selected_rsn, timeout_us).await {
+                Err(StaAssocError::Timeout) if remaining > 1 => remaining -= 1,
+                result => return result,
+            }
+        }
+    }
+
     async fn authenticate_attempt(
         access_point: &StrictScanRecord,
         local: [u8; 6],
         timeout_us: u32,
     ) -> Result<(), StaAuthError> {
+        if ASSOC_PHASE.load(Ordering::Acquire) != PHASE_IDLE {
+            return Err(StaAuthError::Busy);
+        }
         PHASE
             .compare_exchange(
                 PHASE_IDLE,
@@ -337,6 +724,140 @@ mod target {
         }
     }
 
+    fn association_body_len(
+        access_point: &StrictScanRecord,
+        node_rate_count: usize,
+        selected_rsn: SelectedRsn,
+    ) -> Option<usize> {
+        let supported = node_rate_count.min(8);
+        let extended = node_rate_count.saturating_sub(supported);
+        ASSOC_FIXED_BODY_LEN
+            .checked_add(2 + usize::from(access_point.ssid_len))?
+            .checked_add(2 + supported)?
+            .checked_add(if extended == 0 { 0 } else { 2 + extended })?
+            .checked_add(usize::from(selected_rsn.len))
+            .filter(|length| *length <= ASSOC_BODY_CAPACITY)
+    }
+
+    unsafe fn write_association_body(
+        body: *mut u8,
+        body_len: usize,
+        node: *const u8,
+        config: AssocConfig,
+    ) -> Result<(), StaAssocError> {
+        let mut offset = 0_usize;
+        let capability = (config.access_point.capability_info & ASSOC_CAPABILITY_MASK) | 1;
+        body.add(offset)
+            .cast::<u16>()
+            .write_unaligned(capability.to_le());
+        offset += 2;
+        body.add(offset)
+            .cast::<u16>()
+            .write_unaligned(ASSOC_LISTEN_INTERVAL.to_le());
+        offset += 2;
+
+        let ssid_len = usize::from(config.access_point.ssid_len);
+        body.add(offset).write(0);
+        body.add(offset + 1).write(ssid_len as u8);
+        ptr::copy_nonoverlapping(
+            config.access_point.ssid.as_ptr(),
+            body.add(offset + 2),
+            ssid_len,
+        );
+        offset += 2 + ssid_len;
+
+        let rate_count = usize::from(node.add(0x73).read()).min(16);
+        let supported = rate_count.min(8);
+        body.add(offset).write(1);
+        body.add(offset + 1).write(supported as u8);
+        ptr::copy_nonoverlapping(node.add(0x74), body.add(offset + 2), supported);
+        offset += 2 + supported;
+        if rate_count > supported {
+            let extended = rate_count - supported;
+            body.add(offset).write(50);
+            body.add(offset + 1).write(extended as u8);
+            ptr::copy_nonoverlapping(node.add(0x74 + supported), body.add(offset + 2), extended);
+            offset += 2 + extended;
+        }
+        let selected_rsn = config.selected_rsn.as_bytes();
+        ptr::copy_nonoverlapping(selected_rsn.as_ptr(), body.add(offset), selected_rsn.len());
+        offset += selected_rsn.len();
+        if offset != body_len {
+            return Err(StaAssocError::RequestTooLarge);
+        }
+        Ok(())
+    }
+
+    pub(crate) unsafe fn dispatch_assoc_tx() {
+        ASSOC_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        if ASSOC_PHASE.load(Ordering::Acquire) != PHASE_WAITING
+            || !crate::critical::on_strict_wifi_hart()
+            || !crate::context::in_radio_context()
+        {
+            complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
+            return;
+        }
+        let config = ASSOC_CONFIG.0.get().read();
+        let node_config = AuthConfig {
+            local: config.local,
+            bssid: config.access_point.bssid,
+            channel: config.access_point.channel,
+            timeout_us: config.timeout_us,
+            supported_rates: config.access_point.supported_rates,
+            supported_rates_len: config.access_point.supported_rates_len,
+            extended_rates: config.access_point.extended_supported_rates,
+            extended_rates_len: config.access_point.extended_supported_rates_len,
+        };
+        let Some(node) = initialize_static_node(node_config) else {
+            complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
+            return;
+        };
+        let node_rate_count = usize::from(node.add(0x73).read()).min(16);
+        let Some(body_len) =
+            association_body_len(&config.access_point, node_rate_count, config.selected_rsn)
+        else {
+            complete_assoc(RESULT_BUFFER_UNAVAILABLE);
+            return;
+        };
+        let mut body = ptr::null_mut();
+        let buffer = ieee80211_getmgtframe(&mut body, MANAGEMENT_HEADER_LEN, body_len as u32);
+        if buffer.is_null() || body.is_null() {
+            complete_assoc(RESULT_BUFFER_UNAVAILABLE);
+            return;
+        }
+        if write_association_body(body, body_len, node, config).is_err() {
+            complete_assoc(RESULT_BUFFER_UNAVAILABLE);
+            return;
+        }
+        buffer
+            .add(0x14)
+            .cast::<u16>()
+            .write_unaligned(MANAGEMENT_HEADER_LEN as u16);
+        ASSOC_LAST_BODY_LEN.store(body_len as u32, Ordering::Relaxed);
+        ieee80211_set_tx_desc(node, buffer, MANAGEMENT_RATE_POLICY, 0, 0);
+        linked_ieee80211_set_tx_pti(buffer, ASSOC_PTI);
+        let tx = linked_ieee80211_mgmt_output(node, buffer, ASSOC_SUBTYPE);
+        if tx != 0 {
+            complete_assoc(RESULT_TX_REJECTED | u32::from(tx as u16));
+            return;
+        }
+        ASSOC_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        if !crate::adapter::schedule_internal_timer(
+            ASSOC_TIMER.0.get().cast(),
+            assoc_timeout,
+            ptr::null_mut(),
+            config.timeout_us,
+        ) {
+            complete_assoc(RESULT_TIMER_UNAVAILABLE);
+        }
+    }
+
+    unsafe extern "C" fn assoc_timeout(_argument: *mut c_void) {
+        let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
+        ASSOC_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+        complete_assoc(RESULT_TIMEOUT);
+    }
+
     pub(crate) unsafe fn dispatch_auth_tx() {
         ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         if PHASE.load(Ordering::Acquire) != PHASE_WAITING
@@ -397,20 +918,40 @@ mod target {
         hardware_status: u8,
         descriptor_status: u32,
     ) {
-        LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Relaxed);
-        LAST_HARDWARE_STATUS.store(u32::from(hardware_status), Ordering::Relaxed);
-        LAST_DESCRIPTOR_STATUS.store(descriptor_status, Ordering::Relaxed);
-        TX_DONE.fetch_add(1, Ordering::Release);
+        match frame_control & 0x00fc {
+            0x00b0 => {
+                LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Relaxed);
+                LAST_HARDWARE_STATUS.store(u32::from(hardware_status), Ordering::Relaxed);
+                LAST_DESCRIPTOR_STATUS.store(descriptor_status, Ordering::Relaxed);
+                TX_DONE.fetch_add(1, Ordering::Release);
+            }
+            0x0000 => {
+                ASSOC_LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Relaxed);
+                ASSOC_LAST_HARDWARE_STATUS.store(u32::from(hardware_status), Ordering::Relaxed);
+                ASSOC_LAST_DESCRIPTOR_STATUS.store(descriptor_status, Ordering::Relaxed);
+                ASSOC_TX_DONE.fetch_add(1, Ordering::Release);
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn observe_management(frame: &[u8]) {
-        if PHASE.load(Ordering::Acquire) != PHASE_WAITING || frame.len() < 30 {
+        if frame.len() < 30 {
             return;
         }
         let frame_control = u16::from_le_bytes([frame[0], frame[1]]);
-        if frame_control & 0x00fc != 0x00b0 {
-            return;
+        match frame_control & 0x00fc {
+            0x00b0 if PHASE.load(Ordering::Acquire) == PHASE_WAITING => {
+                observe_auth_response(frame)
+            }
+            0x0010 if ASSOC_PHASE.load(Ordering::Acquire) == PHASE_WAITING => {
+                observe_assoc_response(frame)
+            }
+            _ => {}
         }
+    }
+
+    fn observe_auth_response(frame: &[u8]) {
         let config = unsafe { CONFIG.0.get().read() };
         if frame[4..10] != config.local
             || frame[10..16] != config.bssid
@@ -431,17 +972,52 @@ mod target {
             complete(RESULT_STATUS | u32::from(status));
         }
     }
+
+    fn observe_assoc_response(frame: &[u8]) {
+        let config = unsafe { ASSOC_CONFIG.0.get().read() };
+        if frame[4..10] != config.local
+            || frame[10..16] != config.access_point.bssid
+            || frame[16..22] != config.access_point.bssid
+        {
+            return;
+        }
+        let capability = u16::from_le_bytes([frame[24], frame[25]]);
+        let status = u16::from_le_bytes([frame[26], frame[27]]);
+        let association_id = u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff;
+        ASSOC_LAST_CAPABILITY.store(u32::from(capability), Ordering::Relaxed);
+        ASSOC_LAST_STATUS.store(u32::from(status), Ordering::Relaxed);
+        ASSOC_LAST_ID.store(u32::from(association_id), Ordering::Relaxed);
+        ASSOC_RESPONSES.fetch_add(1, Ordering::Relaxed);
+        unsafe {
+            let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
+        }
+        if status == 0 {
+            complete_assoc(RESULT_OK);
+        } else {
+            complete_assoc(RESULT_STATUS | u32::from(status));
+        }
+    }
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use target::associate_sta;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::authenticate_open;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use target::sta_assoc_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::sta_auth_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub(crate) use target::{dispatch_auth_tx, management_tx_done, observe_management, STA_AUTH_EVENT};
+pub(crate) use target::{
+    dispatch_assoc_tx, dispatch_auth_tx, management_tx_done, observe_management, STA_ASSOC_EVENT,
+    STA_AUTH_EVENT,
+};
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::scan::StrictScanRecord;
+
     #[test]
     fn open_auth_response_layout_is_unambiguous() {
         let mut frame = [0_u8; 30];
@@ -453,5 +1029,75 @@ mod tests {
         assert_eq!(u16::from_le_bytes([frame[24], frame[25]]), 0);
         assert_eq!(u16::from_le_bytes([frame[26], frame[27]]), 2);
         assert_eq!(u16::from_le_bytes([frame[28], frame[29]]), 17);
+    }
+
+    fn access_point_with_rsn(akms: &[[u8; 4]], capabilities: u16) -> StrictScanRecord {
+        let mut record = StrictScanRecord::EMPTY;
+        record.ssid[..4].copy_from_slice(b"test");
+        record.ssid_len = 4;
+        record.bssid = [1, 2, 3, 4, 5, 6];
+        record.channel = 6;
+        record.privacy = true;
+        let mut offset = 2;
+        record.rsn_ie[offset..offset + 2].copy_from_slice(&1_u16.to_le_bytes());
+        offset += 2;
+        record.rsn_ie[offset..offset + 4].copy_from_slice(&[0, 0x0f, 0xac, 4]);
+        offset += 4;
+        record.rsn_ie[offset..offset + 2].copy_from_slice(&1_u16.to_le_bytes());
+        offset += 2;
+        record.rsn_ie[offset..offset + 4].copy_from_slice(&[0, 0x0f, 0xac, 4]);
+        offset += 4;
+        record.rsn_ie[offset..offset + 2].copy_from_slice(&(akms.len() as u16).to_le_bytes());
+        offset += 2;
+        for akm in akms {
+            record.rsn_ie[offset..offset + 4].copy_from_slice(akm);
+            offset += 4;
+        }
+        record.rsn_ie[offset..offset + 2].copy_from_slice(&capabilities.to_le_bytes());
+        offset += 2;
+        record.rsn_ie[0] = 48;
+        record.rsn_ie[1] = (offset - 2) as u8;
+        record.rsn_ie_len = offset as u8;
+        record
+    }
+
+    #[test]
+    fn mixed_wpa2_wpa3_ap_is_narrowed_to_wpa2_psk_ccmp() {
+        let record = access_point_with_rsn(&[[0, 0x0f, 0xac, 8], [0, 0x0f, 0xac, 2]], 0x80);
+        let selected = select_wpa2_psk_rsn(&record).unwrap();
+        assert_eq!(selected.as_bytes().len(), SELECTED_RSN_IE_LEN);
+        assert_eq!(&selected.as_bytes()[8..14], &[1, 0, 0, 0x0f, 0xac, 4]);
+        assert_eq!(&selected.as_bytes()[14..20], &[1, 0, 0, 0x0f, 0xac, 2]);
+        assert_eq!(&selected.as_bytes()[20..22], &[0, 0]);
+    }
+
+    #[test]
+    fn required_management_frame_protection_is_rejected() {
+        let record = access_point_with_rsn(&[[0, 0x0f, 0xac, 2]], RSN_CAPABILITY_MFPR);
+        assert_eq!(
+            select_wpa2_psk_rsn(&record).unwrap_err(),
+            StaAssocSecurityError::ManagementFrameProtectionRequired
+        );
+    }
+
+    #[test]
+    fn open_ap_needs_no_security_ie() {
+        let record = StrictScanRecord {
+            privacy: false,
+            ..StrictScanRecord::EMPTY
+        };
+        assert!(select_wpa2_psk_rsn(&record).unwrap().as_bytes().is_empty());
+    }
+
+    #[test]
+    fn association_response_fixed_fields_are_unambiguous() {
+        let mut frame = [0_u8; 30];
+        frame[0] = 0x10;
+        frame[24..26].copy_from_slice(&0x0431_u16.to_le_bytes());
+        frame[26..28].copy_from_slice(&0_u16.to_le_bytes());
+        frame[28..30].copy_from_slice(&0xc02a_u16.to_le_bytes());
+        assert_eq!(frame[0] & 0xfc, 0x10);
+        assert_eq!(u16::from_le_bytes([frame[26], frame[27]]), 0);
+        assert_eq!(u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff, 42);
     }
 }

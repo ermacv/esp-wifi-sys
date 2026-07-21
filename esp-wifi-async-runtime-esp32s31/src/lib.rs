@@ -157,11 +157,13 @@ pub use scan::{
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use scan::{passive_scan_2_4ghz, tune_home_channel};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use sta_link::authenticate_open;
+pub use sta_link::{associate_sta, authenticate_open};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use sta_link::sta_auth_snapshot;
+pub use sta_link::{sta_assoc_snapshot, sta_auth_snapshot};
 pub use sta_link::{
-    StaAuthError, StaAuthSnapshot, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US,
+    StaAssocError, StaAssocSecurityError, StaAssocSnapshot, StaAssociation, StaAuthError,
+    StaAuthSnapshot, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US,
+    STA_ASSOC_DEFAULT_ATTEMPTS, STA_ASSOC_DEFAULT_TIMEOUT_US,
 };
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;

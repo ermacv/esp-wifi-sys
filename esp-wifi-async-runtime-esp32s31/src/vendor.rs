@@ -273,6 +273,12 @@ impl PpDispatcher for VendorPpDispatcher {
             }
 
             #[cfg(feature = "strict-no-wait")]
+            if event.kind == crate::sta_link::STA_ASSOC_EVENT {
+                crate::sta_link::dispatch_assoc_tx();
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
             if event.kind == crate::net80211_timer::NET80211_TIMER_EVENT {
                 crate::net80211_timer::dispatch(event.argument)
                     .map_err(VendorDispatchError::Net80211Timer)?;
