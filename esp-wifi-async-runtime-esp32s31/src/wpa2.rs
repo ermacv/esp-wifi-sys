@@ -223,6 +223,12 @@ impl<'a> EapolKeyFrame<'a> {
             .expect("validated EAPOL-Key MIC range")
     }
 
+    pub fn key_receive_sequence(self) -> &'a [u8; 8] {
+        self.bytes[65..73]
+            .try_into()
+            .expect("validated EAPOL-Key RSC range")
+    }
+
     pub const fn key_data(self) -> &'a [u8] {
         self.key_data
     }

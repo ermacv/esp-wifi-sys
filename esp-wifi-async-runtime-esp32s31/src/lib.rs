@@ -61,6 +61,7 @@ pub mod vendor;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod wdev;
 pub mod wpa2;
+pub mod wpa2_aes;
 pub mod wpa2_ap;
 pub mod wpa2_crypto;
 pub mod wpa2_frames;
@@ -179,6 +180,9 @@ pub use wpa2::{
     Wpa2Ingress, Wpa2IngressError, Wpa2Interface, DEFAULT_EAPOL_FRAME_CAPACITY, EAPOL_HEADER_LEN,
     EAPOL_KEY_FIXED_LEN, EAPOL_KEY_PACKET_LEN,
 };
+pub use wpa2_aes::{
+    AsyncWpa2KeyUnwrap, SoftwareAesKeyUnwrapError, Wpa2SoftwareAes, Wpa2UnwrappedKeyData,
+};
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_ap::{
     async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks, Wpa2ApInstallError,
@@ -229,7 +233,8 @@ pub use wpa2_sta::{
     try_receive_wpa2_sta_link_event, Wpa2StaLinkEvent, WPA2_STA_LINK_CAPACITY,
 };
 pub use wpa2_sta_async::{
-    derive_wpa2_sta_message2, AsyncWpa2StaCrypto, Wpa2StaMessage2, Wpa2StaMessage2Error,
+    complete_wpa2_sta_message3, derive_wpa2_sta_message2, AsyncWpa2StaCrypto, Wpa2StaMessage2,
+    Wpa2StaMessage2Error, Wpa2StaMessage4, Wpa2StaMessage4Error,
 };
 pub use wpa2_state::{
     PtkContext, Wpa2ApAction, Wpa2ApPeerError, Wpa2ApPeers, Wpa2ApPhase, Wpa2ApState,

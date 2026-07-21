@@ -116,6 +116,11 @@ impl<const N: usize> OwnedAssociationSecurityIes<N> {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
+
+    pub fn rsn_ie(&self) -> &[u8] {
+        let length = self.bytes[1] as usize + 2;
+        &self.bytes[..length]
+    }
 }
 
 pub struct Wpa2Gtk {
