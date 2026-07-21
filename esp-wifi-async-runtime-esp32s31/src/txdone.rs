@@ -8,12 +8,6 @@ use core::{
 #[cfg(feature = "hil-vendor-tx")]
 use core::sync::atomic::{AtomicU8, AtomicUsize};
 
-#[cfg(feature = "hil-vendor-tx")]
-use aes::{
-    cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
-    Aes128,
-};
-
 use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
 use crate::event::PpEvent;
@@ -72,7 +66,7 @@ static HIL_DATA_TRANSMITTER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
 #[cfg(feature = "hil-vendor-tx")]
 static HIL_DATA_CCMP_HEADER: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
 #[cfg(feature = "hil-vendor-tx")]
-static HIL_DATA_CIPHERTEXT_PREFIX: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
+static HIL_DATA_PAYLOAD_PREFIX: [AtomicU8; 8] = [const { AtomicU8::new(0) }; 8];
 
 #[cfg(feature = "hil-vendor-tx")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,7 +98,7 @@ pub struct HilDataTxDoneSnapshot {
     pub descriptor_status: u32,
     pub transmitter: [u8; 6],
     pub ccmp_header: [u8; 8],
-    pub ciphertext_prefix: [u8; 8],
+    pub payload_prefix: [u8; 8],
 }
 
 #[cfg(feature = "hil-vendor-tx")]
@@ -117,7 +111,7 @@ pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
         descriptor_status: HIL_DATA_DESCRIPTOR_STATUS.load(Ordering::Acquire) as u32,
         transmitter: load_hil_bytes(&HIL_DATA_TRANSMITTER),
         ccmp_header: load_hil_bytes(&HIL_DATA_CCMP_HEADER),
-        ciphertext_prefix: load_hil_bytes(&HIL_DATA_CIPHERTEXT_PREFIX),
+        payload_prefix: load_hil_bytes(&HIL_DATA_PAYLOAD_PREFIX),
     }
 }
 
@@ -130,39 +124,6 @@ fn load_hil_bytes<const N: usize>(source: &[AtomicU8; N]) -> [u8; N] {
         index += 1;
     }
     bytes
-}
-
-/// Decrypts the first eight captured CCMP payload octets for HIL diagnostics.
-///
-/// A valid protected Ethernet data frame starts with an LLC/SNAP header
-/// (`aa aa 03 00 00 00`) followed by its EtherType. This helper performs one
-/// bounded AES block operation and never waits or allocates.
-#[cfg(feature = "hil-vendor-tx")]
-pub fn hil_decrypt_data_ccmp_prefix(
-    temporal_key: &[u8; 16],
-    snapshot: &HilDataTxDoneSnapshot,
-) -> Option<[u8; 8]> {
-    if snapshot.frame_control & 0x4000 == 0 || snapshot.ccmp_header[3] & 0x20 == 0 {
-        return None;
-    }
-
-    let ccmp = &snapshot.ccmp_header;
-    let mut counter = [0; 16];
-    counter[0] = 0x01;
-    counter[1] = 0;
-    counter[2..8].copy_from_slice(&snapshot.transmitter);
-    counter[8..14].copy_from_slice(&[ccmp[7], ccmp[6], ccmp[5], ccmp[4], ccmp[1], ccmp[0]]);
-    counter[14..16].copy_from_slice(&1_u16.to_be_bytes());
-
-    let cipher = Aes128::new(GenericArray::from_slice(temporal_key));
-    cipher.encrypt_block(GenericArray::from_mut_slice(&mut counter));
-    let mut plaintext = snapshot.ciphertext_prefix;
-    let mut index = 0;
-    while index < plaintext.len() {
-        plaintext[index] ^= counter[index];
-        index += 1;
-    }
-    Some(plaintext)
 }
 
 type TxCallback = unsafe extern "C" fn(*mut c_void);
@@ -762,7 +723,9 @@ unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Resul
     if frame_control & 0x4000 != 0 {
         store_hil_bytes(&HIL_DATA_TRANSMITTER, payload.add(10));
         store_hil_bytes(&HIL_DATA_CCMP_HEADER, payload.add(24));
-        store_hil_bytes(&HIL_DATA_CIPHERTEXT_PREFIX, payload.add(32));
+        // CCMP is applied while hardware consumes the DMA buffer. RAM keeps
+        // the plaintext LLC/SNAP prefix after the inserted CCMP header.
+        store_hil_bytes(&HIL_DATA_PAYLOAD_PREFIX, payload.add(32));
     }
     HIL_DATA_FRAME_CONTROL.store(usize::from(frame_control), Ordering::Release);
     HIL_DATA_HW_STATUS.store(usize::from(descriptor.add(19).read()), Ordering::Release);

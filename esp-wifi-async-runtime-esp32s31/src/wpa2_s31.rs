@@ -210,6 +210,23 @@ pub enum S31Wpa2IoError {
     InternalOwnershipMismatch,
 }
 
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilStaPairwiseKeySnapshot {
+    pub valid: bool,
+    pub peer: [u8; 6],
+    pub control: u16,
+    pub key_matches: bool,
+    pub crypto_gate: u16,
+    pub node_hardware_index: u8,
+    pub node_flags: u32,
+    pub node_key_state: u8,
+    pub station_privacy: u32,
+    pub station_state: u8,
+    pub global_connected: u8,
+    pub global_auth_state: u8,
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{ffi::c_void, ptr};
@@ -290,6 +307,70 @@ mod target {
             linked_hal_crypto_set_key_entry as *const (),
             __wrap_hal_crypto_set_key_entry as *const (),
         )
+    }
+
+    #[cfg(feature = "hil-vendor-tx")]
+    pub fn hil_sta_pairwise_key_snapshot(
+        expected_tk: &[u8; WPA2_TK_LEN],
+    ) -> HilStaPairwiseKeySnapshot {
+        unsafe {
+            let entry = (CRYPTO_KEY_TABLE_BASE
+                + usize::from(STA_PAIRWISE_HARDWARE_INDEX) * CRYPTO_KEY_ENTRY_STRIDE)
+                as *const u8;
+            let peer_low = entry.cast::<u32>().read_volatile().to_le_bytes();
+            let peer_control = entry.add(4).cast::<u32>().read_volatile();
+            let peer_high = peer_control.to_le_bytes();
+            let mut peer = [0; 6];
+            peer[..4].copy_from_slice(&peer_low);
+            peer[4..].copy_from_slice(&peer_high[..2]);
+            let mut key_matches = true;
+            let mut index = 0;
+            while index < expected_tk.len() {
+                key_matches &= entry.add(8 + index).read_volatile() == expected_tk[index];
+                index += 1;
+            }
+            let station = sta_interface_state();
+            let node = sta_interface_node();
+            HilStaPairwiseKeySnapshot {
+                valid: CRYPTO_KEY_VALID_BITMAP.read_volatile()
+                    & (1_u32 << STA_PAIRWISE_HARDWARE_INDEX)
+                    != 0,
+                peer,
+                control: (peer_control >> 16) as u16,
+                key_matches,
+                crypto_gate: ptr::addr_of_mut!(g_ic)
+                    .add(0x210)
+                    .cast::<u16>()
+                    .read_volatile(),
+                node_hardware_index: if node.is_null() {
+                    u8::MAX
+                } else {
+                    node.add(0x134).read_volatile()
+                },
+                node_flags: if node.is_null() {
+                    0
+                } else {
+                    node.add(0x0c).cast::<u32>().read_volatile()
+                },
+                node_key_state: if node.is_null() {
+                    u8::MAX
+                } else {
+                    node.add(0x24).read_volatile()
+                },
+                station_privacy: if station.is_null() {
+                    0
+                } else {
+                    station.add(0xa4).cast::<u32>().read_volatile()
+                },
+                station_state: if station.is_null() {
+                    u8::MAX
+                } else {
+                    station.add(0x140).read_volatile()
+                },
+                global_connected: ptr::addr_of_mut!(g_sta_connected_flag).read_volatile(),
+                global_auth_state: ptr::addr_of_mut!(g_ic).add(0x274).read_volatile(),
+            }
+        }
     }
 
     unsafe fn software_key_slot(hardware_index: u8) -> Option<*mut *mut c_void> {
@@ -958,6 +1039,8 @@ mod target {
     }
 }
 
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+pub use target::hil_sta_pairwise_key_snapshot;
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::runtime_key_link_wrapper_active;
 #[cfg(target_arch = "riscv32")]

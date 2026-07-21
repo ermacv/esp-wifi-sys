@@ -173,8 +173,8 @@ pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use txdone::{
-    hil_data_tx_done_snapshot, hil_decrypt_data_ccmp_prefix, hil_eapol_tx_done_snapshot,
-    HilDataTxDoneSnapshot, HilEapolTxDoneSnapshot,
+    hil_data_tx_done_snapshot, hil_eapol_tx_done_snapshot, HilDataTxDoneSnapshot,
+    HilEapolTxDoneSnapshot,
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use vendor::{vendor_rx_diagnostic_snapshot, VendorRxDiagnosticSnapshot};
@@ -220,6 +220,8 @@ pub use wpa2_rx::{
 pub use wpa2_rx::{wpa2_rx_diagnostic_snapshot, Wpa2RxDiagnosticSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_s31::S31StaticWpa2Io;
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+pub use wpa2_s31::{hil_sta_pairwise_key_snapshot, HilStaPairwiseKeySnapshot};
 pub use wpa2_s31::{S31StaticKeyStorage, S31Wpa2IoError};
 pub use wpa2_sha1::{
     AsyncSha1, SoftwareSha1Error, Wpa2Sha1Crypto, Wpa2SoftwareSha1,
