@@ -78,6 +78,15 @@ impl OwnedWifiDataFrame {
         let data = unsafe { &*RX_SLOTS[self.token.index].data.get() };
         &data.bytes[..data.length]
     }
+
+    /// Mutable packet view for a network-stack receive token.
+    ///
+    /// Ownership of the slot token guarantees exclusive access until this
+    /// frame is dropped and returns the slot to the interrupt producer.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        let data = unsafe { &mut *RX_SLOTS[self.token.index].data.get() };
+        &mut data.bytes[..data.length]
+    }
 }
 
 pub fn try_receive_wifi_data() -> Option<OwnedWifiDataFrame> {
