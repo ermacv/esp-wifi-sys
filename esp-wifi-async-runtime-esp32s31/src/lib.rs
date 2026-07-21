@@ -171,7 +171,11 @@ pub use sta_link::{
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
-#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-vendor-tx"
+))]
 pub use txdone::{
     hil_data_tx_done_snapshot, hil_eapol_tx_done_snapshot, HilDataTxDoneSnapshot,
     HilEapolTxDoneSnapshot,
