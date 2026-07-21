@@ -2,7 +2,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
@@ -45,6 +45,7 @@ unsafe extern "C" {
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
     fn chm_end_op_timeout_process(which: u32);
+    fn scan_op_end(context: *mut c_void, result: u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +58,7 @@ pub enum ChannelSwitchError {
     InvalidChannel = 4,
     TimerUnavailable = 5,
     MacDidNotBecomeIdle = 6,
+    LegacyDwellRejected = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +124,7 @@ static FIRST_DWELL_TIMER: TimerCell = TimerCell::new();
 static FINAL_DWELL_TIMER: TimerCell = TimerCell::new();
 static FAILURE: AtomicU32 = AtomicU32::new(ChannelSwitchError::None as u32);
 static MAC_FAILURE_STATUS: AtomicU32 = AtomicU32::new(0);
+static LEGACY_DWELL_ACCEPTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn link_wrappers_active() -> bool {
     core::ptr::eq(chm_start_op as *const (), __wrap_chm_start_op as *const ())
@@ -154,8 +157,36 @@ const fn decode_error(raw: u32) -> ChannelSwitchError {
         4 => ChannelSwitchError::InvalidChannel,
         5 => ChannelSwitchError::TimerUnavailable,
         6 => ChannelSwitchError::MacDidNotBecomeIdle,
+        7 => ChannelSwitchError::LegacyDwellRejected,
         _ => ChannelSwitchError::None,
     }
+}
+
+/// Complete the single scan dwell that may already be armed when the cold
+/// handoff enters strict mode. Its callback identity and `g_chm` state are
+/// checked before entering the recovered finite completion leaf. Every later
+/// scan operation is created through `__wrap_chm_start_op` instead.
+pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), ChannelSwitchError> {
+    if which > 1 || !crate::critical::on_strict_wifi_hart() {
+        return Err(ChannelSwitchError::LegacyDwellRejected);
+    }
+    let chm = g_chm;
+    if chm.is_null()
+        || chm.add(4).read() == u8::MAX
+        || (*STATE.0.get()).active
+        || chm
+            .add(24)
+            .cast::<Option<ChannelCallback>>()
+            .read_unaligned()
+            .is_none_or(|callback| callback as *const () != scan_op_end as *const ())
+        || LEGACY_DWELL_ACCEPTED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return Err(ChannelSwitchError::LegacyDwellRejected);
+    }
+    chm_end_op_timeout_process(which as u32);
+    Ok(())
 }
 
 unsafe fn fail(error: ChannelSwitchError, detail: u32) {

@@ -57,7 +57,7 @@ pub(crate) fn timer_process_link_wrapper_active() -> bool {
 }
 
 const fn supported_strict_timer(id: u8) -> bool {
-    id == 0
+    id == 0 || id == 8
 }
 
 fn claim_slot() -> Option<usize> {
@@ -163,12 +163,18 @@ pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211Timer
         return Err(Net80211TimerError::UnsupportedId(id));
     }
 
-    // Timer ID 0 maps to `ieee80211_timer_connect`, whose recovered body only
-    // returns success. Completing it locally avoids both the vendor timer
-    // table's indirect callback and its heap-owned envelope. Other IDs are
-    // rejected by the producer before a slot is claimed.
+    let original_argument = (*envelope).argument;
     release_slot(index);
-    Ok(())
+    match id {
+        // `ieee80211_timer_connect` only returns success.
+        0 => Ok(()),
+        // One dwell may have been armed by the connect request immediately
+        // before cold handoff. The channel module validates the pinned scan
+        // callback and accepts this bridge exactly once.
+        8 => crate::channel_switch::complete_legacy_scan_dwell(original_argument as usize)
+            .map_err(Net80211TimerError::ChannelSwitch),
+        _ => Err(Net80211TimerError::UnsupportedId(id)),
+    }
 }
 
 pub fn rejected_net80211_timer_events() -> usize {
@@ -179,6 +185,7 @@ pub fn rejected_net80211_timer_events() -> usize {
 pub enum Net80211TimerError {
     InvalidSlot,
     UnsupportedId(u8),
+    ChannelSwitch(crate::channel_switch::ChannelSwitchError),
 }
 
 const _: () = assert!(mem::size_of::<TimerEnvelope>() == 8);
