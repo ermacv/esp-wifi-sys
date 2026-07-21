@@ -202,7 +202,7 @@ pub enum S31Wpa2IoError {
     InvalidHardwareIndex(u8),
     ForeignSoftwareKeyPresent,
     MissingStaInterfaceState,
-    UnexpectedStaPairwiseHardwareIndex(u8),
+    UnexpectedStaPairwiseHardwareIndex,
     AuthorizationWithoutPairwiseKey,
     StaPeerUnauthorized,
     ApPeerUnauthorized,
@@ -579,7 +579,7 @@ mod target {
             match interface {
                 Wpa2Interface::Station => {
                     if authorized {
-                        self.activate_sta_ptk(&peer)?;
+                        self.activate_sta_ptk()?;
                         self.sta_authorized_peer = Some(peer);
                     } else if self.sta_authorized_peer == Some(peer) {
                         self.sta_authorized_peer = None;
@@ -593,17 +593,16 @@ mod target {
             }
         }
 
-        fn activate_sta_ptk(&self, peer: &[u8; 6]) -> Result<(), S31Wpa2IoError> {
+        #[inline(never)]
+        fn activate_sta_ptk(&self) -> Result<(), S31Wpa2IoError> {
             let station = unsafe { sta_interface_state() };
-            let node = unsafe { cnx_node_search(peer.as_ptr()) };
-            if station.is_null() || node.is_null() || unsafe { sta_interface_node() } != node {
+            let node = unsafe { sta_interface_node() };
+            if station.is_null() || node.is_null() {
                 return Err(S31Wpa2IoError::MissingStaInterfaceState);
             }
             let hardware_index = unsafe { node.add(0x134).read() };
             if hardware_index != STA_PAIRWISE_HARDWARE_INDEX {
-                return Err(S31Wpa2IoError::UnexpectedStaPairwiseHardwareIndex(
-                    hardware_index,
-                ));
+                return Err(S31Wpa2IoError::UnexpectedStaPairwiseHardwareIndex);
             }
             unsafe {
                 // Finite state tail of the pinned PTK-ready and STA privacy
