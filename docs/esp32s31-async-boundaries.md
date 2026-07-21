@@ -433,6 +433,37 @@ The strict gate still intentionally fails. Confirmed remaining paths include:
 - remaining callback chains and TX/RX queue drains with unproven backward
   branches.
 
+### TX A-MPDU boundary
+
+The successful Rust-owned ADDBA exchange is only protocol negotiation; it does
+not make the vendor aggregation scheduler safe to enable. The pinned S31
+`ieee80211_ampdu_request` allocates a `0x78`-byte per-TID object and owns an OS
+timer. Those two responsibilities are now replaced by `TxBlockAckSession` and
+the executor timer pool, but the stock data path would still enter a separate
+stateful subsystem:
+
+- `ppCalTxAMPDULength` moves frames between linked lists in `pTxRx`, pauses the
+  hardware TXQ, and can call `ppAssembleAMPDU` repeatedly;
+- `ppAssembleAMPDU` mutates every descriptor and contains a fatal logging path
+  followed by a non-returning loop;
+- `lmacEndFrameExchangeSequence` reads the 64-bit hardware BlockAck, updates a
+  vendor bitmap, and selects recycle, BAR resend, regression, or resort paths;
+- `ppRecycleAmpdu`, `ppRegressAmpdu`, and `ppResortTxAMPDU` walk and relink the
+  aggregate chain, and can post more PP work.
+
+Consequently `ic_ampdu_op` is not a sufficient stateless enable switch. The
+strict runtime keeps the vendor operational bit clear until all aggregate
+descriptor completion and timeout ownership has moved to Rust.
+
+`TxAmpduBatch` is the first half of that replacement. It owns up to 32 fixed TX
+slot indices, assigns consecutive 12-bit sequence numbers, consumes a 64-bit
+BlockAck including sequence wrap, and returns exactly one acknowledged/retry
+result per executor step. It owns no raw frame pointer and has no allocator,
+timer, lock, polling operation, or variable-length drain. The remaining work is
+to construct the hardware descriptor chain from those slots and replace the
+aggregate branches of TX completion/timeout before enabling the negotiated
+agreement.
+
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys
 up to 32 bytes and performs no temporary allocation irrespective of pointer

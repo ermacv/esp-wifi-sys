@@ -11,6 +11,7 @@ pub const ADDBA_REQUEST_ACTION: u8 = 0;
 pub const ADDBA_RESPONSE_ACTION: u8 = 1;
 pub const ADDBA_ACTION_BODY_LEN: usize = 9;
 pub const TX_BLOCK_ACK_MAX_WINDOW: u16 = 32;
+pub const TX_AMPDU_SLOT_CAPACITY: usize = TX_BLOCK_ACK_MAX_WINDOW as usize;
 
 const BA_PARAMETER_AMSDU: u16 = 1;
 const BA_PARAMETER_IMMEDIATE: u16 = 1 << 1;
@@ -105,6 +106,235 @@ pub struct TxBlockAckSession {
     generation: u32,
     next_dialog_token: u8,
     phase: TxBlockAckPhase,
+}
+
+/// Opaque index of one statically owned TX frame.
+///
+/// The strict S31 data path has exactly 32 fixed TX slots. Keeping only their
+/// indices here prevents the BlockAck state machine from owning raw pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxAmpduSlot(u8);
+
+impl TxAmpduSlot {
+    pub const fn new(index: u8) -> Option<Self> {
+        if (index as usize) < TX_AMPDU_SLOT_CAPACITY {
+            Some(Self(index))
+        } else {
+            None
+        }
+    }
+
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxAmpduMpdu {
+    pub slot: TxAmpduSlot,
+    pub sequence: u16,
+}
+
+/// BlockAck information read from the MAC completion registers.
+///
+/// Bit zero acknowledges `starting_sequence`, bit one the following sequence,
+/// and so on. The S31 completion block exposes 64 bits even though strict mode
+/// deliberately negotiates a window of at most 32 frames.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxBlockAckBitmap {
+    pub starting_sequence: u16,
+    pub bitmap: u64,
+}
+
+impl TxBlockAckBitmap {
+    pub const fn new(starting_sequence: u16, bitmap: u64) -> Self {
+        Self {
+            starting_sequence: starting_sequence & SEQUENCE_NUMBER_MASK,
+            bitmap,
+        }
+    }
+
+    pub const fn acknowledges(self, sequence: u16) -> bool {
+        let distance = sequence.wrapping_sub(self.starting_sequence) & SEQUENCE_NUMBER_MASK;
+        distance < 64 && self.bitmap & (1_u64 << distance) != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxAmpduDisposition {
+    Acknowledged,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TxAmpduCompletion {
+    pub mpdu: TxAmpduMpdu,
+    pub disposition: TxAmpduDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxAmpduBatchError {
+    Busy,
+    NotBuilding,
+    Empty,
+    InvalidWindow(u8),
+    InvalidSlot(u8),
+    DuplicateSlot(u8),
+    Full,
+}
+
+#[derive(Clone, Copy)]
+enum TxAmpduBatchPhase {
+    Idle,
+    Building,
+    Completing(Option<TxBlockAckBitmap>),
+}
+
+/// One fixed TX A-MPDU batch owned by the Rust radio task.
+///
+/// `next_completion` returns at most one frame on every call. The executor can
+/// therefore recycle or retry one MPDU and yield, instead of running the
+/// vendor linked-list drains inside one PP event. There is no allocation,
+/// clock read, retry loop, lock, or raw-pointer ownership in this type.
+pub struct TxAmpduBatch {
+    entries: [Option<TxAmpduMpdu>; TX_AMPDU_SLOT_CAPACITY],
+    phase: TxAmpduBatchPhase,
+    starting_sequence: u16,
+    window: u8,
+    count: u8,
+    completion_index: u8,
+    slot_mask: u32,
+}
+
+impl TxAmpduBatch {
+    pub const fn new() -> Self {
+        Self {
+            entries: [None; TX_AMPDU_SLOT_CAPACITY],
+            phase: TxAmpduBatchPhase::Idle,
+            starting_sequence: 0,
+            window: 0,
+            count: 0,
+            completion_index: 0,
+            slot_mask: 0,
+        }
+    }
+
+    pub fn begin(&mut self, starting_sequence: u16, window: u8) -> Result<(), TxAmpduBatchError> {
+        if !matches!(self.phase, TxAmpduBatchPhase::Idle) {
+            return Err(TxAmpduBatchError::Busy);
+        }
+        if window == 0 || usize::from(window) > TX_AMPDU_SLOT_CAPACITY {
+            return Err(TxAmpduBatchError::InvalidWindow(window));
+        }
+        self.starting_sequence = starting_sequence & SEQUENCE_NUMBER_MASK;
+        self.window = window;
+        self.count = 0;
+        self.completion_index = 0;
+        self.slot_mask = 0;
+        self.phase = TxAmpduBatchPhase::Building;
+        Ok(())
+    }
+
+    /// Append one statically owned frame and assign its consecutive QoS
+    /// sequence number. Duplicate slot ownership is rejected in O(1).
+    pub fn push(&mut self, slot: u8) -> Result<TxAmpduMpdu, TxAmpduBatchError> {
+        if !matches!(self.phase, TxAmpduBatchPhase::Building) {
+            return Err(TxAmpduBatchError::NotBuilding);
+        }
+        let slot = TxAmpduSlot::new(slot).ok_or(TxAmpduBatchError::InvalidSlot(slot))?;
+        let slot_bit = 1_u32 << slot.index();
+        if self.slot_mask & slot_bit != 0 {
+            return Err(TxAmpduBatchError::DuplicateSlot(slot.index()));
+        }
+        if self.count >= self.window {
+            return Err(TxAmpduBatchError::Full);
+        }
+
+        let sequence =
+            self.starting_sequence.wrapping_add(u16::from(self.count)) & SEQUENCE_NUMBER_MASK;
+        let mpdu = TxAmpduMpdu { slot, sequence };
+        self.entries[usize::from(self.count)] = Some(mpdu);
+        self.count += 1;
+        self.slot_mask |= slot_bit;
+        Ok(mpdu)
+    }
+
+    pub fn complete_with_block_ack(
+        &mut self,
+        block_ack: TxBlockAckBitmap,
+    ) -> Result<(), TxAmpduBatchError> {
+        self.begin_completion(Some(block_ack))
+    }
+
+    /// Complete a hardware timeout/error edge. Every submitted MPDU is
+    /// returned as `Retry`, one per `next_completion` call.
+    pub fn complete_without_block_ack(&mut self) -> Result<(), TxAmpduBatchError> {
+        self.begin_completion(None)
+    }
+
+    fn begin_completion(
+        &mut self,
+        block_ack: Option<TxBlockAckBitmap>,
+    ) -> Result<(), TxAmpduBatchError> {
+        if !matches!(self.phase, TxAmpduBatchPhase::Building) {
+            return Err(TxAmpduBatchError::NotBuilding);
+        }
+        if self.count == 0 {
+            return Err(TxAmpduBatchError::Empty);
+        }
+        self.completion_index = 0;
+        self.phase = TxAmpduBatchPhase::Completing(block_ack);
+        Ok(())
+    }
+
+    /// Consume exactly one completion result. Returning the last result also
+    /// returns the batch to idle; no separate drain or cleanup loop exists.
+    pub fn next_completion(&mut self) -> Option<TxAmpduCompletion> {
+        let TxAmpduBatchPhase::Completing(block_ack) = self.phase else {
+            return None;
+        };
+        if self.completion_index >= self.count {
+            self.reset();
+            return None;
+        }
+
+        let index = usize::from(self.completion_index);
+        let mpdu = self.entries[index].take()?;
+        self.completion_index += 1;
+        self.slot_mask &= !(1_u32 << mpdu.slot.index());
+        let disposition = if block_ack.is_some_and(|ack| ack.acknowledges(mpdu.sequence)) {
+            TxAmpduDisposition::Acknowledged
+        } else {
+            TxAmpduDisposition::Retry
+        };
+        let completion = TxAmpduCompletion { mpdu, disposition };
+        if self.completion_index == self.count {
+            self.reset();
+        }
+        Some(completion)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub const fn is_idle(&self) -> bool {
+        matches!(self.phase, TxAmpduBatchPhase::Idle)
+    }
+
+    fn reset(&mut self) {
+        self.phase = TxAmpduBatchPhase::Idle;
+        self.window = 0;
+        self.count = 0;
+        self.completion_index = 0;
+        self.slot_mask = 0;
+    }
+}
+
+impl Default for TxAmpduBatch {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TxBlockAckSession {
@@ -358,5 +588,87 @@ mod tests {
         );
         assert_eq!(session.operational(), None);
         assert!(!session.on_alarm(request.alarm));
+    }
+
+    #[test]
+    fn block_ack_bitmap_handles_sequence_wrap() {
+        let ack = TxBlockAckBitmap::new(0x0ffe, 0b1101);
+        assert!(ack.acknowledges(0x0ffe));
+        assert!(!ack.acknowledges(0x0fff));
+        assert!(ack.acknowledges(0));
+        assert!(ack.acknowledges(1));
+        assert!(!ack.acknowledges(2));
+    }
+
+    #[test]
+    fn batch_returns_one_block_ack_result_per_step() {
+        let mut batch = TxAmpduBatch::new();
+        batch.begin(0x0ffe, 4).unwrap();
+        for slot in 3..7 {
+            batch.push(slot).unwrap();
+        }
+        batch
+            .complete_with_block_ack(TxBlockAckBitmap::new(0x0ffe, 0b1101))
+            .unwrap();
+
+        for (slot, sequence, disposition) in [
+            (3, 0x0ffe, TxAmpduDisposition::Acknowledged),
+            (4, 0x0fff, TxAmpduDisposition::Retry),
+            (5, 0, TxAmpduDisposition::Acknowledged),
+            (6, 1, TxAmpduDisposition::Acknowledged),
+        ] {
+            assert_eq!(
+                batch.next_completion(),
+                Some(TxAmpduCompletion {
+                    mpdu: TxAmpduMpdu {
+                        slot: TxAmpduSlot::new(slot).unwrap(),
+                        sequence,
+                    },
+                    disposition,
+                })
+            );
+        }
+        assert!(batch.is_idle());
+        assert_eq!(batch.next_completion(), None);
+    }
+
+    #[test]
+    fn missing_block_ack_retries_every_mpdu_without_a_drain() {
+        let mut batch = TxAmpduBatch::new();
+        batch.begin(9, 2).unwrap();
+        batch.push(0).unwrap();
+        batch.push(31).unwrap();
+        batch.complete_without_block_ack().unwrap();
+        assert_eq!(
+            batch.next_completion().unwrap().disposition,
+            TxAmpduDisposition::Retry
+        );
+        assert!(!batch.is_idle());
+        assert_eq!(
+            batch.next_completion().unwrap().disposition,
+            TxAmpduDisposition::Retry
+        );
+        assert!(batch.is_idle());
+    }
+
+    #[test]
+    fn batch_rejects_duplicate_static_slot_ownership() {
+        let mut batch = TxAmpduBatch::new();
+        batch.begin(0, 32).unwrap();
+        batch.push(17).unwrap();
+        assert_eq!(batch.push(17), Err(TxAmpduBatchError::DuplicateSlot(17)));
+    }
+
+    #[test]
+    fn batch_never_exceeds_negotiated_or_static_window() {
+        let mut batch = TxAmpduBatch::new();
+        assert_eq!(batch.begin(0, 0), Err(TxAmpduBatchError::InvalidWindow(0)));
+        assert_eq!(
+            batch.begin(0, 33),
+            Err(TxAmpduBatchError::InvalidWindow(33))
+        );
+        batch.begin(0, 1).unwrap();
+        batch.push(0).unwrap();
+        assert_eq!(batch.push(1), Err(TxAmpduBatchError::Full));
     }
 }

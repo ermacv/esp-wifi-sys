@@ -180,8 +180,10 @@ pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
 pub use tx_ampdu::{
-    AddbaRequest, OperationalTxBlockAck, TxBlockAckAlarm, TxBlockAckConfig, TxBlockAckError,
-    TxBlockAckResponse, TxBlockAckSession, ADDBA_ACTION_BODY_LEN, TX_BLOCK_ACK_MAX_WINDOW,
+    AddbaRequest, OperationalTxBlockAck, TxAmpduBatch, TxAmpduBatchError, TxAmpduCompletion,
+    TxAmpduDisposition, TxAmpduMpdu, TxAmpduSlot, TxBlockAckAlarm, TxBlockAckBitmap,
+    TxBlockAckConfig, TxBlockAckError, TxBlockAckResponse, TxBlockAckSession,
+    ADDBA_ACTION_BODY_LEN, TX_AMPDU_SLOT_CAPACITY, TX_BLOCK_ACK_MAX_WINDOW,
 };
 #[cfg(all(
     target_arch = "riscv32",
