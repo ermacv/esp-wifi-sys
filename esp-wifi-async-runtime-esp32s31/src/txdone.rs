@@ -29,7 +29,6 @@ const DESCRIPTOR_DIRECT_RECYCLE_BIT: u32 = 0x0400_0000;
 const DESCRIPTOR_RATE_CONTROL_BIT: u32 = 0x0000_0008;
 const DESCRIPTOR_RATE_CONTROL_SKIP_MASK: u32 = 0x4040_4000;
 const DESCRIPTOR_RATE_CONTROL_SKIP_VALUE: u32 = 0x0040_0000;
-const STATIC_TX_FRAME_TYPE: u8 = 1;
 
 const CALLBACK_MGMT: u8 = 2;
 const CALLBACK_STA_EAPOL: u8 = 3;
@@ -624,13 +623,14 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
         return Err(TxDoneError::UserCallbackInstalled);
     }
     let frame_type = frame.add(FRAME_TYPE_OFFSET).read();
-    if frame_type != STATIC_TX_FRAME_TYPE {
+    if !crate::esf::is_strict_recyclable_frame(frame) {
         return Err(TxDoneError::NonStaticFrameType(frame_type));
     }
 
     pp_coex_tx_release(frame.cast());
-    // With `validate_strict_basic_config`, type 1 selects the fixed free-list
-    // branch of `esf_buf_recycle`; dynamic/cache branches are unreachable.
+    // The strict ESF wrapper accepts only its fixed Rust management pool or
+    // initialized vendor static free lists; dynamic/cache branches remain
+    // unreachable.
     esf_buf_recycle(frame.cast());
 
     state.frame = ptr::null_mut();

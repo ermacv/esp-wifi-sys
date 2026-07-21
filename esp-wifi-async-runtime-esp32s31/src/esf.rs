@@ -168,6 +168,13 @@ fn management_slot_index(frame: *mut u8) -> Option<usize> {
     (index < MANAGEMENT_SLOT_CAPACITY).then_some(index)
 }
 
+/// Return whether `frame` belongs to one of the fixed pools handled by the
+/// strict recycler. The caller must hold a live ESF object.
+pub(crate) unsafe fn is_strict_recyclable_frame(frame: *mut u8) -> bool {
+    management_slot_index(frame).is_some()
+        || is_vendor_static_kind(frame.add(ESF_TYPE_OFFSET).read() as u32)
+}
+
 unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     let index = claim_management_slot()?;
     let frame = MANAGEMENT_SLOTS[index].0.get().cast::<u8>();

@@ -389,9 +389,9 @@ path no longer calls `lmacTxDone`: its mode-1 bitmap is advanced one known bit
 per executor event, the frame is appended to the TX-done list without the
 vendor callback loop, and event 16 is posted normally. Strict event 16 no
 longer calls `ppProcTxDone`: its Rust continuation dequeues one frame, invokes at most one
-directly classified mode-0 callback, or recycles one static frame per event.
+directly classified mode-0 callback, or recycles one fixed-pool frame per event.
 It rejects unknown callback bits, a registered user TX callback, fragmented or
-trace descriptors, and non-static frame types. The original unbounded queue
+trace descriptors, and frame types outside the strict fixed pools. The original unbounded queue
 drain and its power-management tail are therefore absent from this path.
 
 The mode-1 replacement accepts only the STA EAPOL bit and checks that its

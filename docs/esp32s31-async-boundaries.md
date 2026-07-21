@@ -379,9 +379,9 @@ unexpected aggregation, PM, BSS-color, modem-beacon, and coexistence events.
 PP event 16 is also replaced. The original `ppProcTxDone` drains the complete
 linked list, iterates callback bitmaps, and ends in power management. The Rust
 state machine performs one dequeue, one classified mode-0 callback, or one
-static recycle per continuation. It verifies the callback-table pointer before
+fixed-pool recycle per continuation. It verifies the callback-table pointer before
 the direct call and fails closed on unknown bits, user TX callbacks,
-fragment/trace descriptors, and non-static frame types. The pinned leaves are
+fragment/trace descriptors, and frame types outside the strict fixed pools. The pinned leaves are
 `pp_coex_tx_release` (`0x74`), `esf_buf_recycle` (`0x156`), and the four basic
 STA/AP mode-0 callback sizes.
 
