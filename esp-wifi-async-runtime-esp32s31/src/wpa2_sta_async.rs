@@ -156,6 +156,7 @@ pub async fn complete_wpa2_sta_message3<S, A, const N: usize, const R: usize>(
     message3: OwnedEapolFrame<N>,
     ptk: &Wpa2Ptk,
     security_ies: &OwnedAssociationSecurityIes<R>,
+    authenticator_rsn_ie: &[u8],
     sha1: &mut S,
     aes: &mut A,
 ) -> Result<Wpa2StaMessage4, Wpa2StaMessage4Error<S::Error, A::Error>>
@@ -196,7 +197,7 @@ where
                     return Err(Wpa2StaMessage4Error::KeyUnwrap(error));
                 }
             };
-            let gtk = match parse_gtk_key_data(plain.as_bytes(), security_ies.rsn_ie()) {
+            let gtk = match parse_gtk_key_data(plain.as_bytes(), authenticator_rsn_ie) {
                 Ok(gtk) => gtk,
                 Err(error) => {
                     let _ = state.complete_key_data(ticket, frame, false);
@@ -212,8 +213,7 @@ where
             }
         }
         Wpa2StaAction::InstallKeys { ticket, frame } => {
-            let gtk = match parse_gtk_key_data(frame.key_frame().key_data(), security_ies.rsn_ie())
-            {
+            let gtk = match parse_gtk_key_data(frame.key_frame().key_data(), authenticator_rsn_ie) {
                 Ok(gtk) => gtk,
                 Err(error) => {
                     let _ = state.complete_key_install::<N>(ticket, false);
@@ -387,6 +387,7 @@ mod tests {
             message3,
             &ptk,
             &security_ies,
+            rsn.as_bytes(),
             &mut sha1,
             &mut aes,
         ))
