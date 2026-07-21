@@ -37,6 +37,7 @@ pub struct StrictScanRecord {
     pub privacy: bool,
     pub rsn: bool,
     pub legacy_wpa: bool,
+    pub information_elements_truncated: bool,
 }
 
 impl StrictScanRecord {
@@ -49,6 +50,7 @@ impl StrictScanRecord {
         privacy: false,
         rsn: false,
         legacy_wpa: false,
+        information_elements_truncated: false,
     };
 
     pub fn ssid_bytes(&self) -> &[u8] {
@@ -315,9 +317,16 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
         let id = frame[offset];
         let length = usize::from(frame[offset + 1]);
         offset += 2;
-        let end = offset.checked_add(length)?;
+        let Some(end) = offset.checked_add(length) else {
+            record.information_elements_truncated = true;
+            break;
+        };
         if end > frame.len() {
-            return None;
+            // S31's RX metadata exposes a bounded management-frame prefix.
+            // BSSID, capabilities, and all preceding complete IEs remain
+            // trustworthy even when a long vendor/HE tail is truncated.
+            record.information_elements_truncated = true;
+            break;
         }
         let value = &frame[offset..end];
         match id {
@@ -360,13 +369,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_data_and_truncated_information_elements() {
+    fn rejects_data_and_keeps_bounded_prefix_of_truncated_information_elements() {
         let mut frame = [0_u8; 40];
         frame[0] = 0x08;
         assert!(parse_management(&frame, 1, -1).is_none());
         frame[0] = 0x50;
         frame[36] = 0;
         frame[37] = 8;
-        assert!(parse_management(&frame, 1, -1).is_none());
+        let record = parse_management(&frame, 1, -1).unwrap();
+        assert!(record.information_elements_truncated);
     }
 }
