@@ -15,9 +15,9 @@ SECTIONS
     __esp_wpa2_set_eap_state = .;
     KEEP(*(.text.wpa2_set_eap_state))
     __esp_wpa2_set_eap_state_end = .;
-  }
+  } > ROTEXT
 }
-INSERT AFTER .text;
+INSERT BEFORE .text;
 
 SECTIONS
 {

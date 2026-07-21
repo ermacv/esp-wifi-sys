@@ -14,6 +14,6 @@ SECTIONS
     __esp_wpa_sm_key_request = .;
     KEEP(*(.text.wpa_sm_key_request))
     __esp_wpa_sm_key_request_end = .;
-  }
+  } > ROTEXT
 }
-INSERT AFTER .text;
+INSERT BEFORE .text;

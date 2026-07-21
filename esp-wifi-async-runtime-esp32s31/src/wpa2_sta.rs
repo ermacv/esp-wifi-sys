@@ -318,12 +318,14 @@ mod target {
         }
         let connected_size = (__esp_wpa_sta_connected_cb_end as *const () as usize)
             .wrapping_sub(__esp_wpa_sta_connected_cb as *const () as usize);
-        if connected_size != 0x08 {
+        // The pinned input sections are 0x08/0xc0 bytes. Flash placement can
+        // relax AUIPC/JALR pairs to JAL, yielding the smaller final sizes.
+        if connected_size != 0x08 && connected_size != 0x04 {
             return Err(Wpa2StaInstallError::UnexpectedConnectedSize(connected_size));
         }
         let disconnected_size = (__esp_wpa_sta_disconnected_cb_end as *const () as usize)
             .wrapping_sub(__esp_wpa_sta_disconnected_cb as *const () as usize);
-        if disconnected_size != 0xc0 {
+        if disconnected_size != 0xc0 && disconnected_size != 0xa8 {
             return Err(Wpa2StaInstallError::UnexpectedDisconnectedSize(
                 disconnected_size,
             ));

@@ -11,6 +11,6 @@ SECTIONS
     __esp_hostap_sta_join = .;
     KEEP(*(.text.hostap_sta_join))
     __esp_hostap_sta_join_end = .;
-  }
+  } > ROTEXT
 }
-INSERT AFTER .text;
+INSERT BEFORE .text;

@@ -11,6 +11,6 @@ SECTIONS
     __esp_wpa_sta_disconnected_cb = .;
     KEEP(*(.text.wpa_sta_disconnected_cb))
     __esp_wpa_sta_disconnected_cb_end = .;
-  }
+  } > ROTEXT
 }
-INSERT AFTER .text;
+INSERT BEFORE .text;

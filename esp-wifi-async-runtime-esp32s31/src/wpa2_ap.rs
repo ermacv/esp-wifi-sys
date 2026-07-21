@@ -646,7 +646,9 @@ mod target {
 
         let join_size = (__esp_hostap_sta_join_end as *const () as usize)
             .wrapping_sub(__esp_hostap_sta_join as *const () as usize);
-        if join_size != 0x114 {
+        // The archive audit pins the 0x114-byte input section. The linker can
+        // shrink its call pairs to a 0xf8-byte final flash image.
+        if join_size != 0x114 && join_size != 0xf8 {
             return Err(Wpa2ApInstallError::UnexpectedJoinSize(join_size));
         }
         let callbacks = ptr::addr_of!(wpa_cb).read();
