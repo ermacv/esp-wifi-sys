@@ -406,6 +406,7 @@ mod target {
 
     unsafe extern "C" {
         static mut g_ic: u8;
+        static mut g_per_conn_trc: u8;
         fn ieee80211_getmgtframe(
             body: *mut *mut u8,
             header_length: u32,
@@ -419,25 +420,31 @@ mod target {
             tid: u32,
             flags: u32,
         );
-        fn trc_set_80211_tx_rate_config(interface: u32, config: *const TxRateConfig);
         #[link_name = "ieee80211_set_tx_pti"]
         fn linked_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
         #[link_name = "ieee80211_mgmt_output"]
         fn linked_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
     }
-
-    #[repr(C)]
-    struct TxRateConfig {
-        phy_mode: u32,
-        rate: u32,
-        ersu: bool,
-        dcm: bool,
-    }
-
-    const _: () = assert!(core::mem::size_of::<TxRateConfig>() == 12);
-
-    const PHY_MODE_HT20: u32 = 4;
     const PHY_RATE_MCS7_SGI: u32 = 0x21;
+
+    unsafe fn set_default_sta_fixed_rate(rate: u8) -> bool {
+        // `trc_init` installs the three allocation-backed default contexts at
+        // g_per_conn_trc + 0x4c/0x50/0x54. Strict takeover happens only after
+        // that initialization. Interface 0 uses the first pointer. `rcGetSched`
+        // consumes flag bit 0 and byte +8 as its fixed-rate fast path.
+        let trc = ptr::addr_of_mut!(g_per_conn_trc)
+            .add(0x4c)
+            .cast::<*mut u8>()
+            .read();
+        if trc.is_null() {
+            return false;
+        }
+        trc.add(8).write(rate);
+        trc.add(9).write(rate);
+        let flags = trc.add(0x0c).cast::<u16>();
+        flags.write_unaligned((flags.read_unaligned() & !0x03) | 0x01);
+        true
+    }
 
     fn decode_result(result: u32) -> Result<(), StaAuthError> {
         match result {
@@ -1301,16 +1308,13 @@ mod target {
         if mcs_count >= 8 {
             // Diagnostic first policy: prove the lower PP/LMAC path can use
             // negotiated HT independently of the vendor connection/runtime
-            // state machine. This leaf is exactly one bounded 12-byte copy
-            // into the per-interface TRC configuration table.
-            let config = TxRateConfig {
-                phy_mode: PHY_MODE_HT20,
-                rate: PHY_RATE_MCS7_SGI,
-                ersu: false,
-                dcm: false,
-            };
-            trc_set_80211_tx_rate_config(0, &config);
-            ASSOC_FIXED_HT20_RATE.store(PHY_RATE_MCS7_SGI, Ordering::Release);
+            // state machine. Rust mutates only the already initialized
+            // interface-0 default TRC context before the first data frame.
+            let applied = set_default_sta_fixed_rate(PHY_RATE_MCS7_SGI as u8);
+            ASSOC_FIXED_HT20_RATE.store(
+                if applied { PHY_RATE_MCS7_SGI } else { u32::MAX },
+                Ordering::Release,
+            );
         } else {
             ASSOC_FIXED_HT20_RATE.store(u32::MAX, Ordering::Release);
         }

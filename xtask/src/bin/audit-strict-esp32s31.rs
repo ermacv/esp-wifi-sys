@@ -53,9 +53,6 @@ const ROOTS: &[&str] = &[
     // heap-backed WPA station callbacks have been patched.
     "ieee80211_assoc_resp_construct",
     "ieee80211_set_tx_desc",
-    // Rust-owned HT rate policy calls this bounded 12-byte table-copy leaf
-    // directly, bypassing `esp_wifi_config_80211_tx` and its control graph.
-    "trc_set_80211_tx_rate_config",
     // Timer ID 0 is completed entirely by Rust; no vendor timer callback is a
     // strict root. All other stock net80211 timers fail closed.
 ];
