@@ -8,6 +8,7 @@ use core::{
 use crate::{
     channel::{BoundedChannel, Receive, TrySendError},
     context::RadioContextGuard,
+    queue::WakerCell,
 };
 
 /// Synthetic event identity used while the single radio owner handles an
@@ -21,6 +22,7 @@ pub const RADIO_COMMAND_CONTEXT_EVENT: u32 = u32::MAX - 32;
 pub struct RadioCommandQueue<C, const N: usize> {
     channel: BoundedChannel<C, N>,
     rejected: AtomicUsize,
+    capacity_waker: WakerCell,
 }
 
 impl<C, const N: usize> RadioCommandQueue<C, N> {
@@ -28,6 +30,7 @@ impl<C, const N: usize> RadioCommandQueue<C, N> {
         Self {
             channel: BoundedChannel::new(),
             rejected: AtomicUsize::new(0),
+            capacity_waker: WakerCell::new(),
         }
     }
 
@@ -38,7 +41,9 @@ impl<C, const N: usize> RadioCommandQueue<C, N> {
     }
 
     pub fn try_receive(&self) -> Option<C> {
-        self.channel.try_receive()
+        self.channel
+            .try_receive()
+            .inspect(|_| self.capacity_waker.wake())
     }
 
     pub fn receive(&self) -> Receive<'_, C, N> {
@@ -56,11 +61,48 @@ impl<C, const N: usize> RadioCommandQueue<C, N> {
     pub fn is_empty(&self) -> bool {
         self.channel.is_empty()
     }
+
+    /// Wait asynchronously until a bounded command slot may be available.
+    ///
+    /// A producer still has to use [`try_submit`](Self::try_submit) after this
+    /// returns because another producer can win the slot. The future never
+    /// spins or sleeps; command consumption wakes it.
+    pub fn ready(&self) -> RadioCommandReady<'_, C, N> {
+        RadioCommandReady { queue: self }
+    }
+
+    /// Submit with Rust-async backpressure while retaining command ownership.
+    pub async fn submit(&self, mut command: C) {
+        loop {
+            match self.try_submit(command) {
+                Ok(()) => return,
+                Err(error) => command = error.0,
+            }
+            self.ready().await;
+        }
+    }
 }
 
 impl<C, const N: usize> Default for RadioCommandQueue<C, N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct RadioCommandReady<'a, C, const N: usize> {
+    queue: &'a RadioCommandQueue<C, N>,
+}
+
+impl<C, const N: usize> Future for RadioCommandReady<'_, C, N> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.queue.capacity_waker.register(cx.waker());
+        if self.queue.len() < N {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 }
 
@@ -124,7 +166,10 @@ where
         while received < self.command_budget {
             let command = if received == 0 {
                 match Pin::new(&mut receive).poll(cx) {
-                    Poll::Ready(command) => command,
+                    Poll::Ready(command) => {
+                        self.commands.capacity_waker.wake();
+                        command
+                    }
                     Poll::Pending => break,
                 }
             } else {
@@ -195,5 +240,19 @@ mod tests {
         assert_eq!(owner.handler().sum, 5);
         assert!(owner.handler().all_in_radio_context);
         assert!(!in_radio_context());
+    }
+
+    #[test]
+    fn async_submit_retains_command_until_capacity_is_woken() {
+        let commands = RadioCommandQueue::<u32, 1>::new();
+        commands.try_submit(7).unwrap();
+        let mut submit = core::pin::pin!(commands.submit(9));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        assert_eq!(submit.as_mut().poll(&mut context), Poll::Pending);
+        assert_eq!(commands.try_receive(), Some(7));
+        assert_eq!(submit.as_mut().poll(&mut context), Poll::Ready(()));
+        assert_eq!(commands.try_receive(), Some(9));
     }
 }

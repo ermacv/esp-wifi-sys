@@ -10,6 +10,7 @@ use core::sync::atomic::{compiler_fence, Ordering};
 
 use crate::{
     command::{RadioCommandHandler, RadioCommandQueue},
+    data_tx::OwnedWifiDataTxFrame,
     wpa2::Wpa2Interface,
     wpa2_crypto::{Wpa2Ptk, WPA2_TK_LEN},
     wpa2_frames::{Wpa2EthernetFrame, Wpa2Gtk, WPA2_TX_ETHERNET_CAPACITY},
@@ -192,6 +193,7 @@ impl<const N: usize> Default for StaticWpa2Keys<N> {
 
 pub enum Wpa2IoCommand<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
     Transmit(Wpa2EthernetFrame<N>),
+    TransmitData(OwnedWifiDataTxFrame),
     InstallKey(Wpa2KeyInstall),
     SetPeerAuthorized {
         interface: Wpa2Interface,

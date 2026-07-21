@@ -2,7 +2,10 @@
 
 use core::{
     cell::UnsafeCell,
+    future::Future,
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    task::{Context, Poll},
 };
 
 use crate::channel::BoundedChannel;
@@ -87,6 +90,18 @@ pub async fn receive_wifi_data() -> OwnedWifiDataFrame {
     OwnedWifiDataFrame {
         token: RX_CHANNEL.receive().await,
     }
+}
+
+/// Register an executor waker and receive one owned Ethernet frame if ready.
+///
+/// This is the synchronous poll boundary required by `embassy-net-driver`;
+/// the interrupt producer wakes it through the same bounded channel used by
+/// [`receive_wifi_data`].
+pub fn poll_receive_wifi_data(cx: &mut Context<'_>) -> Poll<OwnedWifiDataFrame> {
+    let mut receive = RX_CHANNEL.receive();
+    Pin::new(&mut receive)
+        .poll(cx)
+        .map(|token| OwnedWifiDataFrame { token })
 }
 
 pub fn rejected_wifi_data_frames() -> usize {

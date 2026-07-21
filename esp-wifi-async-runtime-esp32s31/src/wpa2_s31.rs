@@ -873,6 +873,13 @@ mod target {
                     }
                     Ok(())
                 }
+                Wpa2IoCommand::TransmitData(frame) => {
+                    self.try_transmit_wifi_data(&frame)
+                        .map_err(|error| Wpa2IoFailure {
+                            error,
+                            command: Wpa2IoCommand::TransmitData(frame),
+                        })
+                }
                 Wpa2IoCommand::InstallKey(install) => {
                     self.install_ccmp(install)
                         .map_err(|(error, install)| Wpa2IoFailure {

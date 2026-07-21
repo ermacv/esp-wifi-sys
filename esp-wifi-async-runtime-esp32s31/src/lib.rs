@@ -92,7 +92,8 @@ pub use channel::{BoundedChannel, Receive, TrySendError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
 pub use command::{
-    RadioCommandHandler, RadioCommandQueue, RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,
+    RadioCommandHandler, RadioCommandQueue, RadioCommandReady, RadioOwnerFuture,
+    RADIO_COMMAND_CONTEXT_EVENT,
 };
 pub use context::{current_event, in_radio_context, RadioContextGuard};
 #[cfg(target_arch = "riscv32")]
@@ -110,12 +111,13 @@ pub use data_rx::{
     async_wifi_data_rx_installed, install_async_wifi_data_rx, WifiDataRxInstallError,
 };
 pub use data_rx::{
-    receive_wifi_data, rejected_wifi_data_frames, try_receive_wifi_data, OwnedWifiDataFrame,
-    WifiDataInterface, WIFI_DATA_RX_CAPACITY, WIFI_DATA_RX_FRAME_CAPACITY,
+    poll_receive_wifi_data, receive_wifi_data, rejected_wifi_data_frames, try_receive_wifi_data,
+    OwnedWifiDataFrame, WifiDataInterface, WIFI_DATA_RX_CAPACITY, WIFI_DATA_RX_FRAME_CAPACITY,
 };
 pub use data_tx::{
-    receive_wifi_data_tx, try_receive_wifi_data_tx, try_send_wifi_data, OwnedWifiDataTxFrame,
-    WifiDataTxEnqueueError, WIFI_DATA_TX_CAPACITY, WIFI_DATA_TX_FRAME_CAPACITY,
+    poll_wifi_data_tx_ready, receive_wifi_data_tx, try_receive_wifi_data_tx, try_send_wifi_data,
+    OwnedWifiDataTxFrame, WifiDataTxEnqueueError, WIFI_DATA_TX_CAPACITY,
+    WIFI_DATA_TX_FRAME_CAPACITY,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use esf::rejected_esf_operations;

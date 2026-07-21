@@ -3,9 +3,10 @@
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
+    task::Context,
 };
 
-use crate::{channel::BoundedChannel, data_rx::WifiDataInterface};
+use crate::{channel::BoundedChannel, data_rx::WifiDataInterface, queue::WakerCell};
 
 pub const WIFI_DATA_TX_CAPACITY: usize = 8;
 pub const WIFI_DATA_TX_FRAME_CAPACITY: usize = 1600;
@@ -39,6 +40,7 @@ unsafe impl Sync for TxSlot {}
 
 static TX_SLOTS: [TxSlot; WIFI_DATA_TX_CAPACITY] = [const { TxSlot::new() }; WIFI_DATA_TX_CAPACITY];
 static TX_CHANNEL: BoundedChannel<TxSlotToken, WIFI_DATA_TX_CAPACITY> = BoundedChannel::new();
+static TX_CAPACITY_WAKER: WakerCell = WakerCell::new();
 
 struct TxSlotToken {
     index: usize,
@@ -49,6 +51,7 @@ impl Drop for TxSlotToken {
         TX_SLOTS[self.index]
             .occupied
             .store(false, Ordering::Release);
+        TX_CAPACITY_WAKER.wake();
     }
 }
 
@@ -115,6 +118,19 @@ pub async fn receive_wifi_data_tx() -> OwnedWifiDataTxFrame {
     OwnedWifiDataTxFrame {
         token: TX_CHANNEL.receive().await,
     }
+}
+
+/// Register an executor waker and report whether a fixed TX slot is free.
+///
+/// The returned readiness is advisory: the caller must still handle the
+/// bounded `try_send_wifi_data` result. Dropping a radio-owned frame wakes the
+/// registered network driver without a timer or retry loop.
+pub fn poll_wifi_data_tx_ready(cx: &mut Context<'_>) -> bool {
+    TX_CAPACITY_WAKER.register(cx.waker());
+    TX_SLOTS
+        .iter()
+        .any(|slot| !slot.occupied.load(Ordering::Acquire))
+        && TX_CHANNEL.len() < WIFI_DATA_TX_CAPACITY
 }
 
 #[cfg(test)]
