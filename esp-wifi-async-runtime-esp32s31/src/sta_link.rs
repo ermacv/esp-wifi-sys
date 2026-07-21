@@ -31,6 +31,8 @@ pub struct StaAuthSnapshot {
     pub last_frame_control: u16,
     pub last_hardware_status: u8,
     pub last_descriptor_status: u32,
+    pub last_node_rate_count: u8,
+    pub last_node_first_rate: u8,
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
@@ -74,6 +76,10 @@ mod target {
         bssid: [u8; 6],
         channel: u8,
         timeout_us: u32,
+        supported_rates: [u8; 8],
+        supported_rates_len: u8,
+        extended_rates: [u8; crate::scan::STRICT_SCAN_EXTENDED_RATES_CAPACITY],
+        extended_rates_len: u8,
     }
 
     impl AuthConfig {
@@ -82,6 +88,10 @@ mod target {
             bssid: [0; 6],
             channel: 0,
             timeout_us: 0,
+            supported_rates: [0; 8],
+            supported_rates_len: 0,
+            extended_rates: [0; crate::scan::STRICT_SCAN_EXTENDED_RATES_CAPACITY],
+            extended_rates_len: 0,
         };
     }
 
@@ -115,6 +125,8 @@ mod target {
     static LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
     static LAST_HARDWARE_STATUS: AtomicU32 = AtomicU32::new(0);
     static LAST_DESCRIPTOR_STATUS: AtomicU32 = AtomicU32::new(0);
+    static LAST_NODE_RATE_COUNT: AtomicU32 = AtomicU32::new(0);
+    static LAST_NODE_FIRST_RATE: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -176,6 +188,8 @@ mod target {
             last_frame_control: LAST_FRAME_CONTROL.load(Ordering::Acquire) as u16,
             last_hardware_status: LAST_HARDWARE_STATUS.load(Ordering::Acquire) as u8,
             last_descriptor_status: LAST_DESCRIPTOR_STATUS.load(Ordering::Acquire),
+            last_node_rate_count: LAST_NODE_RATE_COUNT.load(Ordering::Acquire) as u8,
+            last_node_first_rate: LAST_NODE_FIRST_RATE.load(Ordering::Acquire) as u8,
         }
     }
 
@@ -198,6 +212,10 @@ mod target {
                 bssid: access_point.bssid,
                 channel: access_point.channel,
                 timeout_us,
+                supported_rates: access_point.supported_rates,
+                supported_rates_len: access_point.supported_rates_len,
+                extended_rates: access_point.extended_supported_rates,
+                extended_rates_len: access_point.extended_supported_rates_len,
             });
         }
         RESULT.store(RESULT_PENDING, Ordering::Relaxed);
@@ -256,11 +274,66 @@ mod target {
         node.add(0xab).write(config.channel);
         node.add(0xac).write(0);
         node.add(0x134).write(4);
+        initialize_node_rates(node, interface, config);
 
         interface.add(0xe4).cast::<*mut u8>().write(node);
         ptr::copy_nonoverlapping(config.bssid.as_ptr(), interface.add(0x9c), 6);
         ptr::copy_nonoverlapping(config.local.as_ptr(), ic.add(0x21a), 6);
         Some(node)
+    }
+
+    unsafe fn initialize_node_rates(node: *mut u8, interface: *const u8, config: AuthConfig) {
+        // Exact bounded subset of the pinned `ieee80211_setup_rates` leaf.
+        // The interface advertises at most sixteen local legacy rates at
+        // 0x156; only rates present in either AP IE are copied to node+0x74.
+        let local_length = usize::from(interface.add(0x155).read()).min(16);
+        let supported_length = usize::from(config.supported_rates_len).min(8);
+        let extended_length = usize::from(config.extended_rates_len)
+            .min(crate::scan::STRICT_SCAN_EXTENDED_RATES_CAPACITY);
+        let mut output_length = 0_usize;
+        let mut basic_count = 0_u8;
+        let mut ordinary_count = 0_u8;
+        let mut highest_basic = 0_u8;
+        let mut highest_ordinary = 0_u8;
+
+        for index in 0..local_length {
+            let rate = interface.add(0x156 + index).read();
+            let value = rate & 0x7f;
+            let supported = config.supported_rates[..supported_length]
+                .iter()
+                .chain(config.extended_rates[..extended_length].iter())
+                .any(|candidate| candidate & 0x7f == value);
+            if !supported || output_length == 16 {
+                continue;
+            }
+            node.add(0x74 + output_length).write(rate);
+            output_length += 1;
+            if rate & 0x80 != 0 {
+                basic_count = basic_count.saturating_add(1);
+                highest_basic = highest_basic.max(value);
+            } else {
+                ordinary_count = ordinary_count.saturating_add(1);
+                highest_ordinary = highest_ordinary.max(rate);
+            }
+        }
+        node.add(0x73).write(output_length as u8);
+        LAST_NODE_RATE_COUNT.store(output_length as u32, Ordering::Relaxed);
+        LAST_NODE_FIRST_RATE.store(
+            if output_length == 0 {
+                0
+            } else {
+                u32::from(node.add(0x74).read())
+            },
+            Ordering::Relaxed,
+        );
+        node.add(0x2ec).write(highest_basic);
+        node.add(0x2ed).write(highest_ordinary);
+        if basic_count != 4 {
+            node.add(0x2f1).write(1);
+        }
+        if ordinary_count == 1 || highest_ordinary == 0x6c {
+            node.add(0x2f2).write(1);
+        }
     }
 
     pub(crate) unsafe fn dispatch_auth_tx() {
