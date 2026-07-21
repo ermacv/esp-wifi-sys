@@ -20,6 +20,15 @@ const MANAGEMENT_SLOT_SIZE: usize = ESF_HEADER_SIZE + MANAGEMENT_PAYLOAD_CAPACIT
 const MANAGEMENT_SLOT_CAPACITY: usize = 16;
 const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 
+// `wDev_IndicateFrame` and `wDev_IndicateBeaconMemoryFrame` request ESF kind
+// 7 for received frames larger than the vendor's 500-byte small-frame pool.
+// The original allocator serves kind 7 from the heap. Match the configured
+// static RX bound with fixed Rust-owned storage instead.
+const LARGE_RX_PAYLOAD_CAPACITY: usize = 1700;
+const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
+const LARGE_RX_SLOT_CAPACITY: usize = 16;
+const LARGE_RX_SLOT_MASK: usize = (1 << LARGE_RX_SLOT_CAPACITY) - 1;
+
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
 const ESF_TX_DESCRIPTOR_OFFSET: usize = 0x48;
 const ESF_BUFFER_POINTER_OFFSET: usize = 0x10;
@@ -40,9 +49,23 @@ impl ManagementSlot {
 
 unsafe impl Sync for ManagementSlot {}
 
+#[repr(C, align(4))]
+struct LargeRxSlot(UnsafeCell<[u8; LARGE_RX_SLOT_SIZE]>);
+
+impl LargeRxSlot {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; LARGE_RX_SLOT_SIZE]))
+    }
+}
+
+unsafe impl Sync for LargeRxSlot {}
+
 static MANAGEMENT_SLOTS: [ManagementSlot; MANAGEMENT_SLOT_CAPACITY] =
     [const { ManagementSlot::new() }; MANAGEMENT_SLOT_CAPACITY];
 static CLAIMED_MANAGEMENT_SLOTS: AtomicUsize = AtomicUsize::new(0);
+static LARGE_RX_SLOTS: [LargeRxSlot; LARGE_RX_SLOT_CAPACITY] =
+    [const { LargeRxSlot::new() }; LARGE_RX_SLOT_CAPACITY];
+static CLAIMED_LARGE_RX_SLOTS: AtomicUsize = AtomicUsize::new(0);
 static REJECTED_ESF_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 const NO_PREARM_HART: usize = usize::MAX;
 static PREARM_MANAGEMENT_HART: AtomicUsize = AtomicUsize::new(NO_PREARM_HART);
@@ -101,13 +124,14 @@ unsafe fn initialize_frame(
     kind: u32,
     source: *const u8,
     length: usize,
+    payload_capacity: usize,
 ) -> Option<*mut u8> {
     if kind as usize >= DESCRIPTOR_COUNT || length > u16::MAX as usize {
         return None;
     }
     let list = descriptor(kind);
     let prefix = list.add(0x0c).read() as usize;
-    if prefix.checked_add(length)? > MANAGEMENT_PAYLOAD_CAPACITY {
+    if prefix.checked_add(length)? > payload_capacity {
         return None;
     }
 
@@ -175,6 +199,20 @@ fn claim_management_slot() -> Option<usize> {
         .map(|_| index)
 }
 
+fn claim_large_rx_slot() -> Option<usize> {
+    let claimed = CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire);
+    let free = !claimed & LARGE_RX_SLOT_MASK;
+    if free == 0 {
+        return None;
+    }
+    let index = free.trailing_zeros() as usize;
+    let bit = 1_usize << index;
+    CLAIMED_LARGE_RX_SLOTS
+        .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+        .ok()
+        .map(|_| index)
+}
+
 fn management_slot_index(frame: *mut u8) -> Option<usize> {
     let base = ptr::addr_of!(MANAGEMENT_SLOTS) as usize;
     let address = frame as usize;
@@ -187,18 +225,41 @@ fn management_slot_index(frame: *mut u8) -> Option<usize> {
     (index < MANAGEMENT_SLOT_CAPACITY).then_some(index)
 }
 
+fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
+    let base = ptr::addr_of!(LARGE_RX_SLOTS) as usize;
+    let address = frame as usize;
+    let stride = mem::size_of::<LargeRxSlot>();
+    let offset = address.checked_sub(base)?;
+    if offset % stride != 0 {
+        return None;
+    }
+    let index = offset / stride;
+    (index < LARGE_RX_SLOT_CAPACITY).then_some(index)
+}
+
 /// Return whether `frame` belongs to one of the fixed pools handled by the
 /// strict recycler. The caller must hold a live ESF object.
 pub(crate) unsafe fn is_strict_recyclable_frame(frame: *mut u8) -> bool {
     management_slot_index(frame).is_some()
+        || large_rx_slot_index(frame).is_some()
         || is_vendor_static_kind(frame.add(ESF_TYPE_OFFSET).read() as u32)
 }
 
 unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     let index = claim_management_slot()?;
     let frame = MANAGEMENT_SLOTS[index].0.get().cast::<u8>();
-    if initialize_frame(frame, kind, source, length).is_none() {
+    if initialize_frame(frame, kind, source, length, MANAGEMENT_PAYLOAD_CAPACITY).is_none() {
         CLAIMED_MANAGEMENT_SLOTS.fetch_and(!(1_usize << index), Ordering::AcqRel);
+        return None;
+    }
+    Some(frame)
+}
+
+unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8> {
+    let index = claim_large_rx_slot()?;
+    let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
+    if initialize_frame(frame, 7, source, length, LARGE_RX_PAYLOAD_CAPACITY).is_none() {
+        CLAIMED_LARGE_RX_SLOTS.fetch_and(!(1_usize << index), Ordering::AcqRel);
         return None;
     }
     Some(frame)
@@ -332,6 +393,8 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
     }
     let frame = if is_management_kind(kind) {
         allocate_management(source, kind, length as usize)
+    } else if kind == 7 {
+        allocate_large_rx(source, length as usize)
     } else if is_vendor_static_kind(kind) {
         allocate_vendor_static(source, kind, length as usize)
     } else {
@@ -384,6 +447,13 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
         }
         return;
     }
+    if let Some(index) = large_rx_slot_index(frame) {
+        let bit = 1_usize << index;
+        if CLAIMED_LARGE_RX_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+            reject(u32::MAX, frame as usize);
+        }
+        return;
+    }
     let kind = frame.add(ESF_TYPE_OFFSET).read() as u32;
     if !is_vendor_static_kind(kind) {
         reject(kind, frame as usize);
@@ -398,3 +468,5 @@ pub fn rejected_esf_operations() -> usize {
 
 const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
 const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
+const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
+const _: () = assert!(LARGE_RX_SLOT_CAPACITY < usize::BITS as usize);
