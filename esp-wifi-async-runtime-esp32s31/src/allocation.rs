@@ -192,6 +192,12 @@ mod target {
     // Return address immediately after the pinned S31 `_wifi_malloc(12)`
     // call in `cnx_add_to_blacklist`.
     const BLACKLIST_ALLOCATION_RETURN_OFFSET: usize = 0x5c;
+    const IPC_ENVELOPE_SIZE: usize = 24;
+    const IPC_ENVELOPE_CAPACITY: usize = 8;
+    const IPC_ENVELOPE_MASK: usize = (1 << IPC_ENVELOPE_CAPACITY) - 1;
+    // Return addresses after the two pinned S31 `_wifi_zalloc(24)` calls in
+    // `esp_wifi_ipc_internal`.
+    const IPC_ENVELOPE_RETURN_OFFSETS: [usize; 2] = [0x34, 0xce];
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -204,13 +210,28 @@ mod target {
 
     unsafe impl Sync for BlacklistNode {}
 
+    #[repr(C, align(4))]
+    struct IpcEnvelope(UnsafeCell<[u8; IPC_ENVELOPE_SIZE]>);
+
+    impl IpcEnvelope {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; IPC_ENVELOPE_SIZE]))
+        }
+    }
+
+    unsafe impl Sync for IpcEnvelope {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
+    static IPC_ENVELOPES: [IpcEnvelope; IPC_ENVELOPE_CAPACITY] =
+        [const { IpcEnvelope::new() }; IPC_ENVELOPE_CAPACITY];
+    static CLAIMED_IPC_ENVELOPES: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
         fn cnx_add_to_blacklist(bssid: *const u8);
+        fn esp_wifi_ipc_internal(request: *const c_void, copy_request: bool) -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -342,6 +363,54 @@ mod target {
         CLAIMED_BLACKLIST_NODES.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
+    fn claim_ipc_envelope(size: usize, caller: usize) -> Option<*mut c_void> {
+        let function = esp_wifi_ipc_internal as *const () as usize;
+        if size != IPC_ENVELOPE_SIZE
+            || !IPC_ENVELOPE_RETURN_OFFSETS
+                .iter()
+                .any(|offset| caller == function + offset)
+        {
+            return None;
+        }
+        let claimed = CLAIMED_IPC_ENVELOPES.load(Ordering::Acquire);
+        let free = !claimed & IPC_ENVELOPE_MASK;
+        if free == 0 {
+            return None;
+        }
+        let index = free.trailing_zeros() as usize;
+        let bit = 1_usize << index;
+        CLAIMED_IPC_ENVELOPES
+            .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let envelope = IPC_ENVELOPES[index].0.get();
+        unsafe { envelope.write([0; IPC_ENVELOPE_SIZE]) };
+        Some(envelope.cast())
+    }
+
+    fn ipc_envelope_index(envelope: *mut c_void) -> Option<usize> {
+        let base = core::ptr::addr_of!(IPC_ENVELOPES) as usize;
+        let address = envelope as usize;
+        let stride = mem::size_of::<IpcEnvelope>();
+        let offset = address.checked_sub(base)?;
+        if offset % stride != 0 {
+            return None;
+        }
+        let index = offset / stride;
+        (index < IPC_ENVELOPE_CAPACITY).then_some(index)
+    }
+
+    fn release_ipc_envelope(envelope: *mut c_void) -> bool {
+        let Some(index) = ipc_envelope_index(envelope) else {
+            return false;
+        };
+        let bit = 1_usize << index;
+        CLAIMED_IPC_ENVELOPES.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
+    fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        release_blacklist_node(ptr) || release_ipc_envelope(ptr)
+    }
+
     #[inline(always)]
     fn caller_address() -> usize {
         let caller: usize;
@@ -432,7 +501,7 @@ mod target {
     /// Final-link guard for direct C `free` references.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_free(ptr: *mut c_void) {
-        if release_blacklist_node(ptr) {
+        if release_strict_allocation(ptr) {
             return;
         }
         PROBE.record_free();
@@ -472,6 +541,11 @@ mod target {
             if source == AllocationSource::OsiWifiMalloc {
                 if let Some(node) = claim_blacklist_node(size, caller) {
                     return node;
+                }
+            }
+            if source == AllocationSource::OsiWifiZalloc {
+                if let Some(envelope) = claim_ipc_envelope(size, caller) {
+                    return envelope;
                 }
             }
             PROBE.record_request_at(size, true, false, source, caller);
@@ -521,7 +595,7 @@ mod target {
         call_malloc(&MALLOC, size, AllocationSource::OsiMalloc, caller_address())
     }
     unsafe extern "C" fn free(ptr: *mut c_void) {
-        if release_blacklist_node(ptr) {
+        if release_strict_allocation(ptr) {
             return;
         }
         PROBE.record_free();
@@ -602,6 +676,8 @@ mod target {
 
     const _: () = assert!(mem::size_of::<BlacklistNode>() == BLACKLIST_NODE_SIZE);
     const _: () = assert!(BLACKLIST_NODE_CAPACITY < usize::BITS as usize);
+    const _: () = assert!(mem::size_of::<IpcEnvelope>() == IPC_ENVELOPE_SIZE);
+    const _: () = assert!(IPC_ENVELOPE_CAPACITY < usize::BITS as usize);
 }
 
 #[cfg(target_arch = "riscv32")]
