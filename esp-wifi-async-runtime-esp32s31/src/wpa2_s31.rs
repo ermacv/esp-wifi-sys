@@ -579,6 +579,7 @@ mod target {
             match interface {
                 Wpa2Interface::Station => {
                     if authorized {
+                        self.activate_sta_ptk(&peer)?;
                         self.sta_authorized_peer = Some(peer);
                     } else if self.sta_authorized_peer == Some(peer) {
                         self.sta_authorized_peer = None;
@@ -590,6 +591,31 @@ mod target {
                     .set(peer, authorized)
                     .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull),
             }
+        }
+
+        fn activate_sta_ptk(&self, peer: &[u8; 6]) -> Result<(), S31Wpa2IoError> {
+            let station = unsafe { sta_interface_state() };
+            let node = unsafe { cnx_node_search(peer.as_ptr()) };
+            if station.is_null() || node.is_null() || unsafe { sta_interface_node() } != node {
+                return Err(S31Wpa2IoError::MissingStaInterfaceState);
+            }
+            let hardware_index = unsafe { node.add(0x134).read() };
+            if hardware_index != STA_PAIRWISE_HARDWARE_INDEX {
+                return Err(S31Wpa2IoError::UnexpectedStaPairwiseHardwareIndex(
+                    hardware_index,
+                ));
+            }
+            unsafe {
+                // Finite state tail of the pinned PTK-ready and STA privacy
+                // callbacks. It runs only after M4 TX completion; their
+                // event/log side effects are deliberately omitted.
+                let flags = node.add(0x0c).cast::<u32>();
+                flags.write((flags.read() & 0xfdff_ffff) | 1);
+                node.add(0x24).write(0);
+                let privacy = station.add(0xa4).cast::<u32>();
+                privacy.write(privacy.read() | 0x10);
+            }
+            Ok(())
         }
 
         fn submit_eapol<const N: usize>(
@@ -733,15 +759,15 @@ mod target {
             let interface = install.interface();
             let peer = *install.peer();
             let kind = install.kind();
-            let (sta_interface, sta_node) = if interface == Wpa2Interface::Station {
+            let sta_node = if interface == Wpa2Interface::Station {
                 let sta_interface = unsafe { sta_interface_state() };
                 let sta_node = unsafe { sta_interface_node() };
                 if sta_interface.is_null() || sta_node.is_null() {
                     return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
                 }
-                (Some(sta_interface), Some(sta_node))
+                Some(sta_node)
             } else {
-                (None, None)
+                None
             };
             let (hardware_index, key_index, spp) = match kind {
                 Wpa2KeyKind::Pairwise => {
@@ -836,29 +862,15 @@ mod target {
                 // Exact non-freeing branch of the pinned key-table setter.
                 // The foreign-pointer case was rejected before any mutation.
                 software_key_slot.write(object as *mut _ as *mut c_void);
-                match kind {
-                    Wpa2KeyKind::Pairwise => {
-                        if let (Some(station), Some(node)) = (sta_interface, sta_node) {
-                            // Finite state tail of the pinned PTK-ready and STA
-                            // privacy callbacks. Their event/log side effects
-                            // are deliberately not part of strict mode.
-                            let flags = node.add(0x0c).cast::<u32>();
-                            flags.write((flags.read() & 0xfdff_ffff) | 1);
-                            node.add(0x24).write(0);
-                            let privacy = station.add(0xa4).cast::<u32>();
-                            privacy.write(privacy.read() | 0x10);
-                        }
-                    }
-                    Wpa2KeyKind::Group { key_id, .. } => {
-                        if let Some(station) = sta_node {
-                            // ppInstallKey proves this exact metadata update for
-                            // hardware indices zero and one. It is a finite pair
-                            // of byte stores with no callback or lock.
-                            station.add(0x135).write(hardware_index);
-                            station
-                                .add(0x137 + usize::from(key_id))
-                                .write(hardware_index);
-                        }
+                if let Wpa2KeyKind::Group { key_id, .. } = kind {
+                    if let Some(station) = sta_node {
+                        // ppInstallKey proves this exact metadata update for
+                        // hardware indices zero and one. It is a finite pair
+                        // of byte stores with no callback or lock.
+                        station.add(0x135).write(hardware_index);
+                        station
+                            .add(0x137 + usize::from(key_id))
+                            .write(hardware_index);
                     }
                 }
             }
