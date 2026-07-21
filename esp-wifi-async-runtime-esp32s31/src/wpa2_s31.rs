@@ -26,6 +26,16 @@ const MAX_WPA2_GTK_ID: u8 = 3;
 #[cfg(target_arch = "riscv32")]
 const MAX_VENDOR_KEY_INDEX: u8 = 24;
 
+const fn hardware_key_direction(cipher: u32, hardware_index: u32) -> u32 {
+    if cipher & 0x001c_0000 == 0x0004_0000 {
+        7
+    } else if hardware_index <= 3 {
+        6
+    } else {
+        3
+    }
+}
+
 const fn group_hardware_index(interface: crate::wpa2::Wpa2Interface, key_id: u8) -> Option<u8> {
     if key_id > MAX_WPA2_GTK_ID {
         return None;
@@ -502,13 +512,7 @@ mod target {
         } else {
             (algorithm & 7) << 18
         };
-        let direction = if cipher & 0x001c_0000 == 0x0004_0000 {
-            7
-        } else if hardware_index <= 3 {
-            6
-        } else {
-            7
-        };
+        let direction = hardware_key_direction(cipher, hardware_index);
         let control = ((interface & 3) << 8)
             | (direction << 5)
             | (u32::from(logical_key_index != 3) << 11)
@@ -1102,6 +1106,14 @@ mod tests {
         }
         assert_ne!(STA_GROUP_HARDWARE_INDEX, STA_PAIRWISE_HARDWARE_INDEX);
         assert_eq!(group_hardware_index(Wpa2Interface::Station, 4), None);
+    }
+
+    #[test]
+    fn hardware_key_direction_matches_pinned_hal_branches() {
+        let ccmp = 3 << 18;
+        assert_eq!(hardware_key_direction(ccmp, 4), 3);
+        assert_eq!(hardware_key_direction(ccmp, 1), 6);
+        assert_eq!(hardware_key_direction(0x0004_0000, 4), 7);
     }
 
     #[test]
