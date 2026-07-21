@@ -64,6 +64,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "ppProcTxDone",
     "lmacTxDone",
     "hal_mac_get_txq_state",
+    "hal_mac_get_txq_complete",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
@@ -99,6 +100,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
 const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "lmacTxDone",
     "hal_mac_get_txq_state",
+    "hal_mac_get_txq_complete",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
@@ -155,6 +157,7 @@ const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_lmacTxDone",
     "__wrap_hal_mac_get_txq_state",
+    "__wrap_hal_mac_get_txq_complete",
     "__wrap_ieee80211_hostapd_beacon_txcb",
     "__wrap_ieee80211_tx_mgt_cb",
     "__wrap_wDev_record_ftm_data",

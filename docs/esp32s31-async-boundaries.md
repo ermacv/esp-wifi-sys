@@ -263,11 +263,12 @@ state wrapper reads pinned MMIO without test/log hooks and exposes one
 completion/collision bitmap bit per event. The original archive sections must
 not remain in the final ELF.
 
-Eight ROM-exported entries cannot use LLD wrapping because the ROM linker
+Nine ROM-exported entries cannot use LLD wrapping because the ROM linker
 scripts assign their public symbols after `--wrap` rewriting. The late
 `esp32s31-rom-wrap-overrides.x` fragment instead aliases
 `ieee80211_set_tx_pti`, `esf_buf_alloc`, `esf_buf_recycle`,
-`hal_mac_get_txq_state`, `lmacTxDone`, `pm_on_beacon_rx`, `pm_on_data_tx`, and
+`hal_mac_get_txq_state`, `hal_mac_get_txq_complete`, `lmacTxDone`,
+`pm_on_beacon_rx`, `pm_on_data_tx`, and
 `esp_test_tx_enab_statistics` to Rust wrappers while pinning their
 `__real_*` names to the audited ROM addresses.
 
@@ -463,6 +464,19 @@ timer, lock, polling operation, or variable-length drain. The remaining work is
 to construct the hardware descriptor chain from those slots and replace the
 aggregate branches of TX completion/timeout before enabling the negotiated
 agreement.
+
+The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
+The original `0x81e`-byte body performs the required fixed MMIO decode first,
+then enters HE MPLEN list maintenance, connection-state locks, formatters, and
+debug logging. The replacement reproduces the two six/eight-byte completion
+records and traps after recording a strict failure if it observes HE, BAR,
+A-MPDU, or live MPLEN state. A trap is required because the pinned vendor
+caller discards the callee's return value and would otherwise interpret a
+returned error as a completion record. The basic path therefore leaves
+the stock outcome state machine intact while removing those unrelated tails.
+The independent `hal_mac_tx_get_blockack` leaf is only `0x3e` bytes, contains
+fixed MMIO loads/stores and no calls or cycles, and passes the strict auditor as
+the future Rust A-MPDU completion input.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys

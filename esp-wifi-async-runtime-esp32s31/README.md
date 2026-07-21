@@ -163,7 +163,7 @@ wrong-hart `pp_post`, and never stalls the second core.
 counts, sizes, failures, and calls made from radio context. Direct C allocator
 references in the vendor archives must additionally pass through the GNU
 linker's wrappers. TX/RX completion, WPA2 ingress, and key programming also
-require symbol interposition. Twenty of the twenty-eight entries are ordinary
+require symbol interposition. Twenty of the twenty-nine entries are ordinary
 archive definitions and use LLD wrapping:
 
 ```text
@@ -195,8 +195,9 @@ archive definitions and use LLD wrapping:
 -Wl,--wrap=wifi_log
 ```
 
-The other eight entries (`esf_buf_alloc`, `esf_buf_recycle`,
+The other nine entries (`esf_buf_alloc`, `esf_buf_recycle`,
 `ieee80211_set_tx_pti`, `lmacTxDone`, `hal_mac_get_txq_state`,
+`hal_mac_get_txq_complete`,
 `pm_on_beacon_rx`, `pm_on_data_tx`, and
 `esp_test_tx_enab_statistics`) are ECO0 ROM exports. Do not pass them through
 LLD `--wrap`: `esp-rom-sys` defines them with absolute linker-script
@@ -388,7 +389,10 @@ through `__wrap_lmacTxDone`; its callback bitmap, inline `ppProcTxDone`/PM tail,
 and TX-queue resume are then executor continuations.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
-posts another event for a captured remainder. It is expected to fail
+posts another event for a captured remainder. `hal_mac_get_txq_complete` is
+also a late ROM alias: its wrapper performs only the fixed basic-HT register
+decode and traps on HE, BAR, A-MPDU, or live MPLEN state before the vendor
+caller can misinterpret an unsupported record. It is expected to fail
 until all reported roots are replaced or their exact indirect target and loop
 bound are proven.
 

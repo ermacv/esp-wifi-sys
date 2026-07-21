@@ -51,7 +51,7 @@ const EXPECTED_LABELS: [&str; 34] = [
     ".L1024", ".L1017", ".L1023", ".L1022", ".L1021", ".L1020", ".L1018",
 ];
 
-const REQUIRED_GLOBALS: [(&str, &str); 38] = [
+const REQUIRED_GLOBALS: [(&str, &str); 39] = [
     ("ppTask", "0000023a"),
     ("pp_post", "00000160"),
     ("pp_sig_cnt", "00000024"),
@@ -71,6 +71,7 @@ const REQUIRED_GLOBALS: [(&str, &str); 38] = [
     ("pp_coex_tx_release", "00000074"),
     ("esf_buf_recycle", "00000156"),
     ("lmacTxDone", "000000fc"),
+    ("hal_mac_get_txq_complete", "0000081e"),
     ("ppProcTxCallback", "0000006e"),
     ("ppEnqueueTxDone", "00000062"),
     ("rcUpdateTxDone", "000000a0"),

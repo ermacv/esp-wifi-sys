@@ -24,6 +24,7 @@ const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
 const TX_FRAME_ABORTED_BIT: u32 = 0x0002_0000;
 const TX_FRAME_BAR_BIT: u32 = 0x0020_0000;
 const TX_FRAME_AMPDU_BIT: u32 = 0x0040_0000;
+const TX_FRAME_HE_BIT: u32 = 0x8000_0000;
 const TX_FRAME_DEQUEUE_MASK: u32 = 0x0000_00c0;
 const TX_FRAME_DEQUEUE_VALUE: u32 = 0x0000_0080;
 const TXRX_QUEUE_SIZE: usize = 0x34;
@@ -42,6 +43,13 @@ unsafe extern "C" {
 
     fn hal_mac_tx_set_cca(value: u32);
     fn hal_mac_get_txq_state(kind: u32) -> u32;
+    #[link_name = "hal_mac_get_txq_complete"]
+    fn vendor_hal_mac_get_txq_complete(
+        queue_state: *mut u8,
+        queue: u8,
+        completion: *mut u8,
+        auxiliary: *mut u8,
+    ) -> i32;
     fn hal_mac_is_txq_valid(queue: u8) -> u32;
     fn hal_mac_set_txq_invalid(queue: u8);
     fn hal_mac_txq_disable(queue: u8);
@@ -143,6 +151,118 @@ pub unsafe extern "C" fn __wrap_hal_mac_get_txq_state(kind: u32) -> u32 {
     one
 }
 
+/// Strict basic-HT replacement for the 0x81e-byte vendor completion reader.
+///
+/// The stock body starts with these fixed register decodes, then enters HE
+/// MPLEN maintenance, connection-state queries, formatters, and debug logs.
+/// Strict STA advertises HT rather than HE and keeps AMPDU/AMSDU disabled, so
+/// those tails are forbidden invariants rather than required completion work.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.txq_complete"]
+pub unsafe extern "C" fn __wrap_hal_mac_get_txq_complete(
+    queue_state: *mut u8,
+    queue: u8,
+    completion: *mut u8,
+    auxiliary: *mut u8,
+) -> i32 {
+    if queue >= 4 || queue_state.is_null() || completion.is_null() {
+        reject_txq_completion();
+    }
+
+    // Match the stock ABI even though every byte is overwritten below. This
+    // also makes future extensions deterministic if another completion field
+    // is recovered from the pinned body.
+    completion.write(0);
+    completion.add(1).write(0);
+    completion.add(2).write(0);
+    completion.add(3).write(0);
+    completion.add(4).write(0);
+    completion.add(5).write(0);
+    if !auxiliary.is_null() {
+        auxiliary.cast::<u32>().write(0);
+        auxiliary.add(4).cast::<u32>().write(0);
+    }
+
+    let frame = queue_state.cast::<*mut u8>().read();
+    if frame.is_null() {
+        reject_txq_completion();
+    }
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u32>()
+        .read();
+    if descriptor.is_null()
+        || descriptor.read() & (TX_FRAME_HE_BIT | TX_FRAME_BAR_BIT | TX_FRAME_AMPDU_BIT) != 0
+    {
+        reject_txq_completion();
+    }
+
+    // `hal_mac_tx_clr_mplen` is a no-op unless this per-queue bit is set. A
+    // set bit would make its linked-list walk and HE callbacks reachable.
+    let mplen_state = (0x2010_4d68_usize - usize::from(queue) * 0x10) as *const u32;
+    if mplen_state.read_volatile() & 0x08 != 0 {
+        reject_txq_completion();
+    }
+
+    let queue_offset = usize::from(queue) * 0x7c;
+    let primary = (0x2010_553c_usize - queue_offset) as *const u32;
+    let secondary = (0x2010_5540_usize - queue_offset) as *const u32;
+    let primary_word = primary.read_volatile();
+    let secondary_word = secondary.read_volatile();
+
+    let use_secondary = if auxiliary.is_null() {
+        false
+    } else {
+        let completion_aux = decode_txq_completion_auxiliary(queue_offset);
+        auxiliary.cast::<u32>().write(completion_aux.0);
+        auxiliary.add(4).cast::<u32>().write(completion_aux.1);
+        completion_aux.0 & 0x0010_0000 != 0
+    };
+    let status = if use_secondary {
+        secondary_word
+    } else {
+        primary_word
+    };
+
+    completion.write(status as u8);
+    completion.add(1).write((status >> 8) as u8);
+    completion.add(2).write((primary_word >> 16) as u8);
+    completion.add(3).write(((primary_word >> 25) & 0x03) as u8);
+    let signed_metric = ((secondary_word >> 24) & 0x7f) as u8;
+    completion.add(4).write(if signed_metric & 0x40 != 0 {
+        signed_metric.wrapping_sub(0x80)
+    } else {
+        signed_metric
+    });
+    completion.add(5).write((secondary_word >> 16) as u8);
+
+    0
+}
+
+#[inline(always)]
+unsafe fn reject_txq_completion() -> ! {
+    // The vendor caller discards this function's return value and immediately
+    // interprets the completion bytes. Returning an error could therefore
+    // turn an unsupported descriptor into a false success. Record the fault
+    // and stop at the exact boundary instead.
+    TXQ_SPLIT_FAILED.store(true, Ordering::Release);
+    core::arch::asm!("ebreak", options(noreturn))
+}
+
+unsafe fn decode_txq_completion_auxiliary(queue_offset: usize) -> (u32, u32) {
+    let status_534 = ((0x2010_5534_usize - queue_offset) as *const u32).read_volatile();
+    let status_524 = ((0x2010_5524_usize - queue_offset) as *const u32).read_volatile();
+    let status_54c = ((0x2010_554c_usize - queue_offset) as *const u32).read_volatile();
+
+    let mut word0 = (status_534 & 0x000f_0000) << 12;
+    word0 |= status_524 & 0x000f_e000;
+    word0 |= status_524 & 0x0010_0000;
+    word0 |= (status_524 >> 25) << 21;
+    let mut word1 = (status_534 >> 20) & 0x03;
+    word1 |= (status_54c >> 5) & 0x01fc;
+    (word0, word1)
+}
+
 pub(crate) fn txq_split_failed() -> bool {
     TXQ_SPLIT_FAILED.load(Ordering::Acquire)
 }
@@ -151,6 +271,9 @@ pub(crate) fn runtime_tx_link_wrappers_active() -> bool {
     core::ptr::eq(
         hal_mac_get_txq_state as *const (),
         __wrap_hal_mac_get_txq_state as *const (),
+    ) && core::ptr::eq(
+        vendor_hal_mac_get_txq_complete as *const (),
+        __wrap_hal_mac_get_txq_complete as *const (),
     ) && core::ptr::eq(
         lmacTxDone as *const (),
         crate::txdone::__wrap_lmacTxDone as *const (),

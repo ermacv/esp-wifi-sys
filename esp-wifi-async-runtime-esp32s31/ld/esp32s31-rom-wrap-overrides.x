@@ -25,6 +25,9 @@ esf_buf_recycle = __wrap_esf_buf_recycle;
 __real_hal_mac_get_txq_state = 0x2f800d3c;
 hal_mac_get_txq_state = __wrap_hal_mac_get_txq_state;
 
+__real_hal_mac_get_txq_complete = 0x2f800d44;
+hal_mac_get_txq_complete = __wrap_hal_mac_get_txq_complete;
+
 __real_lmacTxDone = 0x2f800dec;
 lmacTxDone = __wrap_lmacTxDone;
 
