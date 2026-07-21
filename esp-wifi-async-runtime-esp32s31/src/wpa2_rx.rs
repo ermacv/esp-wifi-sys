@@ -3,6 +3,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(any(test, target_arch = "riscv32"))]
+use crate::wpa2::Wpa2IngressError;
+#[cfg(any(test, target_arch = "riscv32"))]
 use crate::wpa2::Wpa2Interface;
 #[cfg(target_arch = "riscv32")]
 use crate::wpa2::DEFAULT_EAPOL_FRAME_CAPACITY;
@@ -15,6 +17,12 @@ pub const WPA2_RX_CAPACITY: usize = 8;
 
 static INGRESS: Wpa2Ingress<WPA2_RX_CAPACITY> = Wpa2Ingress::new();
 static REJECTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, target_arch = "riscv32"))]
+static REJECTED_INVALID: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, target_arch = "riscv32"))]
+static REJECTED_CAPACITY: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(test, target_arch = "riscv32"))]
+static REJECTED_QUEUE_FULL: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "hil-vendor-tx")]
 static STA_RAW_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
@@ -24,6 +32,14 @@ static STA_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
 static AP_RAW_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hil-vendor-tx")]
 static AP_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static DIRECT_FRAME_LENGTH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static DIRECT_AVAILABLE_LENGTH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static DIRECT_DECLARED_LENGTH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static DIRECT_KEY_INFO: AtomicUsize = AtomicUsize::new(0);
 
 /// Laboratory-only counters at the final supplicant/authenticator ingress.
 #[cfg(feature = "hil-vendor-tx")]
@@ -34,6 +50,13 @@ pub struct Wpa2RxDiagnosticSnapshot {
     pub ap_raw_attempts: usize,
     pub ap_accepted: usize,
     pub rejected: usize,
+    pub rejected_invalid: usize,
+    pub rejected_capacity: usize,
+    pub rejected_queue_full: usize,
+    pub direct_frame_length: usize,
+    pub direct_available_length: usize,
+    pub direct_declared_length: usize,
+    pub direct_key_info: u16,
 }
 
 #[cfg(feature = "hil-vendor-tx")]
@@ -44,6 +67,13 @@ pub fn wpa2_rx_diagnostic_snapshot() -> Wpa2RxDiagnosticSnapshot {
         ap_raw_attempts: AP_RAW_ATTEMPTS.load(Ordering::Acquire),
         ap_accepted: AP_ACCEPTED.load(Ordering::Acquire),
         rejected: REJECTED.load(Ordering::Acquire),
+        rejected_invalid: REJECTED_INVALID.load(Ordering::Acquire),
+        rejected_capacity: REJECTED_CAPACITY.load(Ordering::Acquire),
+        rejected_queue_full: REJECTED_QUEUE_FULL.load(Ordering::Acquire),
+        direct_frame_length: DIRECT_FRAME_LENGTH.load(Ordering::Acquire),
+        direct_available_length: DIRECT_AVAILABLE_LENGTH.load(Ordering::Acquire),
+        direct_declared_length: DIRECT_DECLARED_LENGTH.load(Ordering::Acquire),
+        direct_key_info: DIRECT_KEY_INFO.load(Ordering::Acquire) as u16,
     }
 }
 
@@ -61,11 +91,23 @@ pub fn rejected_wpa2_eapol() -> usize {
 
 #[cfg(any(test, target_arch = "riscv32"))]
 fn ingest(interface: Wpa2Interface, peer: [u8; 6], bytes: &[u8]) -> bool {
-    if INGRESS.try_push(interface, peer, bytes).is_ok() {
-        true
-    } else {
-        REJECTED.fetch_add(1, Ordering::Relaxed);
-        false
+    match INGRESS.try_push(interface, peer, bytes) {
+        Ok(()) => true,
+        Err(error) => {
+            REJECTED.fetch_add(1, Ordering::Relaxed);
+            match error {
+                Wpa2IngressError::Invalid(_) => {
+                    REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+                }
+                Wpa2IngressError::CapacityExceeded => {
+                    REJECTED_CAPACITY.fetch_add(1, Ordering::Relaxed);
+                }
+                Wpa2IngressError::QueueFull => {
+                    REJECTED_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            false
+        }
     }
 }
 
@@ -113,6 +155,11 @@ pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
     // rejection and the caller recycles the PP packet immediately.
     #[cfg(feature = "hil-vendor-tx")]
     STA_RAW_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "hil-vendor-tx")]
+    {
+        DIRECT_FRAME_LENGTH.store(frame.len(), Ordering::Release);
+        DIRECT_AVAILABLE_LENGTH.store(frame.len().saturating_sub(llc_end), Ordering::Release);
+    }
     let Some(header) = frame.get(llc_end..llc_end + 4) else {
         REJECTED.fetch_add(1, Ordering::Relaxed);
         return true;
@@ -122,6 +169,14 @@ pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
         REJECTED.fetch_add(1, Ordering::Relaxed);
         return true;
     };
+    #[cfg(feature = "hil-vendor-tx")]
+    {
+        DIRECT_DECLARED_LENGTH.store(eapol_len, Ordering::Release);
+        let key_info = frame
+            .get(llc_end + 5..llc_end + 7)
+            .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+        DIRECT_KEY_INFO.store(usize::from(key_info), Ordering::Release);
+    }
     let Some(bytes) = frame.get(llc_end..llc_end + eapol_len) else {
         REJECTED.fetch_add(1, Ordering::Relaxed);
         return true;
