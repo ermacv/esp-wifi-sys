@@ -2,7 +2,7 @@
 
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Context,
 };
 
@@ -41,6 +41,53 @@ unsafe impl Sync for TxSlot {}
 static TX_SLOTS: [TxSlot; WIFI_DATA_TX_CAPACITY] = [const { TxSlot::new() }; WIFI_DATA_TX_CAPACITY];
 static TX_CHANNEL: BoundedChannel<TxSlotToken, WIFI_DATA_TX_CAPACITY> = BoundedChannel::new();
 static TX_CAPACITY_WAKER: WakerCell = WakerCell::new();
+static TX_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+static TX_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
+static TX_DEQUEUED: AtomicUsize = AtomicUsize::new(0);
+static TX_RELEASED: AtomicUsize = AtomicUsize::new(0);
+static TX_REJECTED_INVALID: AtomicUsize = AtomicUsize::new(0);
+static TX_REJECTED_SLOTS_FULL: AtomicUsize = AtomicUsize::new(0);
+static TX_REJECTED_CHANNEL_CONTENDED: AtomicUsize = AtomicUsize::new(0);
+static TX_OCCUPIED: AtomicUsize = AtomicUsize::new(0);
+static TX_OCCUPIED_HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
+
+fn record_high_water(counter: &AtomicUsize, value: usize) {
+    let observed = counter.load(Ordering::Relaxed);
+    if value > observed {
+        // Diagnostics must preserve the runtime's wait-free producer
+        // contract. A racing update may conservatively win; never retry.
+        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WifiDataTxSnapshot {
+    pub claimed: usize,
+    pub enqueued: usize,
+    pub dequeued: usize,
+    pub released: usize,
+    pub rejected_invalid: usize,
+    pub rejected_slots_full: usize,
+    pub rejected_channel_contended: usize,
+    pub occupied: usize,
+    pub occupied_high_water: usize,
+    pub queued: usize,
+}
+
+pub fn wifi_data_tx_snapshot() -> WifiDataTxSnapshot {
+    WifiDataTxSnapshot {
+        claimed: TX_CLAIMED.load(Ordering::Acquire),
+        enqueued: TX_ENQUEUED.load(Ordering::Acquire),
+        dequeued: TX_DEQUEUED.load(Ordering::Acquire),
+        released: TX_RELEASED.load(Ordering::Acquire),
+        rejected_invalid: TX_REJECTED_INVALID.load(Ordering::Acquire),
+        rejected_slots_full: TX_REJECTED_SLOTS_FULL.load(Ordering::Acquire),
+        rejected_channel_contended: TX_REJECTED_CHANNEL_CONTENDED.load(Ordering::Acquire),
+        occupied: TX_OCCUPIED.load(Ordering::Acquire),
+        occupied_high_water: TX_OCCUPIED_HIGH_WATER.load(Ordering::Acquire),
+        queued: TX_CHANNEL.len(),
+    }
+}
 
 struct TxSlotToken {
     index: usize,
@@ -51,6 +98,8 @@ impl Drop for TxSlotToken {
         TX_SLOTS[self.index]
             .occupied
             .store(false, Ordering::Release);
+        TX_RELEASED.fetch_add(1, Ordering::Relaxed);
+        TX_OCCUPIED.fetch_sub(1, Ordering::AcqRel);
         TX_CAPACITY_WAKER.wake();
     }
 }
@@ -87,6 +136,7 @@ pub fn try_send_wifi_data(
     frame: &[u8],
 ) -> Result<(), WifiDataTxEnqueueError> {
     if frame.len() < ETHERNET_HEADER_LEN || frame.len() > WIFI_DATA_TX_FRAME_CAPACITY {
+        TX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
         return Err(WifiDataTxEnqueueError::InvalidLength);
     }
     let Some((index, slot)) = TX_SLOTS.iter().enumerate().find(|(_, slot)| {
@@ -94,30 +144,38 @@ pub fn try_send_wifi_data(
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }) else {
+        TX_REJECTED_SLOTS_FULL.fetch_add(1, Ordering::Relaxed);
         return Err(WifiDataTxEnqueueError::SlotsFull);
     };
+
+    TX_CLAIMED.fetch_add(1, Ordering::Relaxed);
+    let occupied = TX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
+    record_high_water(&TX_OCCUPIED_HIGH_WATER, occupied);
 
     let data = unsafe { &mut *slot.data.get() };
     data.interface = interface;
     data.length = frame.len();
     data.bytes[..frame.len()].copy_from_slice(frame);
     if let Err(error) = TX_CHANNEL.try_send(TxSlotToken { index }) {
+        TX_REJECTED_CHANNEL_CONTENDED.fetch_add(1, Ordering::Relaxed);
         drop(error.0);
         return Err(WifiDataTxEnqueueError::ChannelContended);
     }
+    TX_ENQUEUED.fetch_add(1, Ordering::Release);
     Ok(())
 }
 
 pub fn try_receive_wifi_data_tx() -> Option<OwnedWifiDataTxFrame> {
-    TX_CHANNEL
-        .try_receive()
-        .map(|token| OwnedWifiDataTxFrame { token })
+    TX_CHANNEL.try_receive().map(|token| {
+        TX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+        OwnedWifiDataTxFrame { token }
+    })
 }
 
 pub async fn receive_wifi_data_tx() -> OwnedWifiDataTxFrame {
-    OwnedWifiDataTxFrame {
-        token: TX_CHANNEL.receive().await,
-    }
+    let token = TX_CHANNEL.receive().await;
+    TX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    OwnedWifiDataTxFrame { token }
 }
 
 /// Register an executor waker and report whether a fixed TX slot is free.

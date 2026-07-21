@@ -50,8 +50,57 @@ unsafe impl Sync for RxSlot {}
 static RX_SLOTS: [RxSlot; WIFI_DATA_RX_CAPACITY] = [const { RxSlot::new() }; WIFI_DATA_RX_CAPACITY];
 static RX_CHANNEL: BoundedChannel<RxSlotToken, WIFI_DATA_RX_CAPACITY> = BoundedChannel::new();
 static REJECTED_RX_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static RX_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+static RX_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
+static RX_DEQUEUED: AtomicUsize = AtomicUsize::new(0);
+static RX_RELEASED: AtomicUsize = AtomicUsize::new(0);
+static RX_REJECTED_INVALID: AtomicUsize = AtomicUsize::new(0);
+static RX_REJECTED_SLOTS_FULL: AtomicUsize = AtomicUsize::new(0);
+static RX_REJECTED_CHANNEL_CONTENDED: AtomicUsize = AtomicUsize::new(0);
+static RX_OCCUPIED: AtomicUsize = AtomicUsize::new(0);
+static RX_OCCUPIED_HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_arch = "riscv32")]
 static RX_CALLBACKS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn record_high_water(counter: &AtomicUsize, value: usize) {
+    let observed = counter.load(Ordering::Relaxed);
+    if value > observed {
+        // The interrupt producer gets one attempt; diagnostics must never
+        // introduce a CAS retry loop into the packet path.
+        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WifiDataRxSnapshot {
+    pub claimed: usize,
+    pub enqueued: usize,
+    pub dequeued: usize,
+    pub released: usize,
+    pub rejected: usize,
+    pub rejected_invalid: usize,
+    pub rejected_slots_full: usize,
+    pub rejected_channel_contended: usize,
+    pub occupied: usize,
+    pub occupied_high_water: usize,
+    pub queued: usize,
+}
+
+pub fn wifi_data_rx_snapshot() -> WifiDataRxSnapshot {
+    WifiDataRxSnapshot {
+        claimed: RX_CLAIMED.load(Ordering::Acquire),
+        enqueued: RX_ENQUEUED.load(Ordering::Acquire),
+        dequeued: RX_DEQUEUED.load(Ordering::Acquire),
+        released: RX_RELEASED.load(Ordering::Acquire),
+        rejected: REJECTED_RX_FRAMES.load(Ordering::Acquire),
+        rejected_invalid: RX_REJECTED_INVALID.load(Ordering::Acquire),
+        rejected_slots_full: RX_REJECTED_SLOTS_FULL.load(Ordering::Acquire),
+        rejected_channel_contended: RX_REJECTED_CHANNEL_CONTENDED.load(Ordering::Acquire),
+        occupied: RX_OCCUPIED.load(Ordering::Acquire),
+        occupied_high_water: RX_OCCUPIED_HIGH_WATER.load(Ordering::Acquire),
+        queued: RX_CHANNEL.len(),
+    }
+}
 
 struct RxSlotToken {
     index: usize,
@@ -62,6 +111,8 @@ impl Drop for RxSlotToken {
         RX_SLOTS[self.index]
             .occupied
             .store(false, Ordering::Release);
+        RX_RELEASED.fetch_add(1, Ordering::Relaxed);
+        RX_OCCUPIED.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -90,15 +141,16 @@ impl OwnedWifiDataFrame {
 }
 
 pub fn try_receive_wifi_data() -> Option<OwnedWifiDataFrame> {
-    RX_CHANNEL
-        .try_receive()
-        .map(|token| OwnedWifiDataFrame { token })
+    RX_CHANNEL.try_receive().map(|token| {
+        RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+        OwnedWifiDataFrame { token }
+    })
 }
 
 pub async fn receive_wifi_data() -> OwnedWifiDataFrame {
-    OwnedWifiDataFrame {
-        token: RX_CHANNEL.receive().await,
-    }
+    let token = RX_CHANNEL.receive().await;
+    RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    OwnedWifiDataFrame { token }
 }
 
 /// Register an executor waker and receive one owned Ethernet frame if ready.
@@ -108,9 +160,10 @@ pub async fn receive_wifi_data() -> OwnedWifiDataFrame {
 /// [`receive_wifi_data`].
 pub fn poll_receive_wifi_data(cx: &mut Context<'_>) -> Poll<OwnedWifiDataFrame> {
     let mut receive = RX_CHANNEL.receive();
-    Pin::new(&mut receive)
-        .poll(cx)
-        .map(|token| OwnedWifiDataFrame { token })
+    Pin::new(&mut receive).poll(cx).map(|token| {
+        RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+        OwnedWifiDataFrame { token }
+    })
 }
 
 pub fn rejected_wifi_data_frames() -> usize {
@@ -120,6 +173,8 @@ pub fn rejected_wifi_data_frames() -> usize {
 #[cfg(any(test, target_arch = "riscv32"))]
 unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length: usize) -> bool {
     if buffer.is_null() || length == 0 || length > WIFI_DATA_RX_FRAME_CAPACITY {
+        REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+        RX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
         return false;
     }
     let Some((index, slot)) = RX_SLOTS.iter().enumerate().find(|(_, slot)| {
@@ -127,17 +182,26 @@ unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }) else {
+        REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+        RX_REJECTED_SLOTS_FULL.fetch_add(1, Ordering::Relaxed);
         return false;
     };
+
+    RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
+    let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
+    record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
 
     let data = &mut *slot.data.get();
     data.interface = interface;
     data.length = length;
     core::ptr::copy_nonoverlapping(buffer, data.bytes.as_mut_ptr(), length);
     if let Err(error) = RX_CHANNEL.try_send(RxSlotToken { index }) {
+        REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+        RX_REJECTED_CHANNEL_CONTENDED.fetch_add(1, Ordering::Relaxed);
         drop(error.0);
         return false;
     }
+    RX_ENQUEUED.fetch_add(1, Ordering::Release);
     true
 }
 
@@ -203,7 +267,6 @@ mod target {
         if accepted {
             ESP_OK as i32
         } else {
-            REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
             ESP_ERR_NO_MEM as i32
         }
     }

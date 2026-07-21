@@ -36,8 +36,31 @@ unsafe impl Sync for Slot {}
 pub struct RadioQueue<const N: usize> {
     enqueue: AtomicUsize,
     dequeue: AtomicUsize,
+    pushed: AtomicUsize,
+    popped: AtomicUsize,
+    rejected: AtomicUsize,
+    high_water: AtomicUsize,
     slots: [Slot; N],
     waker: WakerCell,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioQueueSnapshot {
+    pub pushed: usize,
+    pub popped: usize,
+    pub rejected: usize,
+    pub queued: usize,
+    pub high_water: usize,
+    pub capacity: usize,
+}
+
+fn record_high_water(counter: &AtomicUsize, value: usize) {
+    let observed = counter.load(Ordering::Relaxed);
+    if value > observed {
+        // Queue producers are wait-free. A diagnostic update gets one CAS
+        // attempt and never turns contention into a retry loop.
+        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+    }
 }
 
 impl<const N: usize> RadioQueue<N> {
@@ -54,6 +77,10 @@ impl<const N: usize> RadioQueue<N> {
         Self {
             enqueue: AtomicUsize::new(0),
             dequeue: AtomicUsize::new(0),
+            pushed: AtomicUsize::new(0),
+            popped: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
+            high_water: AtomicUsize::new(0),
             slots,
             waker: WakerCell::new(),
         }
@@ -67,11 +94,14 @@ impl<const N: usize> RadioQueue<N> {
                 .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
+                self.rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(PushError(event));
             }
             unsafe { (*slot.event.get()).write(event) };
             self.enqueue.fetch_add(1, Ordering::Release);
             slot.sequence.store(2, Ordering::Release);
+            self.pushed.fetch_add(1, Ordering::Relaxed);
+            record_high_water(&self.high_water, 1);
             self.waker.wake();
             return Ok(());
         }
@@ -90,12 +120,15 @@ impl<const N: usize> RadioQueue<N> {
                 )
                 .is_err()
         {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
             return Err(PushError(event));
         }
 
         unsafe { (*slot.event.get()).write(event) };
         slot.sequence
             .store(position.wrapping_add(1), Ordering::Release);
+        self.pushed.fetch_add(1, Ordering::Relaxed);
+        record_high_water(&self.high_water, self.len());
         self.waker.wake();
         Ok(())
     }
@@ -110,6 +143,7 @@ impl<const N: usize> RadioQueue<N> {
             let event = unsafe { (*slot.event.get()).assume_init_read() };
             self.dequeue.fetch_add(1, Ordering::Release);
             slot.sequence.store(0, Ordering::Release);
+            self.popped.fetch_add(1, Ordering::Relaxed);
             return Some(event);
         }
 
@@ -126,6 +160,7 @@ impl<const N: usize> RadioQueue<N> {
         let event = unsafe { (*slot.event.get()).assume_init_read() };
         slot.sequence
             .store(position.wrapping_add(N), Ordering::Release);
+        self.popped.fetch_add(1, Ordering::Relaxed);
         Some(event)
     }
 
@@ -143,6 +178,17 @@ impl<const N: usize> RadioQueue<N> {
         self.enqueue
             .load(Ordering::Acquire)
             .wrapping_sub(self.dequeue.load(Ordering::Acquire))
+    }
+
+    pub fn snapshot(&self) -> RadioQueueSnapshot {
+        RadioQueueSnapshot {
+            pushed: self.pushed.load(Ordering::Acquire),
+            popped: self.popped.load(Ordering::Acquire),
+            rejected: self.rejected.load(Ordering::Acquire),
+            queued: self.len(),
+            high_water: self.high_water.load(Ordering::Acquire),
+            capacity: N,
+        }
     }
 }
 
@@ -247,6 +293,17 @@ mod tests {
         assert_eq!(queue.try_pop().unwrap().kind, 1);
         assert_eq!(queue.try_pop().unwrap().kind, 2);
         assert!(queue.try_pop().is_none());
+        assert_eq!(
+            queue.snapshot(),
+            super::RadioQueueSnapshot {
+                pushed: 2,
+                popped: 2,
+                rejected: 1,
+                queued: 0,
+                high_water: 2,
+                capacity: 2,
+            }
+        );
     }
 
     #[test]

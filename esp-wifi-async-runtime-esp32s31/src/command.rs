@@ -21,23 +21,53 @@ pub const RADIO_COMMAND_CONTEXT_EVENT: u32 = u32::MAX - 32;
 /// Queue saturation is explicit and leaves ownership with the producer.
 pub struct RadioCommandQueue<C, const N: usize> {
     channel: BoundedChannel<C, N>,
+    submitted: AtomicUsize,
     rejected: AtomicUsize,
+    high_water: AtomicUsize,
     capacity_waker: WakerCell,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RadioCommandSnapshot {
+    pub submitted: usize,
+    pub rejected: usize,
+    pub queued: usize,
+    pub high_water: usize,
+    pub capacity: usize,
+}
+
+fn record_high_water(counter: &AtomicUsize, value: usize) {
+    let observed = counter.load(Ordering::Relaxed);
+    if value > observed {
+        // One failed diagnostic CAS is acceptable; retrying here would break
+        // the fixed-cost command-producer contract.
+        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+    }
 }
 
 impl<C, const N: usize> RadioCommandQueue<C, N> {
     pub const fn new() -> Self {
         Self {
             channel: BoundedChannel::new(),
+            submitted: AtomicUsize::new(0),
             rejected: AtomicUsize::new(0),
+            high_water: AtomicUsize::new(0),
             capacity_waker: WakerCell::new(),
         }
     }
 
     pub fn try_submit(&self, command: C) -> Result<(), TrySendError<C>> {
-        self.channel.try_send(command).inspect_err(|_| {
-            self.rejected.fetch_add(1, Ordering::Relaxed);
-        })
+        match self.channel.try_send(command) {
+            Ok(()) => {
+                self.submitted.fetch_add(1, Ordering::Relaxed);
+                record_high_water(&self.high_water, self.channel.len());
+                Ok(())
+            }
+            Err(error) => {
+                self.rejected.fetch_add(1, Ordering::Relaxed);
+                Err(error)
+            }
+        }
     }
 
     pub fn try_receive(&self) -> Option<C> {
@@ -60,6 +90,16 @@ impl<C, const N: usize> RadioCommandQueue<C, N> {
 
     pub fn is_empty(&self) -> bool {
         self.channel.is_empty()
+    }
+
+    pub fn snapshot(&self) -> RadioCommandSnapshot {
+        RadioCommandSnapshot {
+            submitted: self.submitted.load(Ordering::Acquire),
+            rejected: self.rejected.load(Ordering::Acquire),
+            queued: self.channel.len(),
+            high_water: self.high_water.load(Ordering::Acquire),
+            capacity: N,
+        }
     }
 
     /// Wait asynchronously until a bounded command slot may be available.
@@ -240,6 +280,12 @@ mod tests {
         assert_eq!(owner.handler().sum, 5);
         assert!(owner.handler().all_in_radio_context);
         assert!(!in_radio_context());
+        let snapshot = commands.snapshot();
+        assert_eq!(snapshot.submitted, 2);
+        assert_eq!(snapshot.rejected, 0);
+        assert_eq!(snapshot.queued, 0);
+        assert_eq!(snapshot.high_water, 2);
+        assert_eq!(snapshot.capacity, 2);
     }
 
     #[test]

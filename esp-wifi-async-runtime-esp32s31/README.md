@@ -558,6 +558,14 @@ buffer path as EAPOL. AP additionally checks the destination against the live
 controlled-port table at submission time, so a queued frame cannot retain
 authorization after peer removal.
 
+`wifi_data_tx_snapshot()` and `wifi_data_rx_snapshot()` expose cumulative
+claims, queue transfers, releases, rejection reasons, current ownership, and
+the occupied-slot high-water mark without allocating or locking. A quiescent
+TX/RX boundary must satisfy `claimed == released + occupied` and
+`enqueued == dequeued + queued`. `RadioQueue::snapshot()` and
+`RadioCommandQueue::snapshot()` provide the corresponding bounded scheduler
+and command-queue watermarks for load qualification.
+
 Promiscuous/sniffer RX is outside this basic profile. Strict mode rejects event
 13 unconditionally before `ppProcessRxPktHdr`: that vendor handler not only
 invokes the optional `pTxRx + 0x404` callback, but also releases its payload and
