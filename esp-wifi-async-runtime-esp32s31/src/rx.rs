@@ -260,6 +260,11 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
     match (frame_control >> 2) & 3 {
         0 => {
             COUNTERS.raw_management.fetch_add(1, Ordering::Relaxed);
+            let rssi = unsafe { rx_control.cast::<i8>().read() };
+            crate::scan::observe_management(
+                unsafe { core::slice::from_raw_parts(frame, length) },
+                rssi,
+            );
         }
         1 => {
             COUNTERS.raw_control.fetch_add(1, Ordering::Relaxed);

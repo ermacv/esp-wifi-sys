@@ -261,6 +261,12 @@ impl PpDispatcher for VendorPpDispatcher {
             }
 
             #[cfg(feature = "strict-no-wait")]
+            if event.kind == crate::scan::SCAN_CHANNEL_EVENT {
+                crate::scan::dispatch_channel();
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
             if event.kind == crate::net80211_timer::NET80211_TIMER_EVENT {
                 crate::net80211_timer::dispatch(event.argument)
                     .map_err(VendorDispatchError::Net80211Timer)?;

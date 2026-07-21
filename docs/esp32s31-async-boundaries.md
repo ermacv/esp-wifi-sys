@@ -196,6 +196,15 @@ Stock auth/assoc/handshake/reconnect/scan/beacon/hostap timeout recovery can
 reach synchronous MAC deinit or channel switching and therefore fails closed
 after the strict proof. WPA2 retry timing is Rust-owned and remains async.
 
+The strict profile has a separate Rust-owned passive scan and does not call
+`esp_wifi_scan_start`. `passive_scan_2_4ghz` enqueues one channel command at a
+time to the radio owner, uses the executor timer-backed channel-operation
+boundary for dwell completion, and awaits one wake edge per channel. Beacon
+and probe-response frames are parsed before the vendor management-frame tail
+and deduplicated by BSSID into a 32-entry BSS table. The caller supplies the
+output slice; no vendor AP list, `Vec`, semaphore, task delay, or polling loop
+is used. Table overflow is reported in the scan summary and never waits.
+
 ## Heap and indirect calls
 
 Setting dynamic RX, dynamic TX, and cache TX counts to zero removes only the

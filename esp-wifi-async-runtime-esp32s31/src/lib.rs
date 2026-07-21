@@ -49,6 +49,7 @@ pub mod radio;
 pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;
+pub mod scan;
 pub mod strict;
 pub mod task;
 pub mod timer;
@@ -147,6 +148,9 @@ pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
 pub use runtime::WifiRuntimeFuture;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{strict_rx_snapshot, RxPumpError, StrictRxSnapshot};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use scan::passive_scan_2_4ghz;
+pub use scan::{StrictScanError, StrictScanRecord, StrictScanSummary, STRICT_SCAN_RECORD_CAPACITY};
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
