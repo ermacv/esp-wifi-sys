@@ -695,27 +695,43 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
         .iter()
         .copied()
         .collect::<BTreeMap<_, _>>();
-    let linked_symbols = symbols
+    let linked_symbol_kinds = symbols
         .lines()
-        .filter_map(|line| line.split_whitespace().last())
-        .map(normalize_symbol)
-        .collect::<BTreeSet<_>>();
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let symbol = normalize_symbol(fields.last()?);
+            let kind = (*fields.get(fields.len().checked_sub(2)?)?).to_owned();
+            Some((symbol, kind))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut violations = BTreeSet::new();
     for (_, wrapper) in DIRECT_HEAP_WRAPPERS {
-        if !linked_symbols.contains(wrapper) {
-            violations.insert(Violation::ElfSymbol {
+        let violation = match linked_symbol_kinds.get(wrapper) {
+            None => Some(Violation::ElfSymbol {
                 category: "missing strict direct-heap wrapper",
                 symbol: wrapper.to_owned(),
-            });
-        }
+            }),
+            Some(kind) if !is_code_symbol_kind(kind) => Some(Violation::ElfSymbol {
+                category: "non-code strict direct-heap wrapper",
+                symbol: wrapper.to_owned(),
+            }),
+            Some(_) => None,
+        };
+        violations.extend(violation);
     }
     for wrapper in REQUIRED_RUNTIME_WRAPPERS {
-        if !linked_symbols.contains(*wrapper) {
-            violations.insert(Violation::ElfSymbol {
+        let violation = match linked_symbol_kinds.get(*wrapper) {
+            None => Some(Violation::ElfSymbol {
                 category: "missing strict runtime wrapper",
                 symbol: (*wrapper).to_owned(),
-            });
-        }
+            }),
+            Some(kind) if !is_code_symbol_kind(kind) => Some(Violation::ElfSymbol {
+                category: "non-code strict runtime wrapper",
+                symbol: (*wrapper).to_owned(),
+            }),
+            Some(_) => None,
+        };
+        violations.extend(violation);
     }
     for line in symbols.lines() {
         let Some(symbol) = line.split_whitespace().last() else {
@@ -726,7 +742,8 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             if *category == "heap"
                 && direct_heap_wrappers
                     .get(symbol.as_str())
-                    .is_some_and(|wrapper| linked_symbols.contains(*wrapper))
+                    .and_then(|wrapper| linked_symbol_kinds.get(*wrapper))
+                    .is_some_and(|kind| is_code_symbol_kind(kind))
             {
                 continue;
             }
@@ -734,13 +751,17 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
         }
         // Do not reject a replaced entry merely because its symbol exists.
         // Strict wrappers deliberately retain `__real_*` delegation for init,
-        // and eight ROM entries alias their public names to the wrapper while
+        // and ROM entries alias their public names to the wrapper while
         // pinning `__real_*` to absolute ROM addresses. Wrapper presence is
         // checked above; runtime reachability is checked from the pinned
         // archive graph. Symbol-table presence alone cannot distinguish an
         // inbound bypass from valid initialization delegation.
     }
     Ok(violations)
+}
+
+fn is_code_symbol_kind(kind: &str) -> bool {
+    matches!(kind, "T" | "t" | "W" | "w")
 }
 
 fn print_report(
@@ -866,8 +887,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        definition_name, direct_relocation_target, indirect_site, is_pinned_bounded_cycle,
-        parse_object,
+        definition_name, direct_relocation_target, indirect_site, is_code_symbol_kind,
+        is_pinned_bounded_cycle, parse_object,
     };
 
     #[test]
@@ -903,6 +924,13 @@ mod tests {
             "different_function",
             "aa: bne a5, s8, 0x94 <.L10>"
         ));
+    }
+
+    #[test]
+    fn absolute_rom_alias_is_not_accepted_as_a_wrapper() {
+        assert!(is_code_symbol_kind("T"));
+        assert!(is_code_symbol_kind("W"));
+        assert!(!is_code_symbol_kind("A"));
     }
 
     #[test]

@@ -10,6 +10,9 @@
 __real_ieee80211_set_tx_pti = 0x2f800cb8;
 ieee80211_set_tx_pti = __wrap_ieee80211_set_tx_pti;
 
+__real_ieee80211_search_node = 0x2f800ca8;
+ieee80211_search_node = __wrap_ieee80211_search_node;
+
 __real_esf_buf_alloc = 0x2f800d1c;
 esf_buf_alloc = __wrap_esf_buf_alloc;
 
