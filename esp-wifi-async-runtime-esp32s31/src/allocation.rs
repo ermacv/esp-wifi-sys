@@ -158,6 +158,7 @@ pub fn allocation_probe() -> &'static AllocationProbe {
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
+        cell::UnsafeCell,
         ffi::c_void,
         mem,
         sync::atomic::{AtomicUsize, Ordering},
@@ -185,8 +186,31 @@ mod target {
     static CALLBACKS_PATCHED: AtomicUsize = AtomicUsize::new(0);
     static RUNTIME_HEAP_FORBIDDEN: AtomicUsize = AtomicUsize::new(0);
 
+    const BLACKLIST_NODE_SIZE: usize = 12;
+    const BLACKLIST_NODE_CAPACITY: usize = 16;
+    const BLACKLIST_NODE_MASK: usize = (1 << BLACKLIST_NODE_CAPACITY) - 1;
+    // Return address immediately after the pinned S31 `_wifi_malloc(12)`
+    // call in `cnx_add_to_blacklist`.
+    const BLACKLIST_ALLOCATION_RETURN_OFFSET: usize = 0x5c;
+
+    #[repr(C, align(4))]
+    struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
+
+    impl BlacklistNode {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; BLACKLIST_NODE_SIZE]))
+        }
+    }
+
+    unsafe impl Sync for BlacklistNode {}
+
+    static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
+        [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
+    static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
+
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
+        fn cnx_add_to_blacklist(bssid: *const u8);
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -275,6 +299,47 @@ mod target {
 
     fn heap_forbidden() -> bool {
         RUNTIME_HEAP_FORBIDDEN.load(Ordering::Acquire) != 0
+    }
+
+    fn claim_blacklist_node(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller =
+            cnx_add_to_blacklist as *const () as usize + BLACKLIST_ALLOCATION_RETURN_OFFSET;
+        if size != BLACKLIST_NODE_SIZE || caller != expected_caller {
+            return None;
+        }
+        let claimed = CLAIMED_BLACKLIST_NODES.load(Ordering::Acquire);
+        let free = !claimed & BLACKLIST_NODE_MASK;
+        if free == 0 {
+            return None;
+        }
+        let index = free.trailing_zeros() as usize;
+        let bit = 1_usize << index;
+        CLAIMED_BLACKLIST_NODES
+            .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let node = BLACKLIST_NODES[index].0.get();
+        unsafe { node.write([0; BLACKLIST_NODE_SIZE]) };
+        Some(node.cast())
+    }
+
+    fn blacklist_node_index(node: *mut c_void) -> Option<usize> {
+        let base = core::ptr::addr_of!(BLACKLIST_NODES) as usize;
+        let address = node as usize;
+        let stride = mem::size_of::<BlacklistNode>();
+        let offset = address.checked_sub(base)?;
+        if offset % stride != 0 {
+            return None;
+        }
+        let index = offset / stride;
+        (index < BLACKLIST_NODE_CAPACITY).then_some(index)
+    }
+
+    fn release_blacklist_node(node: *mut c_void) -> bool {
+        let Some(index) = blacklist_node_index(node) else {
+            return false;
+        };
+        let bit = 1_usize << index;
+        CLAIMED_BLACKLIST_NODES.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
     #[inline(always)]
@@ -367,6 +432,9 @@ mod target {
     /// Final-link guard for direct C `free` references.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_free(ptr: *mut c_void) {
+        if release_blacklist_node(ptr) {
+            return;
+        }
         PROBE.record_free();
         if !heap_forbidden() {
             __real_free(ptr);
@@ -401,6 +469,11 @@ mod target {
         caller: usize,
     ) -> *mut c_void {
         if heap_forbidden() {
+            if source == AllocationSource::OsiWifiMalloc {
+                if let Some(node) = claim_blacklist_node(size, caller) {
+                    return node;
+                }
+            }
             PROBE.record_request_at(size, true, false, source, caller);
             return core::ptr::null_mut();
         }
@@ -448,6 +521,9 @@ mod target {
         call_malloc(&MALLOC, size, AllocationSource::OsiMalloc, caller_address())
     }
     unsafe extern "C" fn free(ptr: *mut c_void) {
+        if release_blacklist_node(ptr) {
+            return;
+        }
         PROBE.record_free();
         if heap_forbidden() {
             return;
@@ -523,6 +599,9 @@ mod target {
             caller_address(),
         )
     }
+
+    const _: () = assert!(mem::size_of::<BlacklistNode>() == BLACKLIST_NODE_SIZE);
+    const _: () = assert!(BLACKLIST_NODE_CAPACITY < usize::BITS as usize);
 }
 
 #[cfg(target_arch = "riscv32")]
