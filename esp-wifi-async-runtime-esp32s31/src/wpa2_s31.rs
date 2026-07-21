@@ -218,6 +218,7 @@ pub enum S31Wpa2IoError {
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
     InternalOwnershipMismatch,
+    DataTxCreditMismatch,
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
@@ -804,7 +805,7 @@ mod target {
                 }
                 _ => {}
             }
-            self.submit_frame(interface, frame.as_bytes())
+            self.submit_frame(interface, frame.as_bytes(), Some(frame))
         }
 
         fn has_pairwise_key(&self, interface: Wpa2Interface, peer: &[u8; 6]) -> bool {
@@ -879,13 +880,14 @@ mod target {
             &mut self,
             frame: &crate::wpa2_frames::Wpa2EthernetFrame<N>,
         ) -> Result<(), S31Wpa2IoError> {
-            self.submit_frame(frame.interface(), frame.as_bytes())
+            self.submit_frame(frame.interface(), frame.as_bytes(), None)
         }
 
         fn submit_frame(
             &mut self,
             frame_interface: Wpa2Interface,
             frame: &[u8],
+            data_owner: Option<&OwnedWifiDataTxFrame>,
         ) -> Result<(), S31Wpa2IoError> {
             if self.tx_poisoned {
                 return Err(S31Wpa2IoError::TxBackendPoisoned);
@@ -985,6 +987,12 @@ mod target {
                 // require Wi-Fi deinit instead of retrying or duplicating TX.
                 self.tx_poisoned = true;
                 return Err(S31Wpa2IoError::TxPostRejected(result));
+            }
+            if let Some(owner) = data_owner {
+                if owner.commit_hardware_credit(buffer).is_err() {
+                    self.tx_poisoned = true;
+                    return Err(S31Wpa2IoError::DataTxCreditMismatch);
+                }
             }
             Ok(())
         }

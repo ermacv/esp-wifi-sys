@@ -697,6 +697,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     // initialized vendor static free lists; dynamic/cache branches remain
     // unreachable.
     esf_buf_recycle(frame.cast());
+    crate::data_tx::complete_hardware_wifi_data_tx(frame);
 
     state.frame = ptr::null_mut();
     state.phase = PHASE_LOAD;
