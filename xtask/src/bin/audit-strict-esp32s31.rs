@@ -183,6 +183,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_set_tx_pti",
     "__wrap_ieee80211_search_node",
     "__wrap_cnx_node_search",
+    "__wrap_ets_delay_us",
     "__esp_hostap_sta_join",
     "__esp_hostap_sta_join_end",
     "__esp_wifi_async_wpa2_ap_join",

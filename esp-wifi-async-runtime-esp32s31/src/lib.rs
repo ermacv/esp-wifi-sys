@@ -26,6 +26,8 @@ pub mod data_rx;
 pub mod data_tx;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod debug;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod delay;
 pub mod diagnostics;
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-eap"))]
 mod eap;
@@ -119,6 +121,8 @@ pub use data_tx::{
     OwnedWifiDataTxFrame, WifiDataTxEnqueueError, WIFI_DATA_TX_CAPACITY,
     WIFI_DATA_TX_FRAME_CAPACITY,
 };
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use delay::{direct_delay_snapshot, DirectDelaySnapshot};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use esf::rejected_esf_operations;
 pub use event::{PpAction, PpEvent};
