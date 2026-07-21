@@ -49,6 +49,7 @@ unsafe extern "C" {
     fn __real_ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
     fn cnx_auth_timeout_process();
     fn cnx_assoc_timeout_process();
+    fn cnx_connect_next_ap_timeout_process();
 }
 
 pub(crate) fn timer_process_link_wrapper_active() -> bool {
@@ -59,7 +60,7 @@ pub(crate) fn timer_process_link_wrapper_active() -> bool {
 }
 
 const fn supported_strict_timer(id: u8) -> bool {
-    matches!(id, 0 | 8 | 11 | 13)
+    matches!(id, 0 | 8 | 11 | 13 | 44)
 }
 
 fn claim_slot() -> Option<usize> {
@@ -184,6 +185,10 @@ pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211Timer
         }
         13 => {
             cnx_assoc_timeout_process();
+            Ok(())
+        }
+        44 => {
+            cnx_connect_next_ap_timeout_process();
             Ok(())
         }
         _ => Err(Net80211TimerError::UnsupportedId(id)),
