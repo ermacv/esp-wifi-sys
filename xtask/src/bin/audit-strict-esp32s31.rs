@@ -183,6 +183,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_set_tx_pti",
     "__wrap_ieee80211_search_node",
     "__wrap_cnx_node_search",
+    "__wrap_ets_delay_us",
     "__esp_hostap_sta_join",
     "__esp_hostap_sta_join_end",
     "__esp_wifi_async_wpa2_ap_join",
@@ -209,6 +210,8 @@ const DIRECT_HEAP_WRAPPERS: [(&str, &str); 4] = [
     ("realloc", "__wrap_realloc"),
     ("free", "__wrap_free"),
 ];
+
+const DIRECT_FORBIDDEN_WRAPPERS: &[(&str, &str)] = &[("ets_delay_us", "__wrap_ets_delay_us")];
 
 const FORBIDDEN: &[(&str, &str)] = &[
     ("malloc", "heap"),
@@ -695,6 +698,10 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
         .iter()
         .copied()
         .collect::<BTreeMap<_, _>>();
+    let direct_forbidden_wrappers = DIRECT_FORBIDDEN_WRAPPERS
+        .iter()
+        .copied()
+        .collect::<BTreeMap<_, _>>();
     let linked_symbol_kinds = symbols
         .lines()
         .filter_map(|line| {
@@ -739,11 +746,14 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
         };
         let symbol = normalize_symbol(symbol);
         if let Some(category) = forbidden.get(symbol.as_str()) {
-            if *category == "heap"
-                && direct_heap_wrappers
-                    .get(symbol.as_str())
-                    .and_then(|wrapper| linked_symbol_kinds.get(*wrapper))
-                    .is_some_and(|kind| is_code_symbol_kind(kind))
+            let wrapper = if *category == "heap" {
+                direct_heap_wrappers.get(symbol.as_str())
+            } else {
+                direct_forbidden_wrappers.get(symbol.as_str())
+            };
+            if wrapper
+                .and_then(|wrapper| linked_symbol_kinds.get(*wrapper))
+                .is_some_and(|kind| is_code_symbol_kind(kind))
             {
                 continue;
             }

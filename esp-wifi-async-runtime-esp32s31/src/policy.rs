@@ -68,6 +68,7 @@ pub enum StrictRuntimeError {
     AllocatorCallbacksNotPatched,
     CriticalCallbacksNotPatched,
     DirectHeapLinkWrappersMissing,
+    DirectDelayLinkWrapperMissing,
     TxLinkWrappersMissing,
     RxLinkWrappersMissing,
     DebugLinkWrappersMissing,
@@ -355,6 +356,10 @@ pub unsafe fn prepare_strict_runtime(
     }
     if !crate::allocation::direct_heap_link_wrappers_active() {
         return Err(StrictRuntimeError::DirectHeapLinkWrappersMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::delay::runtime_delay_link_wrapper_active() {
+        return Err(StrictRuntimeError::DirectDelayLinkWrapperMissing);
     }
     #[cfg(feature = "strict-no-wait")]
     if !crate::lmac::runtime_tx_link_wrappers_active() {

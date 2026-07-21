@@ -26,6 +26,8 @@ pub mod data_rx;
 pub mod data_tx;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod debug;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod delay;
 pub mod diagnostics;
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-eap"))]
 mod eap;
