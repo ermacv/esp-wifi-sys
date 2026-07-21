@@ -29,7 +29,11 @@ use crate::{
 pub const PP_QUEUE_CAPACITY: usize = 256;
 pub const DEFAULT_EVENT_BUDGET: usize = 16;
 const SEMAPHORE_CAPACITY: usize = 32;
-pub const TIMER_CAPACITY: usize = 64;
+// The initialized S31 blob retains sixty-four timer identities before the
+// cold handoff. Strict channel switching adopts two pre-handoff `g_chm`
+// timers, and the remaining static reserve prevents those identities from
+// competing with executor continuations. This is BSS-only storage.
+pub const TIMER_CAPACITY: usize = 80;
 const MUTEX_CAPACITY: usize = 64;
 const EVENT_GROUP_CAPACITY: usize = 32;
 const NO_SEMAPHORE: usize = usize::MAX;
