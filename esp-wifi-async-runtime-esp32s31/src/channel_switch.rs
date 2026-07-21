@@ -23,16 +23,16 @@ unsafe extern "C" {
 
     fn chm_start_op(
         channel: *const u8,
-        first_dwell_us: u32,
-        final_dwell_us: u32,
+        first_dwell_ms: u32,
+        final_dwell_ms: u32,
         start: Option<ChannelCallback>,
         end: Option<ChannelCallback>,
         context: *mut c_void,
     ) -> i32;
     fn __real_chm_start_op(
         channel: *const u8,
-        first_dwell_us: u32,
-        final_dwell_us: u32,
+        first_dwell_ms: u32,
+        final_dwell_ms: u32,
         start: Option<ChannelCallback>,
         end: Option<ChannelCallback>,
         context: *mut c_void,
@@ -313,7 +313,12 @@ unsafe fn finish_operation(chm: *mut u8) {
         return;
     }
     if first != 0 && first < final_dwell {
-        if !schedule_internal_timer(first_timer(), first_dwell_elapsed, ptr::null_mut(), first) {
+        if !schedule_internal_timer(
+            first_timer(),
+            first_dwell_elapsed,
+            ptr::null_mut(),
+            first.saturating_mul(1_000),
+        ) {
             fail(ChannelSwitchError::TimerUnavailable, 0);
             return;
         }
@@ -322,7 +327,7 @@ unsafe fn finish_operation(chm: *mut u8) {
         final_timer(),
         final_dwell_elapsed,
         ptr::null_mut(),
-        final_dwell,
+        final_dwell.saturating_mul(1_000),
     ) {
         fail(ChannelSwitchError::TimerUnavailable, 0);
     }
@@ -343,14 +348,14 @@ unsafe extern "C" fn final_dwell_elapsed(_argument: *mut c_void) {
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_chm_start_op(
     channel: *const u8,
-    first_dwell_us: u32,
-    final_dwell_us: u32,
+    first_dwell_ms: u32,
+    final_dwell_ms: u32,
     start: Option<ChannelCallback>,
     end: Option<ChannelCallback>,
     context: *mut c_void,
 ) -> i32 {
     if !crate::critical::strict_wifi_hart_armed() {
-        return __real_chm_start_op(channel, first_dwell_us, final_dwell_us, start, end, context);
+        return __real_chm_start_op(channel, first_dwell_ms, final_dwell_ms, start, end, context);
     }
     if channel.is_null() || !crate::critical::on_strict_wifi_hart() {
         return 3;
@@ -363,8 +368,8 @@ pub unsafe extern "C" fn __wrap_chm_start_op(
     let selected = [channel.read(), channel.add(1).read()];
     chm.add(4).write(selected[0]);
     chm.add(5).write(selected[1]);
-    chm.add(8).cast::<u32>().write_unaligned(first_dwell_us);
-    chm.add(12).cast::<u32>().write_unaligned(final_dwell_us);
+    chm.add(8).cast::<u32>().write_unaligned(first_dwell_ms);
+    chm.add(12).cast::<u32>().write_unaligned(final_dwell_ms);
     chm.add(16).cast::<*mut c_void>().write_unaligned(context);
     chm.add(20)
         .cast::<Option<ChannelCallback>>()
