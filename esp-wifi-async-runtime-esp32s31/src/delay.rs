@@ -110,8 +110,9 @@ pub(crate) fn runtime_delay_link_wrapper_active() -> bool {
 /// Reject a ROM busy-delay after strict takeover.
 ///
 /// Initialization still delegates to the pinned ROM entry. Once the strict
-/// runtime owns Wi-Fi, an attempted delay is recorded and returns immediately;
-/// no synchronous wait is allowed to enter the async execution phase.
+/// runtime owns Wi-Fi, an attempted delay is recorded and raises a breakpoint
+/// exception; no synchronous wait or continuation with unsettled hardware is
+/// allowed to enter the async execution phase.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_ets_delay_us(microseconds: u32) {
     let caller: usize;
@@ -126,7 +127,7 @@ pub unsafe extern "C" fn __wrap_ets_delay_us(microseconds: u32) {
         CALLS.fetch_add(1, Ordering::Release);
         record_site(caller, microseconds);
         blocking_probe().record(BlockingCall::EtsDelayUs, current_event(), caller);
-        return;
+        core::arch::asm!("ebreak", options(noreturn));
     }
     __real_ets_delay_us(microseconds);
 }
