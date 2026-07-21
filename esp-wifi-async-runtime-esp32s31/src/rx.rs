@@ -15,6 +15,8 @@ const RX_CALLBACK_OFFSET: usize = 0x3f8;
 const RX_AUX_CALLBACK_1_OFFSET: usize = 0x3fc;
 const RX_AUX_CALLBACK_2_OFFSET: usize = 0x400;
 const LOCAL_ADDRESS_OFFSET: usize = 0x21a;
+const RX_CONTROL_SIGNAL_LENGTH_OFFSET: usize = 45;
+const RX_CONTROL_SIGNAL_LENGTH_MASK: u16 = 0x3fff;
 
 type RxCallback = unsafe extern "C" fn(*mut u8, i32, u32);
 
@@ -172,7 +174,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
     account_raw_frame(packet, rx_control);
 
     let mut raw_frame = unsafe { rx_control.add(64) };
-    let mut raw_length = unsafe { rx_control.add(20).read() as usize };
+    let mut raw_length = unsafe { rx_signal_length(rx_control) };
     if unsafe { packet.add(36).cast::<u16>().read() } & 0x2000 != 0 {
         if raw_length < 8 {
             COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
@@ -195,7 +197,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
     }
 
     let frame = unsafe { payload_owner.add(4).cast::<*mut u8>().read() };
-    let length = unsafe { rx_control.add(20).read() as usize };
+    let length = unsafe { rx_signal_length(rx_control) };
     if frame.is_null() || length < 2 {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
         unsafe { ppRecycleRxPkt(packet) };
@@ -241,7 +243,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
             return;
         };
         let rssi = unsafe { rx_control.cast::<i8>().read() } as i32;
-        let signal_length = unsafe { rx_control.add(20).read() } as u32;
+        let signal_length = unsafe { rx_signal_length(rx_control) } as u32;
         unsafe { callback(packet, rssi, signal_length) };
         return;
     }
@@ -261,7 +263,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
 }
 
 fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
-    let mut length = unsafe { rx_control.add(20).read() as usize };
+    let mut length = unsafe { rx_signal_length(rx_control) };
     let mut frame = unsafe { rx_control.add(64) };
     if unsafe { packet.add(36).cast::<u16>().read() } & 0x2000 != 0 {
         if length < 8 {
@@ -312,6 +314,16 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
         }
         _ => {}
     }
+}
+
+unsafe fn rx_signal_length(rx_control: *const u8) -> usize {
+    usize::from(
+        rx_control
+            .add(RX_CONTROL_SIGNAL_LENGTH_OFFSET)
+            .cast::<u16>()
+            .read_unaligned()
+            & RX_CONTROL_SIGNAL_LENGTH_MASK,
+    )
 }
 
 fn is_fragmented(frame: &[u8]) -> bool {

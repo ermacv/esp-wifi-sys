@@ -162,6 +162,7 @@ pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
     }
     let Some(header) = frame.get(llc_end..llc_end + 4) else {
         REJECTED.fetch_add(1, Ordering::Relaxed);
+        REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
         return true;
     };
     let body_len = usize::from(u16::from_be_bytes([header[2], header[3]]));
@@ -179,6 +180,7 @@ pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
     }
     let Some(bytes) = frame.get(llc_end..llc_end + eapol_len) else {
         REJECTED.fetch_add(1, Ordering::Relaxed);
+        REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
         return true;
     };
     let mut peer = [0; 6];
