@@ -47,6 +47,8 @@ static REJECTED_TIMER_EVENTS: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "C" {
     fn ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
     fn __real_ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
+    fn cnx_auth_timeout_process();
+    fn cnx_assoc_timeout_process();
 }
 
 pub(crate) fn timer_process_link_wrapper_active() -> bool {
@@ -57,7 +59,7 @@ pub(crate) fn timer_process_link_wrapper_active() -> bool {
 }
 
 const fn supported_strict_timer(id: u8) -> bool {
-    id == 0 || id == 8
+    matches!(id, 0 | 8 | 11 | 13)
 }
 
 fn claim_slot() -> Option<usize> {
@@ -173,6 +175,17 @@ pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211Timer
         // callback and accepts this bridge exactly once.
         8 => crate::channel_switch::complete_legacy_scan_dwell(original_argument as usize)
             .map_err(Net80211TimerError::ChannelSwitch),
+        // Authentication and association retries are ordinary executor timer
+        // continuations. Call their finite state-machine leaves directly,
+        // bypassing the heap-owning timer envelope in the vendor producer.
+        11 => {
+            cnx_auth_timeout_process();
+            Ok(())
+        }
+        13 => {
+            cnx_assoc_timeout_process();
+            Ok(())
+        }
         _ => Err(Net80211TimerError::UnsupportedId(id)),
     }
 }
