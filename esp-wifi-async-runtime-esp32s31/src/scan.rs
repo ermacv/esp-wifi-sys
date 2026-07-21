@@ -15,6 +15,9 @@ pub const STRICT_SCAN_RECORD_CAPACITY: usize = 32;
 pub const STRICT_SCAN_RSN_IE_CAPACITY: usize = 64;
 pub const STRICT_SCAN_RSNXE_CAPACITY: usize = 16;
 pub const STRICT_SCAN_EXTENDED_RATES_CAPACITY: usize = 16;
+pub const STRICT_SCAN_HT_CAPABILITY_IE_LEN: usize = 28;
+pub const STRICT_SCAN_HT_OPERATION_IE_LEN: usize = 24;
+pub const STRICT_SCAN_WMM_IE_CAPACITY: usize = 26;
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 const SESSION_IDLE: u8 = 0;
@@ -47,6 +50,12 @@ pub struct StrictScanRecord {
     pub supported_rates_len: u8,
     pub extended_supported_rates: [u8; STRICT_SCAN_EXTENDED_RATES_CAPACITY],
     pub extended_supported_rates_len: u8,
+    pub ht_capability_ie: [u8; STRICT_SCAN_HT_CAPABILITY_IE_LEN],
+    pub ht_capability_ie_present: bool,
+    pub ht_operation_ie: [u8; STRICT_SCAN_HT_OPERATION_IE_LEN],
+    pub ht_operation_ie_present: bool,
+    pub wmm_ie: [u8; STRICT_SCAN_WMM_IE_CAPACITY],
+    pub wmm_ie_len: u8,
     pub rsn_ie: [u8; STRICT_SCAN_RSN_IE_CAPACITY],
     pub rsn_ie_len: u8,
     pub rsnxe: [u8; STRICT_SCAN_RSNXE_CAPACITY],
@@ -70,6 +79,12 @@ impl StrictScanRecord {
         supported_rates_len: 0,
         extended_supported_rates: [0; STRICT_SCAN_EXTENDED_RATES_CAPACITY],
         extended_supported_rates_len: 0,
+        ht_capability_ie: [0; STRICT_SCAN_HT_CAPABILITY_IE_LEN],
+        ht_capability_ie_present: false,
+        ht_operation_ie: [0; STRICT_SCAN_HT_OPERATION_IE_LEN],
+        ht_operation_ie_present: false,
+        wmm_ie: [0; STRICT_SCAN_WMM_IE_CAPACITY],
+        wmm_ie_len: 0,
         rsn_ie: [0; STRICT_SCAN_RSN_IE_CAPACITY],
         rsn_ie_len: 0,
         rsnxe: [0; STRICT_SCAN_RSNXE_CAPACITY],
@@ -86,6 +101,23 @@ impl StrictScanRecord {
 
     pub fn extended_supported_rates_bytes(&self) -> &[u8] {
         &self.extended_supported_rates[..usize::from(self.extended_supported_rates_len)]
+    }
+
+    /// Exact 802.11 HT Capabilities element, including id and length.
+    pub fn ht_capability_ie_bytes(&self) -> Option<&[u8; STRICT_SCAN_HT_CAPABILITY_IE_LEN]> {
+        self.ht_capability_ie_present
+            .then_some(&self.ht_capability_ie)
+    }
+
+    /// Exact 802.11 HT Operation element, including id and length.
+    pub fn ht_operation_ie_bytes(&self) -> Option<&[u8; STRICT_SCAN_HT_OPERATION_IE_LEN]> {
+        self.ht_operation_ie_present
+            .then_some(&self.ht_operation_ie)
+    }
+
+    /// Exact WMM information/parameter element, including id and length.
+    pub fn wmm_ie_bytes(&self) -> &[u8] {
+        &self.wmm_ie[..usize::from(self.wmm_ie_len)]
     }
 
     /// Exact RSN element, including its element id and length byte.
@@ -475,6 +507,18 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
                 record.extended_supported_rates_len = copied as u8;
                 record.information_elements_truncated |= copied != length;
             }
+            45 if length + 2 == STRICT_SCAN_HT_CAPABILITY_IE_LEN => {
+                record
+                    .ht_capability_ie
+                    .copy_from_slice(&frame[offset - 2..end]);
+                record.ht_capability_ie_present = true;
+            }
+            61 if length + 2 == STRICT_SCAN_HT_OPERATION_IE_LEN => {
+                record
+                    .ht_operation_ie
+                    .copy_from_slice(&frame[offset - 2..end]);
+                record.ht_operation_ie_present = true;
+            }
             244 => {
                 let total = length + 2;
                 if total <= record.rsnxe.len() {
@@ -486,6 +530,15 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
             }
             221 if length >= 4 && value[..4] == [0x00, 0x50, 0xf2, 0x01] => {
                 record.legacy_wpa = true;
+            }
+            221 if length >= 6 && value[..4] == [0x00, 0x50, 0xf2, 0x02] => {
+                let total = length + 2;
+                if total <= record.wmm_ie.len() {
+                    record.wmm_ie[..total].copy_from_slice(&frame[offset - 2..end]);
+                    record.wmm_ie_len = total as u8;
+                } else {
+                    record.information_elements_truncated = true;
+                }
             }
             _ => {}
         }
@@ -528,6 +581,39 @@ mod tests {
         frame[37] = 8;
         let record = parse_management(&frame, 1, -1).unwrap();
         assert!(record.information_elements_truncated);
+    }
+
+    #[test]
+    fn owns_complete_ht_capability_and_operation_elements() {
+        let mut frame = [0_u8; 88];
+        frame[0] = 0x80;
+        frame[16..22].copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+        frame[36] = 45;
+        frame[37] = 26;
+        frame[38..64].fill(0xa5);
+        frame[64] = 61;
+        frame[65] = 22;
+        frame[66..88].fill(0x5a);
+
+        let record = parse_management(&frame, 6, -20).unwrap();
+        assert_eq!(record.ht_capability_ie_bytes().unwrap()[..2], [45, 26]);
+        assert_eq!(record.ht_capability_ie_bytes().unwrap()[2..], [0xa5; 26]);
+        assert_eq!(record.ht_operation_ie_bytes().unwrap()[..2], [61, 22]);
+        assert_eq!(record.ht_operation_ie_bytes().unwrap()[2..], [0x5a; 22]);
+    }
+
+    #[test]
+    fn owns_wmm_information_element_separately_from_legacy_wpa() {
+        let mut frame = [0_u8; 45];
+        frame[0] = 0x80;
+        frame[36..45].copy_from_slice(&[221, 7, 0x00, 0x50, 0xf2, 0x02, 0, 1, 0]);
+
+        let record = parse_management(&frame, 6, -20).unwrap();
+        assert_eq!(
+            record.wmm_ie_bytes(),
+            &[221, 7, 0x00, 0x50, 0xf2, 0x02, 0, 1, 0]
+        );
+        assert!(!record.legacy_wpa);
     }
 
     #[test]
