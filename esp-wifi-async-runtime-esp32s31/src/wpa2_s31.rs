@@ -202,6 +202,7 @@ pub enum S31Wpa2IoError {
     InvalidHardwareIndex(u8),
     ForeignSoftwareKeyPresent,
     MissingStaInterfaceState,
+    UnexpectedStaPairwiseHardwareIndex(u8),
     AuthorizationWithoutPairwiseKey,
     StaPeerUnauthorized,
     ApPeerUnauthorized,
@@ -327,8 +328,12 @@ mod target {
         }
     }
 
+    unsafe fn sta_interface_state() -> *mut u8 {
+        ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read()
+    }
+
     unsafe fn sta_interface_node() -> *mut u8 {
-        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let interface = sta_interface_state();
         if interface.is_null() {
             return ptr::null_mut();
         }
@@ -728,7 +733,17 @@ mod target {
             let interface = install.interface();
             let peer = *install.peer();
             let kind = install.kind();
-            let (hardware_index, key_index, spp, sta_gtk_node) = match kind {
+            let (sta_interface, sta_node) = if interface == Wpa2Interface::Station {
+                let sta_interface = unsafe { sta_interface_state() };
+                let sta_node = unsafe { sta_interface_node() };
+                if sta_interface.is_null() || sta_node.is_null() {
+                    return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
+                }
+                (Some(sta_interface), Some(sta_node))
+            } else {
+                (None, None)
+            };
+            let (hardware_index, key_index, spp) = match kind {
                 Wpa2KeyKind::Pairwise => {
                     let hardware_index = unsafe {
                         match interface {
@@ -739,28 +754,23 @@ mod target {
                     if interface == Wpa2Interface::AccessPoint && hardware_index == 0 {
                         return Err((S31Wpa2IoError::MissingApPeerHardwareIndex, install));
                     }
+                    if let Some(sta_node) = sta_node {
+                        let actual = unsafe { sta_node.add(0x134).read() };
+                        if actual != hardware_index {
+                            return Err((
+                                S31Wpa2IoError::UnexpectedStaPairwiseHardwareIndex(actual),
+                                install,
+                            ));
+                        }
+                    }
                     let spp = unsafe { peer_spp(interface, peer.as_ptr()) };
-                    (
-                        hardware_index,
-                        PAIRWISE_KEY_INDEX,
-                        u32::from(spp != 0),
-                        None,
-                    )
+                    (hardware_index, PAIRWISE_KEY_INDEX, u32::from(spp != 0))
                 }
                 Wpa2KeyKind::Group { key_id, .. } => {
                     let Some(hardware_index) = group_hardware_index(interface, key_id) else {
                         return Err((S31Wpa2IoError::InvalidGroupKeyId(key_id), install));
                     };
-                    let sta_gtk_node = if interface == Wpa2Interface::Station {
-                        let node = unsafe { sta_interface_node() };
-                        if node.is_null() {
-                            return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
-                        }
-                        Some(node)
-                    } else {
-                        None
-                    };
-                    (hardware_index, u32::from(key_id), 0, sta_gtk_node)
+                    (hardware_index, u32::from(key_id), 0)
                 }
             };
             if hardware_index > MAX_VENDOR_KEY_INDEX {
@@ -826,15 +836,29 @@ mod target {
                 // Exact non-freeing branch of the pinned key-table setter.
                 // The foreign-pointer case was rejected before any mutation.
                 software_key_slot.write(object as *mut _ as *mut c_void);
-                if let Wpa2KeyKind::Group { key_id, .. } = kind {
-                    if let Some(station) = sta_gtk_node {
-                        // ppInstallKey proves this exact metadata update for
-                        // hardware indices zero and one. It is a finite pair
-                        // of byte stores with no callback or lock.
-                        station.add(0x135).write(hardware_index);
-                        station
-                            .add(0x137 + usize::from(key_id))
-                            .write(hardware_index);
+                match kind {
+                    Wpa2KeyKind::Pairwise => {
+                        if let (Some(station), Some(node)) = (sta_interface, sta_node) {
+                            // Finite state tail of the pinned PTK-ready and STA
+                            // privacy callbacks. Their event/log side effects
+                            // are deliberately not part of strict mode.
+                            let flags = node.add(0x0c).cast::<u32>();
+                            flags.write((flags.read() & 0xfdff_ffff) | 1);
+                            node.add(0x24).write(0);
+                            let privacy = station.add(0xa4).cast::<u32>();
+                            privacy.write(privacy.read() | 0x10);
+                        }
+                    }
+                    Wpa2KeyKind::Group { key_id, .. } => {
+                        if let Some(station) = sta_node {
+                            // ppInstallKey proves this exact metadata update for
+                            // hardware indices zero and one. It is a finite pair
+                            // of byte stores with no callback or lock.
+                            station.add(0x135).write(hardware_index);
+                            station
+                                .add(0x137 + usize::from(key_id))
+                                .write(hardware_index);
+                        }
                     }
                 }
             }
