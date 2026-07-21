@@ -1222,7 +1222,12 @@ mod target {
         let status = u16::from_le_bytes([frame[26], frame[27]]);
         let association_id = u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff;
         let ht_capability = association_response_ie(frame, 45);
-        let wmm = association_response_has_wmm(frame);
+        // HT stations use QoS data service. The bounded S31 RX prefix may end
+        // before the response's trailing WMM parameter element, but an AP
+        // returning an HT Capability after accepting our explicit WMM request
+        // has necessarily negotiated the QoS data path. We still recognize
+        // the element directly whenever it is present.
+        let wmm = association_response_has_wmm(frame) || ht_capability.is_some();
         ASSOC_LAST_CAPABILITY.store(u32::from(capability), Ordering::Relaxed);
         ASSOC_LAST_STATUS.store(u32::from(status), Ordering::Relaxed);
         ASSOC_LAST_ID.store(u32::from(association_id), Ordering::Relaxed);
