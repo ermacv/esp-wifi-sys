@@ -198,6 +198,7 @@ mod target {
     // Return addresses after the two pinned S31 `_wifi_zalloc(24)` calls in
     // `esp_wifi_ipc_internal`.
     const IPC_ENVELOPE_RETURN_OFFSETS: [usize; 2] = [0x34, 0xce];
+    const SET_APPIE_ENVELOPE_RETURN_OFFSET: usize = 0x2a;
     const WPA_IE_CAPACITY: usize = 256;
     const WPA_IE_SLOT_CAPACITY: usize = 8;
     const WPA_IE_SLOT_MASK: usize = (1 << WPA_IE_SLOT_CAPACITY) - 1;
@@ -250,6 +251,12 @@ mod target {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
         fn cnx_add_to_blacklist(bssid: *const u8);
         fn esp_wifi_ipc_internal(request: *const c_void, copy_request: bool) -> i32;
+        fn esp_wifi_set_appie_internal(
+            interface: u32,
+            appie: *const u8,
+            length: usize,
+            appie_type: u32,
+        ) -> i32;
         fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
     }
 
@@ -384,11 +391,12 @@ mod target {
 
     fn claim_ipc_envelope(size: usize, caller: usize) -> Option<*mut c_void> {
         let function = esp_wifi_ipc_internal as *const () as usize;
-        if size != IPC_ENVELOPE_SIZE
-            || !IPC_ENVELOPE_RETURN_OFFSETS
-                .iter()
-                .any(|offset| caller == function + offset)
-        {
+        let ipc_caller = IPC_ENVELOPE_RETURN_OFFSETS
+            .iter()
+            .any(|offset| caller == function + offset);
+        let set_appie_caller = caller
+            == esp_wifi_set_appie_internal as *const () as usize + SET_APPIE_ENVELOPE_RETURN_OFFSET;
+        if size != IPC_ENVELOPE_SIZE || (!ipc_caller && !set_appie_caller) {
             return None;
         }
         let claimed = CLAIMED_IPC_ENVELOPES.load(Ordering::Acquire);
