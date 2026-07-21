@@ -198,6 +198,10 @@ mod target {
     // Return addresses after the two pinned S31 `_wifi_zalloc(24)` calls in
     // `esp_wifi_ipc_internal`.
     const IPC_ENVELOPE_RETURN_OFFSETS: [usize; 2] = [0x34, 0xce];
+    const WPA_IE_CAPACITY: usize = 256;
+    const WPA_IE_SLOT_CAPACITY: usize = 8;
+    const WPA_IE_SLOT_MASK: usize = (1 << WPA_IE_SLOT_CAPACITY) - 1;
+    const OS_MEMDUP_MALLOC_RETURN_OFFSET: usize = 0x10;
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -221,17 +225,32 @@ mod target {
 
     unsafe impl Sync for IpcEnvelope {}
 
+    #[repr(C, align(4))]
+    struct WpaIeSlot(UnsafeCell<[u8; WPA_IE_CAPACITY]>);
+
+    impl WpaIeSlot {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; WPA_IE_CAPACITY]))
+        }
+    }
+
+    unsafe impl Sync for WpaIeSlot {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
     static IPC_ENVELOPES: [IpcEnvelope; IPC_ENVELOPE_CAPACITY] =
         [const { IpcEnvelope::new() }; IPC_ENVELOPE_CAPACITY];
     static CLAIMED_IPC_ENVELOPES: AtomicUsize = AtomicUsize::new(0);
+    static WPA_IE_SLOTS: [WpaIeSlot; WPA_IE_SLOT_CAPACITY] =
+        [const { WpaIeSlot::new() }; WPA_IE_SLOT_CAPACITY];
+    static CLAIMED_WPA_IE_SLOTS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
         fn cnx_add_to_blacklist(bssid: *const u8);
         fn esp_wifi_ipc_internal(request: *const c_void, copy_request: bool) -> i32;
+        fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -407,8 +426,48 @@ mod target {
         CLAIMED_IPC_ENVELOPES.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
+    fn claim_wpa_ie_slot(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller = os_memdup as *const () as usize + OS_MEMDUP_MALLOC_RETURN_OFFSET;
+        if size == 0 || size > WPA_IE_CAPACITY || caller != expected_caller {
+            return None;
+        }
+        let claimed = CLAIMED_WPA_IE_SLOTS.load(Ordering::Acquire);
+        let free = !claimed & WPA_IE_SLOT_MASK;
+        if free == 0 {
+            return None;
+        }
+        let index = free.trailing_zeros() as usize;
+        let bit = 1_usize << index;
+        CLAIMED_WPA_IE_SLOTS
+            .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let slot = WPA_IE_SLOTS[index].0.get();
+        unsafe { slot.write([0; WPA_IE_CAPACITY]) };
+        Some(slot.cast())
+    }
+
+    fn wpa_ie_slot_index(slot: *mut c_void) -> Option<usize> {
+        let base = core::ptr::addr_of!(WPA_IE_SLOTS) as usize;
+        let address = slot as usize;
+        let stride = mem::size_of::<WpaIeSlot>();
+        let offset = address.checked_sub(base)?;
+        if offset % stride != 0 {
+            return None;
+        }
+        let index = offset / stride;
+        (index < WPA_IE_SLOT_CAPACITY).then_some(index)
+    }
+
+    fn release_wpa_ie_slot(slot: *mut c_void) -> bool {
+        let Some(index) = wpa_ie_slot_index(slot) else {
+            return false;
+        };
+        let bit = 1_usize << index;
+        CLAIMED_WPA_IE_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
-        release_blacklist_node(ptr) || release_ipc_envelope(ptr)
+        release_blacklist_node(ptr) || release_ipc_envelope(ptr) || release_wpa_ie_slot(ptr)
     }
 
     #[inline(always)]
@@ -447,13 +506,11 @@ mod target {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_malloc(size: usize) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request_at(
-                size,
-                true,
-                false,
-                AllocationSource::DirectMalloc,
-                caller_address(),
-            );
+            let caller = caller_address();
+            if let Some(slot) = claim_wpa_ie_slot(size, caller) {
+                return slot;
+            }
+            PROBE.record_request_at(size, true, false, AllocationSource::DirectMalloc, caller);
             return core::ptr::null_mut();
         }
         let result = __real_malloc(size);
@@ -678,6 +735,8 @@ mod target {
     const _: () = assert!(BLACKLIST_NODE_CAPACITY < usize::BITS as usize);
     const _: () = assert!(mem::size_of::<IpcEnvelope>() == IPC_ENVELOPE_SIZE);
     const _: () = assert!(IPC_ENVELOPE_CAPACITY < usize::BITS as usize);
+    const _: () = assert!(mem::size_of::<WpaIeSlot>() == WPA_IE_CAPACITY);
+    const _: () = assert!(WPA_IE_SLOT_CAPACITY < usize::BITS as usize);
 }
 
 #[cfg(target_arch = "riscv32")]
