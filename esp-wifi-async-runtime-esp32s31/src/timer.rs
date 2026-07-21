@@ -306,12 +306,12 @@ impl<const N: usize> Default for RuntimeTimerPool<N> {
     }
 }
 
-pub(crate) fn record_timer_failure(probe: &BlockingCallProbe, timer: *mut c_void) {
-    probe.record(
-        BlockingCall::TimerPoolExhausted,
-        TIMER_CONTEXT_EVENT,
-        timer as usize,
-    );
+pub(crate) fn record_timer_failure(
+    probe: &BlockingCallProbe,
+    call: BlockingCall,
+    timer: *mut c_void,
+) {
+    probe.record(call, TIMER_CONTEXT_EVENT, timer as usize);
 }
 
 #[cfg(test)]

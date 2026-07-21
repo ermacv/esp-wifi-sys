@@ -537,12 +537,21 @@ pub(crate) unsafe fn schedule_internal_timer(
         );
         return false;
     };
-    STATE.timers.set_internal_callback(
+    let registered = STATE.timers.set_internal_callback(
         timer,
         callback as *const () as *mut c_void,
         argument,
         INTERNAL_TIMER_RESERVE,
-    ) && STATE.timers.arm_at(timer, delay_us, false, now() as u32)
+    );
+    if !registered {
+        record_timer_failure(&STATE.probe, BlockingCall::TimerSetCallbackRejected, timer);
+        return false;
+    }
+    if !STATE.timers.arm_at(timer, delay_us, false, now() as u32) {
+        record_timer_failure(&STATE.probe, BlockingCall::TimerArmRejected, timer);
+        return false;
+    }
+    true
 }
 
 #[allow(dead_code)]
@@ -932,7 +941,7 @@ unsafe extern "C" fn timer_setfn(timer: *mut c_void, callback: *mut c_void, argu
         argument,
         INTERNAL_TIMER_RESERVE,
     ) {
-        record_timer_failure(&STATE.probe, timer);
+        record_timer_failure(&STATE.probe, BlockingCall::TimerSetCallbackRejected, timer);
     }
 }
 
@@ -954,19 +963,19 @@ fn timer_arm_at(timer: *mut c_void, timeout_us: u32, repeat: bool) {
         return;
     };
     if !unsafe { STATE.timers.arm_at(timer, timeout_us, repeat, now() as u32) } {
-        record_timer_failure(&STATE.probe, timer);
+        record_timer_failure(&STATE.probe, BlockingCall::TimerArmRejected, timer);
     }
 }
 
 unsafe extern "C" fn timer_disarm(timer: *mut c_void) {
     if !STATE.timers.disarm(timer) {
-        record_timer_failure(&STATE.probe, timer);
+        record_timer_failure(&STATE.probe, BlockingCall::TimerDisarmRejected, timer);
     }
 }
 
 unsafe extern "C" fn timer_done(timer: *mut c_void) {
     if !STATE.timers.done(timer) {
-        record_timer_failure(&STATE.probe, timer);
+        record_timer_failure(&STATE.probe, BlockingCall::TimerDoneRejected, timer);
     }
 }
 

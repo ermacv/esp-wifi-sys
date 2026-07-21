@@ -23,6 +23,10 @@ pub enum BlockingCall {
     Net80211TimerRejected = 17,
     EsfBufferRejected = 18,
     ManagementTxRejected = 19,
+    TimerSetCallbackRejected = 20,
+    TimerArmRejected = 21,
+    TimerDisarmRejected = 22,
+    TimerDoneRejected = 23,
 }
 
 /// Allocation-free recorder for forbidden calls reached from a supposedly
