@@ -279,6 +279,7 @@ mod target {
         interface.add(0xe4).cast::<*mut u8>().write(node);
         ptr::copy_nonoverlapping(config.bssid.as_ptr(), interface.add(0x9c), 6);
         ptr::copy_nonoverlapping(config.local.as_ptr(), ic.add(0x21a), 6);
+        crate::scan::enable_sta_link_rx_policy();
         Some(node)
     }
 
@@ -356,6 +357,13 @@ mod target {
             complete(RESULT_BUFFER_UNAVAILABLE);
             return;
         }
+        // `ieee80211_getmgtframe` stores only the body length at +0x16. The
+        // pinned vendor auth constructor separately publishes the reserved
+        // 802.11 header length at +0x14 before descriptor construction.
+        buffer
+            .add(0x14)
+            .cast::<u16>()
+            .write_unaligned(MANAGEMENT_HEADER_LEN as u16);
         // Open System algorithm, transaction 1, status success/reserved zero.
         body.cast::<u16>().write_unaligned(0);
         body.add(2).cast::<u16>().write_unaligned(1);

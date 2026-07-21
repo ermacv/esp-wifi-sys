@@ -361,6 +361,17 @@ unsafe fn enable_scan_rx_policy() {
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub(crate) unsafe fn enable_sta_link_rx_policy() {
+    // Exact policy-5 branch of the pinned `wifi_set_rx_policy` jump table.
+    // `cnx_connect_to_bss` installs it before sending Authentication. Keep the
+    // finite leaves here so the vendor jump table and its unrelated modes can
+    // never enter the strict runtime.
+    ic_set_rx_policy(0, 0, 1, 1);
+    ic_set_rx_policy_ubssid_check(0, 0);
+    core::ptr::addr_of_mut!(g_ic).add(716).write(5);
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 unsafe fn restore_default_rx_policy() {
     // Exact policy-0 branch. Both addresses belong to the pinned `g_ic`
     // object and the called leaves audit without heap, waits, or cycles.
