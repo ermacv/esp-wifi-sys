@@ -457,11 +457,13 @@ mod target {
             }
             return -1;
         }
+        let subtype_allowed = matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
+            || crate::sta_link::is_owned_action_management(buffer, subtype);
         if !crate::critical::on_strict_wifi_hart()
             || !crate::context::in_radio_context()
             || node.is_null()
             || buffer.is_null()
-            || !matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
+            || !subtype_allowed
             || ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0
             || !chm_is_at_home_channel()
         {

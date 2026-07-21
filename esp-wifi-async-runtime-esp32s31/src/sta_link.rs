@@ -101,6 +101,9 @@ pub struct StaAssocSnapshot {
     pub ht_negotiated: bool,
     pub wmm_negotiated: bool,
     pub ht_mcs_count: u8,
+    pub addba_requests: u32,
+    pub addba_declines_submitted: u32,
+    pub action_tx_done: u32,
 }
 
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
@@ -253,7 +256,7 @@ mod target {
         cell::UnsafeCell,
         ffi::c_void,
         ptr,
-        sync::atomic::{AtomicU32, AtomicU8, Ordering},
+        sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering},
     };
 
     use super::*;
@@ -394,6 +397,10 @@ mod target {
     static ASSOC_HT_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_WMM_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HT_MCS_COUNT: AtomicU32 = AtomicU32::new(0);
+    static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
+    static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
+    static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -402,6 +409,7 @@ mod target {
             header_length: u32,
             body_length: u32,
         ) -> *mut u8;
+        fn esf_buf_recycle(buffer: *mut c_void);
         fn ieee80211_set_tx_desc(
             node: *mut u8,
             buffer: *mut u8,
@@ -492,6 +500,9 @@ mod target {
             ht_negotiated: ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) != 0,
             wmm_negotiated: ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) != 0,
             ht_mcs_count: ASSOC_HT_MCS_COUNT.load(Ordering::Acquire) as u8,
+            addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
+            addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
+            action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
         }
     }
 
@@ -836,6 +847,107 @@ mod target {
         Ok(())
     }
 
+    pub(crate) fn is_owned_action_management(buffer: *mut u8, subtype: u8) -> bool {
+        subtype == 0xd0
+            && !buffer.is_null()
+            && OWNED_ACTION_BUFFER.load(Ordering::Acquire) == buffer as usize
+    }
+
+    pub(crate) fn complete_owned_action_management() -> bool {
+        if OWNED_ACTION_BUFFER.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        ACTION_TX_DONE.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn cancel_owned_action_management(buffer: *mut u8) {
+        let _ = OWNED_ACTION_BUFFER.compare_exchange(
+            buffer as usize,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    unsafe fn send_addba_decline(node: *mut u8, request: &[u8]) -> bool {
+        const ACTION_BODY_LEN: usize = 9;
+        const STATUS_REQUEST_DECLINED: u16 = 37;
+        if request.len() < 33 || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        let dialog_token = request[26];
+        let request_parameters = u16::from_le_bytes([request[27], request[28]]);
+        let timeout = u16::from_le_bytes([request[29], request[30]]);
+        // Preserve only immediate/delayed policy and TID. A declined response
+        // advertises neither A-MSDU nor a receive reorder-buffer size.
+        let response_parameters = request_parameters & 0x003e;
+
+        let mut body = ptr::null_mut();
+        let buffer =
+            ieee80211_getmgtframe(&mut body, MANAGEMENT_HEADER_LEN, ACTION_BODY_LEN as u32);
+        if buffer.is_null() || body.is_null() {
+            return false;
+        }
+        body.write(3); // Block Ack category.
+        body.add(1).write(1); // ADDBA response.
+        body.add(2).write(dialog_token);
+        body.add(3)
+            .cast::<u16>()
+            .write_unaligned(STATUS_REQUEST_DECLINED.to_le());
+        body.add(5)
+            .cast::<u16>()
+            .write_unaligned(response_parameters.to_le());
+        body.add(7).cast::<u16>().write_unaligned(timeout.to_le());
+        buffer
+            .add(0x14)
+            .cast::<u16>()
+            .write_unaligned(MANAGEMENT_HEADER_LEN as u16);
+        ieee80211_set_tx_desc(node, buffer, MANAGEMENT_RATE_POLICY, 0, 0);
+        linked_ieee80211_set_tx_pti(buffer, ASSOC_PTI);
+        if OWNED_ACTION_BUFFER
+            .compare_exchange(0, buffer as usize, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            esf_buf_recycle(buffer.cast());
+            return false;
+        }
+        let result = linked_ieee80211_mgmt_output(node, buffer, 0xd0);
+        if result != 0 {
+            cancel_owned_action_management(buffer);
+            return false;
+        }
+        ADDBA_DECLINES_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// Consume a peer ADDBA request before it can enter the vendor BlockAck
+    /// state machine. Until Rust owns reorder buffers, it emits one explicit
+    /// standards-level decline using the fixed management pool.
+    pub(crate) fn ingest_management_action(frame: &[u8]) -> bool {
+        if frame.len() < 33 || frame[0] & 0xfc != 0xd0 || frame[24] != 3 || frame[25] != 0 {
+            return false;
+        }
+        let config = unsafe { ASSOC_CONFIG.0.get().read() };
+        if frame[4..10] != config.local
+            || frame[10..16] != config.access_point.bssid
+            || frame[16..22] != config.access_point.bssid
+        {
+            return false;
+        }
+        ADDBA_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        let interface = unsafe { ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read() };
+        if interface.is_null() {
+            return true;
+        }
+        let node = unsafe { interface.add(0xe4).cast::<*mut u8>().read() };
+        if node != NODE.0.get().cast::<u8>() {
+            return true;
+        }
+        let _ = unsafe { send_addba_decline(node, frame) };
+        true
+    }
+
     pub(crate) unsafe fn dispatch_assoc_tx() {
         ASSOC_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         if ASSOC_PHASE.load(Ordering::Acquire) != PHASE_WAITING
@@ -1177,8 +1289,9 @@ pub use target::sta_assoc_snapshot;
 pub use target::sta_auth_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) use target::{
-    dispatch_assoc_tx, dispatch_auth_tx, management_tx_done, observe_management, STA_ASSOC_EVENT,
-    STA_AUTH_EVENT,
+    complete_owned_action_management, dispatch_assoc_tx, dispatch_auth_tx,
+    ingest_management_action, is_owned_action_management, management_tx_done, observe_management,
+    STA_ASSOC_EVENT, STA_AUTH_EVENT,
 };
 
 #[cfg(test)]
