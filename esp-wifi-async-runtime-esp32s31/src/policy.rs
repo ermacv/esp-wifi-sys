@@ -62,6 +62,7 @@ pub enum StrictRuntimeError {
     PpTaskHandoffIncomplete,
     PpPostLinkWrapperMissing,
     Net80211TimerLinkWrapperMissing,
+    ChannelSwitchLinkWrappersMissing,
     EsfBufferLinkWrappersMissing,
     ManagementTxLinkWrapperMissing,
     AllocatorCallbacksNotPatched,
@@ -333,6 +334,10 @@ pub unsafe fn prepare_strict_runtime(
     #[cfg(feature = "strict-no-wait")]
     if !crate::net80211_timer::timer_process_link_wrapper_active() {
         return Err(StrictRuntimeError::Net80211TimerLinkWrapperMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::channel_switch::link_wrappers_active() {
+        return Err(StrictRuntimeError::ChannelSwitchLinkWrappersMissing);
     }
     #[cfg(feature = "strict-no-wait")]
     if !crate::esf::link_wrappers_active() {

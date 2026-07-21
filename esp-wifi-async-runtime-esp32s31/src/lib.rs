@@ -16,6 +16,8 @@ compile_error!(
 pub mod adapter;
 pub mod allocation;
 pub mod channel;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod channel_switch;
 pub mod command;
 pub mod context;
 pub mod critical;
@@ -83,6 +85,8 @@ pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use allocation::{allow_heap_for_wifi_teardown, patch_allocator_probes};
 pub use channel::{BoundedChannel, Receive, TrySendError};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
 pub use command::{
     RadioCommandHandler, RadioCommandQueue, RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,
 };

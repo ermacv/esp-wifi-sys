@@ -85,6 +85,8 @@ pub enum VendorDispatchError {
     Net80211Timer(crate::net80211_timer::Net80211TimerError),
     #[cfg(feature = "strict-no-wait")]
     RxPump(crate::rx::RxPumpError),
+    #[cfg(feature = "strict-no-wait")]
+    ChannelSwitch(crate::channel_switch::ChannelSwitchError),
 }
 
 /// Calls the original finite PP handlers selected by the recovered `ppTask`
@@ -224,6 +226,11 @@ impl PpDispatcher for VendorPpDispatcher {
                 return Err(VendorDispatchError::LmacContinuation(
                     crate::lmac::LmacAsyncError::TxQueueSplitFailed,
                 ));
+            }
+
+            #[cfg(feature = "strict-no-wait")]
+            if let Some(error) = crate::channel_switch::failure() {
+                return Err(VendorDispatchError::ChannelSwitch(error));
             }
 
             #[cfg(feature = "strict-no-wait")]
