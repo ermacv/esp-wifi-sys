@@ -12,6 +12,9 @@ use crate::interrupt::InterruptSignal;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) const SCAN_CHANNEL_EVENT: u32 = u32::MAX - 11;
 pub const STRICT_SCAN_RECORD_CAPACITY: usize = 32;
+pub const STRICT_SCAN_RSN_IE_CAPACITY: usize = 64;
+pub const STRICT_SCAN_RSNXE_CAPACITY: usize = 16;
+pub const STRICT_SCAN_EXTENDED_RATES_CAPACITY: usize = 16;
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 const SESSION_IDLE: u8 = 0;
@@ -38,6 +41,16 @@ pub struct StrictScanRecord {
     pub rsn: bool,
     pub legacy_wpa: bool,
     pub information_elements_truncated: bool,
+    pub capability_info: u16,
+    pub beacon_interval_tu: u16,
+    pub supported_rates: [u8; 8],
+    pub supported_rates_len: u8,
+    pub extended_supported_rates: [u8; STRICT_SCAN_EXTENDED_RATES_CAPACITY],
+    pub extended_supported_rates_len: u8,
+    pub rsn_ie: [u8; STRICT_SCAN_RSN_IE_CAPACITY],
+    pub rsn_ie_len: u8,
+    pub rsnxe: [u8; STRICT_SCAN_RSNXE_CAPACITY],
+    pub rsnxe_len: u8,
 }
 
 impl StrictScanRecord {
@@ -51,11 +64,53 @@ impl StrictScanRecord {
         rsn: false,
         legacy_wpa: false,
         information_elements_truncated: false,
+        capability_info: 0,
+        beacon_interval_tu: 0,
+        supported_rates: [0; 8],
+        supported_rates_len: 0,
+        extended_supported_rates: [0; STRICT_SCAN_EXTENDED_RATES_CAPACITY],
+        extended_supported_rates_len: 0,
+        rsn_ie: [0; STRICT_SCAN_RSN_IE_CAPACITY],
+        rsn_ie_len: 0,
+        rsnxe: [0; STRICT_SCAN_RSNXE_CAPACITY],
+        rsnxe_len: 0,
     };
 
     pub fn ssid_bytes(&self) -> &[u8] {
         &self.ssid[..usize::from(self.ssid_len)]
     }
+
+    pub fn supported_rates_bytes(&self) -> &[u8] {
+        &self.supported_rates[..usize::from(self.supported_rates_len)]
+    }
+
+    pub fn extended_supported_rates_bytes(&self) -> &[u8] {
+        &self.extended_supported_rates[..usize::from(self.extended_supported_rates_len)]
+    }
+
+    /// Exact RSN element, including its element id and length byte.
+    pub fn rsn_ie_bytes(&self) -> &[u8] {
+        &self.rsn_ie[..usize::from(self.rsn_ie_len)]
+    }
+
+    /// Exact RSN extension element, including its element id and length byte.
+    pub fn rsnxe_bytes(&self) -> &[u8] {
+        &self.rsnxe[..usize::from(self.rsnxe_len)]
+    }
+}
+
+/// Select the strongest complete observation with an exact SSID match.
+///
+/// A zero or out-of-range channel is never returned. The caller can further
+/// restrict security suites after inspecting the owned RSN bytes.
+pub fn best_matching_ssid<'a>(
+    records: &'a [StrictScanRecord],
+    ssid: &[u8],
+) -> Option<&'a StrictScanRecord> {
+    records
+        .iter()
+        .filter(|record| record.ssid_bytes() == ssid && (1..=13).contains(&record.channel))
+        .max_by_key(|record| record.rssi)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -194,6 +249,21 @@ pub async fn passive_scan_2_4ghz(
     })
 }
 
+/// Switch to one 2.4-GHz channel and make it the fixed home channel.
+///
+/// Completion is raised directly by the physical channel-switch callback.
+/// There is no dwell timer, retry loop, register polling, or RTOS wait.
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub async fn tune_home_channel(channel: u8) -> Result<(), StrictScanError> {
+    if !(1..=13).contains(&channel) {
+        return Err(StrictScanError::ChannelStart(-1));
+    }
+    if SESSION.load(Ordering::Acquire) != SESSION_IDLE {
+        return Err(StrictScanError::Busy);
+    }
+    run_channel(channel, 0).await
+}
+
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 async fn run_channel(channel: u8, dwell_ms: u32) -> Result<(), StrictScanError> {
     OP_STATE
@@ -234,15 +304,20 @@ pub(crate) unsafe fn dispatch_channel() {
     }
     let channel = [OP_CHANNEL.load(Ordering::Acquire), 0];
     let dwell = OP_DWELL_MS.load(Ordering::Acquire);
-    if channel[0] == 1 {
+    if dwell != 0 && channel[0] == 1 {
         enable_scan_rx_policy();
     }
+    let (start, end) = if dwell == 0 {
+        (Some(channel_complete as unsafe extern "C" fn(_, _)), None)
+    } else {
+        (None, Some(channel_complete as unsafe extern "C" fn(_, _)))
+    };
     let result = chm_start_op(
         channel.as_ptr(),
         dwell,
         dwell,
-        None,
-        Some(channel_complete),
+        start,
+        end,
         core::ptr::null_mut(),
     );
     if result != 0 {
@@ -255,7 +330,16 @@ pub(crate) unsafe fn dispatch_channel() {
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) unsafe extern "C" fn channel_complete(_context: *mut core::ffi::c_void, result: u32) {
-    if result != 0
+    let tune = OP_DWELL_MS.load(Ordering::Acquire) == 0;
+    let result = if result == 0 && tune {
+        crate::channel_switch::make_current_channel_home()
+            .err()
+            .map_or(0, |error| error as u32)
+    } else {
+        result
+    };
+    if tune
+        || result != 0
         || OP_CHANNEL.load(Ordering::Acquire) == 13
         || SESSION.load(Ordering::Acquire) != SESSION_ACTIVE
     {
@@ -333,7 +417,9 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
     record.bssid.copy_from_slice(&frame[16..22]);
     record.channel = fallback_channel;
     record.rssi = rssi;
-    record.privacy = u16::from_le_bytes([frame[34], frame[35]]) & 0x0010 != 0;
+    record.beacon_interval_tu = u16::from_le_bytes([frame[32], frame[33]]);
+    record.capability_info = u16::from_le_bytes([frame[34], frame[35]]);
+    record.privacy = record.capability_info & 0x0010 != 0;
 
     let mut offset = 36;
     while offset + 2 <= frame.len() {
@@ -358,7 +444,35 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
                 record.ssid_len = length as u8;
             }
             3 if length == 1 => record.channel = value[0],
-            48 => record.rsn = true,
+            1 if length <= record.supported_rates.len() => {
+                record.supported_rates[..length].copy_from_slice(value);
+                record.supported_rates_len = length as u8;
+            }
+            48 => {
+                record.rsn = true;
+                let total = length + 2;
+                if total <= record.rsn_ie.len() {
+                    record.rsn_ie[..total].copy_from_slice(&frame[offset - 2..end]);
+                    record.rsn_ie_len = total as u8;
+                } else {
+                    record.information_elements_truncated = true;
+                }
+            }
+            50 => {
+                let copied = length.min(record.extended_supported_rates.len());
+                record.extended_supported_rates[..copied].copy_from_slice(&value[..copied]);
+                record.extended_supported_rates_len = copied as u8;
+                record.information_elements_truncated |= copied != length;
+            }
+            244 => {
+                let total = length + 2;
+                if total <= record.rsnxe.len() {
+                    record.rsnxe[..total].copy_from_slice(&frame[offset - 2..end]);
+                    record.rsnxe_len = total as u8;
+                } else {
+                    record.information_elements_truncated = true;
+                }
+            }
             221 if length >= 4 && value[..4] == [0x00, 0x50, 0xf2, 0x01] => {
                 record.legacy_wpa = true;
             }
@@ -371,7 +485,7 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::parse_management;
+    use super::{best_matching_ssid, parse_management, StrictScanRecord};
 
     #[test]
     fn parses_beacon_into_owned_bounded_record() {
@@ -389,6 +503,8 @@ mod tests {
         assert_eq!(record.rssi, -42);
         assert!(record.privacy);
         assert!(record.rsn);
+        assert_eq!(record.rsn_ie_bytes(), &[48, 0]);
+        assert_eq!(record.capability_info, 0x10);
     }
 
     #[test]
@@ -401,5 +517,26 @@ mod tests {
         frame[37] = 8;
         let record = parse_management(&frame, 1, -1).unwrap();
         assert!(record.information_elements_truncated);
+    }
+
+    #[test]
+    fn strongest_exact_ssid_is_selected_without_hidden_or_invalid_entries() {
+        let mut records = [StrictScanRecord::EMPTY; 4];
+        for (record, rssi, channel) in [(-70, 1), (-25, 6), (-10, 0)]
+            .into_iter()
+            .zip(&mut records)
+            .map(|((rssi, channel), record)| (record, rssi, channel))
+        {
+            record.ssid[..4].copy_from_slice(b"test");
+            record.ssid_len = 4;
+            record.rssi = rssi;
+            record.channel = channel;
+        }
+        records[3].ssid[..5].copy_from_slice(b"other");
+        records[3].ssid_len = 5;
+        records[3].rssi = -1;
+        records[3].channel = 11;
+        assert_eq!(best_matching_ssid(&records, b"test").unwrap().channel, 6);
+        assert!(best_matching_ssid(&records, b"missing").is_none());
     }
 }

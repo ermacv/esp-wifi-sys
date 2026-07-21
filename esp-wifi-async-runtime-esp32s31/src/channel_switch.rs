@@ -362,6 +362,21 @@ unsafe fn finish_operation(chm: *mut u8) {
     }
 }
 
+/// Promote the physically selected channel to the fixed STA home channel.
+/// Called only by the Rust tune completion while executing on the radio owner.
+pub(crate) unsafe fn make_current_channel_home() -> Result<(), ChannelSwitchError> {
+    let chm = g_chm;
+    if chm.is_null() || !crate::critical::on_strict_wifi_hart() {
+        fail(ChannelSwitchError::StateUnavailable, 0);
+        return Err(ChannelSwitchError::StateUnavailable);
+    }
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    chm.add(80).write(chm.add(82).read());
+    chm.add(81).write(chm.add(83).read());
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    Ok(())
+}
+
 unsafe extern "C" fn first_dwell_elapsed(_argument: *mut c_void) {
     let _ = crate::adapter::cancel_internal_timer(final_timer());
     finish_strict_dwell();
