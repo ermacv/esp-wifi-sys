@@ -173,8 +173,8 @@ pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use txdone::{
-    hil_data_tx_done_snapshot, hil_eapol_tx_done_snapshot, HilDataTxDoneSnapshot,
-    HilEapolTxDoneSnapshot,
+    hil_data_tx_done_snapshot, hil_decrypt_data_ccmp_prefix, hil_eapol_tx_done_snapshot,
+    HilDataTxDoneSnapshot, HilEapolTxDoneSnapshot,
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use vendor::{vendor_rx_diagnostic_snapshot, VendorRxDiagnosticSnapshot};

@@ -2,12 +2,12 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(target_arch = "riscv32")]
-use crate::wpa2::DEFAULT_EAPOL_FRAME_CAPACITY;
 #[cfg(any(test, target_arch = "riscv32"))]
 use crate::wpa2::Wpa2IngressError;
 #[cfg(any(test, target_arch = "riscv32"))]
 use crate::wpa2::Wpa2Interface;
+#[cfg(target_arch = "riscv32")]
+use crate::wpa2::DEFAULT_EAPOL_FRAME_CAPACITY;
 use crate::{
     channel::Receive,
     wpa2::{OwnedEapolFrame, Wpa2Ingress},
@@ -17,11 +17,11 @@ pub const WPA2_RX_CAPACITY: usize = 8;
 
 static INGRESS: Wpa2Ingress<WPA2_RX_CAPACITY> = Wpa2Ingress::new();
 static REJECTED: AtomicUsize = AtomicUsize::new(0);
-#[cfg(any(test, target_arch = "riscv32"))]
+#[cfg(any(test, target_arch = "riscv32", feature = "hil-vendor-tx"))]
 static REJECTED_INVALID: AtomicUsize = AtomicUsize::new(0);
-#[cfg(any(test, target_arch = "riscv32"))]
+#[cfg(any(test, target_arch = "riscv32", feature = "hil-vendor-tx"))]
 static REJECTED_CAPACITY: AtomicUsize = AtomicUsize::new(0);
-#[cfg(any(test, target_arch = "riscv32"))]
+#[cfg(any(test, target_arch = "riscv32", feature = "hil-vendor-tx"))]
 static REJECTED_QUEUE_FULL: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "hil-vendor-tx")]
