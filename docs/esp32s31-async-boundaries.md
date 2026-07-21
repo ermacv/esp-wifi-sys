@@ -99,6 +99,14 @@ to be ready before the synchronous connect path begins. The audited exported
 `wpa_set_pmk` (`0x8c` bytes in the pinned archive) then copies that key from a
 completed job when invoked by the single radio owner.
 
+The S31 has no verified SHA-1 completion interrupt, so its concrete PBKDF2 path
+is a Rust software future with a caller-selected HMAC budget per poll. Every
+poll advances cryptographic work; it never reads a busy flag or waits for an
+RTOS object. The future uses only fixed job/intermediate storage and wipes
+partial output if cancelled. This is distinct from the HAL CPU SHA work queue,
+whose recall mechanism polls hardware busy state and is therefore excluded
+from the strict runtime.
+
 ## Critical sections and locks
 
 There are four different mechanisms and they must not be treated alike:

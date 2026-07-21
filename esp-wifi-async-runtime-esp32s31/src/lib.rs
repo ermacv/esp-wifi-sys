@@ -94,8 +94,8 @@ pub use critical::{critical_section_probe, CriticalSectionProbe, CriticalSection
 pub use crypto::{install_precomputed_wpa_pmk, PmkInstallError};
 pub use crypto::{
     CryptoFuture, CryptoJob, CryptoJobError, CryptoOperation, InterruptCryptoBackend,
-    InterruptCryptoEngine, WpaPskJob, AES_BLOCK_SIZE, WPA_PBKDF2_ITERATIONS, WPA_PMK_LENGTH,
-    WPA_PSK_PASSPHRASE_CAPACITY, WPA_SSID_CAPACITY,
+    InterruptCryptoEngine, SoftwarePbkdf2Future, SoftwarePbkdf2Progress, WpaPskJob, AES_BLOCK_SIZE,
+    WPA_PBKDF2_ITERATIONS, WPA_PMK_LENGTH, WPA_PSK_PASSPHRASE_CAPACITY, WPA_SSID_CAPACITY,
 };
 #[cfg(target_arch = "riscv32")]
 pub use data_rx::{

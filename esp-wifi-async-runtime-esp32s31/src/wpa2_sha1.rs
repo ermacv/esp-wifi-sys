@@ -58,59 +58,71 @@ impl AsyncSha1 for Wpa2SoftwareSha1 {
     type Error = SoftwareSha1Error;
 
     async fn digest(&mut self, parts: &[&[u8]]) -> Result<[u8; 20], Self::Error> {
-        let mut message_len = 0_usize;
-        for part in parts {
-            message_len = message_len
-                .checked_add(part.len())
-                .filter(|length| *length <= WPA2_SOFTWARE_SHA1_MAX_MESSAGE_LEN)
-                .ok_or(SoftwareSha1Error::MessageTooLong)?;
-        }
+        software_sha1_digest_parts(parts)
+    }
+}
 
-        let mut state = [
-            0x6745_2301,
-            0xefcd_ab89,
-            0x98ba_dcfe,
-            0x1032_5476,
-            0xc3d2_e1f0,
-        ];
-        let mut block = [0_u8; SHA1_BLOCK_LEN];
-        let mut used = 0;
+/// Synchronous bounded leaf used by cooperative Rust-owned algorithms.
+///
+/// The leaf performs a finite amount of CPU work for a bounded message. It
+/// does not inspect hardware status, wait, allocate, or wake the executor.
+/// Callers implementing expensive algorithms such as PBKDF2 must impose their
+/// own per-poll work budget around calls to this function.
+pub(crate) fn software_sha1_digest_parts(
+    parts: &[&[u8]],
+) -> Result<[u8; SHA1_DIGEST_LEN], SoftwareSha1Error> {
+    let mut message_len = 0_usize;
+    for part in parts {
+        message_len = message_len
+            .checked_add(part.len())
+            .filter(|length| *length <= WPA2_SOFTWARE_SHA1_MAX_MESSAGE_LEN)
+            .ok_or(SoftwareSha1Error::MessageTooLong)?;
+    }
 
-        for part in parts {
-            let mut remaining = *part;
-            while !remaining.is_empty() {
-                let copied = core::cmp::min(SHA1_BLOCK_LEN - used, remaining.len());
-                block[used..used + copied].copy_from_slice(&remaining[..copied]);
-                used += copied;
-                remaining = &remaining[copied..];
-                if used == SHA1_BLOCK_LEN {
-                    compress_sha1(&mut state, &block);
-                    block.fill(0);
-                    used = 0;
-                }
+    let mut state = [
+        0x6745_2301,
+        0xefcd_ab89,
+        0x98ba_dcfe,
+        0x1032_5476,
+        0xc3d2_e1f0,
+    ];
+    let mut block = [0_u8; SHA1_BLOCK_LEN];
+    let mut used = 0;
+
+    for part in parts {
+        let mut remaining = *part;
+        while !remaining.is_empty() {
+            let copied = core::cmp::min(SHA1_BLOCK_LEN - used, remaining.len());
+            block[used..used + copied].copy_from_slice(&remaining[..copied]);
+            used += copied;
+            remaining = &remaining[copied..];
+            if used == SHA1_BLOCK_LEN {
+                compress_sha1(&mut state, &block);
+                block.fill(0);
+                used = 0;
             }
         }
-
-        block[used] = 0x80;
-        used += 1;
-        if used > 56 {
-            block[used..].fill(0);
-            compress_sha1(&mut state, &block);
-            block.fill(0);
-        } else {
-            block[used..56].fill(0);
-        }
-        block[56..].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
-        compress_sha1(&mut state, &block);
-
-        let mut digest = [0; SHA1_DIGEST_LEN];
-        for (word, output) in state.iter().zip(digest.chunks_exact_mut(4)) {
-            output.copy_from_slice(&word.to_be_bytes());
-        }
-        zeroize(&mut block);
-        zeroize_words(&mut state);
-        Ok(digest)
     }
+
+    block[used] = 0x80;
+    used += 1;
+    if used > 56 {
+        block[used..].fill(0);
+        compress_sha1(&mut state, &block);
+        block.fill(0);
+    } else {
+        block[used..56].fill(0);
+    }
+    block[56..].copy_from_slice(&((message_len as u64) * 8).to_be_bytes());
+    compress_sha1(&mut state, &block);
+
+    let mut digest = [0; SHA1_DIGEST_LEN];
+    for (word, output) in state.iter().zip(digest.chunks_exact_mut(4)) {
+        output.copy_from_slice(&word.to_be_bytes());
+    }
+    zeroize(&mut block);
+    zeroize_words(&mut state);
+    Ok(digest)
 }
 
 /// Allocation-free HMAC-SHA1 and WPA2 PRF-384 built on [`AsyncSha1`].

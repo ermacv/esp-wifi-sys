@@ -597,9 +597,18 @@ The expensive WPA-Personal derivation is available directly:
 
 ```rust,ignore
 let mut job = WpaPskJob::wpa_psk(passphrase, ssid)?;
-engine.run(Pin::new(&mut job)).await?;
+// Every poll performs up to 32 useful HMACs and then cooperatively requeues
+// itself. It does not poll a peripheral or wait on an RTOS object.
+job.derive_software::<32>().await?;
 let pmk: &[u8] = job.result()?; // 32-byte PMK, ready before connect
 
 // Execute this command through RadioOwnerFuture after supplicant init.
 unsafe { install_precomputed_wpa_pmk(&job)? };
 ```
+
+The software future owns fixed intermediate `U`/XOR blocks, wipes them on
+completion or cancellation, and matches the standard WPA `password`/`IEEE`
+test vector. An IRQ-capable SHA-1 backend may instead execute the same
+`CryptoJob` through `InterruptCryptoEngine`; the S31 SHA work queue is not used
+as an async substitute because its SHA-1 path recalls itself to read busy
+status rather than receiving a completion interrupt.
