@@ -815,20 +815,12 @@ pub unsafe extern "C" fn __wrap_pp_post(kind: u32, argument: *mut c_void) -> i32
         leave_pp_counter_critical(interrupt_state);
         return 1;
     };
-    counter.write(next);
-    leave_pp_counter_critical(interrupt_state);
-
     let event = PpEvent { kind, argument };
-    if STATE.queue.try_push(event).is_ok() {
+    if STATE.queue.try_push_deferred_wake(event).is_ok() {
+        counter.write(next);
+        leave_pp_counter_critical(interrupt_state);
+        STATE.queue.wake_consumer();
         return 0;
-    }
-
-    let Some(interrupt_state) = enter_pp_counter_critical(strict) else {
-        return 1;
-    };
-    let current = counter.read();
-    if current != 0 {
-        counter.write(current - 1);
     }
     leave_pp_counter_critical(interrupt_state);
     1

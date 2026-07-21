@@ -87,11 +87,23 @@ impl<const N: usize> RadioQueue<N> {
     }
 
     pub fn try_push(&self, event: PpEvent) -> Result<(), PushError> {
+        self.try_push_deferred_wake(event)?;
+        self.wake_consumer();
+        Ok(())
+    }
+
+    /// Claim and publish one event without waking the consumer yet.
+    ///
+    /// This split form lets the strict `pp_post` adapter keep its local
+    /// interrupt exclusion through both the vendor signal-counter update and
+    /// queue publication, then invoke the executor waker after interrupts are
+    /// restored. It is still one fixed-cost claim attempt and never retries.
+    pub(crate) fn try_push_deferred_wake(&self, event: PpEvent) -> Result<(), PushError> {
         if N == 1 {
             let slot = &self.slots[0];
             if slot
                 .sequence
-                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
                 self.rejected.fetch_add(1, Ordering::Relaxed);
@@ -102,7 +114,6 @@ impl<const N: usize> RadioQueue<N> {
             slot.sequence.store(2, Ordering::Release);
             self.pushed.fetch_add(1, Ordering::Relaxed);
             record_high_water(&self.high_water, 1);
-            self.waker.wake();
             return Ok(());
         }
 
@@ -112,7 +123,7 @@ impl<const N: usize> RadioQueue<N> {
         if sequence.wrapping_sub(position) as isize != 0
             || self
                 .enqueue
-                .compare_exchange_weak(
+                .compare_exchange(
                     position,
                     position.wrapping_add(1),
                     Ordering::Relaxed,
@@ -129,8 +140,11 @@ impl<const N: usize> RadioQueue<N> {
             .store(position.wrapping_add(1), Ordering::Release);
         self.pushed.fetch_add(1, Ordering::Relaxed);
         record_high_water(&self.high_water, self.len());
-        self.waker.wake();
         Ok(())
+    }
+
+    pub(crate) fn wake_consumer(&self) {
+        self.waker.wake();
     }
 
     pub fn try_pop(&self) -> Option<PpEvent> {
