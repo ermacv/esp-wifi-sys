@@ -5,6 +5,24 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::context::in_radio_context;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub enum AllocationSource {
+    None = 0,
+    DirectMalloc = 1,
+    DirectCalloc = 2,
+    DirectRealloc = 3,
+    OsiMalloc = 4,
+    OsiMallocInternal = 5,
+    OsiReallocInternal = 6,
+    OsiCallocInternal = 7,
+    OsiZallocInternal = 8,
+    OsiWifiMalloc = 9,
+    OsiWifiRealloc = 10,
+    OsiWifiCalloc = 11,
+    OsiWifiZalloc = 12,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocationSnapshot {
     pub allocations: usize,
     pub reallocations: usize,
@@ -13,6 +31,9 @@ pub struct AllocationSnapshot {
     pub largest_request: usize,
     pub failures: usize,
     pub radio_context_calls: usize,
+    pub last_failure_source: AllocationSource,
+    pub last_failure_size: usize,
+    pub last_failure_caller: usize,
 }
 
 /// Counters shared by OSI allocator callbacks and final-link `__wrap_*`
@@ -25,6 +46,9 @@ pub struct AllocationProbe {
     largest_request: AtomicUsize,
     failures: AtomicUsize,
     radio_context_calls: AtomicUsize,
+    last_failure_source: AtomicUsize,
+    last_failure_size: AtomicUsize,
+    last_failure_caller: AtomicUsize,
 }
 
 impl AllocationProbe {
@@ -37,10 +61,24 @@ impl AllocationProbe {
             largest_request: AtomicUsize::new(0),
             failures: AtomicUsize::new(0),
             radio_context_calls: AtomicUsize::new(0),
+            last_failure_source: AtomicUsize::new(AllocationSource::None as usize),
+            last_failure_size: AtomicUsize::new(0),
+            last_failure_caller: AtomicUsize::new(0),
         }
     }
 
     fn record_request(&self, size: usize, failed: bool, realloc: bool) {
+        self.record_request_at(size, failed, realloc, AllocationSource::None, 0);
+    }
+
+    fn record_request_at(
+        &self,
+        size: usize,
+        failed: bool,
+        realloc: bool,
+        source: AllocationSource,
+        caller: usize,
+    ) {
         if realloc {
             self.reallocations.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -50,6 +88,10 @@ impl AllocationProbe {
         self.largest_request.fetch_max(size, Ordering::Relaxed);
         if failed {
             self.failures.fetch_add(1, Ordering::Relaxed);
+            self.last_failure_source
+                .store(source as usize, Ordering::Relaxed);
+            self.last_failure_size.store(size, Ordering::Relaxed);
+            self.last_failure_caller.store(caller, Ordering::Relaxed);
         }
         if in_radio_context() {
             self.radio_context_calls.fetch_add(1, Ordering::Relaxed);
@@ -72,6 +114,31 @@ impl AllocationProbe {
             largest_request: self.largest_request.load(Ordering::Acquire),
             failures: self.failures.load(Ordering::Acquire),
             radio_context_calls: self.radio_context_calls.load(Ordering::Acquire),
+            last_failure_source: AllocationSource::from_raw(
+                self.last_failure_source.load(Ordering::Acquire),
+            ),
+            last_failure_size: self.last_failure_size.load(Ordering::Acquire),
+            last_failure_caller: self.last_failure_caller.load(Ordering::Acquire),
+        }
+    }
+}
+
+impl AllocationSource {
+    const fn from_raw(raw: usize) -> Self {
+        match raw {
+            1 => Self::DirectMalloc,
+            2 => Self::DirectCalloc,
+            3 => Self::DirectRealloc,
+            4 => Self::OsiMalloc,
+            5 => Self::OsiMallocInternal,
+            6 => Self::OsiReallocInternal,
+            7 => Self::OsiCallocInternal,
+            8 => Self::OsiZallocInternal,
+            9 => Self::OsiWifiMalloc,
+            10 => Self::OsiWifiRealloc,
+            11 => Self::OsiWifiCalloc,
+            12 => Self::OsiWifiZalloc,
+            _ => Self::None,
         }
     }
 }
@@ -98,7 +165,7 @@ mod target {
 
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
-    use super::PROBE;
+    use super::{AllocationSource, PROBE};
 
     type Malloc = unsafe extern "C" fn(usize) -> *mut c_void;
     type Free = unsafe extern "C" fn(*mut c_void);
@@ -210,6 +277,15 @@ mod target {
         RUNTIME_HEAP_FORBIDDEN.load(Ordering::Acquire) != 0
     }
 
+    #[inline(always)]
+    fn caller_address() -> usize {
+        let caller: usize;
+        unsafe {
+            core::arch::asm!("mv {caller}, ra", caller = out(reg) caller, options(nomem, nostack))
+        };
+        caller
+    }
+
     unsafe extern "C" {
         #[link_name = "malloc"]
         fn direct_malloc(size: usize) -> *mut c_void;
@@ -237,7 +313,13 @@ mod target {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_malloc(size: usize) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request(size, true, false);
+            PROBE.record_request_at(
+                size,
+                true,
+                false,
+                AllocationSource::DirectMalloc,
+                caller_address(),
+            );
             return core::ptr::null_mut();
         }
         let result = __real_malloc(size);
@@ -250,7 +332,13 @@ mod target {
     pub unsafe extern "C" fn __wrap_calloc(count: usize, size: usize) -> *mut c_void {
         let requested = count.saturating_mul(size);
         if heap_forbidden() {
-            PROBE.record_request(requested, true, false);
+            PROBE.record_request_at(
+                requested,
+                true,
+                false,
+                AllocationSource::DirectCalloc,
+                caller_address(),
+            );
             return core::ptr::null_mut();
         }
         let result = __real_calloc(count, size);
@@ -262,7 +350,13 @@ mod target {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request(size, true, true);
+            PROBE.record_request_at(
+                size,
+                true,
+                true,
+                AllocationSource::DirectRealloc,
+                caller_address(),
+            );
             return core::ptr::null_mut();
         }
         let result = __real_realloc(ptr, size);
@@ -300,9 +394,14 @@ mod target {
         }
     }
 
-    unsafe fn call_malloc(saved: &AtomicUsize, size: usize) -> *mut c_void {
+    unsafe fn call_malloc(
+        saved: &AtomicUsize,
+        size: usize,
+        source: AllocationSource,
+        caller: usize,
+    ) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request(size, true, false);
+            PROBE.record_request_at(size, true, false, source, caller);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Malloc>(saved.load(Ordering::Acquire));
@@ -311,9 +410,15 @@ mod target {
         result
     }
 
-    unsafe fn call_realloc(saved: &AtomicUsize, ptr: *mut c_void, size: usize) -> *mut c_void {
+    unsafe fn call_realloc(
+        saved: &AtomicUsize,
+        ptr: *mut c_void,
+        size: usize,
+        source: AllocationSource,
+        caller: usize,
+    ) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request(size, true, true);
+            PROBE.record_request_at(size, true, true, source, caller);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Realloc>(saved.load(Ordering::Acquire));
@@ -322,9 +427,15 @@ mod target {
         result
     }
 
-    unsafe fn call_calloc(saved: &AtomicUsize, count: usize, size: usize) -> *mut c_void {
+    unsafe fn call_calloc(
+        saved: &AtomicUsize,
+        count: usize,
+        size: usize,
+        source: AllocationSource,
+        caller: usize,
+    ) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request(count.saturating_mul(size), true, false);
+            PROBE.record_request_at(count.saturating_mul(size), true, false, source, caller);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Calloc>(saved.load(Ordering::Acquire));
@@ -334,7 +445,7 @@ mod target {
     }
 
     unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-        call_malloc(&MALLOC, size)
+        call_malloc(&MALLOC, size, AllocationSource::OsiMalloc, caller_address())
     }
     unsafe extern "C" fn free(ptr: *mut c_void) {
         PROBE.record_free();
@@ -345,28 +456,72 @@ mod target {
         original(ptr);
     }
     unsafe extern "C" fn malloc_internal(size: usize) -> *mut c_void {
-        call_malloc(&MALLOC_INTERNAL, size)
+        call_malloc(
+            &MALLOC_INTERNAL,
+            size,
+            AllocationSource::OsiMallocInternal,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn realloc_internal(ptr: *mut c_void, size: usize) -> *mut c_void {
-        call_realloc(&REALLOC_INTERNAL, ptr, size)
+        call_realloc(
+            &REALLOC_INTERNAL,
+            ptr,
+            size,
+            AllocationSource::OsiReallocInternal,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn calloc_internal(count: usize, size: usize) -> *mut c_void {
-        call_calloc(&CALLOC_INTERNAL, count, size)
+        call_calloc(
+            &CALLOC_INTERNAL,
+            count,
+            size,
+            AllocationSource::OsiCallocInternal,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn zalloc_internal(size: usize) -> *mut c_void {
-        call_malloc(&ZALLOC_INTERNAL, size)
+        call_malloc(
+            &ZALLOC_INTERNAL,
+            size,
+            AllocationSource::OsiZallocInternal,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn wifi_malloc(size: usize) -> *mut c_void {
-        call_malloc(&WIFI_MALLOC, size)
+        call_malloc(
+            &WIFI_MALLOC,
+            size,
+            AllocationSource::OsiWifiMalloc,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn wifi_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-        call_realloc(&WIFI_REALLOC, ptr, size)
+        call_realloc(
+            &WIFI_REALLOC,
+            ptr,
+            size,
+            AllocationSource::OsiWifiRealloc,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn wifi_calloc(count: usize, size: usize) -> *mut c_void {
-        call_calloc(&WIFI_CALLOC, count, size)
+        call_calloc(
+            &WIFI_CALLOC,
+            count,
+            size,
+            AllocationSource::OsiWifiCalloc,
+            caller_address(),
+        )
     }
     unsafe extern "C" fn wifi_zalloc(size: usize) -> *mut c_void {
-        call_malloc(&WIFI_ZALLOC, size)
+        call_malloc(
+            &WIFI_ZALLOC,
+            size,
+            AllocationSource::OsiWifiZalloc,
+            caller_address(),
+        )
     }
 }
 
