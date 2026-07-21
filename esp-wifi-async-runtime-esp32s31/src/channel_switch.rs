@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
+use crate::adapter::schedule_internal_timer;
 
 const MAC_CONTROL: *mut u32 = 0x2010_4cac as *mut u32;
 const MAC_STOP_MASK: u32 = 0x00ff_1000;
@@ -103,25 +103,7 @@ impl State {
 struct StateCell(UnsafeCell<State>);
 unsafe impl Sync for StateCell {}
 
-struct TimerCell(UnsafeCell<RawOsiTimer>);
-unsafe impl Sync for TimerCell {}
-
-impl TimerCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(RawOsiTimer {
-            next: ptr::null_mut(),
-            expire: 0,
-            period: 0,
-            callback: None,
-            argument: ptr::null_mut(),
-        }))
-    }
-}
-
 static STATE: StateCell = StateCell(UnsafeCell::new(State::new()));
-static SETTLE_TIMER: TimerCell = TimerCell::new();
-static FIRST_DWELL_TIMER: TimerCell = TimerCell::new();
-static FINAL_DWELL_TIMER: TimerCell = TimerCell::new();
 static FAILURE: AtomicU32 = AtomicU32::new(ChannelSwitchError::None as u32);
 static MAC_FAILURE_STATUS: AtomicU32 = AtomicU32::new(0);
 static LEGACY_DWELL_ACCEPTED: AtomicBool = AtomicBool::new(false);
@@ -196,6 +178,14 @@ unsafe fn fail(error: ChannelSwitchError, detail: u32) {
     FAILURE.store(error as u32, Ordering::Release);
 }
 
+unsafe fn first_timer() -> *mut c_void {
+    g_chm.add(36).cast()
+}
+
+unsafe fn final_timer() -> *mut c_void {
+    g_chm.add(56).cast()
+}
+
 unsafe fn prepare_channel(channel: [u8; 2]) -> Option<(u16, u8)> {
     let info = chm_get_chan_info(channel[0]);
     if info.is_null() {
@@ -249,7 +239,7 @@ unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelS
     MAC_CONTROL.write_volatile(status | MAC_STOP_MASK);
 
     if !schedule_internal_timer(
-        SETTLE_TIMER.0.get().cast(),
+        first_timer(),
         mac_command_settled,
         ptr::null_mut(),
         MAC_COMMAND_SETTLE_US,
@@ -267,7 +257,7 @@ unsafe extern "C" fn mac_command_settled(_argument: *mut c_void) {
         return;
     }
     if !schedule_internal_timer(
-        SETTLE_TIMER.0.get().cast(),
+        first_timer(),
         mac_idle_settled,
         ptr::null_mut(),
         MAC_IDLE_SETTLE_US,
@@ -323,18 +313,13 @@ unsafe fn finish_operation(chm: *mut u8) {
         return;
     }
     if first != 0 && first < final_dwell {
-        if !schedule_internal_timer(
-            FIRST_DWELL_TIMER.0.get().cast(),
-            first_dwell_elapsed,
-            ptr::null_mut(),
-            first,
-        ) {
+        if !schedule_internal_timer(first_timer(), first_dwell_elapsed, ptr::null_mut(), first) {
             fail(ChannelSwitchError::TimerUnavailable, 0);
             return;
         }
     }
     if !schedule_internal_timer(
-        FINAL_DWELL_TIMER.0.get().cast(),
+        final_timer(),
         final_dwell_elapsed,
         ptr::null_mut(),
         final_dwell,
@@ -344,7 +329,7 @@ unsafe fn finish_operation(chm: *mut u8) {
 }
 
 unsafe extern "C" fn first_dwell_elapsed(_argument: *mut c_void) {
-    let _ = crate::adapter::cancel_internal_timer(FINAL_DWELL_TIMER.0.get().cast());
+    let _ = crate::adapter::cancel_internal_timer(final_timer());
     chm_end_op_timeout_process(0);
 }
 
