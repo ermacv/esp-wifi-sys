@@ -1296,6 +1296,13 @@ unsafe extern "C" fn task_delay(ticks: u32) {
     #[cfg(not(target_arch = "riscv32"))]
     let caller = 0;
 
+    if STATE
+        .virtual_task
+        .take_redundant_startup_delay(caller, ticks)
+    {
+        return;
+    }
+
     TASK_DELAY_CALLER.store(caller, Ordering::Relaxed);
     TASK_DELAY_TICKS.store(ticks, Ordering::Relaxed);
     TASK_DELAY_CALLS.fetch_add(1, Ordering::Release);

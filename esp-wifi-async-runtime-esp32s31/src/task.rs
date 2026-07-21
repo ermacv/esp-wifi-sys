@@ -6,7 +6,13 @@ use core::{
 #[cfg(target_arch = "riscv32")]
 extern "C" {
     fn ppTask(argument: *mut c_void);
+    fn pp_create_task();
 }
+
+// Return address immediately after the pinned indirect `_task_delay(1)` call
+// in the 0x1e8-byte `pp_create_task` body.
+#[cfg(target_arch = "riscv32")]
+const PP_CREATE_TASK_STARTUP_DELAY_RETURN_OFFSET: usize = 0x17c;
 
 /// Logical task handle returned to the blob for the virtualized `ppTask`.
 pub const PP_TASK_HANDLE: *mut c_void = core::ptr::dangling_mut::<c_void>();
@@ -16,6 +22,7 @@ pub const PP_TASK_HANDLE: *mut c_void = core::ptr::dangling_mut::<c_void>();
 pub struct VirtualPpTask {
     started: AtomicBool,
     startup_signal: AtomicBool,
+    startup_delay_pending: AtomicBool,
 }
 
 impl VirtualPpTask {
@@ -23,6 +30,7 @@ impl VirtualPpTask {
         Self {
             started: AtomicBool::new(false),
             startup_signal: AtomicBool::new(false),
+            startup_delay_pending: AtomicBool::new(false),
         }
     }
 
@@ -57,6 +65,7 @@ impl VirtualPpTask {
         }
         self.started.store(true, Ordering::Release);
         self.startup_signal.store(true, Ordering::Release);
+        self.startup_delay_pending.store(true, Ordering::Release);
         true
     }
 
@@ -70,9 +79,25 @@ impl VirtualPpTask {
         self.startup_signal.swap(false, Ordering::AcqRel)
     }
 
+    /// Consume the one-tick yield following the startup latch in the pinned
+    /// `pp_create_task`. A real task needs that yield to begin running; the
+    /// virtual task has already published its state synchronously.
+    pub fn take_redundant_startup_delay(&self, caller: usize, ticks: u32) -> bool {
+        #[cfg(target_arch = "riscv32")]
+        let expected_caller =
+            pp_create_task as *const () as usize + PP_CREATE_TASK_STARTUP_DELAY_RETURN_OFFSET;
+        #[cfg(not(target_arch = "riscv32"))]
+        let expected_caller = usize::MAX;
+
+        ticks == 1
+            && caller == expected_caller
+            && self.startup_delay_pending.swap(false, Ordering::AcqRel)
+    }
+
     pub fn stop(&self) {
         self.started.store(false, Ordering::Release);
         self.startup_signal.store(false, Ordering::Release);
+        self.startup_delay_pending.store(false, Ordering::Release);
     }
 }
 
