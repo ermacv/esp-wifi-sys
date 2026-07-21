@@ -78,6 +78,7 @@ enum Completion {
 #[derive(Clone, Copy)]
 struct State {
     active: bool,
+    waiting_for_mac_edge: bool,
     channel: [u8; 2],
     frequency_mhz: u16,
     cbw: u8,
@@ -90,6 +91,7 @@ impl State {
     const fn new() -> Self {
         Self {
             active: false,
+            waiting_for_mac_edge: false,
             channel: [0; 2],
             frequency_mhz: 0,
             cbw: 0,
@@ -174,6 +176,7 @@ pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), Chan
 unsafe fn fail(error: ChannelSwitchError, detail: u32) {
     let state = &mut *STATE.0.get();
     state.active = false;
+    state.waiting_for_mac_edge = false;
     MAC_FAILURE_STATUS.store(detail, Ordering::Relaxed);
     FAILURE.store(error as u32, Ordering::Release);
 }
@@ -224,6 +227,7 @@ unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelS
     };
 
     state.active = true;
+    state.waiting_for_mac_edge = false;
     state.channel = channel;
     state.frequency_mhz = frequency_mhz;
     state.cbw = cbw;
@@ -251,11 +255,25 @@ unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelS
 }
 
 unsafe extern "C" fn mac_command_settled(_argument: *mut c_void) {
-    let status = MAC_CONTROL.read_volatile();
-    if status & MAC_ACTIVE_MASK != 0 {
-        fail(ChannelSwitchError::MacDidNotBecomeIdle, status);
+    try_finish_mac_stop();
+}
+
+unsafe fn try_finish_mac_stop() {
+    let state = &mut *STATE.0.get();
+    if !state.active {
         return;
     }
+    let status = MAC_CONTROL.read_volatile();
+    if status & MAC_ACTIVE_MASK != 0 {
+        // Do not poll the register. The in-flight TX completion enters
+        // `tx_done_edge`, which retries this single check from the real
+        // hardware-driven completion path.
+        state.waiting_for_mac_edge = true;
+        MAC_FAILURE_STATUS.store(status, Ordering::Relaxed);
+        return;
+    }
+    state.waiting_for_mac_edge = false;
+    MAC_FAILURE_STATUS.store(0, Ordering::Relaxed);
     if !schedule_internal_timer(
         first_timer(),
         mac_idle_settled,
@@ -263,6 +281,17 @@ unsafe extern "C" fn mac_command_settled(_argument: *mut c_void) {
         MAC_IDLE_SETTLE_US,
     ) {
         fail(ChannelSwitchError::TimerUnavailable, 0);
+    }
+}
+
+/// Continue a deferred channel transition from the real hardware TX-done
+/// path. No retry loop or periodic timer is involved.
+pub(crate) unsafe fn tx_done_edge() {
+    if !crate::critical::strict_wifi_hart_armed() || !crate::critical::on_strict_wifi_hart() {
+        return;
+    }
+    if (*STATE.0.get()).waiting_for_mac_edge {
+        try_finish_mac_stop();
     }
 }
 
@@ -289,6 +318,7 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
 
     let completion = state.completion;
     state.active = false;
+    state.waiting_for_mac_edge = false;
     state.completed = state.completed.wrapping_add(1);
     if completion == Completion::Operation {
         finish_operation(chm);

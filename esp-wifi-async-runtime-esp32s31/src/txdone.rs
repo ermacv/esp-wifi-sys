@@ -456,6 +456,7 @@ unsafe fn begin_from_wrapped_lmac(frame: *mut u8, mode: u32) -> Result<(), TxDon
 /// so the stock inline `ppProcTxDone`/power-management tail is never entered.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
+    crate::channel_switch::tx_done_edge();
     if begin_from_wrapped_lmac(frame.cast(), mode).is_err() {
         let state = &mut *LMAC_STATE.0.get();
         state.failed = true;
