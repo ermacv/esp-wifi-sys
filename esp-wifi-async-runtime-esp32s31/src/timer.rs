@@ -201,13 +201,43 @@ impl<const N: usize> RuntimeTimerPool<N> {
     /// # Safety
     /// `timer` must be the live timer previously passed to `set_callback`.
     pub unsafe fn done(&self, timer: *mut c_void) -> bool {
-        let Some(slot) = self.find(timer) else {
+        if timer.is_null() {
             return false;
-        };
-        slot.armed.store(false, Ordering::Release);
-        slot.callback.store(0, Ordering::Release);
-        slot.argument.store(ptr::null_mut(), Ordering::Release);
-        slot.timer.store(ptr::null_mut(), Ordering::Release);
+        }
+
+        let raw = timer.cast::<RawOsiTimer>();
+        if let Some(slot) = self.find(timer) {
+            slot.armed.store(false, Ordering::Release);
+            slot.callback.store(0, Ordering::Release);
+            slot.argument.store(ptr::null_mut(), Ordering::Release);
+            slot.timer.store(ptr::null_mut(), Ordering::Release);
+
+            // Match the OSI timer contract: `done` deletes the timer backend and
+            // leaves the embedded handle empty.  Clearing the complete public
+            // object also gives a later duplicate `done` an unambiguous,
+            // allocation-free tombstone to validate.
+            unsafe {
+                (*raw).next = ptr::null_mut();
+                (*raw).expire = 0;
+                (*raw).period = 0;
+                (*raw).callback = None;
+                (*raw).argument = ptr::null_mut();
+            }
+        } else {
+            // The stock adapter makes deleting an empty timer a no-op. Preserve
+            // that required idempotence, but reject an unregistered object if
+            // any field still describes a live or unknown timer.
+            let already_done = unsafe {
+                (*raw).next.is_null()
+                    && (*raw).expire == 0
+                    && (*raw).period == 0
+                    && (*raw).callback.is_none()
+                    && (*raw).argument.is_null()
+            };
+            if !already_done {
+                return false;
+            }
+        }
         self.waker.wake();
         true
     }
@@ -405,5 +435,42 @@ mod tests {
                 1,
             ));
         }
+    }
+
+    #[test]
+    fn done_is_idempotent_only_for_an_empty_timer() {
+        let pool = RuntimeTimerPool::<1>::new();
+        let mut timer = raw_timer();
+        let timer_ptr = core::ptr::from_mut(&mut timer).cast();
+
+        unsafe {
+            assert!(pool.set_callback(
+                timer_ptr,
+                one_shot_callback as *const () as *mut _,
+                1usize as *mut _,
+            ));
+            assert!(pool.arm_at(timer_ptr, 10, false, 100));
+            assert!(pool.done(timer_ptr));
+            assert!(pool.done(timer_ptr));
+        }
+        assert!(timer.next.is_null());
+        assert_eq!(timer.expire, 0);
+        assert_eq!(timer.period, 0);
+        assert!(timer.callback.is_none());
+        assert!(timer.argument.is_null());
+
+        let mut unknown_timer = RawOsiTimer {
+            callback: Some(one_shot_callback),
+            ..raw_timer()
+        };
+        assert!(!unsafe { pool.done(core::ptr::from_mut(&mut unknown_timer).cast()) });
+    }
+
+    #[test]
+    fn done_accepts_a_never_initialized_empty_timer() {
+        let pool = RuntimeTimerPool::<1>::new();
+        let mut timer = raw_timer();
+
+        assert!(unsafe { pool.done(core::ptr::from_mut(&mut timer).cast()) });
     }
 }
