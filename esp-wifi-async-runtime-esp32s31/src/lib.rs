@@ -56,6 +56,7 @@ mod sta_link;
 pub mod strict;
 pub mod task;
 pub mod timer;
+pub mod tx_ampdu;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod txdone;
 #[cfg(target_arch = "riscv32")]
@@ -178,6 +179,10 @@ pub use sta_link::{
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
+pub use tx_ampdu::{
+    AddbaRequest, OperationalTxBlockAck, TxBlockAckAlarm, TxBlockAckConfig, TxBlockAckError,
+    TxBlockAckResponse, TxBlockAckSession, ADDBA_ACTION_BODY_LEN, TX_BLOCK_ACK_MAX_WINDOW,
+};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
