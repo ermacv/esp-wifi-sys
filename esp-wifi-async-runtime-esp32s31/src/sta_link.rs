@@ -105,6 +105,13 @@ pub struct StaAssocSnapshot {
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
     pub action_tx_done: u32,
+    pub tx_addba_submitted: u32,
+    pub tx_addba_responses: u32,
+    pub tx_addba_accepted: u32,
+    pub tx_addba_rejected: u32,
+    pub tx_addba_timeouts: u32,
+    pub tx_addba_last_status: u16,
+    pub tx_addba_window: u16,
 }
 
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
@@ -261,7 +268,12 @@ mod target {
     };
 
     use super::*;
-    use crate::{interrupt::InterruptSignal, scan::StrictScanRecord, timer::RawOsiTimer};
+    use crate::{
+        interrupt::InterruptSignal,
+        scan::StrictScanRecord,
+        timer::RawOsiTimer,
+        tx_ampdu::{TxBlockAckAlarm, TxBlockAckConfig, TxBlockAckResponse, TxBlockAckSession},
+    };
 
     pub(crate) const STA_AUTH_EVENT: u32 = u32::MAX - 12;
     pub(crate) const STA_ASSOC_EVENT: u32 = u32::MAX - 13;
@@ -292,6 +304,20 @@ mod target {
     const ASSOC_FIXED_BODY_LEN: usize = 4;
     const ASSOC_CAPABILITY_MASK: u16 = 0x0431;
     const ASSOC_LISTEN_INTERVAL: u16 = 1;
+    const TX_BLOCK_ACK_TID: u8 = 7;
+    const TX_BLOCK_ACK_TIMEOUT_US: u32 = 100_000;
+    const TX_BLOCK_ACK_CONFIG: TxBlockAckConfig = TxBlockAckConfig {
+        tid: TX_BLOCK_ACK_TID,
+        window: crate::tx_ampdu::TX_BLOCK_ACK_MAX_WINDOW,
+        timeout_tu: 0,
+        negotiation_timeout_us: TX_BLOCK_ACK_TIMEOUT_US,
+        amsdu: false,
+    };
+    const TX_BLOCK_ACK_SESSION_INITIAL: TxBlockAckSession =
+        match TxBlockAckSession::new(TX_BLOCK_ACK_CONFIG) {
+            Ok(session) => session,
+            Err(_) => panic!("fixed TX BlockAck config must be valid"),
+        };
 
     #[derive(Clone, Copy)]
     struct AuthConfig {
@@ -348,6 +374,9 @@ mod target {
     struct TimerCell(UnsafeCell<RawOsiTimer>);
     unsafe impl Sync for TimerCell {}
 
+    struct TxBlockAckCell(UnsafeCell<TxBlockAckSession>);
+    unsafe impl Sync for TxBlockAckCell {}
+
     static CONFIG: ConfigCell = ConfigCell(UnsafeCell::new(AuthConfig::EMPTY));
     static ASSOC_CONFIG: AssocConfigCell = AssocConfigCell(UnsafeCell::new(AssocConfig::EMPTY));
     static NODE: NodeCell = NodeCell(UnsafeCell::new([0; VENDOR_NODE_LEN]));
@@ -379,6 +408,17 @@ mod target {
         callback: None,
         argument: ptr::null_mut(),
     }));
+    #[unsafe(link_section = ".critical.bss.wifi_strict.tx_block_ack")]
+    static TX_BLOCK_ACK_SESSION: TxBlockAckCell =
+        TxBlockAckCell(UnsafeCell::new(TX_BLOCK_ACK_SESSION_INITIAL));
+    #[unsafe(link_section = ".critical.bss.wifi_strict.tx_block_ack")]
+    static TX_BLOCK_ACK_TIMER: TimerCell = TimerCell(UnsafeCell::new(RawOsiTimer {
+        next: ptr::null_mut(),
+        expire: 0,
+        period: 0,
+        callback: None,
+        argument: ptr::null_mut(),
+    }));
     static ASSOC_PHASE: AtomicU8 = AtomicU8::new(PHASE_IDLE);
     static ASSOC_RESULT: AtomicU32 = AtomicU32::new(RESULT_PENDING);
     static ASSOC_SIGNAL: InterruptSignal = InterruptSignal::new();
@@ -403,6 +443,14 @@ mod target {
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
     static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    static TX_ADDBA_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_RESPONSES: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_ACCEPTED: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_REJECTED: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_TIMEOUTS: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_WINDOW: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_ALARM_GENERATION: AtomicU32 = AtomicU32::new(0);
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -530,6 +578,13 @@ mod target {
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
             action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
+            tx_addba_submitted: TX_ADDBA_SUBMITTED.load(Ordering::Acquire),
+            tx_addba_responses: TX_ADDBA_RESPONSES.load(Ordering::Acquire),
+            tx_addba_accepted: TX_ADDBA_ACCEPTED.load(Ordering::Acquire),
+            tx_addba_rejected: TX_ADDBA_REJECTED.load(Ordering::Acquire),
+            tx_addba_timeouts: TX_ADDBA_TIMEOUTS.load(Ordering::Acquire),
+            tx_addba_last_status: TX_ADDBA_LAST_STATUS.load(Ordering::Acquire) as u16,
+            tx_addba_window: TX_ADDBA_WINDOW.load(Ordering::Acquire) as u16,
         }
     }
 
@@ -897,6 +952,102 @@ mod target {
         );
     }
 
+    unsafe extern "C" fn tx_addba_timeout(_argument: *mut c_void) {
+        let _ = crate::adapter::cancel_internal_timer(TX_BLOCK_ACK_TIMER.0.get().cast());
+        let alarm = TxBlockAckAlarm {
+            generation: TX_ADDBA_ALARM_GENERATION.load(Ordering::Acquire),
+            deadline_us: 0,
+        };
+        if (*TX_BLOCK_ACK_SESSION.0.get()).on_alarm(alarm) {
+            TX_ADDBA_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Start a Rust-owned TX ADDBA negotiation after the controlled port is
+    /// authorized. This only proves the management protocol and bounded async
+    /// deadline. It deliberately does not enable the vendor aggregation
+    /// scheduler or attach an allocation-backed vendor BA object.
+    pub(crate) unsafe fn start_sta_tx_block_ack() -> bool {
+        if !crate::critical::on_strict_wifi_hart()
+            || !crate::context::in_radio_context()
+            || ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) == 0
+            || ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) == 0
+            || TX_ADDBA_SUBMITTED.load(Ordering::Acquire) != 0
+            || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0
+        {
+            return false;
+        }
+        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        if interface.is_null() {
+            return false;
+        }
+        let node = interface.add(0xe4).cast::<*mut u8>().read();
+        if node != NODE.0.get().cast::<u8>() {
+            return false;
+        }
+        // The pinned node stores the next 12-bit QoS sequence number at
+        // node+0xae+2*TID. Rust snapshots it before constructing ADDBA.
+        let starting_sequence = node
+            .add(0xae + usize::from(TX_BLOCK_ACK_TID) * 2)
+            .cast::<u16>()
+            .read_unaligned()
+            & 0x0fff;
+        let session = &mut *TX_BLOCK_ACK_SESSION.0.get();
+        if session.is_awaiting() || session.operational().is_some() {
+            return false;
+        }
+        let Ok(request) = session.begin(starting_sequence, 0) else {
+            return false;
+        };
+
+        let mut body = ptr::null_mut();
+        let buffer = ieee80211_getmgtframe(
+            &mut body,
+            MANAGEMENT_HEADER_LEN,
+            crate::tx_ampdu::ADDBA_ACTION_BODY_LEN as u32,
+        );
+        if buffer.is_null() || body.is_null() {
+            session.stop();
+            return false;
+        }
+        ptr::copy_nonoverlapping(
+            request.body.as_ptr(),
+            body,
+            crate::tx_ampdu::ADDBA_ACTION_BODY_LEN,
+        );
+        buffer
+            .add(0x14)
+            .cast::<u16>()
+            .write_unaligned(MANAGEMENT_HEADER_LEN as u16);
+        ieee80211_set_tx_desc(node, buffer, MANAGEMENT_RATE_POLICY, 0, 0);
+        linked_ieee80211_set_tx_pti(buffer, ASSOC_PTI);
+        if OWNED_ACTION_BUFFER
+            .compare_exchange(0, buffer as usize, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            session.stop();
+            esf_buf_recycle(buffer.cast());
+            return false;
+        }
+        if linked_ieee80211_mgmt_output(node, buffer, 0xd0) != 0 {
+            session.stop();
+            cancel_owned_action_management(buffer);
+            return false;
+        }
+        TX_ADDBA_ALARM_GENERATION.store(request.alarm.generation, Ordering::Release);
+        TX_ADDBA_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        if !crate::adapter::schedule_internal_timer(
+            TX_BLOCK_ACK_TIMER.0.get().cast(),
+            tx_addba_timeout,
+            ptr::null_mut(),
+            TX_BLOCK_ACK_TIMEOUT_US,
+        ) {
+            session.stop();
+            return false;
+        }
+        true
+    }
+
     unsafe fn send_addba_decline(node: *mut u8, request: &[u8]) -> bool {
         const ACTION_BODY_LEN: usize = 9;
         const STATUS_REQUEST_DECLINED: u16 = 37;
@@ -952,7 +1103,7 @@ mod target {
     /// state machine. Until Rust owns reorder buffers, it emits one explicit
     /// standards-level decline using the fixed management pool.
     pub(crate) fn ingest_management_action(frame: &[u8]) -> bool {
-        if frame.len() < 33 || frame[0] & 0xfc != 0xd0 || frame[24] != 3 || frame[25] != 0 {
+        if frame.len() < 33 || frame[0] & 0xfc != 0xd0 || frame[24] != 3 {
             return false;
         }
         let config = unsafe { ASSOC_CONFIG.0.get().read() };
@@ -960,6 +1111,38 @@ mod target {
             || frame[10..16] != config.access_point.bssid
             || frame[16..22] != config.access_point.bssid
         {
+            return false;
+        }
+        if frame[25] == crate::tx_ampdu::ADDBA_RESPONSE_ACTION {
+            let session = unsafe { &mut *TX_BLOCK_ACK_SESSION.0.get() };
+            match session.on_response(&frame[24..33]) {
+                Ok(TxBlockAckResponse::Operational(agreement)) => {
+                    unsafe {
+                        let _ = crate::adapter::cancel_internal_timer(
+                            TX_BLOCK_ACK_TIMER.0.get().cast(),
+                        );
+                    }
+                    TX_ADDBA_RESPONSES.fetch_add(1, Ordering::Relaxed);
+                    TX_ADDBA_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+                    TX_ADDBA_LAST_STATUS.store(0, Ordering::Release);
+                    TX_ADDBA_WINDOW.store(u32::from(agreement.window), Ordering::Release);
+                }
+                Ok(TxBlockAckResponse::Rejected(status)) => {
+                    unsafe {
+                        let _ = crate::adapter::cancel_internal_timer(
+                            TX_BLOCK_ACK_TIMER.0.get().cast(),
+                        );
+                    }
+                    TX_ADDBA_RESPONSES.fetch_add(1, Ordering::Relaxed);
+                    TX_ADDBA_REJECTED.fetch_add(1, Ordering::Relaxed);
+                    TX_ADDBA_LAST_STATUS.store(u32::from(status), Ordering::Release);
+                    TX_ADDBA_WINDOW.store(0, Ordering::Release);
+                }
+                Err(_) => {}
+            }
+            return true;
+        }
+        if frame[25] != crate::tx_ampdu::ADDBA_REQUEST_ACTION {
             return false;
         }
         ADDBA_REQUESTS.fetch_add(1, Ordering::Relaxed);
@@ -1336,7 +1519,7 @@ pub use target::sta_auth_snapshot;
 pub(crate) use target::{
     complete_owned_action_management, dispatch_assoc_tx, dispatch_auth_tx,
     ingest_management_action, is_owned_action_management, management_tx_done, observe_management,
-    STA_ASSOC_EVENT, STA_AUTH_EVENT,
+    start_sta_tx_block_ack, STA_ASSOC_EVENT, STA_AUTH_EVENT,
 };
 
 #[cfg(test)]

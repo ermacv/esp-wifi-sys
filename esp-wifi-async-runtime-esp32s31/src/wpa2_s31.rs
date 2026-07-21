@@ -873,6 +873,12 @@ mod target {
                 ptr::addr_of_mut!(g_sta_connected_flag).write(1);
                 station.add(0x140).write(5);
             }
+            // Negotiate the protocol boundary now that protected data is
+            // authorized. The current step does not enable aggregation; it
+            // only exercises the Rust-owned ADDBA state and async timeout.
+            unsafe {
+                let _ = crate::sta_link::start_sta_tx_block_ack();
+            }
             Ok(())
         }
 

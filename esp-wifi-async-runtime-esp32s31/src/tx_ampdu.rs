@@ -235,6 +235,10 @@ impl TxBlockAckSession {
             _ => None,
         }
     }
+
+    pub const fn is_awaiting(&self) -> bool {
+        matches!(self.phase, TxBlockAckPhase::Awaiting { .. })
+    }
 }
 
 const fn encode_ba_parameters(tid: u8, window: u16, amsdu: bool) -> u16 {
