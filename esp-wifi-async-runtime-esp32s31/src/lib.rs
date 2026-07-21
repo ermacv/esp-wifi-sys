@@ -50,6 +50,7 @@ pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;
 pub mod scan;
+mod sta_link;
 pub mod strict;
 pub mod task;
 pub mod timer;
@@ -155,6 +156,9 @@ pub use scan::{
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use scan::{passive_scan_2_4ghz, tune_home_channel};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use sta_link::authenticate_open;
+pub use sta_link::{StaAuthError, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US};
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};

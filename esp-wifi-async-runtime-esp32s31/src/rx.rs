@@ -265,6 +265,9 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
                 unsafe { core::slice::from_raw_parts(frame, length) },
                 rssi,
             );
+            crate::sta_link::observe_management(unsafe {
+                core::slice::from_raw_parts(frame, length)
+            });
         }
         1 => {
             COUNTERS.raw_control.fetch_add(1, Ordering::Relaxed);
