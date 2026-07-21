@@ -187,12 +187,19 @@ impl<const N: usize> RuntimeTimerPool<N> {
     /// # Safety
     /// `timer` must be the live timer previously passed to `set_callback`.
     pub unsafe fn disarm(&self, timer: *mut c_void) -> bool {
-        let Some(slot) = self.find(timer) else {
+        if timer.is_null() {
             return false;
-        };
-        slot.armed.store(false, Ordering::Release);
-        unsafe {
-            (*timer.cast::<RawOsiTimer>()).period = 0;
+        }
+        if let Some(slot) = self.find(timer) {
+            slot.armed.store(false, Ordering::Release);
+            unsafe {
+                (*timer.cast::<RawOsiTimer>()).period = 0;
+            }
+        } else if !unsafe { Self::raw_is_empty(timer.cast()) } {
+            // The stock adapter treats disarming a deleted timer as a no-op.
+            // Accept only our fully cleared tombstone, never an unknown live
+            // object which could belong to another timer backend.
+            return false;
         }
         self.waker.wake();
         true
@@ -227,19 +234,23 @@ impl<const N: usize> RuntimeTimerPool<N> {
             // The stock adapter makes deleting an empty timer a no-op. Preserve
             // that required idempotence, but reject an unregistered object if
             // any field still describes a live or unknown timer.
-            let already_done = unsafe {
-                (*raw).next.is_null()
-                    && (*raw).expire == 0
-                    && (*raw).period == 0
-                    && (*raw).callback.is_none()
-                    && (*raw).argument.is_null()
-            };
+            let already_done = unsafe { Self::raw_is_empty(raw) };
             if !already_done {
                 return false;
             }
         }
         self.waker.wake();
         true
+    }
+
+    unsafe fn raw_is_empty(raw: *const RawOsiTimer) -> bool {
+        unsafe {
+            (*raw).next.is_null()
+                && (*raw).expire == 0
+                && (*raw).period == 0
+                && (*raw).callback.is_none()
+                && (*raw).argument.is_null()
+        }
     }
 
     pub fn dispatch_due_at(&self, now: u32, budget: usize) -> usize {
@@ -472,5 +483,20 @@ mod tests {
         let mut timer = raw_timer();
 
         assert!(unsafe { pool.done(core::ptr::from_mut(&mut timer).cast()) });
+    }
+
+    #[test]
+    fn disarm_is_idempotent_only_for_an_empty_timer() {
+        let pool = RuntimeTimerPool::<1>::new();
+        let mut timer = raw_timer();
+        let timer_ptr = core::ptr::from_mut(&mut timer).cast();
+
+        assert!(unsafe { pool.disarm(timer_ptr) });
+
+        let mut unknown_timer = RawOsiTimer {
+            callback: Some(one_shot_callback),
+            ..raw_timer()
+        };
+        assert!(!unsafe { pool.disarm(core::ptr::from_mut(&mut unknown_timer).cast()) });
     }
 }
