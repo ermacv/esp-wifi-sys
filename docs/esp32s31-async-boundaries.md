@@ -204,6 +204,10 @@ and probe-response frames are parsed before the vendor management-frame tail
 and deduplicated by BSSID into a 32-entry BSS table. The caller supplies the
 output slice; no vendor AP list, `Vec`, semaphore, task delay, or polling loop
 is used. Table overflow is reported in the scan summary and never waits.
+The pinned RX-policy jump table is not entered: its exact policy-3 and policy-0
+branches are expressed as direct calls to audited finite `ic_*` leaves. Dwell
+completion likewise accepts only the Rust scan callback, clears the fixed
+channel-operation state directly, and makes no arbitrary indirect call.
 
 ## Heap and indirect calls
 

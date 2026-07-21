@@ -29,6 +29,16 @@ const ROOTS: &[&str] = &[
     "ppDequeueTxQ",
     "rcUpdateTxDone",
     "ic_get_next_tbtt",
+    // Direct finite leaves used by the Rust-owned channel switch and strict
+    // passive-scan receive-policy branches.
+    "chm_get_chan_info",
+    "ic_set_current_channel",
+    "phy_change_channel",
+    "hal_mac_set_csi_cbw",
+    "ic_mac_init",
+    "ic_set_mac",
+    "ic_set_rx_policy",
+    "ic_set_rx_policy_ubssid_check",
     // Direct leaves used by the one-frame strict event-16 continuation.
     "pp_coex_tx_release",
     "esp_wifi_internal_free_rx_buffer",

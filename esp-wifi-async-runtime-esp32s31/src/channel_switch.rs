@@ -44,7 +44,6 @@ unsafe extern "C" {
     fn phy_change_channel(frequency_mhz: u16, init: u32, noise_floor: u32, cbw: u32);
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
-    fn chm_end_op_timeout_process(which: u32);
     fn __esp_scan_op_end(context: *mut c_void, result: u32);
 }
 
@@ -148,7 +147,7 @@ const fn decode_error(raw: u32) -> ChannelSwitchError {
 
 /// Complete the single scan dwell that may already be armed when the cold
 /// handoff enters strict mode. Its callback identity and `g_chm` state are
-/// checked before entering the recovered finite completion leaf. Every later
+/// checked before rejecting its vendor-owned callback. Every later
 /// scan operation is created through `__wrap_chm_start_op` instead.
 pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), ChannelSwitchError> {
     if which > 1 || !crate::critical::on_strict_wifi_hart() {
@@ -169,8 +168,8 @@ pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), Chan
     {
         return Err(ChannelSwitchError::LegacyDwellRejected);
     }
-    chm_end_op_timeout_process(which as u32);
-    Ok(())
+    let _ = which;
+    Err(ChannelSwitchError::LegacyDwellRejected)
 }
 
 unsafe fn fail(error: ChannelSwitchError, detail: u32) {
@@ -365,11 +364,36 @@ unsafe fn finish_operation(chm: *mut u8) {
 
 unsafe extern "C" fn first_dwell_elapsed(_argument: *mut c_void) {
     let _ = crate::adapter::cancel_internal_timer(final_timer());
-    chm_end_op_timeout_process(0);
+    finish_strict_dwell();
 }
 
 unsafe extern "C" fn final_dwell_elapsed(_argument: *mut c_void) {
-    chm_end_op_timeout_process(1);
+    finish_strict_dwell();
+}
+
+unsafe fn finish_strict_dwell() {
+    let chm = g_chm;
+    if chm.is_null() {
+        fail(ChannelSwitchError::StateUnavailable, 0);
+        return;
+    }
+    let end = chm
+        .add(24)
+        .cast::<Option<ChannelCallback>>()
+        .read_unaligned();
+    let context = chm.add(16).cast::<*mut c_void>().read_unaligned();
+    if end
+        .is_none_or(|callback| callback as *const () != crate::scan::channel_complete as *const ())
+    {
+        fail(ChannelSwitchError::LegacyDwellRejected, 0);
+        return;
+    }
+
+    // Exact finite state-clear prefix of pinned `chm_end_op`, followed by a
+    // direct call to the sole callback accepted by the strict scan API.
+    ptr::write_bytes(chm.add(4), 0, 24);
+    chm.add(4).write(u8::MAX);
+    crate::scan::channel_complete(context, 0);
 }
 
 /// Strict final-link channel-operation boundary. The vendor state and callback

@@ -110,7 +110,10 @@ static OP_SIGNAL: InterruptSignal = InterruptSignal::new();
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 unsafe extern "C" {
-    fn wifi_set_rx_policy(policy: u32) -> i32;
+    static mut g_ic: u8;
+    fn ic_set_mac(index: u32, address: *const u8);
+    fn ic_set_rx_policy(index: u32, mode: u32, control: u32, management: u32);
+    fn ic_set_rx_policy_ubssid_check(index: u32, enabled: u32);
     fn chm_start_op(
         channel: *const u8,
         first_dwell_ms: u32,
@@ -231,11 +234,8 @@ pub(crate) unsafe fn dispatch_channel() {
     }
     let channel = [OP_CHANNEL.load(Ordering::Acquire), 0];
     let dwell = OP_DWELL_MS.load(Ordering::Acquire);
-    if channel[0] == 1 && wifi_set_rx_policy(3) == 0 {
-        OP_RESULT.store(0x8000_0000, Ordering::Release);
-        OP_STATE.store(OP_IDLE, Ordering::Release);
-        OP_SIGNAL.notify_from_isr();
-        return;
+    if channel[0] == 1 {
+        enable_scan_rx_policy();
     }
     let result = chm_start_op(
         channel.as_ptr(),
@@ -246,7 +246,7 @@ pub(crate) unsafe fn dispatch_channel() {
         core::ptr::null_mut(),
     );
     if result != 0 {
-        let _ = wifi_set_rx_policy(0);
+        restore_default_rx_policy();
         OP_RESULT.store(0x8000_0000 | result as u32, Ordering::Release);
         OP_STATE.store(OP_IDLE, Ordering::Release);
         OP_SIGNAL.notify_from_isr();
@@ -254,16 +254,39 @@ pub(crate) unsafe fn dispatch_channel() {
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-unsafe extern "C" fn channel_complete(_context: *mut core::ffi::c_void, result: u32) {
+pub(crate) unsafe extern "C" fn channel_complete(_context: *mut core::ffi::c_void, result: u32) {
     if result != 0
         || OP_CHANNEL.load(Ordering::Acquire) == 13
         || SESSION.load(Ordering::Acquire) != SESSION_ACTIVE
     {
-        let _ = wifi_set_rx_policy(0);
+        restore_default_rx_policy();
     }
     OP_RESULT.store(result, Ordering::Release);
     OP_STATE.store(OP_IDLE, Ordering::Release);
     OP_SIGNAL.notify_from_isr();
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+unsafe fn enable_scan_rx_policy() {
+    // Exact policy-3 branch of the pinned `wifi_set_rx_policy` jump table.
+    // Calling the three finite leaves directly removes the unproven indirect
+    // dispatch while preserving management/control reception off-channel.
+    ic_set_rx_policy(0, 2, 1, 1);
+    ic_set_rx_policy_ubssid_check(0, 0);
+    core::ptr::addr_of_mut!(g_ic).add(716).write(3);
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+unsafe fn restore_default_rx_policy() {
+    // Exact policy-0 branch. Both addresses belong to the pinned `g_ic`
+    // object and the called leaves audit without heap, waits, or cycles.
+    let ic = core::ptr::addr_of_mut!(g_ic);
+    ic_set_mac(0, ic.add(0x21a));
+    ic_set_mac(1, ic.add(0x214));
+    ic_set_rx_policy(0, 0, 0, 0);
+    ic_set_rx_policy(1, 0, 0, 0);
+    ic_set_rx_policy_ubssid_check(0, 0);
+    ic.add(716).write(0);
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
