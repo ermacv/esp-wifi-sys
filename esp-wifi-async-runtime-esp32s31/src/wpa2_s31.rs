@@ -202,8 +202,8 @@ pub enum S31Wpa2IoError {
     InvalidHardwareIndex(u8),
     ForeignSoftwareKeyPresent,
     MissingStaInterfaceState,
-    AuthorizationOnlyForAccessPoint,
     AuthorizationWithoutPairwiseKey,
+    StaPeerUnauthorized,
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
     InternalOwnershipMismatch,
@@ -448,6 +448,7 @@ mod target {
     pub struct S31StaticWpa2Io<const K: usize> {
         storage: &'static S31StaticKeyStorage<K>,
         keys: StaticWpa2Keys<K>,
+        sta_authorized_peer: Option<[u8; 6]>,
         authorized_peers: StaticAuthorizedPeers<K>,
         tx_poisoned: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -476,6 +477,7 @@ mod target {
             Ok(Self {
                 storage,
                 keys: StaticWpa2Keys::new(),
+                sta_authorized_peer: None,
                 authorized_peers: StaticAuthorizedPeers::new(),
                 tx_poisoned: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -517,6 +519,11 @@ mod target {
             self.authorized_peers.contains(peer)
         }
 
+        /// Controlled-port state for the single associated STA peer.
+        pub fn is_sta_peer_authorized(&self) -> bool {
+            self.sta_authorized_peer.is_some()
+        }
+
         /// Submit one frame received from the fixed application TX channel.
         ///
         /// This performs one immediate static-pool attempt. AP traffic is
@@ -533,18 +540,22 @@ mod target {
                 WifiDataInterface::Station => Wpa2Interface::Station,
                 WifiDataInterface::AccessPoint => Wpa2Interface::AccessPoint,
             };
-            if interface == Wpa2Interface::AccessPoint
-                && !self.is_ap_peer_authorized(frame.destination())
-            {
-                return Err(S31Wpa2IoError::ApPeerUnauthorized);
+            match interface {
+                Wpa2Interface::Station if !self.is_sta_peer_authorized() => {
+                    return Err(S31Wpa2IoError::StaPeerUnauthorized);
+                }
+                Wpa2Interface::AccessPoint if !self.is_ap_peer_authorized(frame.destination()) => {
+                    return Err(S31Wpa2IoError::ApPeerUnauthorized);
+                }
+                _ => {}
             }
             self.submit_frame(interface, frame.as_bytes())
         }
 
-        fn has_ap_pairwise_key(&self, peer: &[u8; 6]) -> bool {
+        fn has_pairwise_key(&self, interface: Wpa2Interface, peer: &[u8; 6]) -> bool {
             (0..K).any(|index| {
                 self.keys.get(index).is_some_and(|key| {
-                    key.interface() == Wpa2Interface::AccessPoint
+                    key.interface() == interface
                         && key.peer() == peer
                         && key.kind() == Wpa2KeyKind::Pairwise
                 })
@@ -557,15 +568,23 @@ mod target {
             peer: [u8; 6],
             authorized: bool,
         ) -> Result<(), S31Wpa2IoError> {
-            if interface != Wpa2Interface::AccessPoint {
-                return Err(S31Wpa2IoError::AuthorizationOnlyForAccessPoint);
-            }
-            if authorized && !self.has_ap_pairwise_key(&peer) {
+            if authorized && !self.has_pairwise_key(interface, &peer) {
                 return Err(S31Wpa2IoError::AuthorizationWithoutPairwiseKey);
             }
-            self.authorized_peers
-                .set(peer, authorized)
-                .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull)
+            match interface {
+                Wpa2Interface::Station => {
+                    if authorized {
+                        self.sta_authorized_peer = Some(peer);
+                    } else if self.sta_authorized_peer == Some(peer) {
+                        self.sta_authorized_peer = None;
+                    }
+                    Ok(())
+                }
+                Wpa2Interface::AccessPoint => self
+                    .authorized_peers
+                    .set(peer, authorized)
+                    .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull),
+            }
         }
 
         fn submit_eapol<const N: usize>(
