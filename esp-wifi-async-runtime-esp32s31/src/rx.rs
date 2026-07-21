@@ -171,6 +171,23 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
     };
     account_raw_frame(packet, rx_control);
 
+    let mut raw_frame = unsafe { rx_control.add(64) };
+    let mut raw_length = unsafe { rx_control.add(20).read() as usize };
+    if unsafe { packet.add(36).cast::<u16>().read() } & 0x2000 != 0 {
+        if raw_length < 8 {
+            COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+            unsafe { ppRecycleRxPkt(packet) };
+            return;
+        }
+        raw_frame = unsafe { raw_frame.add(8) };
+        raw_length -= 8;
+    }
+    let raw_bytes = unsafe { core::slice::from_raw_parts(raw_frame, raw_length) };
+    if is_frame_to_local_address(raw_bytes) && crate::wpa2_rx::ingest_sta_80211(raw_bytes) {
+        unsafe { ppRecycleRxPkt(packet) };
+        return;
+    }
+
     if unsafe { ppRxProtoProc(packet, rx_control) } != 0 {
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
         unsafe { ppRecycleRxPkt(packet) };
@@ -321,6 +338,17 @@ fn is_frame_from_local_address(frame: *const u8, length: usize) -> bool {
         index += 1;
     }
     true
+}
+
+fn is_frame_to_local_address(frame: &[u8]) -> bool {
+    if frame.len() < 10 {
+        return false;
+    }
+    let local = unsafe { ptr::addr_of!(g_ic).add(LOCAL_ADDRESS_OFFSET) };
+    frame[4..10]
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| unsafe { *byte == local.add(index).read() })
 }
 
 #[cfg(test)]

@@ -69,6 +69,73 @@ fn ingest(interface: Wpa2Interface, peer: [u8; 6], bytes: &[u8]) -> bool {
     }
 }
 
+/// Copy an unencrypted STA EAPOL-Key packet directly from an 802.11 data MPDU.
+///
+/// This boundary is used before the vendor net80211 protocol classifier. A
+/// Rust-driven association does not populate the vendor supplicant/link state
+/// which would otherwise select `sta_rx_eapol`, so relying on that callback
+/// would leave a valid M1 in the raw RX path without waking the async consumer.
+/// Recognized EAPOL traffic is always consumed, including malformed or
+/// overflowed packets, and therefore can never fall through into `wpa2_task`.
+#[cfg(any(test, target_arch = "riscv32"))]
+pub(crate) fn ingest_sta_80211(frame: &[u8]) -> bool {
+    const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
+
+    if frame.len() < 24 {
+        return false;
+    }
+    let frame_control = u16::from_le_bytes([frame[0], frame[1]]);
+    let frame_type = (frame_control >> 2) & 3;
+    let to_ds = frame_control & 0x0100 != 0;
+    let from_ds = frame_control & 0x0200 != 0;
+    if frame_type != 2 || to_ds || !from_ds || frame_control & 0x4000 != 0 {
+        return false;
+    }
+
+    let qos = frame_control & 0x0080 != 0;
+    let order = frame_control & 0x8000 != 0;
+    let mut header_len = 24_usize;
+    if qos {
+        header_len += 2;
+        if order {
+            header_len += 4;
+        }
+    }
+    let Some(llc_end) = header_len.checked_add(LLC_EAPOL.len()) else {
+        return false;
+    };
+    if frame.get(header_len..llc_end) != Some(LLC_EAPOL.as_slice()) {
+        return false;
+    }
+
+    // Once LLC identifies EAPOL, keep it out of the vendor supplicant even if
+    // its own length fields are malformed. The bounded ingress accounts the
+    // rejection and the caller recycles the PP packet immediately.
+    #[cfg(feature = "hil-vendor-tx")]
+    STA_RAW_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    let Some(header) = frame.get(llc_end..llc_end + 4) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let body_len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+    let Some(eapol_len) = 4_usize.checked_add(body_len) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let Some(bytes) = frame.get(llc_end..llc_end + eapol_len) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return true;
+    };
+    let mut peer = [0; 6];
+    peer.copy_from_slice(&frame[10..16]);
+    let _accepted = ingest(Wpa2Interface::Station, peer, bytes);
+    #[cfg(feature = "hil-vendor-tx")]
+    if _accepted {
+        STA_ACCEPTED.fetch_add(1, Ordering::Release);
+    }
+    true
+}
+
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     #[link_name = "sta_rx_eapol"]
@@ -272,5 +339,22 @@ mod tests {
         let ap = try_receive_wpa2_eapol().unwrap();
         assert_eq!(ap.interface(), Wpa2Interface::AccessPoint);
         assert_eq!(ap.peer(), &[6; 6]);
+    }
+
+    #[test]
+    fn raw_sta_mpdu_enters_static_ingress_without_vendor_classifier() {
+        while try_receive_wpa2_eapol().is_some() {}
+        let eapol = Wpa2TxFrame::<128>::message1([1; 6], 9, [2; 32]).unwrap();
+        let mut frame = [0_u8; 24 + 8 + 128];
+        frame[..2].copy_from_slice(&0x0208_u16.to_le_bytes());
+        frame[10..16].copy_from_slice(&[3; 6]);
+        frame[24..32].copy_from_slice(&[0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e]);
+        let length = 32 + eapol.as_bytes().len();
+        frame[32..length].copy_from_slice(eapol.as_bytes());
+
+        assert!(ingest_sta_80211(&frame[..length]));
+        let received = try_receive_wpa2_eapol().unwrap();
+        assert_eq!(received.peer(), &[3; 6]);
+        assert_eq!(received.key_frame().replay_counter(), 9);
     }
 }
