@@ -14,7 +14,10 @@ const DESCRIPTOR_SIZE: usize = 0x14;
 const ESF_HEADER_SIZE: usize = 0x90;
 const MANAGEMENT_PAYLOAD_CAPACITY: usize = 1600;
 const MANAGEMENT_SLOT_SIZE: usize = ESF_HEADER_SIZE + MANAGEMENT_PAYLOAD_CAPACITY;
-const MANAGEMENT_SLOT_CAPACITY: usize = 8;
+// Active 2.4-GHz scanning can retain one management frame for each of the
+// thirteen configured channels until TX completion catches up. Keep those
+// frames plus bounded authentication/association headroom entirely in BSS.
+const MANAGEMENT_SLOT_CAPACITY: usize = 16;
 const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
@@ -394,3 +397,4 @@ pub fn rejected_esf_operations() -> usize {
 }
 
 const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
+const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
