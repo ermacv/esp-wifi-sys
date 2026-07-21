@@ -10,7 +10,7 @@ use core::{
 
 use crate::channel::BoundedChannel;
 
-pub const WIFI_DATA_RX_CAPACITY: usize = 8;
+pub const WIFI_DATA_RX_CAPACITY: usize = 32;
 pub const WIFI_DATA_RX_FRAME_CAPACITY: usize = 1600;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,7 +47,15 @@ impl RxSlot {
 // consumer. A slot is never written again until its token is dropped.
 unsafe impl Sync for RxSlot {}
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.data_rx_slots"
+)]
 static RX_SLOTS: [RxSlot; WIFI_DATA_RX_CAPACITY] = [const { RxSlot::new() }; WIFI_DATA_RX_CAPACITY];
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.data_rx_channel"
+)]
 static RX_CHANNEL: BoundedChannel<RxSlotToken, WIFI_DATA_RX_CAPACITY> = BoundedChannel::new();
 static REJECTED_RX_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static RX_CLAIMED: AtomicUsize = AtomicUsize::new(0);
@@ -171,6 +179,10 @@ pub fn rejected_wifi_data_frames() -> usize {
 }
 
 #[cfg(any(test, target_arch = "riscv32"))]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.data_rx_copy"
+)]
 unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length: usize) -> bool {
     if buffer.is_null() || length == 0 || length > WIFI_DATA_RX_FRAME_CAPACITY {
         REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -229,6 +241,7 @@ mod target {
     }
 
     #[no_mangle]
+    #[link_section = ".rwtext.wifi_strict.data_rx_sta"]
     pub unsafe extern "C" fn __esp_wifi_async_data_rx_sta(
         buffer: *mut c_void,
         length: u16,
@@ -238,6 +251,7 @@ mod target {
     }
 
     #[no_mangle]
+    #[link_section = ".rwtext.wifi_strict.data_rx_ap"]
     pub unsafe extern "C" fn __esp_wifi_async_data_rx_ap(
         buffer: *mut c_void,
         length: u16,
@@ -251,6 +265,7 @@ mod target {
         )
     }
 
+    #[link_section = ".rwtext.wifi_strict.data_rx_dispatch"]
     unsafe fn receive(
         interface: WifiDataInterface,
         buffer: *mut c_void,

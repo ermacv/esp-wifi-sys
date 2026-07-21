@@ -118,8 +118,9 @@ pub use data_rx::{
     WIFI_DATA_RX_CAPACITY, WIFI_DATA_RX_FRAME_CAPACITY,
 };
 pub use data_tx::{
-    poll_wifi_data_tx_ready, receive_wifi_data_tx, try_receive_wifi_data_tx, try_send_wifi_data,
-    wifi_data_tx_snapshot, OwnedWifiDataTxFrame, WifiDataTxEnqueueError, WifiDataTxSnapshot,
+    flush_wifi_data_tx, poll_wifi_data_tx_ready, receive_wifi_data_tx, try_receive_wifi_data_tx,
+    try_send_wifi_data, wifi_data_tx_snapshot, OwnedWifiDataTxFrame, WifiDataTxEnqueueError,
+    WifiDataTxSnapshot,
     WIFI_DATA_TX_CAPACITY, WIFI_DATA_TX_FRAME_CAPACITY,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]

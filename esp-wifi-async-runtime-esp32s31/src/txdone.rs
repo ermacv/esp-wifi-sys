@@ -209,7 +209,15 @@ struct StateCell(UnsafeCell<TxDoneState>);
 
 unsafe impl Sync for StateCell {}
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.tx_done_state"
+)]
 static STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.lmac_tx_done_state"
+)]
 static LMAC_STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 static STRICT_CALLBACK_FAILED: AtomicBool = AtomicBool::new(false);
 
@@ -517,6 +525,10 @@ unsafe fn begin_from_wrapped_lmac(frame: *mut u8, mode: u32) -> Result<(), TxDon
 /// Every mode-1 callback and the queue resume become executor continuations,
 /// so the stock inline `ppProcTxDone`/power-management tail is never entered.
 #[no_mangle]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.lmac_tx_done"
+)]
 pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
     crate::channel_switch::tx_done_edge();
     if begin_from_wrapped_lmac(frame.cast(), mode).is_err() {
