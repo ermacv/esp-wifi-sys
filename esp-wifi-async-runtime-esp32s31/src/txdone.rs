@@ -53,6 +53,14 @@ static HIL_EAPOL_QOS_CONTROL: AtomicUsize = AtomicUsize::new(0);
 static HIL_EAPOL_HW_STATUS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hil-vendor-tx")]
 static HIL_EAPOL_DESCRIPTOR_STATUS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_TXDONE_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_FRAME_CONTROL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_HW_STATUS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_DESCRIPTOR_STATUS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "hil-vendor-tx")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +80,25 @@ pub fn hil_eapol_tx_done_snapshot() -> HilEapolTxDoneSnapshot {
         qos_control: HIL_EAPOL_QOS_CONTROL.load(Ordering::Acquire) as u16,
         hardware_status: HIL_EAPOL_HW_STATUS.load(Ordering::Acquire) as u8,
         descriptor_status: HIL_EAPOL_DESCRIPTOR_STATUS.load(Ordering::Acquire) as u32,
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilDataTxDoneSnapshot {
+    pub count: usize,
+    pub frame_control: u16,
+    pub hardware_status: u8,
+    pub descriptor_status: u32,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
+    HilDataTxDoneSnapshot {
+        count: HIL_DATA_TXDONE_COUNT.load(Ordering::Acquire),
+        frame_control: HIL_DATA_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+        hardware_status: HIL_DATA_HW_STATUS.load(Ordering::Acquire) as u8,
+        descriptor_status: HIL_DATA_DESCRIPTOR_STATUS.load(Ordering::Acquire) as u32,
     }
 }
 
@@ -621,6 +648,8 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
 unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     let frame = state.frame;
     let descriptor = descriptor(frame)?;
+    #[cfg(feature = "hil-vendor-tx")]
+    capture_hil_data_tx_done(frame, descriptor)?;
     let flags = descriptor.cast::<u32>().read();
     // The stock bit-13 branch only feeds `trc_onPPTxDone` after inspecting
     // optional tracing metadata. Strict mode has no tracing consumer and
@@ -648,6 +677,33 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     state.frame = ptr::null_mut();
     state.phase = PHASE_LOAD;
     enqueue_step()
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Result<(), TxDoneError> {
+    let payload_owner = frame.add(4).cast::<*const u8>().read();
+    if payload_owner.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    let mut payload = payload_owner.add(4).cast::<*const u8>().read();
+    if payload.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    if frame.add(36).cast::<u16>().read() & 0x2000 != 0 {
+        payload = payload.add(8);
+    }
+    let frame_control = u16::from_le_bytes([payload.read(), payload.add(1).read()]);
+    if frame_control & 0x000c != 0x0008 {
+        return Ok(());
+    }
+    HIL_DATA_FRAME_CONTROL.store(usize::from(frame_control), Ordering::Release);
+    HIL_DATA_HW_STATUS.store(usize::from(descriptor.add(19).read()), Ordering::Release);
+    HIL_DATA_DESCRIPTOR_STATUS.store(
+        descriptor.add(0x10).cast::<u32>().read() as usize,
+        Ordering::Release,
+    );
+    HIL_DATA_TXDONE_COUNT.fetch_add(1, Ordering::AcqRel);
+    Ok(())
 }
 
 fn enqueue_step() -> Result<(), TxDoneError> {
