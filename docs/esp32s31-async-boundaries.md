@@ -485,14 +485,23 @@ HT20 association, one captured six-MPDU aggregate had these exact facts:
   distinction matters for future scatter/gather frames where `frame+0x04`
   and the tail at `frame+0x08` need not be equal.
 
+A second HIL capture wrapped `hal_mac_tx_set_ppdu` for the same selected
+two-MPDU chain. Its aggregate length was 3118, `frame+0x24` carried QoS
+sequences `0x014/0x015`, HT-SIG was `0x8f0c2e07`, the data-length register was
+`0x70400c2e`, and the length-control register was `0x00400244`. These values
+confirm both the sequence metadata offset and every field programmed by the
+strict aggregate-submit leaf. The oracle-only vendor/RTOS throughput run was
+about 53.4 Mbit/s UDP; it is a format baseline, not part of the final runtime.
+
 `HtAmpduLengthAccumulator`, `prepare_basic_ht_ampdu_chain`, and
 `assemble_basic_ht_ampdu` now reproduce those rules with a maximum of 32
 static frame pointers. The target build places both raw chain operations in
-`.rwtext.wifi_strict.*`; their optimized S31 objects contain no call
-relocations. `decode_ht_block_ack_registers` and `read_ht_block_ack` reproduce
-the separate three-load `hal_mac_tx_get_blockack` leaf: the 12-bit starting
-sequence comes from bits 4..15, the control nibble from bits 16..19, and the
-two adjacent registers form the 64-bit bitmap.
+`.rwtext.wifi_strict.*`; the only compiler-generated calls in the larger
+ownership constructor are bounded `memcpy`/`memset` operations over its fixed
+32-entry arrays. `decode_ht_block_ack_registers` and `read_ht_block_ack`
+reproduce the separate three-load `hal_mac_tx_get_blockack` leaf: the 12-bit
+starting sequence comes from bits 4..15, the control nibble from bits 16..19,
+and the two adjacent registers form the 64-bit bitmap.
 
 This still does not enable A-MPDU in strict mode. Frames currently pass from
 `ieee80211_post_hmac_tx` into the vendor PP software scheduler one at a time.
@@ -518,7 +527,10 @@ continues to reject every linked or aggregate descriptor.
 
 `BasicHtAmpduChain` now is that reversible ownership token. Besides the public
 first/last/count/length summary, it privately retains all 32 validated frame
-pointers and the exact pre-assembly scalar values. The SRAM-only
+pointers, each exact 12-bit QoS sequence, and the exact pre-assembly scalar
+values. `TxAmpduBatch::push_sequence` accepts those already assigned values
+without assuming a consecutive retry aggregate and rejects duplicate slot or
+sequence ownership. The SRAM-only
 `restore_basic_ht_ampdu_chain` validates every frame link and every tail-buffer
 link plus the aggregate first/tail markers before its first write, then removes
 both chains and restores the original payload word, descriptor words,

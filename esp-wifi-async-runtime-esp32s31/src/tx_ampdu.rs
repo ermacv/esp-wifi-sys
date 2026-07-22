@@ -179,6 +179,7 @@ pub struct BasicHtAmpduChain {
     pub aggregate_length: u16,
     pub subframes: u8,
     frames: [*mut u8; TX_AMPDU_SLOT_CAPACITY],
+    sequences: [u16; TX_AMPDU_SLOT_CAPACITY],
     original_first_remaining_length: u16,
     original_first_payload_word: u32,
     original_first_descriptor_flags: u32,
@@ -195,6 +196,19 @@ impl BasicHtAmpduChain {
     pub const fn frame(&self, index: u8) -> Option<*mut u8> {
         if index < self.subframes {
             Some(self.frames[index as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Return the QoS sequence number captured from the validated ESF.
+    ///
+    /// The ESP32-S31 PP metadata stores this 12-bit value in `frame + 0x24`.
+    /// Keeping every value avoids assuming that a retry aggregate is
+    /// necessarily consecutive when interpreting the BlockAck bitmap.
+    pub const fn sequence(&self, index: u8) -> Option<u16> {
+        if index < self.subframes {
+            Some(self.sequences[index as usize])
         } else {
             None
         }
@@ -419,6 +433,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
     const FRAME_TAIL_BUFFER_OFFSET: usize = 0x08;
     const FRAME_HEADER_LENGTH_OFFSET: usize = 0x14;
     const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
+    const FRAME_SEQUENCE_OFFSET: usize = 0x24;
     const FRAME_NEXT_OFFSET: usize = 0x30;
     const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
     const BUFFER_DATA_OFFSET: usize = 0x04;
@@ -436,6 +451,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
     let mut length = HtAmpduLengthAccumulator::new(frames.len() as u8, max_aggregate_length)
         .map_err(BasicHtAmpduChainError::Length)?;
     let mut first_rate = 0_u8;
+    let mut sequences = [0_u16; TX_AMPDU_SLOT_CAPACITY];
     let mut index = 0_usize;
     while index < frames.len() {
         let frame = frames[index];
@@ -486,6 +502,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
                 rate,
             });
         }
+        sequences[index] = (frame.add(FRAME_SEQUENCE_OFFSET).cast::<u32>().read() & 0x0fff) as u16;
 
         let first_buffer = frame
             .add(FRAME_FIRST_BUFFER_OFFSET)
@@ -606,6 +623,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         aggregate_length: aggregate.bytes,
         subframes: aggregate.subframes,
         frames: owned_frames,
+        sequences,
         original_first_remaining_length,
         original_first_payload_word,
         original_first_descriptor_flags,
@@ -975,6 +993,7 @@ pub enum TxAmpduBatchError {
     InvalidWindow(u8),
     InvalidSlot(u8),
     DuplicateSlot(u8),
+    DuplicateSequence(u16),
     Full,
 }
 
@@ -1033,6 +1052,22 @@ impl TxAmpduBatch {
     /// Append one statically owned frame and assign its consecutive QoS
     /// sequence number. Duplicate slot ownership is rejected in O(1).
     pub fn push(&mut self, slot: u8) -> Result<TxAmpduMpdu, TxAmpduBatchError> {
+        let sequence =
+            self.starting_sequence.wrapping_add(u16::from(self.count)) & SEQUENCE_NUMBER_MASK;
+        self.push_sequence(slot, sequence)
+    }
+
+    /// Append a statically owned frame whose sequence was already assigned by
+    /// the finite PP framing leaf.
+    ///
+    /// This is the path used for a prepared hardware A-MPDU. It preserves the
+    /// exact per-MPDU sequence numbers, including retry aggregates with holes,
+    /// so BlockAck completion never depends on an inferred order.
+    pub fn push_sequence(
+        &mut self,
+        slot: u8,
+        sequence: u16,
+    ) -> Result<TxAmpduMpdu, TxAmpduBatchError> {
         if !matches!(self.phase, TxAmpduBatchPhase::Building) {
             return Err(TxAmpduBatchError::NotBuilding);
         }
@@ -1045,8 +1080,14 @@ impl TxAmpduBatch {
             return Err(TxAmpduBatchError::Full);
         }
 
-        let sequence =
-            self.starting_sequence.wrapping_add(u16::from(self.count)) & SEQUENCE_NUMBER_MASK;
+        let sequence = sequence & SEQUENCE_NUMBER_MASK;
+        let mut index = 0_usize;
+        while index < usize::from(self.count) {
+            if self.entries[index].is_some_and(|entry| entry.sequence == sequence) {
+                return Err(TxAmpduBatchError::DuplicateSequence(sequence));
+            }
+            index += 1;
+        }
         let mpdu = TxAmpduMpdu { slot, sequence };
         self.entries[usize::from(self.count)] = Some(mpdu);
         self.count += 1;
@@ -1424,12 +1465,16 @@ mod tests {
         let mut frames = [core::ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY];
         frames[0] = 0x1000_usize as *mut u8;
         frames[1] = 0x2000_usize as *mut u8;
+        let mut sequences = [0_u16; TX_AMPDU_SLOT_CAPACITY];
+        sequences[0] = 0x014;
+        sequences[1] = 0x015;
         let chain = BasicHtAmpduChain {
             first: frames[0],
             last: frames[1],
             aggregate_length: 3_000,
             subframes: 2,
             frames,
+            sequences,
             original_first_remaining_length: 1_466,
             original_first_payload_word: 0x0100_0612,
             original_first_descriptor_flags: 0x0004_2009,
@@ -1441,6 +1486,9 @@ mod tests {
         assert_eq!(chain.frame(1), Some(0x2000_usize as *mut u8));
         assert_eq!(chain.frame(2), None);
         assert_eq!(chain.frame(u8::MAX), None);
+        assert_eq!(chain.sequence(0), Some(0x014));
+        assert_eq!(chain.sequence(1), Some(0x015));
+        assert_eq!(chain.sequence(2), None);
     }
 
     #[test]
@@ -1592,6 +1640,30 @@ mod tests {
         batch.begin(0, 32).unwrap();
         batch.push(17).unwrap();
         assert_eq!(batch.push(17), Err(TxAmpduBatchError::DuplicateSlot(17)));
+    }
+
+    #[test]
+    fn batch_preserves_nonconsecutive_hardware_sequences() {
+        let mut batch = TxAmpduBatch::new();
+        batch.begin(0x120, 4).unwrap();
+        assert_eq!(batch.push_sequence(3, 0x120).unwrap().sequence, 0x120);
+        assert_eq!(batch.push_sequence(4, 0x123).unwrap().sequence, 0x123);
+        assert_eq!(
+            batch.push_sequence(5, 0x1123),
+            Err(TxAmpduBatchError::DuplicateSequence(0x123))
+        );
+        batch
+            .complete_with_block_ack(TxBlockAckBitmap::new(0x120, 0b1001))
+            .unwrap();
+        assert_eq!(
+            batch.next_completion().unwrap().disposition,
+            TxAmpduDisposition::Acknowledged
+        );
+        assert_eq!(
+            batch.next_completion().unwrap().disposition,
+            TxAmpduDisposition::Acknowledged
+        );
+        assert!(batch.is_idle());
     }
 
     #[test]
