@@ -499,12 +499,13 @@ The narrow submission body implements the pinned non-HE `rcGetRate` behavior
 as either one direct per-peer selection or at most four cumulative fallback
 table entries. It then performs the status-three descriptor transition,
 long-frame classification, lifetime timeout, bounded contention backoff, EDCA
-configuration, and basic queue enable in Rust/MMIO before calling
-the finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, `mac_tx_set_htsig`, and
-`mac_tx_get_rts_rate` leaves directly. Rust reproduces the bounded RTS/data
-power-table reads, queue PPDU-control write, `coex_pti_tab[1]` priority clamp,
-and both PTI-register updates. This removes `hal_mac_tx_set_ppdu`, its indirect
-`mac_tx_set_pti` OSI callback, and `hal_set_tx_pti` in addition to
+configuration, and basic queue enable in Rust/MMIO before calling only the
+finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, and `mac_tx_set_htsig` leaves
+directly. Rust reproduces the complete guarded `mac_tx_get_rts_rate` mapping,
+bounded RTS/data power-table reads, queue PPDU-control write,
+`coex_pti_tab[1]` priority clamp, and both PTI-register updates. This removes
+`hal_mac_tx_set_ppdu`, its indirect `mac_tx_set_pti` OSI callback,
+`hal_set_tx_pti`, and `mac_tx_get_rts_rate` in addition to
 `lmacTxFrame`, ROM
 `lmacSetTxFrame`, `ppProcessLifeTime`, the OSI random callback, the common EDCA
 helper, and the common TXQ-enable helper from the retry path. In particular,
@@ -537,6 +538,14 @@ CTS timeouts exercised 235 same-frame retries; 4,096/4,096 UDP datagrams and
 4/4 HTTP transfers completed with zero queue rejection, allocation change,
 blocking callback, task delay, or direct delay. Four binary leaves remain in
 the basic-HT formatting branch.
+
+Replacing the finite RTS-rate selector with its exhaustive Rust mapping then
+passed the same workload at 28.745 Mbit/s over 4,964 completions. Its 171 ACK
+timeouts and three CTS timeouts exercised 174 same-frame retries. All 4,096
+UDP datagrams and 4/4 HTTP transfers completed with zero queue rejection,
+allocation change, blocking callback, task delay, or direct delay. The final
+ELF has no call from the Rust submission path to `mac_tx_get_rts_rate`; the
+three remaining binary formatting leaves have a zero-violation graph audit.
 
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
