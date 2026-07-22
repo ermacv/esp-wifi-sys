@@ -152,6 +152,9 @@ unsafe extern "C" {
     fn vendor_tx_mgt_cb(frame: *mut c_void);
     #[link_name = "ieee80211_hostapd_beacon_txcb"]
     fn vendor_hostapd_beacon_txcb(frame: *mut c_void);
+    #[cfg(target_arch = "riscv32")]
+    #[link_name = "__real_ieee80211_hostapd_beacon_txcb"]
+    fn initialization_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
     #[link_name = "ic_get_next_tbtt"]
     fn vendor_ic_get_next_tbtt() -> u32;
@@ -350,7 +353,16 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
 /// with `--wrap=ieee80211_hostapd_beacon_txcb`; no vendor power-save, mesh, or
 /// indirect application callback is entered.
 #[no_mangle]
-pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(_frame: *mut c_void) {
+pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void) {
+    #[cfg(target_arch = "riscv32")]
+    if !crate::critical::strict_wifi_hart_armed() {
+        // The first initialization beacon completion may carry the deferred
+        // softAP-start transition. Preserve that finite leaf until strict
+        // takeover; replacing it too early leaves beacon_send_start_flag at
+        // 0b11 and the AP interface permanently disabled.
+        initialization_hostapd_beacon_txcb(frame);
+        return;
+    }
     if strict_ap_beacon_txdone().is_err() {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
     }
