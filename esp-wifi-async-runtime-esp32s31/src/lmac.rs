@@ -110,11 +110,16 @@ unsafe extern "C" {
     fn hal_mac_set_txq_invalid(queue: u8);
     fn hal_mac_txq_disable(queue: u8);
     fn lmacReleaseTxopQueue(queue: u8);
-    fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
-    fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BasicRetryCause {
+    CtsTimeout,
+    AckTimeout,
+    Collision,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -715,19 +720,19 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     }
     match status {
         0 => process_tx_success(queue_state, completion[2])?,
-        1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
+        1 => process_tx_rts_error(queue_state, completion[0])?,
         2 => {
             #[cfg(feature = "hil-vendor-tx")]
             let retry_frame = record_retry_before(queue_state, false);
-            process_tx_retry(queue_state, false)?;
+            process_tx_retry(queue_state, BasicRetryCause::CtsTimeout)?;
             #[cfg(feature = "hil-vendor-tx")]
             record_retry_after(queue_state, retry_frame);
         }
-        4 => lmacProcessTxError(queue, completion[0], 0),
+        4 => process_tx_error(queue_state, completion[0])?,
         5 => {
             #[cfg(feature = "hil-vendor-tx")]
             let retry_frame = record_retry_before(queue_state, true);
-            process_tx_retry(queue_state, true)?;
+            process_tx_retry(queue_state, BasicRetryCause::AckTimeout)?;
             #[cfg(feature = "hil-vendor-tx")]
             record_retry_after(queue_state, retry_frame);
         }
@@ -744,7 +749,10 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
 /// frame. This reproduces the accounting and decisions in Rust, sends at most
 /// one frame, and routes a terminal failure through the existing one-step
 /// discard continuation.
-unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<(), LmacAsyncError> {
+unsafe fn process_tx_retry(
+    queue_state: *mut u8,
+    cause: BasicRetryCause,
+) -> Result<(), LmacAsyncError> {
     let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
     if queue_kind != 3 {
         return Err(LmacAsyncError::UnsupportedTxRetryQueueKind(queue_kind));
@@ -788,20 +796,32 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
         return Err(LmacAsyncError::UnsupportedTxRetryState(retry_state));
     }
 
-    if ack_timeout && flags & TX_FRAME_LONG_RETRY_BIT != 0 {
+    let long_retry = match cause {
+        BasicRetryCause::CtsTimeout => false,
+        BasicRetryCause::AckTimeout => flags & TX_FRAME_LONG_RETRY_BIT != 0,
+        BasicRetryCause::Collision => {
+            flags & 0x0000_0300 == 0 && basic_frame_is_long(frame, descriptor)
+        }
+    };
+    if long_retry {
         // `lmacProcessAckTimeout` first accounts for the successful short
-        // exchange and then records a long retry failure.
-        queue_state
-            .add(TX_QUEUE_RATE_OFFSET)
-            .write(queue_state.add(TX_QUEUE_SAVED_RATE_OFFSET).read());
-        queue_state.add(TX_QUEUE_SHORT_RETRY_OFFSET).write(0);
+        // exchange and then records a long retry failure. A collision enters
+        // the long-retry body directly and therefore preserves both fields.
+        if cause == BasicRetryCause::AckTimeout {
+            queue_state
+                .add(TX_QUEUE_RATE_OFFSET)
+                .write(queue_state.add(TX_QUEUE_SAVED_RATE_OFFSET).read());
+            queue_state.add(TX_QUEUE_SHORT_RETRY_OFFSET).write(0);
+        }
         update_retry_rate(queue_state, TX_QUEUE_LONG_RETRY_OFFSET, lmacConfMib[0x14]);
         descriptor
             .add(7)
             .write(descriptor.add(7).read().wrapping_add(1));
-        descriptor
-            .add(5)
-            .write(descriptor.add(5).read().wrapping_add(1));
+        if cause == BasicRetryCause::AckTimeout {
+            descriptor
+                .add(5)
+                .write(descriptor.add(5).read().wrapping_add(1));
+        }
     } else {
         update_retry_rate(queue_state, TX_QUEUE_SHORT_RETRY_OFFSET, lmacConfMib[0x15]);
         descriptor
@@ -809,7 +829,7 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
             .write(descriptor.add(6).read().wrapping_add(1));
         // CTS timeout is a short retry but does not consume the descriptor's
         // total ACK retry budget in the pinned implementation.
-        if ack_timeout {
+        if cause == BasicRetryCause::AckTimeout {
             descriptor
                 .add(5)
                 .write(descriptor.add(5).read().wrapping_add(1));
@@ -817,7 +837,7 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     }
 
     let reached_rate_limit = retry_rate_limit_reached(descriptor)?;
-    let reached_mib_limit = if ack_timeout && flags & TX_FRAME_LONG_RETRY_BIT != 0 {
+    let reached_mib_limit = if long_retry {
         descriptor.add(7).read() >= lmacConfMib[0x14]
     } else {
         descriptor.add(6).read() >= lmacConfMib[0x15]
@@ -831,7 +851,11 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
         return begin_retry_discard(queue_state, frame);
     }
 
-    mark_retry_scheduler(frame)?;
+    // Both collision retry bodies call `lmacRetryTxFrame` directly. CTS/ACK
+    // first mark the recovered per-frame scheduler byte.
+    if cause != BasicRetryCause::Collision {
+        mark_retry_scheduler(frame)?;
+    }
     queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
 
     // Narrow non-aggregate body of `lmacRetryTxFrame`. The bounded basic-HT
@@ -863,6 +887,60 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     submit_basic_retry(queue_state, frame, descriptor)?;
     queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
     Ok(())
+}
+
+/// Bounded status-one routing recovered from `lmacProcessTxRtsError`.
+///
+/// Only its collision-class response values have a recoverable retry meaning.
+/// The security-key error and all diagnostic/interface-specific values discard
+/// exactly one frame instead of entering logging, interface callbacks, or the
+/// stateful vendor completion graph.
+unsafe fn process_tx_rts_error(queue_state: *mut u8, response: u8) -> Result<(), LmacAsyncError> {
+    if response == 1 || (3..=5).contains(&response) || (0xa0..=0xad).contains(&response) {
+        process_tx_retry(queue_state, BasicRetryCause::Collision)
+    } else {
+        discard_tx_hardware_error(queue_state, response)
+    }
+}
+
+/// Bounded status-four routing recovered from `lmacProcessTxError`.
+unsafe fn process_tx_error(queue_state: *mut u8, response: u8) -> Result<(), LmacAsyncError> {
+    match response {
+        0 => process_tx_retry(queue_state, BasicRetryCause::CtsTimeout),
+        1 | 3..=5 => process_tx_retry(queue_state, BasicRetryCause::Collision),
+        0xc0 => discard_tx_hardware_error(queue_state, response),
+        _ => process_tx_retry(queue_state, BasicRetryCause::AckTimeout),
+    }
+}
+
+unsafe fn discard_tx_hardware_error(
+    queue_state: *mut u8,
+    response: u8,
+) -> Result<(), LmacAsyncError> {
+    let frame = queue_state.cast::<*mut u8>().read();
+    if frame.is_null()
+        || !frame
+            .add(TX_FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+            .is_null()
+    {
+        return Err(LmacAsyncError::UnsupportedTxRetryChain);
+    }
+    let descriptor = descriptor(frame)?;
+    let flags = descriptor.cast::<u32>().read();
+    if queue_state.add(TX_QUEUE_KIND_OFFSET).read() != 3
+        || queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read() != 0
+        || flags & (TX_FRAME_HE_BIT | TX_FRAME_BAR_BIT | TX_FRAME_AMPDU_BIT) != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxRetryDescriptor(flags));
+    }
+    descriptor
+        .add(TX_DESCRIPTOR_RESPONSE_OFFSET)
+        .write(response);
+    queue_state.add(TX_QUEUE_STATUS_OFFSET).write(6);
+    queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(9);
+    begin_retry_discard(queue_state, frame)
 }
 
 /// Submit one strict basic-HT retry without the stock `lmacTxFrame` wrapper.

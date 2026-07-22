@@ -425,8 +425,8 @@ The strict gate still intentionally fails. Confirmed remaining paths include:
   eloop timeouts and `ets_delay_us` through deauthentication if strict
   integration fails to install the provided async TX-done callback first;
 - basic retry submission now enters only the pinned finite PLCP/HTSIG and
-  terminal PHY/MMIO leaves; unobserved RTS and generic-error outcomes still
-  enter their complete vendor handlers, and collision plus
+  terminal PHY/MMIO leaves; event-23 RTS/generic-error outcomes use the bounded
+  Rust retry/discard classifier, while the separate collision event and
   connection-management state transitions are not yet reconstructed;
 - explicit disassociation, deauthentication, and off-channel action completion
   is not implemented; the Rust management wrapper rejects those subtypes before
@@ -722,9 +722,12 @@ formatting contains no `mac_tx_set_plcp0`, `mac_tx_set_plcp1`,
 
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
-TXOP/list state, and descriptor flags. This remains the HIL oracle for the
-remaining PLCP/HTSIG/PHY leaves and future aggregate enablement. RTS-error
-and generic TX-error outcomes were not observed and remain vendor roots.
+TXOP/list state, and descriptor flags. This remains the HIL oracle for future
+aggregate enablement. RTS-error and generic TX-error outcomes were not observed
+in ordinary stress, but no longer enter their vendor handlers: recovered
+collision-class response codes use the bounded Rust retry path, the key-error
+code and unknown diagnostic/interface codes discard one frame through the
+existing continuation, and the radio owner remains alive.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys

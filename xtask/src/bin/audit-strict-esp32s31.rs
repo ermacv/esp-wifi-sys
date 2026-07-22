@@ -11,10 +11,7 @@ const ROOTS: &[&str] = &[
     "ppProcessTxQ",
     "pp_timer_do_process",
     "pp_default_event_handler",
-    // The Rust event-23 dispatcher owns success, CTS timeout and ACK timeout.
-    // Only the two unobserved hardware-error outcomes still call vendor code.
-    "lmacProcessTxRtsError",
-    "lmacProcessTxError",
+    // The Rust event-23 dispatcher owns every hardware-completion outcome.
     "lmacProcessCollisions_task",
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
@@ -79,6 +76,8 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacProcessTxSuccess",
     "lmacProcessCtsTimeout",
     "lmacProcessAckTimeout",
+    "lmacProcessTxRtsError",
+    "lmacProcessTxError",
     "ppRxPkt",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
