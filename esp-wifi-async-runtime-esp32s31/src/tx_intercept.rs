@@ -47,6 +47,7 @@ struct InterceptState {
     retry_prefix: u8,
     coalesce_armed: bool,
     coalesce_due: bool,
+    direct_queue: u8,
     direct_frame: *mut u8,
     frames: [*mut u8; TX_AMPDU_SLOT_CAPACITY],
 }
@@ -61,6 +62,7 @@ impl InterceptState {
             retry_prefix: 0,
             coalesce_armed: false,
             coalesce_due: false,
+            direct_queue: u8::MAX,
             direct_frame: ptr::null_mut(),
             frames: [ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY],
         }
@@ -96,6 +98,8 @@ static SUBMITTED: AtomicU32 = AtomicU32::new(0);
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
 static DIRECT_SUBMITTED: AtomicU32 = AtomicU32::new(0);
 static DIRECT_COMPLETED: AtomicU32 = AtomicU32::new(0);
+static LEGACY_DIRECT_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+static LEGACY_DIRECT_COMPLETED: AtomicU32 = AtomicU32::new(0);
 static COALESCE_ARMED: AtomicU32 = AtomicU32::new(0);
 static COALESCE_EXPIRED: AtomicU32 = AtomicU32::new(0);
 static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
@@ -180,6 +184,8 @@ pub struct HilAmpduInterceptSnapshot {
     pub completed: u32,
     pub direct_submitted: u32,
     pub direct_completed: u32,
+    pub legacy_direct_submitted: u32,
+    pub legacy_direct_completed: u32,
     pub coalesce_armed: u32,
     pub coalesce_expired: u32,
     pub subframes: u32,
@@ -251,6 +257,8 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         completed: COMPLETED.load(Ordering::Acquire),
         direct_submitted: DIRECT_SUBMITTED.load(Ordering::Acquire),
         direct_completed: DIRECT_COMPLETED.load(Ordering::Acquire),
+        legacy_direct_submitted: LEGACY_DIRECT_SUBMITTED.load(Ordering::Acquire),
+        legacy_direct_completed: LEGACY_DIRECT_COMPLETED.load(Ordering::Acquire),
         coalesce_armed: COALESCE_ARMED.load(Ordering::Acquire),
         coalesce_expired: COALESCE_EXPIRED.load(Ordering::Acquire),
         subframes: SUBFRAMES.load(Ordering::Acquire),
@@ -796,13 +804,28 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
         return Ok(());
     }
 
+    let first_descriptor = state.frames[0]
+        .add(FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_descriptor.is_null() {
+        return fail(TxInterceptError::Submit(
+            crate::lmac::LmacAsyncError::InvalidTxSubmissionPointer,
+        ));
+    }
+    let first_rate = first_descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
+    let submit_queue = if first_rate < 16 {
+        0
+    } else {
+        HIL_HARDWARE_QUEUE
+    };
     let instances = ptr::addr_of!(our_instances_ptr).read();
     if instances.is_null() {
         return fail(TxInterceptError::InstancesUnavailable);
     }
-    let queue_state = instances.add(usize::from(HIL_HARDWARE_QUEUE) * TX_QUEUE_STATE_SIZE);
+    let queue_state = instances.add(usize::from(submit_queue) * TX_QUEUE_STATE_SIZE);
     let hardware_queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
-    if hardware_queue != HIL_HARDWARE_QUEUE {
+    if hardware_queue != submit_queue {
         return fail(TxInterceptError::InvalidHardwareQueue(hardware_queue));
     }
     if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 0 {
@@ -821,11 +844,6 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
         return submit_one(state, queue_state, count);
     }
     let mut selected = count.min(usize::from(state.window)).min(MAX_HIL_SUBFRAMES);
-    let first_descriptor = state.frames[0]
-        .add(FRAME_DESCRIPTOR_OFFSET)
-        .cast::<*mut u8>()
-        .read();
-    let first_rate = first_descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
     let mut index = 1_usize;
     while index < selected {
         let descriptor = state.frames[index]
@@ -901,8 +919,11 @@ pub(crate) fn on_direct_hardware_completion() -> Result<(), TxInterceptError> {
     if instances.is_null() {
         return fail(TxInterceptError::InstancesUnavailable);
     }
-    let queue_state =
-        unsafe { instances.add(usize::from(HIL_HARDWARE_QUEUE) * TX_QUEUE_STATE_SIZE) };
+    let direct_queue = state.direct_queue;
+    if direct_queue > 3 {
+        return fail(TxInterceptError::MissingDirectOwner);
+    }
+    let queue_state = unsafe { instances.add(usize::from(direct_queue) * TX_QUEUE_STATE_SIZE) };
     let queue_frame = unsafe { queue_state.cast::<*mut u8>().read() };
     if !queue_frame.is_null() && queue_frame != state.direct_frame {
         return fail(TxInterceptError::MissingDirectOwner);
@@ -911,7 +932,11 @@ pub(crate) fn on_direct_hardware_completion() -> Result<(), TxInterceptError> {
         queue_state.cast::<*mut u8>().write(ptr::null_mut());
     }
     state.direct_frame = ptr::null_mut();
+    state.direct_queue = u8::MAX;
     DIRECT_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    if direct_queue == 0 {
+        LEGACY_DIRECT_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    }
     on_hardware_completion()
 }
 
@@ -921,9 +946,12 @@ unsafe fn submit_one(
     count: usize,
 ) -> Result<(), TxInterceptError> {
     let frame = state.frames[0];
+    let hardware_queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    state.direct_queue = hardware_queue;
     state.direct_frame = frame;
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         state.direct_frame = ptr::null_mut();
+        state.direct_queue = u8::MAX;
         return Err(TxInterceptError::Submit(error));
     }
     record_hardware_submit(queue_state);
@@ -942,6 +970,9 @@ unsafe fn submit_one(
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
     SUBFRAMES.fetch_add(1, Ordering::Relaxed);
     DIRECT_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    if hardware_queue == 0 {
+        LEGACY_DIRECT_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    }
     Ok(())
 }
 
