@@ -296,13 +296,23 @@ The NAN valid-slot hook retains its recovered descriptor-kind test: ordinary
 AP/STA frames return true, while NAN frames return false without entering the
 registered scheduler callback.
 
-The strict `WIFI_PS_NONE` profile also replaces `pm_on_beacon_rx` and
-`pm_on_data_rx` with no-ops. PP/net80211 performs ordinary beacon/data parsing,
-delivery, and the independent RX rate update outside these hooks. The removed
-tails are limited to power-save/mesh bookkeeping: the beacon tail contains the
-TIM-to-radio-shutdown delay path, while the data tail reaches modem-sleep OSI
-timers and Wi-Fi API locks. Direct calls and saved vendor function-table
-pointers are redirected by mandatory final-link aliases.
+The strict `WIFI_PS_NONE` profile also replaces `pm_on_beacon_rx`,
+`pm_on_data_rx`, and `pm_set_beacon_duration` with no-ops. PP/net80211 performs
+ordinary beacon/data parsing, delivery, and the independent RX rate update
+outside these hooks. The removed tails are limited to power-save/mesh
+bookkeeping: the beacon tail contains the TIM-to-radio-shutdown delay path, the
+data tail reaches modem-sleep OSI timers and Wi-Fi API locks, and the duration
+setter's first-sample path invokes two optional beacon-offset callbacks. Direct
+calls and saved vendor function-table pointers are redirected by mandatory
+final-link interposition.
+
+Hardware qualification with the data-RX alias completed WPA2,
+DHCP/DNS/TCP/HTTP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
+25.710 Mbit/s. Allocation remained unchanged after takeover and all blocking,
+task-delay, direct-delay, and queue-rejection probes remained zero. The strict
+graph first fell from 95 to 74 violations. Interposing the PM-only beacon
+duration setter and proving that `rc_get_trc` removes one bit from a u32 peer
+bitmap per iteration then removes the last three `ppRxProtoProc` violations.
 
 The three verbose PPDU/SIG-B decoders are also no-op wrappers under the verified
 `WIFI_LOG_NONE` policy. This removes their formatting loops and direct

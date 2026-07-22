@@ -85,6 +85,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "pm_on_beacon_rx",
     "pm_on_data_rx",
     "pm_on_data_tx",
+    "pm_set_beacon_duration",
     "dbg_read_tx_ppdu",
     "dbg_dump_rx_ppdu",
     "dbg_dump_rx_sigb",
@@ -125,6 +126,7 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "pm_on_beacon_rx",
     "pm_on_data_rx",
     "pm_on_data_tx",
+    "pm_set_beacon_duration",
     "dbg_read_tx_ppdu",
     "dbg_dump_rx_ppdu",
     "dbg_dump_rx_sigb",
@@ -168,12 +170,15 @@ const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
     ("phy_wifi_set_tx_gain_new", "phy_wifi_get_tx_tab_new"),
 ];
 
-// `phy_wifi_set_tx_gain_new` calls this leaf with count=32. Its outer loop is
+// `phy_wifi_set_tx_gain_new` calls its leaf with count=32. Its outer loop is
 // exactly that count and its inner loop copies four u16 words (offset 0..8 by
 // two), so neither cycle observes hardware state or has an unbounded exit.
+// `rc_get_trc` clears one set bit from a local u32 peer bitmap per iteration,
+// and compares exactly six address bytes, so it exits after at most 32 steps.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
     ("phy_set_tx_gain_mem_new", 0xaa),
     ("phy_set_tx_gain_mem_new", 0x12e),
+    ("rc_get_trc", 0x74),
 ];
 
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
@@ -186,6 +191,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_pm_on_beacon_rx",
     "__wrap_pm_on_data_rx",
     "__wrap_pm_on_data_tx",
+    "__wrap_pm_set_beacon_duration",
     "__wrap_dbg_read_tx_ppdu",
     "__wrap_dbg_dump_rx_ppdu",
     "__wrap_dbg_dump_rx_sigb",

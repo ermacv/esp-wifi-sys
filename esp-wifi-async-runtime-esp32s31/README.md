@@ -163,8 +163,7 @@ wrong-hart `pp_post`, and never stalls the second core.
 counts, sizes, failures, and calls made from radio context. Direct C allocator
 references in the vendor archives must additionally pass through the GNU
 linker's wrappers. TX/RX completion, WPA2 ingress, and key programming also
-require symbol interposition. Twenty of the twenty-nine entries are ordinary
-archive definitions and use LLD wrapping:
+require symbol interposition. Ordinary archive definitions use LLD wrapping:
 
 ```text
 -Wl,--wrap=malloc
@@ -177,6 +176,7 @@ archive definitions and use LLD wrapping:
 -Wl,--wrap=ieee80211_hostapd_beacon_txcb
 -Wl,--wrap=ieee80211_tx_mgt_cb
 -Wl,--wrap=wDev_record_ftm_data
+-Wl,--wrap=pm_set_beacon_duration
 -Wl,--wrap=wDev_ftm_set_t1t4
 -Wl,--wrap=wDev_isNANPktInValidSlot
 -Wl,--wrap=dbg_read_tx_ppdu

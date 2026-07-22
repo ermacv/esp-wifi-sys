@@ -24,6 +24,8 @@ unsafe extern "C" {
     );
     #[link_name = "pm_on_data_tx"]
     fn vendor_pm_on_data_tx();
+    #[link_name = "pm_set_beacon_duration"]
+    fn vendor_pm_set_beacon_duration(duration: u32);
     #[link_name = "wDev_ftm_set_t1t4"]
     fn vendor_ftm_set_t1t4(frame: *mut c_void);
     #[link_name = "wDev_isNANPktInValidSlot"]
@@ -44,6 +46,9 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_pm_on_data_tx as *const (),
         __wrap_pm_on_data_tx as *const (),
+    ) && core::ptr::eq(
+        vendor_pm_set_beacon_duration as *const (),
+        __wrap_pm_set_beacon_duration as *const (),
     ) && core::ptr::eq(
         vendor_ftm_set_t1t4 as *const (),
         __wrap_wDev_ftm_set_t1t4 as *const (),
@@ -128,3 +133,11 @@ pub unsafe extern "C" fn __wrap_pm_on_data_rx(
 /// frame state machine even though that mode is disabled.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_pm_on_data_tx() {}
+
+/// Remove the sampled-beacon-duration update under `WIFI_PS_NONE`.
+///
+/// The stock function only maintains modem-sleep state. Its first-sample path
+/// invokes two optional beacon-offset callbacks; neither is part of an always
+/// awake STA/AP profile.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pm_set_beacon_duration(_duration: u32) {}
