@@ -91,7 +91,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn ppCalFrameTimes(frame: *mut u8);
     fn lmacTxFrame(frame: *mut u8, queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
@@ -713,8 +712,8 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
 
     // Narrow non-aggregate body of `lmacRetryTxFrame`. The bounded basic-HT
-    // rate fallback is Rust-owned; only optional frame-time calculation and
-    // the final hardware submission remain as vendor leaves.
+    // rate fallback is Rust-owned; only the final hardware submission remains
+    // as a vendor leaf.
     let rate_context = frame
         .add(TX_FRAME_RATE_CONTEXT_OFFSET)
         .cast::<*mut u8>()
@@ -730,20 +729,13 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
             | TX_FRAME_BAR_BIT
             | TX_FRAME_AMPDU_BIT
             | TX_FRAME_ABORTED_BIT
-            | TX_FRAME_RETRY_SCHEDULER_MASK)
+            | TX_FRAME_RETRY_SCHEDULER_MASK
+            | TX_FRAME_RETRY_RATE_TIME_BIT)
         != 0
     {
         return Err(LmacAsyncError::UnsupportedTxRetryDescriptor(
             post_rate_flags,
         ));
-    }
-    if post_rate_flags & TX_FRAME_RETRY_RATE_TIME_BIT != 0 {
-        ppCalFrameTimes(frame);
-        let scheduler_state = retry_scheduler_state(frame)?;
-        scheduler_state
-            .add(2)
-            .cast::<u16>()
-            .write(descriptor.add(10).cast::<u16>().read());
     }
     lmacTxFrame(
         frame,
