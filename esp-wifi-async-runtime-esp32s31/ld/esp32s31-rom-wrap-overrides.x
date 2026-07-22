@@ -42,5 +42,8 @@ pm_on_data_tx = __wrap_pm_on_data_tx;
 EXTERN(wifi_strict_pp_tx_proto_proc);
 ppTxProtoProc = wifi_strict_pp_tx_proto_proc;
 
+EXTERN(wifi_strict_pp_proc_tx_sec_frame);
+ppProcTxSecFrame = wifi_strict_pp_proc_tx_sec_frame;
+
 __real_esp_test_tx_enab_statistics = 0x2f801144;
 esp_test_tx_enab_statistics = __wrap_esp_test_tx_enab_statistics;
