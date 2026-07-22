@@ -80,6 +80,14 @@ static READY: AtomicU32 = AtomicU32::new(0);
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
+static MAPPER_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_REASON: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_RATE: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_LAYOUT: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+static LAST_FALLBACK_PRE: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+static LAST_FALLBACK_POST: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
@@ -104,6 +112,14 @@ pub struct HilAmpduInterceptSnapshot {
     pub enabled_calls: u32,
     pub mapper_bypassed: u32,
     pub mapper_already_prepared: u32,
+    pub mapper_fallbacks: u32,
+    pub last_fallback_reason: u8,
+    pub last_fallback_descriptor: u32,
+    pub last_fallback_rate: u8,
+    pub last_fallback_layout: u16,
+    pub last_fallback_frame_control: u16,
+    pub last_fallback_pre: [u32; 5],
+    pub last_fallback_post: [u32; 5],
     pub mapped_zero: u32,
     pub mapped_one: u32,
     pub mapped_two: u32,
@@ -130,10 +146,14 @@ pub struct HilAmpduInterceptSnapshot {
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     let mut last_mapper_pre = [0_u32; 5];
     let mut last_mapper_post = [0_u32; 5];
+    let mut last_fallback_pre = [0_u32; 5];
+    let mut last_fallback_post = [0_u32; 5];
     let mut index = 0_usize;
     while index < last_mapper_pre.len() {
         last_mapper_pre[index] = LAST_MAPPER_PRE[index].load(Ordering::Acquire);
         last_mapper_post[index] = LAST_MAPPER_POST[index].load(Ordering::Acquire);
+        last_fallback_pre[index] = LAST_FALLBACK_PRE[index].load(Ordering::Acquire);
+        last_fallback_post[index] = LAST_FALLBACK_POST[index].load(Ordering::Acquire);
         index += 1;
     }
     HilAmpduInterceptSnapshot {
@@ -141,6 +161,14 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         enabled_calls: ENABLED_CALLS.load(Ordering::Acquire),
         mapper_bypassed: MAPPER_BYPASSED.load(Ordering::Acquire),
         mapper_already_prepared: MAPPER_ALREADY_PREPARED.load(Ordering::Acquire),
+        mapper_fallbacks: MAPPER_FALLBACKS.load(Ordering::Acquire),
+        last_fallback_reason: LAST_FALLBACK_REASON.load(Ordering::Acquire) as u8,
+        last_fallback_descriptor: LAST_FALLBACK_DESCRIPTOR.load(Ordering::Acquire),
+        last_fallback_rate: LAST_FALLBACK_RATE.load(Ordering::Acquire) as u8,
+        last_fallback_layout: LAST_FALLBACK_LAYOUT.load(Ordering::Acquire) as u16,
+        last_fallback_frame_control: LAST_FALLBACK_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+        last_fallback_pre,
+        last_fallback_post,
         mapped_zero: MAPPED_ZERO.load(Ordering::Acquire),
         mapped_one: MAPPED_ONE.load(Ordering::Acquire),
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
@@ -332,7 +360,19 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         return 3;
     }
 
+    let fallback_pre = read_mapper_state(frame);
     let mapped = __real_ppMapTxQueue(frame);
+    let fallback_post = read_mapper_state(frame);
+    MAPPER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    LAST_FALLBACK_DESCRIPTOR.store(LAST_DESCRIPTOR.load(Ordering::Relaxed), Ordering::Release);
+    LAST_FALLBACK_RATE.store(LAST_RATE.load(Ordering::Relaxed), Ordering::Release);
+    LAST_FALLBACK_LAYOUT.store(LAST_LAYOUT.load(Ordering::Relaxed), Ordering::Release);
+    LAST_FALLBACK_FRAME_CONTROL.store(
+        LAST_FRAME_CONTROL.load(Ordering::Relaxed),
+        Ordering::Release,
+    );
+    record_mapper_state(&LAST_FALLBACK_PRE, &fallback_pre);
+    record_mapper_state(&LAST_FALLBACK_POST, &fallback_post);
     LAST_MAPPED.store(mapped as u32, Ordering::Release);
     match mapped {
         0 => MAPPED_ZERO.fetch_add(1, Ordering::Relaxed),
@@ -387,36 +427,41 @@ unsafe fn load_enabled_from_callback_context() -> bool {
 /// Return whether a strict QoS data frame is large enough for the qualified
 /// A-MPDU path. `Some(false)` remains a valid mapper-bypass candidate.
 unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
+    LAST_FALLBACK_REASON.store(0, Ordering::Relaxed);
+    LAST_DESCRIPTOR.store(u32::MAX, Ordering::Relaxed);
+    LAST_RATE.store(u32::MAX, Ordering::Relaxed);
+    LAST_LAYOUT.store(u32::MAX, Ordering::Relaxed);
+    LAST_FRAME_CONTROL.store(u32::MAX, Ordering::Relaxed);
     if frame.is_null() {
-        return None;
+        return reject_qos(1);
     }
     let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
     if descriptor.is_null() {
-        return None;
+        return reject_qos(2);
     }
     let descriptor_word = descriptor.cast::<u32>().read();
     LAST_DESCRIPTOR.store(descriptor_word, Ordering::Release);
     if descriptor_word & DESCRIPTOR_UNSUPPORTED_MASK != 0 {
-        return None;
+        return reject_qos(3);
     }
     let rate = descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
     LAST_RATE.store(u32::from(rate), Ordering::Release);
     if !(16..=35).contains(&rate) {
-        return None;
+        return reject_qos(4);
     }
     let first_buffer = frame
         .add(FRAME_FIRST_BUFFER_OFFSET)
         .cast::<*mut u8>()
         .read();
     if first_buffer.is_null() {
-        return None;
+        return reject_qos(5);
     }
     let mut header = first_buffer
         .add(BUFFER_DATA_OFFSET)
         .cast::<*mut u8>()
         .read();
     if header.is_null() {
-        return None;
+        return reject_qos(6);
     }
     let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
     LAST_LAYOUT.store(u32::from(layout), Ordering::Release);
@@ -425,7 +470,7 @@ unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
     // guarded mapper state; retain the size counter to keep the two classes
     // visible in HIL diagnostics.
     if layout & 0x2000 == 0 {
-        return None;
+        return reject_qos(7);
     }
     let mpdu_length = header.cast::<u32>().read() & 0x3fff;
     let aggregate_eligible = mpdu_length >= MIN_HIL_MPDU_LENGTH;
@@ -433,12 +478,18 @@ unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
     let frame_control = header.cast::<u16>().read_unaligned();
     LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Release);
     if frame_control & 0x008c != 0x0088 {
-        return None;
+        return reject_qos(8);
     }
     if !aggregate_eligible {
         BELOW_MIN_LENGTH.fetch_add(1, Ordering::Relaxed);
     }
     Some(aggregate_eligible)
+}
+
+#[inline(always)]
+fn reject_qos(reason: u32) -> Option<bool> {
+    LAST_FALLBACK_REASON.store(reason, Ordering::Release);
+    None
 }
 
 unsafe fn push_ready(state: &mut InterceptState, frame: *mut u8) -> Result<(), TxInterceptError> {
