@@ -17,7 +17,6 @@ const TXQ_INTERRUPT_CLEAR_REG: *mut u32 = 0x2010_4cb0 as *mut u32;
 const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
-const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_RATE_OFFSET: usize = 0x08;
 const TX_QUEUE_SAVED_RATE_OFFSET: usize = 0x09;
 const TX_QUEUE_RATE_LIMIT_OFFSET: usize = 0x0a;
@@ -36,7 +35,6 @@ const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_FRAME_SCHEDULER_OFFSET: usize = 0x04;
 const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
-const TX_FRAME_RATE_CONTEXT_OFFSET: usize = 0x2c;
 const TX_DESCRIPTOR_REASON_OFFSET: usize = 0x13;
 const TX_DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
@@ -86,8 +84,7 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn rcGetRate(rate_control: *mut u8);
-    fn lmacTxFrame(frame: *mut u8, queue: u8);
+    fn lmacRetryTxFrame(queue_state: *mut u8, mode: u32);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -707,21 +704,12 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     mark_retry_scheduler(frame)?;
     queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
 
-    // Narrow non-aggregate body of `lmacRetryTxFrame`: update the selected
-    // rate and submit exactly one frame. HTC removal, frame-time repair,
-    // aggregate recycling, aged logging, and their loops were rejected above.
-    let rate_context = frame
-        .add(TX_FRAME_RATE_CONTEXT_OFFSET)
-        .cast::<*mut u8>()
-        .read();
-    if rate_context.is_null() {
-        return Err(LmacAsyncError::InvalidTxRetryRateControl);
-    }
-    rcGetRate(rate_context);
-    lmacTxFrame(
-        frame,
-        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
-    );
+    // Keep the final one-frame submission leaf intact for now. The guards
+    // above make its aged, aggregate, HTC-removal, frame-time-repair, and
+    // logging branches unreachable. Splitting its `rcGetRate + lmacTxFrame`
+    // tail directly caused a hardware-queue stall in HIL and therefore needs
+    // a separate before/after register audit.
+    lmacRetryTxFrame(queue_state, 0);
     queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
     Ok(())
 }
