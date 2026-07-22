@@ -20,6 +20,7 @@ const TXQ_PPDU_CONTROL_BASE_REG: usize = 0x2010_4d68;
 const TXQ_PROTECTION_BASE_REG: usize = 0x2010_4d64;
 const TXQ_PROTECTION_DURATION_BASE_REG: usize = 0x2010_54dc;
 const TXQ_PTI_BASE_REG: usize = 0x2010_54e0;
+const TXQ_PLCP1_BASE_REG: usize = 0x2010_54d8;
 const TXQ_POWER_BASE_REG: usize = 0x2010_5500;
 const TXQ_REGISTER_STRIDE: usize = 0x10;
 const TXQ_POWER_STRIDE: usize = 0x7c;
@@ -104,7 +105,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn mac_tx_set_plcp1(queue_state: *mut u8) -> i32;
     fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
@@ -855,7 +855,7 @@ unsafe fn format_basic_ht_ppdu(
     };
 
     program_basic_plcp0(queue, frame, descriptor);
-    let _ = mac_tx_set_plcp1(queue_state);
+    program_basic_plcp1(queue, descriptor, rate);
 
     let ppdu_control =
         (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
@@ -921,6 +921,19 @@ unsafe fn program_basic_plcp0(queue: u8, frame: *mut u8, descriptor: *mut u8) {
             (TXQ_PROTECTION_DURATION_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
         duration_register.write_volatile((duration & 0x0000_ffff) | 0x0001_0000);
     }
+}
+
+/// Recovered guarded basic-HT body of `mac_tx_set_plcp1`.
+unsafe fn program_basic_plcp1(queue: u8, descriptor: *mut u8, rate: u8) {
+    debug_assert!((16..=35).contains(&rate));
+    let flags = descriptor.cast::<u32>().read();
+    debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
+    let queue_word_low = descriptor.add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET).read();
+    let protection = descriptor.add(8).cast::<u32>().read();
+    let plcp1 = crate::tx_plcp::basic_plcp1_word(rate, flags, queue_word_low, protection);
+
+    let register = (TXQ_PLCP1_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    register.write_volatile(plcp1);
 }
 
 /// Finite success branch of `mac_tx_set_pti` and `hal_set_tx_pti` without the
