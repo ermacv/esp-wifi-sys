@@ -338,6 +338,14 @@ pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> 
     begin_lmac(frame, true, false)
 }
 
+/// Continue a Rust-owned successful LMAC completion. This is the recovered
+/// mode-1 `lmacTxDone` ownership transfer: callback work and queue resumption
+/// remain separate bounded executor events.
+pub(crate) unsafe fn begin_from_tx_success(frame: *mut u8) -> Result<(), TxDoneError> {
+    crate::channel_switch::tx_done_edge();
+    begin_lmac(frame, false, true)
+}
+
 unsafe fn begin_lmac(
     frame: *mut u8,
     resume_timeout: bool,

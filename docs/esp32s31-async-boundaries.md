@@ -483,14 +483,17 @@ from the completion bitmap, decodes one fixed completion record, copies the six
 recovered queue-state fields, clears that queue's completion bit, and uses a
 direct `match` for success, RTS error, CTS timeout, TX error, or ACK timeout.
 The stock outer loop, test hook, formatter, and indirect outcome jump table are
-therefore absent. The five vendor outcome bodies are still explicit strict
-roots; replacing their retry/recycle/resort paths is the next TX-completion
-boundary and is required before the completion tract is fully Rust-owned.
+therefore absent. Hardware stress over 5,012 completions proved that the 4,790
+successes used only queue zero/kind three, with zero TXOP ownership, no linked
+MPDU, and no aggregate descriptor state. The strict success path now performs
+the recovered short/optional-long state updates and basic MPDU recycle count in
+Rust, then enters the existing bounded Rust TX-done continuations directly.
+The four vendor error/retry outcome bodies remain explicit strict roots and are
+the next TX-completion boundary.
 The `hil-vendor-tx` build also records an allocation-free snapshot immediately
 before each selected outcome. In particular it observes the live queue kind,
 TXOP outstanding count, next-MPDU link, and descriptor flags for every success.
-This is a temporary oracle: the basic success path will only move to Rust after
-hardware stress proves which of the recovered TXOP/list branches are reachable.
+This remains a HIL oracle for error/retry work and future aggregate enablement.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys

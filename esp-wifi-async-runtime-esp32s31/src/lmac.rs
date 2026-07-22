@@ -18,12 +18,15 @@ const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
+const TX_QUEUE_END_STATE_OFFSET: usize = 0x13;
 const TX_QUEUE_TXOP_OUTSTANDING_OFFSET: usize = 0x1c;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
+const TX_QUEUE_COMPLETED_COUNT_OFFSET: usize = 0x20;
 const TX_QUEUE_DROP_COUNT_OFFSET: usize = 0x24;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_DESCRIPTOR_REASON_OFFSET: usize = 0x13;
+const TX_DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
 const TX_FRAME_ABORTED_BIT: u32 = 0x0002_0000;
 const TX_FRAME_BAR_BIT: u32 = 0x0020_0000;
@@ -31,6 +34,8 @@ const TX_FRAME_AMPDU_BIT: u32 = 0x0040_0000;
 const TX_FRAME_HE_BIT: u32 = 0x8000_0000;
 const TX_FRAME_DEQUEUE_MASK: u32 = 0x0000_00c0;
 const TX_FRAME_DEQUEUE_VALUE: u32 = 0x0000_0080;
+const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
+const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
 const TXRX_QUEUE_SIZE: usize = 0x34;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
 const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
@@ -60,7 +65,6 @@ unsafe extern "C" {
     fn hal_mac_set_txq_invalid(queue: u8);
     fn hal_mac_txq_disable(queue: u8);
     fn lmacReleaseTxopQueue(queue: u8);
-    fn lmacProcessTxSuccess(queue: u8, response: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessCtsTimeout(queue: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
@@ -82,6 +86,10 @@ pub enum LmacAsyncError {
     TxDone(crate::txdone::TxDoneError),
     TxQueueSplitFailed,
     UnsupportedTxCompletionStatus(u8),
+    UnsupportedTxSuccessQueueKind(u8),
+    UnsupportedTxSuccessTxop(u8),
+    UnsupportedTxSuccessChain,
+    UnsupportedTxSuccessDescriptor(u32),
 }
 
 #[derive(Clone, Copy)]
@@ -443,7 +451,7 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     // and clears the hardware completion bit before entering the outcome.
     hal_mac_clr_txq_state(2, queue);
     match status {
-        0 => lmacProcessTxSuccess(queue, completion[2]),
+        0 => process_tx_success(queue_state, completion[2])?,
         1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
         2 => lmacProcessCtsTimeout(queue, 0),
         4 => lmacProcessTxError(queue, completion[0], 0),
@@ -451,6 +459,66 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
     }
     Ok(())
+}
+
+/// Recovered basic-HT success path for the strict one-descriptor profile.
+///
+/// The stock `lmacProcessTxSuccess` first selects optional TXOP/list handling,
+/// then converges through `lmacEndFrameExchangeSequence`, `lmacRecycleMPDU`,
+/// and `lmacTxDone`. Hardware stress proved that ordinary STA traffic uses
+/// queue kind 3 with no TXOP ownership, linked MPDU, or aggregate descriptor
+/// state. Rejecting those invariants before mutation keeps the remaining path
+/// finite and hands the frame directly to the existing Rust TX-done steps.
+unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), LmacAsyncError> {
+    let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
+    if queue_kind != 3 {
+        return Err(LmacAsyncError::UnsupportedTxSuccessQueueKind(queue_kind));
+    }
+    let txop_outstanding = queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read();
+    if txop_outstanding != 0 {
+        return Err(LmacAsyncError::UnsupportedTxSuccessTxop(txop_outstanding));
+    }
+
+    let frame = queue_state.cast::<*mut u8>().read();
+    if !frame
+        .add(TX_FRAME_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+    {
+        return Err(LmacAsyncError::UnsupportedTxSuccessChain);
+    }
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let flags = descriptor.cast::<u32>().read();
+    if flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0 {
+        return Err(LmacAsyncError::UnsupportedTxSuccessDescriptor(flags));
+    }
+
+    // Non-HE `lmacProcessShortFrameSuccess`: copy the saved retry/rate byte
+    // and clear the short-frame state. Bit 8 additionally runs the matching
+    // long-frame success leaf, which only clears the adjacent state byte.
+    queue_state.add(8).write(queue_state.add(9).read());
+    queue_state.add(0x0b).write(0);
+    if flags & 0x0000_0100 != 0 {
+        queue_state.add(0x0c).write(0);
+    }
+    descriptor
+        .add(TX_DESCRIPTOR_RESPONSE_OFFSET)
+        .write(response);
+
+    // Basic non-aggregate convergence from `lmacEndFrameExchangeSequence`
+    // and `lmacRecycleMPDU`.
+    queue_state.add(TX_QUEUE_STATUS_OFFSET).write(0);
+    queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(3);
+    let completed = queue_state
+        .add(TX_QUEUE_COMPLETED_COUNT_OFFSET)
+        .cast::<u32>();
+    completed.write(completed.read().wrapping_add(1));
+    descriptor.add(TX_DESCRIPTOR_REASON_OFFSET).write(1);
+    crate::txdone::begin_from_tx_success(frame).map_err(LmacAsyncError::TxDone)
 }
 
 #[cfg(feature = "hil-vendor-tx")]
