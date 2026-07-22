@@ -574,10 +574,11 @@ input because the pinned implementation never reads them; the mapper and
 scheduler validate those fields at their own boundary. Likewise, the lower
 layout bits remain opaque buffer identity; this leaf checks only that the
 `0x2000` headroom-applied bit was not already set. Any unqualified security
-state traps before mutation. The
-remaining stateful prefix is therefore `rcGetSched` (rate-control state), which
-is why this feature remains a qualification boundary rather than the final
-runtime.
+state traps before mutation. The pinned `rcGetSched` boundary is now reduced
+to two measured stateless
+branches: fixed primary HT and an SRAM-owned 12-byte legacy secondary schedule.
+The final-link wrapper traps on every other adaptive/PHY override and never
+delegates to vendor rate control.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,

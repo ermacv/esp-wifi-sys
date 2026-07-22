@@ -53,7 +53,7 @@ pub fn fixed_rate_schedule_snapshot() -> FixedRateScheduleSnapshot {
 /// This counter exists only to prove that enabling both fixed-rate modes
 /// closes every active STA submission branch before the fallback is removed.
 #[cfg(target_arch = "riscv32")]
-pub fn record_dynamic_rate_schedule_fallback() {
+fn record_dynamic_rate_schedule_fallback() {
     DYNAMIC_RATE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -184,6 +184,20 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
         FIXED_RATE_SECONDARY.fetch_add(1, Ordering::Relaxed);
     }
     true
+}
+
+/// Fail-closed final-link replacement for the measured `rcGetSched` domain.
+///
+/// Every admitted branch is a finite SRAM-resident load/store sequence. An
+/// unmeasured adaptive/PHY override records the violation and traps before the
+/// descriptor can enter hardware; it never delegates to vendor rate control.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_rate_schedule"]
+pub unsafe fn strict_rate_schedule(rate_context: *mut u8, descriptor: *mut u8) {
+    if !try_fixed_rate_schedule(rate_context, descriptor) {
+        record_dynamic_rate_schedule_fallback();
+        core::arch::asm!("ebreak", options(noreturn));
+    }
 }
 
 /// Recovered finite body of the vendor `mac_tx_get_rts_rate` leaf for every
