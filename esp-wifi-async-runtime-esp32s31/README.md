@@ -397,8 +397,11 @@ in Rust one queue at a time and uses a direct outcome `match`. The
 HIL feature exposes `lmac_tx_complete_snapshot()` so TX stress can prove the
 queue-kind, TXOP/list, and descriptor invariants without allocating or changing
 the selected outcome. The proven basic success/recycle path now runs in Rust
-and feeds the bounded Rust TX-done continuations; only the four vendor
-error/retry outcome bodies remain strict audit roots. It is expected to fail
+and feeds the bounded Rust TX-done continuations. Basic ACK and CTS timeout
+accounting, rate fallback, retry-limit/lifetime decisions, and terminal
+discard also run in Rust. The guarded one-frame `lmacRetryTxFrame` submission
+leaf plus the unobserved RTS-error and generic TX-error outcomes remain strict
+audit roots. It is expected to fail
 until all reported roots are replaced or their exact indirect target and loop
 bound are proven.
 

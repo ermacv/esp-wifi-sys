@@ -424,9 +424,9 @@ The strict gate still intentionally fails. Confirmed remaining paths include:
 - the stock WPA2-Personal `eapol_txcb` target reaching `calloc/free` through
   eloop timeouts and `ets_delay_us` through deauthentication if strict
   integration fails to install the provided async TX-done callback first;
-- individual TX completion/collision outcomes still enter vendor retry and
-  connection-management state transitions, although queue bitmaps and the
-  common `lmacTxDone` tail are now split into continuations;
+- the final guarded basic retry submission and unobserved RTS/generic-error
+  outcomes still enter vendor leaves; collision and connection-management
+  state transitions are not yet reconstructed;
 - explicit disassociation, deauthentication, and off-channel action completion
   is not implemented; the Rust management wrapper rejects those subtypes before
   the stock channel-change and `hal_mac_deinit -> ets_delay_us` branches;
@@ -472,8 +472,8 @@ debug logging. The replacement reproduces the two six/eight-byte completion
 records and traps after recording a strict failure if it observes HE, BAR,
 A-MPDU, or live MPLEN state. A trap is required because the pinned vendor
 caller discards the callee's return value and would otherwise interpret a
-returned error as a completion record. The basic path therefore leaves
-the stock outcome state machine intact while removing those unrelated tails.
+returned error as a completion record. Rust now owns the basic completion
+outcome state machine while rejecting those unrelated tails.
 The independent `hal_mac_tx_get_blockack` leaf is only `0x3e` bytes, contains
 fixed MMIO loads/stores and no calls or cycles, and passes the strict auditor as
 the future Rust A-MPDU completion input.
@@ -488,12 +488,31 @@ successes used only queue zero/kind three, with zero TXOP ownership, no linked
 MPDU, and no aggregate descriptor state. The strict success path now performs
 the recovered short/optional-long state updates and basic MPDU recycle count in
 Rust, then enters the existing bounded Rust TX-done continuations directly.
-The four vendor error/retry outcome bodies remain explicit strict roots and are
-the next TX-completion boundary.
-The `hil-vendor-tx` build also records an allocation-free snapshot immediately
-before each selected outcome. In particular it observes the live queue kind,
-TXOP outstanding count, next-MPDU link, and descriptor flags for every success.
-This remains a HIL oracle for error/retry work and future aggregate enablement.
+ACK and CTS timeout processing now has the same strict basic-HT boundary. Rust
+updates the short/long queue and descriptor counters, applies the recovered
+rate fallback, evaluates the rate-control and MIB retry limits, performs the
+non-aggregate lifetime check from the MAC clock, and either prepares one retry
+or enters the existing one-frame-per-event discard continuation. It rejects
+TXOP, linked, HE, BAR, A-MPDU, frame-time-repair, and trigger/MU states before
+mutation. Only the final guarded `lmacRetryTxFrame` submission leaf remains;
+the outer ACK/CTS bodies, retry-failure bodies, end-exchange dispatcher, test
+hook, retry-limit helper, and lifetime helper are no longer called.
+
+A 5,158-completion hardware stress run exercised 352 ACK and 14 CTS timeouts
+through this Rust path. All 366 returned with the same basic-HT frame, no TXOP
+or linked MPDU, and the complete WPA2/DHCP/DNS/TCP/HTTP/UDP test passed with
+zero post-takeover allocation, blocking callbacks, task delays, direct delays,
+or queue rejection. Splitting the last leaf directly into `rcGetRate` and
+`lmacTxFrame` was also tested and caused the hardware queue to stall after a
+few retries. It is therefore not considered equivalent: the next audit must
+capture descriptor and scheduler state after rate selection before replacing
+the leaf.
+
+The `hil-vendor-tx` build records allocation-free before/after snapshots for
+success and retry outcomes, including queue kind, status, retry counters,
+TXOP/list state, and descriptor flags. This remains the HIL oracle for the
+final retry-submission split and future aggregate enablement. RTS-error and
+generic TX-error outcomes were not observed and remain vendor roots.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
 The Rust wrapper reproduces the pinned fixed key-table register writes for keys
@@ -532,9 +551,9 @@ uses the finite `ieee80211_set_sta_gtk_index` byte stores; AP GTK uses hardware
 slots 8 through 11. Since the blob has no independent controlled-port setter,
 AP authorization lives in a fixed Rust peer table and must gate every ordinary
 data-channel operation; EAPOL uses a separate pre-auth path. TXQ bitmap
-processing, the common TX-done tail, beacon completion, and ordinary management
-completion are classified, but individual retry/connection paths are not yet
-strict. Key installation additionally
+processing, the common TX-done tail, beacon completion, ordinary management
+completion, and basic retry accounting/discard are classified. The final retry
+submission and connection paths are not yet fully strict. Key installation additionally
 requires no live RX fragment from the old key, because the stock cleanup path
 can call `wifi_log`.
 
