@@ -12,6 +12,552 @@ pub const ADDBA_RESPONSE_ACTION: u8 = 1;
 pub const ADDBA_ACTION_BODY_LEN: usize = 9;
 pub const TX_BLOCK_ACK_MAX_WINDOW: u16 = 32;
 pub const TX_AMPDU_SLOT_CAPACITY: usize = TX_BLOCK_ACK_MAX_WINDOW as usize;
+const BASIC_HT_RATE_MIN: u8 = 16;
+const BASIC_HT_RATE_MAX: u8 = 35;
+const TX_DESCRIPTOR_HE_BIT: u32 = 0x8000_0000;
+const TX_DESCRIPTOR_BAR_BIT: u32 = 0x0020_0000;
+const TX_DESCRIPTOR_AMPDU_BIT: u32 = 0x0040_0000;
+const TX_DESCRIPTOR_AMPDU_FIRST_BITS: u32 = 0x0048_0000;
+const TX_BUFFER_END_BIT: u32 = 0x4000_0000;
+const FIRST_MPDU_RETRY_HEADER_BIT: u32 = 0x0100_0000;
+const HT_MPDU_LENGTH_MASK: u32 = 0x3fff;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HtAmpduLengthError {
+    InvalidLimits,
+    Empty,
+    ZeroMpduLength,
+    WindowFull,
+    AggregateTooLong(u32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HtAmpduLength {
+    pub bytes: u16,
+    pub subframes: u8,
+}
+
+/// Exact basic-HT A-MPDU byte accounting recovered from the pinned PP blob.
+///
+/// Bits 0..13 of `payload_word` carry the MPDU length. `empty_delimiters` is
+/// the byte immediately following that word in the PP metadata prefix. Every
+/// non-final MPDU contributes its four-byte delimiter, its length rounded to
+/// four bytes, and the requested empty delimiters. `finish` removes the final
+/// padding and empty delimiters, leaving the last MPDU's mandatory delimiter.
+///
+/// The accumulator has a caller-selected fixed window and byte ceiling. It
+/// never allocates, accesses pointers, reads time, retries, waits or invokes a
+/// callback.
+pub struct HtAmpduLengthAccumulator {
+    bytes_with_tail: u32,
+    tail_bytes: u16,
+    count: u8,
+    max_subframes: u8,
+    max_bytes: u16,
+}
+
+impl HtAmpduLengthAccumulator {
+    pub const fn new(max_subframes: u8, max_bytes: u16) -> Result<Self, HtAmpduLengthError> {
+        if max_subframes == 0 || max_subframes as usize > TX_AMPDU_SLOT_CAPACITY || max_bytes == 0 {
+            return Err(HtAmpduLengthError::InvalidLimits);
+        }
+        Ok(Self {
+            bytes_with_tail: 0,
+            tail_bytes: 0,
+            count: 0,
+            max_subframes,
+            max_bytes,
+        })
+    }
+
+    pub const fn push(
+        &mut self,
+        payload_word: u32,
+        empty_delimiters: u8,
+    ) -> Result<(), HtAmpduLengthError> {
+        if self.count >= self.max_subframes {
+            return Err(HtAmpduLengthError::WindowFull);
+        }
+        let mpdu_bytes = payload_word & HT_MPDU_LENGTH_MASK;
+        if mpdu_bytes == 0 {
+            return Err(HtAmpduLengthError::ZeroMpduLength);
+        }
+        let padding = (4 - (mpdu_bytes & 3)) & 3;
+        let empty_bytes = (empty_delimiters as u32) * 4;
+        let contribution = mpdu_bytes + padding + empty_bytes + 4;
+        let next = self.bytes_with_tail + contribution;
+        let final_bytes = next - padding - empty_bytes;
+        if final_bytes > self.max_bytes as u32 {
+            return Err(HtAmpduLengthError::AggregateTooLong(final_bytes));
+        }
+        self.bytes_with_tail = next;
+        self.tail_bytes = (padding + empty_bytes) as u16;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub const fn finish(&self) -> Result<HtAmpduLength, HtAmpduLengthError> {
+        if self.count == 0 {
+            return Err(HtAmpduLengthError::Empty);
+        }
+        let bytes = self.bytes_with_tail - self.tail_bytes as u32;
+        if bytes > self.max_bytes as u32 {
+            return Err(HtAmpduLengthError::AggregateTooLong(bytes));
+        }
+        Ok(HtAmpduLength {
+            bytes: bytes as u16,
+            subframes: self.count,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BasicHtAmpduAssemblyError {
+    AggregateShorterThanHeader,
+    UnsupportedRate(u8),
+    UnsupportedDescriptor(u32),
+    TailAlreadyTerminated(u32),
+    NullFrame,
+    NullDescriptor,
+    NullBufferDescriptor,
+    NullPayload,
+    LastFrameNotReachable,
+    FrameAfterLast,
+    BufferChainMismatch,
+    WindowExceeded,
+}
+
+/// Inputs consumed by the finite HT `ppAssembleAMPDU` leaf.
+///
+/// This value form keeps the recovered bit transition host-testable. The
+/// target-only pointer wrapper below validates the complete ESF/buffer chain
+/// before applying the same mutation to SRAM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BasicHtAmpduAssemblyInput {
+    pub aggregate_length: u16,
+    pub first_header_length: u16,
+    pub first_payload_word: u32,
+    pub first_descriptor_flags: u32,
+    pub first_descriptor_word1: u32,
+    pub first_rate: u8,
+    pub tail_buffer_flags: u32,
+    pub tail_timestamp: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BasicHtAmpduAssemblyOutput {
+    pub first_remaining_length: u16,
+    pub first_payload_word: u32,
+    pub first_descriptor_flags: u32,
+    pub first_descriptor_word1: u32,
+    pub tail_buffer_flags: u32,
+    pub first_timestamp: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BasicHtAmpduChainError {
+    Empty,
+    TooManyFrames(usize),
+    NullFrame(u8),
+    DuplicateFrame(u8),
+    NullDescriptor(u8),
+    NullBufferDescriptor(u8),
+    NullPayload(u8),
+    ExistingFrameLink(u8),
+    ExistingBufferLink(u8),
+    UnsupportedDescriptor { index: u8, flags: u32 },
+    UnsupportedRate { index: u8, rate: u8 },
+    RateMismatch { index: u8, first: u8, rate: u8 },
+    Length(HtAmpduLengthError),
+    Assembly(BasicHtAmpduAssemblyError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BasicHtAmpduChain {
+    pub first: *mut u8,
+    pub last: *mut u8,
+    pub aggregate_length: u16,
+    pub subframes: u8,
+}
+
+/// Reproduce the mutation made by the pinned non-HE `ppAssembleAMPDU` body.
+///
+/// There is no allocation, callback, lock, timer, retry or pointer access in
+/// this value-level operation.
+#[inline(always)]
+pub const fn basic_ht_ampdu_assembly(
+    input: BasicHtAmpduAssemblyInput,
+) -> Result<BasicHtAmpduAssemblyOutput, BasicHtAmpduAssemblyError> {
+    if input.aggregate_length < input.first_header_length {
+        return Err(BasicHtAmpduAssemblyError::AggregateShorterThanHeader);
+    }
+    if input.first_rate < BASIC_HT_RATE_MIN || input.first_rate > BASIC_HT_RATE_MAX {
+        return Err(BasicHtAmpduAssemblyError::UnsupportedRate(input.first_rate));
+    }
+    if input.first_descriptor_flags
+        & (TX_DESCRIPTOR_HE_BIT | TX_DESCRIPTOR_BAR_BIT | TX_DESCRIPTOR_AMPDU_BIT)
+        != 0
+    {
+        return Err(BasicHtAmpduAssemblyError::UnsupportedDescriptor(
+            input.first_descriptor_flags,
+        ));
+    }
+    if input.tail_buffer_flags & TX_BUFFER_END_BIT != 0 {
+        return Err(BasicHtAmpduAssemblyError::TailAlreadyTerminated(
+            input.tail_buffer_flags,
+        ));
+    }
+    Ok(BasicHtAmpduAssemblyOutput {
+        first_remaining_length: input
+            .aggregate_length
+            .wrapping_sub(input.first_header_length),
+        first_payload_word: input.first_payload_word & !FIRST_MPDU_RETRY_HEADER_BIT,
+        first_descriptor_flags: (input.first_descriptor_flags & !TX_BUFFER_END_BIT)
+            | TX_DESCRIPTOR_AMPDU_FIRST_BITS,
+        // The ROM leaf performs one byte load followed by a word store.
+        first_descriptor_word1: input.first_descriptor_word1 & 0xff,
+        tail_buffer_flags: input.tail_buffer_flags | TX_BUFFER_END_BIT,
+        first_timestamp: input.tail_timestamp,
+    })
+}
+
+/// Validate and assemble one statically owned basic-HT ESF chain.
+///
+/// # Safety
+///
+/// `first` through `last`, their `+0x04/+0x08` buffer descriptors, `+0x34`
+/// TX descriptors and the first payload pointer must remain valid writable
+/// SRAM for this call. Each `+0x30` frame link and buffer-descriptor `+0x08`
+/// link must describe the same finite chain. The function validates every
+/// pointer/flag/length invariant before performing any write.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_assemble"]
+pub unsafe fn assemble_basic_ht_ampdu(
+    first: *mut u8,
+    last: *mut u8,
+    aggregate_length: u16,
+) -> Result<u8, BasicHtAmpduAssemblyError> {
+    const FRAME_PAYLOAD_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_CHAIN_BUFFER_OFFSET: usize = 0x08;
+    const FRAME_HEADER_LENGTH_OFFSET: usize = 0x14;
+    const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
+    const FRAME_NEXT_OFFSET: usize = 0x30;
+    const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const BUFFER_NEXT_OFFSET: usize = 0x08;
+    const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
+    const DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+
+    if first.is_null() || last.is_null() {
+        return Err(BasicHtAmpduAssemblyError::NullFrame);
+    }
+
+    // Prove both linked representations before mutating either one. This is a
+    // bounded validation pass, not a wait/retry loop.
+    let mut frame = first;
+    let mut count = 0_u8;
+    let mut found_last = false;
+    while usize::from(count) < TX_AMPDU_SLOT_CAPACITY {
+        if frame.is_null() {
+            return Err(BasicHtAmpduAssemblyError::LastFrameNotReachable);
+        }
+        count += 1;
+        let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+        if descriptor.is_null() {
+            return Err(BasicHtAmpduAssemblyError::NullDescriptor);
+        }
+        let descriptor_flags = descriptor.cast::<u32>().read();
+        if descriptor_flags
+            & (TX_DESCRIPTOR_HE_BIT | TX_DESCRIPTOR_BAR_BIT | TX_DESCRIPTOR_AMPDU_BIT)
+            != 0
+        {
+            return Err(BasicHtAmpduAssemblyError::UnsupportedDescriptor(
+                descriptor_flags,
+            ));
+        }
+        let buffer = frame
+            .add(FRAME_CHAIN_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        if buffer.is_null() {
+            return Err(BasicHtAmpduAssemblyError::NullBufferDescriptor);
+        }
+        let next = frame.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
+        let next_buffer = buffer.add(BUFFER_NEXT_OFFSET).cast::<*mut u8>().read();
+        if frame == last {
+            if !next.is_null() || !next_buffer.is_null() {
+                return Err(BasicHtAmpduAssemblyError::FrameAfterLast);
+            }
+            found_last = true;
+            break;
+        }
+        if next.is_null() {
+            return Err(BasicHtAmpduAssemblyError::LastFrameNotReachable);
+        }
+        let expected_buffer = next
+            .add(FRAME_PAYLOAD_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        if expected_buffer.is_null() || next_buffer != expected_buffer {
+            return Err(BasicHtAmpduAssemblyError::BufferChainMismatch);
+        }
+        frame = next;
+    }
+    if !found_last {
+        return Err(BasicHtAmpduAssemblyError::WindowExceeded);
+    }
+
+    let first_descriptor = first.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    let first_buffer = first
+        .add(FRAME_PAYLOAD_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let tail_buffer = last.add(FRAME_CHAIN_BUFFER_OFFSET).cast::<*mut u8>().read();
+    let tail_descriptor = last.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    if first_buffer.is_null() || tail_buffer.is_null() {
+        return Err(BasicHtAmpduAssemblyError::NullBufferDescriptor);
+    }
+    if first_descriptor.is_null() || tail_descriptor.is_null() {
+        return Err(BasicHtAmpduAssemblyError::NullDescriptor);
+    }
+    let first_payload = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_payload.is_null() {
+        return Err(BasicHtAmpduAssemblyError::NullPayload);
+    }
+    let output = basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+        aggregate_length,
+        first_header_length: first.add(FRAME_HEADER_LENGTH_OFFSET).cast::<u16>().read(),
+        first_payload_word: first_payload.cast::<u32>().read(),
+        first_descriptor_flags: first_descriptor.cast::<u32>().read(),
+        first_descriptor_word1: first_descriptor.add(4).cast::<u32>().read(),
+        first_rate: first_descriptor.add(DESCRIPTOR_RATE_OFFSET).read(),
+        tail_buffer_flags: tail_buffer.cast::<u32>().read(),
+        tail_timestamp: tail_descriptor
+            .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+            .cast::<u32>()
+            .read(),
+    })?;
+
+    first_payload.cast::<u32>().write(output.first_payload_word);
+    first_descriptor
+        .cast::<u32>()
+        .write(output.first_descriptor_flags);
+    first_descriptor
+        .add(4)
+        .cast::<u32>()
+        .write(output.first_descriptor_word1);
+    first
+        .add(FRAME_REMAINING_LENGTH_OFFSET)
+        .cast::<u16>()
+        .write(output.first_remaining_length);
+    tail_buffer.cast::<u32>().write(output.tail_buffer_flags);
+    first_descriptor
+        .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .write(output.first_timestamp);
+    Ok(count)
+}
+
+/// Build and assemble a basic-HT chain from independently owned ESF frames.
+///
+/// The function performs a complete bounded validation pass before its first
+/// write. It then links each frame's `+0x30` field and each frame-tail buffer's
+/// `+0x08` field, and applies the recovered first/tail A-MPDU mutation. Both
+/// passes are capped at the 32-frame static BlockAck window.
+///
+/// # Safety
+///
+/// Every entry and the pointers reachable through its `+0x04`, `+0x08`, and
+/// `+0x34` fields must remain valid writable SRAM under the single radio owner
+/// for this call. Each input frame must still be independent: its frame link
+/// and tail-buffer link must be null. Its existing internal buffer chain is
+/// owned by the caller and must connect the first buffer to the stated tail.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_chain"]
+pub unsafe fn prepare_basic_ht_ampdu_chain(
+    frames: &[*mut u8],
+    max_aggregate_length: u16,
+) -> Result<BasicHtAmpduChain, BasicHtAmpduChainError> {
+    const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_TAIL_BUFFER_OFFSET: usize = 0x08;
+    const FRAME_HEADER_LENGTH_OFFSET: usize = 0x14;
+    const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
+    const FRAME_NEXT_OFFSET: usize = 0x30;
+    const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const BUFFER_NEXT_OFFSET: usize = 0x08;
+    const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
+    const DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+
+    if frames.is_empty() {
+        return Err(BasicHtAmpduChainError::Empty);
+    }
+    if frames.len() > TX_AMPDU_SLOT_CAPACITY {
+        return Err(BasicHtAmpduChainError::TooManyFrames(frames.len()));
+    }
+
+    let mut length = HtAmpduLengthAccumulator::new(frames.len() as u8, max_aggregate_length)
+        .map_err(BasicHtAmpduChainError::Length)?;
+    let mut first_rate = 0_u8;
+    let mut index = 0_usize;
+    while index < frames.len() {
+        let frame = frames[index];
+        let index_u8 = index as u8;
+        if frame.is_null() {
+            return Err(BasicHtAmpduChainError::NullFrame(index_u8));
+        }
+        let mut prior = 0_usize;
+        while prior < index {
+            if frames[prior] == frame {
+                return Err(BasicHtAmpduChainError::DuplicateFrame(index_u8));
+            }
+            prior += 1;
+        }
+        if !frame
+            .add(FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+            .is_null()
+        {
+            return Err(BasicHtAmpduChainError::ExistingFrameLink(index_u8));
+        }
+
+        let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+        if descriptor.is_null() {
+            return Err(BasicHtAmpduChainError::NullDescriptor(index_u8));
+        }
+        let flags = descriptor.cast::<u32>().read();
+        if flags & (TX_DESCRIPTOR_HE_BIT | TX_DESCRIPTOR_BAR_BIT | TX_DESCRIPTOR_AMPDU_BIT) != 0 {
+            return Err(BasicHtAmpduChainError::UnsupportedDescriptor {
+                index: index_u8,
+                flags,
+            });
+        }
+        let rate = descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
+        if rate < BASIC_HT_RATE_MIN || rate > BASIC_HT_RATE_MAX {
+            return Err(BasicHtAmpduChainError::UnsupportedRate {
+                index: index_u8,
+                rate,
+            });
+        }
+        if index == 0 {
+            first_rate = rate;
+        } else if rate != first_rate {
+            return Err(BasicHtAmpduChainError::RateMismatch {
+                index: index_u8,
+                first: first_rate,
+                rate,
+            });
+        }
+
+        let first_buffer = frame
+            .add(FRAME_FIRST_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        let tail_buffer = frame.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+        if first_buffer.is_null() || tail_buffer.is_null() {
+            return Err(BasicHtAmpduChainError::NullBufferDescriptor(index_u8));
+        }
+        if !tail_buffer
+            .add(BUFFER_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+            .is_null()
+        {
+            return Err(BasicHtAmpduChainError::ExistingBufferLink(index_u8));
+        }
+        let payload = first_buffer
+            .add(BUFFER_DATA_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        if payload.is_null() {
+            return Err(BasicHtAmpduChainError::NullPayload(index_u8));
+        }
+        length
+            .push(payload.cast::<u32>().read(), payload.add(4).read())
+            .map_err(BasicHtAmpduChainError::Length)?;
+        index += 1;
+    }
+
+    let aggregate = length.finish().map_err(BasicHtAmpduChainError::Length)?;
+    let first = frames[0];
+    let last = frames[frames.len() - 1];
+    let first_descriptor = first.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    let first_buffer = first
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let first_payload = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let tail_buffer = last.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+    let tail_descriptor = last.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    let output = basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+        aggregate_length: aggregate.bytes,
+        first_header_length: first.add(FRAME_HEADER_LENGTH_OFFSET).cast::<u16>().read(),
+        first_payload_word: first_payload.cast::<u32>().read(),
+        first_descriptor_flags: first_descriptor.cast::<u32>().read(),
+        first_descriptor_word1: first_descriptor.add(4).cast::<u32>().read(),
+        first_rate,
+        tail_buffer_flags: tail_buffer.cast::<u32>().read(),
+        tail_timestamp: tail_descriptor
+            .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+            .cast::<u32>()
+            .read(),
+    })
+    .map_err(BasicHtAmpduChainError::Assembly)?;
+
+    index = 0;
+    while index < frames.len() {
+        let frame = frames[index];
+        let tail_buffer = frame.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+        let next = if index + 1 < frames.len() {
+            frames[index + 1]
+        } else {
+            core::ptr::null_mut()
+        };
+        let next_buffer = if next.is_null() {
+            core::ptr::null_mut()
+        } else {
+            next.add(FRAME_FIRST_BUFFER_OFFSET).cast::<*mut u8>().read()
+        };
+        frame.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().write(next);
+        tail_buffer
+            .add(BUFFER_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(next_buffer);
+        index += 1;
+    }
+
+    first_payload.cast::<u32>().write(output.first_payload_word);
+    first_descriptor
+        .cast::<u32>()
+        .write(output.first_descriptor_flags);
+    first_descriptor
+        .add(4)
+        .cast::<u32>()
+        .write(output.first_descriptor_word1);
+    first
+        .add(FRAME_REMAINING_LENGTH_OFFSET)
+        .cast::<u16>()
+        .write(output.first_remaining_length);
+    tail_buffer.cast::<u32>().write(output.tail_buffer_flags);
+    first_descriptor
+        .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .write(output.first_timestamp);
+
+    Ok(BasicHtAmpduChain {
+        first,
+        last,
+        aggregate_length: aggregate.bytes,
+        subframes: aggregate.subframes,
+    })
+}
 
 const BA_PARAMETER_AMSDU: u16 = 1;
 const BA_PARAMETER_IMMEDIATE: u16 = 1 << 1;
@@ -146,7 +692,58 @@ pub struct TxBlockAckBitmap {
     pub bitmap: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HtBlockAckRegisters {
+    pub control: u8,
+    pub block_ack: TxBlockAckBitmap,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HtBlockAckReadError {
+    InvalidHardwareQueue(u8),
+}
+
+/// Decode the fixed three-register result used by
+/// `hal_mac_tx_get_blockack` on S31.
+#[inline(always)]
+pub const fn decode_ht_block_ack_registers(
+    control_and_sequence: u32,
+    bitmap_low: u32,
+    bitmap_high: u32,
+) -> HtBlockAckRegisters {
+    HtBlockAckRegisters {
+        control: ((control_and_sequence >> 16) & 0x0f) as u8,
+        block_ack: TxBlockAckBitmap::new(
+            ((control_and_sequence >> 4) & 0x0fff) as u16,
+            (bitmap_low as u64) | ((bitmap_high as u64) << 32),
+        ),
+    }
+}
+
+/// Read one completed HT BlockAck without entering the vendor completion
+/// graph. The body is three volatile MMIO loads and fixed bit decoding.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_block_ack"]
+pub unsafe fn read_ht_block_ack(
+    hardware_queue: u8,
+) -> Result<HtBlockAckRegisters, HtBlockAckReadError> {
+    if hardware_queue >= 4 {
+        return Err(HtBlockAckReadError::InvalidHardwareQueue(hardware_queue));
+    }
+    const QUEUE_STRIDE: usize = 0x7c;
+    let offset = usize::from(hardware_queue) * QUEUE_STRIDE;
+    let control_and_sequence = ((0x2010_5530_usize - offset) as *const u32).read_volatile();
+    let bitmap_low = ((0x2010_552c_usize - offset) as *const u32).read_volatile();
+    let bitmap_high = ((0x2010_5528_usize - offset) as *const u32).read_volatile();
+    Ok(decode_ht_block_ack_registers(
+        control_and_sequence,
+        bitmap_low,
+        bitmap_high,
+    ))
+}
+
 impl TxBlockAckBitmap {
+    #[inline(always)]
     pub const fn new(starting_sequence: u16, bitmap: u64) -> Self {
         Self {
             starting_sequence: starting_sequence & SEQUENCE_NUMBER_MASK,
@@ -507,6 +1104,122 @@ mod tests {
         negotiation_timeout_us: 100_000,
         amsdu: true,
     };
+
+    #[test]
+    fn ht_ampdu_length_matches_the_s31_six_mpdu_oracle() {
+        let mut length = HtAmpduLengthAccumulator::new(32, u16::MAX).unwrap();
+        for sequence in 0x15_u32..=0x1a {
+            // The HIL payload metadata was 0x00ss0612 followed by a zero
+            // delimiter byte: six 1,554-byte MPDUs with two-byte padding.
+            length.push((sequence << 16) | 0x0612, 0).unwrap();
+        }
+        assert_eq!(
+            length.finish(),
+            Ok(HtAmpduLength {
+                bytes: 9_358,
+                subframes: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn ht_ampdu_length_is_bounded_and_removes_only_the_tail_trailer() {
+        let mut length = HtAmpduLengthAccumulator::new(2, 4_096).unwrap();
+        length.push(1_001, 2).unwrap();
+        length.push(1_002, 1).unwrap();
+        // First: 1001 + 3 padding + 8 empty + 4 mandatory.
+        // Last: 1002 + 4 mandatory; its 2 padding + 4 empty bytes are removed.
+        assert_eq!(length.finish().unwrap().bytes, 2_022);
+        assert_eq!(length.push(1, 0), Err(HtAmpduLengthError::WindowFull));
+
+        let mut too_short = HtAmpduLengthAccumulator::new(1, 1_000).unwrap();
+        assert_eq!(
+            too_short.push(1_001, 0),
+            Err(HtAmpduLengthError::AggregateTooLong(1_005))
+        );
+        assert!(matches!(
+            HtAmpduLengthAccumulator::new(0, 1),
+            Err(HtAmpduLengthError::InvalidLimits)
+        ));
+    }
+
+    #[test]
+    fn block_ack_register_decode_matches_the_pinned_leaf_layout() {
+        let decoded = decode_ht_block_ack_registers(0x000a_bc50, 0x89ab_cdef, 0x0123_4567);
+        assert_eq!(decoded.control, 0x0a);
+        assert_eq!(decoded.block_ack.starting_sequence, 0x0bc5);
+        assert_eq!(decoded.block_ack.bitmap, 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn basic_ht_assembly_matches_the_s31_hardware_oracle() {
+        assert_eq!(
+            basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+                aggregate_length: 9_358,
+                first_header_length: 34,
+                first_payload_word: 0xff12_3456,
+                first_descriptor_flags: 0x0004_2009,
+                first_descriptor_word1: 0xa5a5_0020,
+                first_rate: 33,
+                tail_buffer_flags: 0xa186_8612,
+                tail_timestamp: 0x1234_5678,
+            }),
+            Ok(BasicHtAmpduAssemblyOutput {
+                first_remaining_length: 9_324,
+                first_payload_word: 0xfe12_3456,
+                first_descriptor_flags: 0x004c_2009,
+                first_descriptor_word1: 0x20,
+                tail_buffer_flags: 0xe186_8612,
+                first_timestamp: 0x1234_5678,
+            })
+        );
+    }
+
+    #[test]
+    fn basic_ht_assembly_rejects_he_bar_ampdu_and_bad_lengths_before_mutation() {
+        let input = BasicHtAmpduAssemblyInput {
+            aggregate_length: 1_500,
+            first_header_length: 34,
+            first_payload_word: 0,
+            first_descriptor_flags: 0x0004_2009,
+            first_descriptor_word1: 0x20,
+            first_rate: 33,
+            tail_buffer_flags: 0xa186_8612,
+            tail_timestamp: 0,
+        };
+        assert_eq!(
+            basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+                first_descriptor_flags: input.first_descriptor_flags | TX_DESCRIPTOR_HE_BIT,
+                ..input
+            }),
+            Err(BasicHtAmpduAssemblyError::UnsupportedDescriptor(
+                0x8004_2009
+            ))
+        );
+        assert_eq!(
+            basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+                first_rate: 15,
+                ..input
+            }),
+            Err(BasicHtAmpduAssemblyError::UnsupportedRate(15))
+        );
+        assert_eq!(
+            basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+                aggregate_length: 33,
+                ..input
+            }),
+            Err(BasicHtAmpduAssemblyError::AggregateShorterThanHeader)
+        );
+        assert_eq!(
+            basic_ht_ampdu_assembly(BasicHtAmpduAssemblyInput {
+                tail_buffer_flags: input.tail_buffer_flags | TX_BUFFER_END_BIT,
+                ..input
+            }),
+            Err(BasicHtAmpduAssemblyError::TailAlreadyTerminated(
+                0xe186_8612
+            ))
+        );
+    }
 
     #[test]
     fn request_encoding_is_exact_and_bounded() {

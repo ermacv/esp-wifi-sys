@@ -466,6 +466,40 @@ to construct the hardware descriptor chain from those slots and replace the
 aggregate branches of TX completion/timeout before enabling the negotiated
 agreement.
 
+The basic-HT assembly boundary is now independently reproduced. A temporary
+HIL-only final-link wrapper called the unmodified ROM `ppAssembleAMPDU` as an
+oracle and copied its input/output chain into statically allocated SRAM. It is
+not part of the strict runtime and does not justify starting `ppTask`. On an
+HT20 association, one captured six-MPDU aggregate had these exact facts:
+
+- each payload metadata word carried MPDU length `0x612` (1,554 bytes), two
+  bytes of four-byte alignment padding, and zero empty delimiters;
+- the aggregate length was therefore `5 * (4 + 1554 + 2) + (4 + 1554) = 9358`;
+- only the first descriptor changed from `0x00042009` to `0x004c2009`, its
+  first remaining-length field changed from `0x05f8` to `9358 - 34 = 9324`,
+  and the first payload retry-header bit was cleared;
+- only the final buffer descriptor gained `0x40000000`; intermediate frame,
+  descriptor, and buffer state was unchanged;
+- the frame chain uses `frame+0x30`, while the tail buffer of one MPDU uses
+  `buffer+0x08` to point to the *first* buffer at `next_frame+0x04`. This
+  distinction matters for future scatter/gather frames where `frame+0x04`
+  and the tail at `frame+0x08` need not be equal.
+
+`HtAmpduLengthAccumulator`, `prepare_basic_ht_ampdu_chain`, and
+`assemble_basic_ht_ampdu` now reproduce those rules with a maximum of 32
+static frame pointers. The target build places both raw chain operations in
+`.rwtext.wifi_strict.*`; their optimized S31 objects contain no call
+relocations. `decode_ht_block_ack_registers` and `read_ht_block_ack` reproduce
+the separate three-load `hal_mac_tx_get_blockack` leaf: the 12-bit starting
+sequence comes from bits 4..15, the control nibble from bits 16..19, and the
+two adjacent registers form the 64-bit bitmap.
+
+This still does not enable A-MPDU in strict mode. Frames currently pass from
+`ieee80211_post_hmac_tx` into the vendor PP software scheduler one at a time.
+The next required boundary is to retain the already constructed/CCMP-ready
+ESF frames in Rust-owned fixed slots before `lmacTxFrame`, then submit the
+assembled chain and route each BlockAck bit through one executor continuation.
+
 The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
 The original `0x81e`-byte body performs the required fixed MMIO decode first,
 then enters HE MPLEN list maintenance, connection-state locks, formatters, and
