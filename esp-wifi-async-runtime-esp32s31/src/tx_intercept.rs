@@ -120,8 +120,12 @@ pub(crate) unsafe fn enable(window: u16) {
 pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> i32 {
     let mapped = __real_ppMapTxQueue(frame);
     let state = &mut *STATE.0.get();
+    // The activation edge is delivered by a management RX callback that is
+    // outside LLVM's ordinary call graph. Preserve the cross-context atomic
+    // observation under fat whole-program LTO.
+    let enabled = core::hint::black_box(ENABLED.load(Ordering::Acquire));
     if !crate::critical::strict_wifi_hart_armed()
-        || !ENABLED.load(Ordering::Acquire)
+        || !enabled
         || mapped != 0
         || !eligible_qos_data(frame)
     {
