@@ -922,7 +922,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     // or recycling. Bit 23 marks a retained management object: restore its
     // original cached layout and deliberately leave it owned by net80211.
     if flags & DESCRIPTOR_PERSISTENT_BIT != 0 {
-        restore_persistent_management(frame, descriptor)?;
+        restore_persistent_frame(frame, descriptor)?;
         state.frame = ptr::null_mut();
         state.phase = PHASE_LOAD;
         return enqueue_step();
@@ -951,10 +951,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     enqueue_step()
 }
 
-unsafe fn restore_persistent_management(
-    frame: *mut u8,
-    descriptor: *mut u8,
-) -> Result<(), TxDoneError> {
+unsafe fn restore_persistent_frame(frame: *mut u8, descriptor: *mut u8) -> Result<(), TxDoneError> {
     let first_buffer = frame.add(4).cast::<*mut u8>().read_unaligned();
     let tail_buffer = frame.add(8).cast::<*mut u8>().read_unaligned();
     if first_buffer.is_null()
@@ -981,7 +978,7 @@ unsafe fn restore_persistent_management(
         descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
         frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
     };
-    let output = crate::tx_security::strict_persistent_management_completion_layout(input)
+    let output = crate::tx_security::strict_persistent_frame_completion_layout(input)
         .ok_or(TxDoneError::UnsupportedDescriptorFlags(descriptor_flags))?;
 
     first_buffer

@@ -26,7 +26,7 @@ pub struct ApBeaconCompletionLayout {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PersistentManagementCompletionLayout {
+pub struct PersistentFrameCompletionLayout {
     pub header_len: u16,
     pub remaining_len: u16,
     pub layout: u16,
@@ -34,27 +34,34 @@ pub struct PersistentManagementCompletionLayout {
     pub descriptor_flags: u32,
 }
 
-/// Restore one retained plaintext management buffer after its transmission.
+/// Restore one retained plaintext management or beacon buffer after TX done.
 ///
 /// The pinned `ppProcTxDone` branch removes the four-byte FCS reservation and
 /// the one-transmission eight-byte PP metadata prefix, then leaves the ESF
 /// owned by net80211 instead of recycling it. AP probe/authentication/
 /// association replies use this path so their cached fixed-pool object can be
-/// submitted again.
-pub const fn strict_persistent_management_completion_layout(
+/// submitted again. An initialization beacon can also already be present on
+/// the ordinary TX-done list when the Rust owner takes over.
+pub const fn strict_persistent_frame_completion_layout(
     input: TxSecurityLayoutInput,
-) -> Option<PersistentManagementCompletionLayout> {
+) -> Option<PersistentFrameCompletionLayout> {
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const PERSISTENT_BIT: u32 = 0x0080_0000;
 
     let subtype = input.frame_control & 0x00f0;
+    let management_reply = input.frame_control & 0x000c == 0
+        && matches!(subtype, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
+        && (input.descriptor_flags == PERSISTENT_BIT
+            || input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412)
+        && input.descriptor_security == 0;
+    let beacon = input.frame_control == 0x0080
+        && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
+        && input.descriptor_security == 0x0114_0000;
     if input.frame_control & 0x000c != 0
-        || !matches!(subtype, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
+        || !(management_reply || beacon)
         || input.header_len < 8
         || input.remaining_len < 4
         || input.layout & 0xe000 != 0x2000
-        || input.descriptor_flags != PERSISTENT_BIT
-        || input.descriptor_security != 0
     {
         return None;
     }
@@ -71,7 +78,7 @@ pub const fn strict_persistent_management_completion_layout(
         None => return None,
     };
 
-    Some(PersistentManagementCompletionLayout {
+    Some(PersistentFrameCompletionLayout {
         header_len: input.header_len - 8,
         remaining_len: input.remaining_len - 4,
         layout: input.layout & !0x2000,
@@ -333,8 +340,8 @@ unsafe fn trap_invalid_tx_security() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        strict_ap_beacon_completion_layout, strict_persistent_management_completion_layout,
-        strict_tx_security_layout, ApBeaconCompletionLayout, PersistentManagementCompletionLayout,
+        strict_ap_beacon_completion_layout, strict_persistent_frame_completion_layout,
+        strict_tx_security_layout, ApBeaconCompletionLayout, PersistentFrameCompletionLayout,
         TxSecurityLayoutInput, TxSecurityLayoutOutput,
     };
 
@@ -397,16 +404,16 @@ mod tests {
     }
 
     #[test]
-    fn restores_retained_management_layout_without_recycling_it() {
-        let completed = input(0x0066_0020, 0x2000, 0xc021_8084, 0x0080_0000, 0x00b0);
+    fn restores_retained_management_and_beacon_layouts() {
+        let completed = input(0x0066_0020, 0x2000, 0xc021_8084, 0x0080_0412, 0x00b0);
         assert_eq!(
-            strict_persistent_management_completion_layout(completed),
-            Some(PersistentManagementCompletionLayout {
+            strict_persistent_frame_completion_layout(completed),
+            Some(PersistentFrameCompletionLayout {
                 header_len: 0x18,
                 remaining_len: 0x62,
                 layout: 0,
                 buffer_flags: 0xc01e_8084,
-                descriptor_flags: 0,
+                descriptor_flags: 0x0000_0412,
             })
         );
 
@@ -420,15 +427,27 @@ mod tests {
                 ..completed
             },
             TxSecurityLayoutInput {
-                descriptor_security: 0x0004_0000,
+                descriptor_flags: 0x0080_0410,
                 ..completed
             },
         ] {
-            assert_eq!(
-                strict_persistent_management_completion_layout(rejected),
-                None
-            );
+            assert_eq!(strict_persistent_frame_completion_layout(rejected), None);
         }
+
+        let beacon = TxSecurityLayoutInput {
+            descriptor_security: 0x0114_0000,
+            ..input(0x0078_0020, 0x2000, 0xc026_00f8, 0x0080_0412, 0x0080)
+        };
+        assert_eq!(
+            strict_persistent_frame_completion_layout(beacon),
+            Some(PersistentFrameCompletionLayout {
+                header_len: 0x18,
+                remaining_len: 0x74,
+                layout: 0,
+                buffer_flags: 0xc023_00f8,
+                descriptor_flags: 0x0000_0412,
+            })
+        );
     }
 
     #[test]
