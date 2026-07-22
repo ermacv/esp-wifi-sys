@@ -132,10 +132,14 @@ pub const fn strict_tx_security_layout(
     let ap_beacon = input.frame_control == 0x0080
         && input.descriptor_flags == 0x0080_0412
         && input.descriptor_security == 0x0004_0000;
+    let persistent_management_reply = input.descriptor_security == 0
+        && matches!(input.frame_control, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
+        && matches!(input.descriptor_flags, 0x0080_0000 | 0x0080_0412);
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
             || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c)))
+        || persistent_management_reply
         || ap_beacon
     {
         // AP beacons carry the pinned hardware-key direction word even though
@@ -400,6 +404,52 @@ mod tests {
 
         for (input, expected) in cases {
             assert_eq!(strict_tx_security_layout(input), Some(expected));
+        }
+    }
+
+    #[test]
+    fn reproduces_retained_ap_management_reply_layouts() {
+        let measured = input(0x0069_0018, 0x0063, 0xc020_4084, 0x0080_0000, 0x0050);
+        let expected = TxSecurityLayoutOutput {
+            header_len: 0x20,
+            remaining_len: 0x6d,
+            layout: 0x2063,
+            buffer_flags: 0xc023_4084,
+            metadata_len: 0x85,
+        };
+        assert_eq!(strict_tx_security_layout(measured), Some(expected));
+
+        for frame_control in [0x0010, 0x0030, 0x0050, 0x00b0] {
+            assert_eq!(
+                strict_tx_security_layout(TxSecurityLayoutInput {
+                    frame_control,
+                    ..measured
+                }),
+                Some(expected),
+            );
+        }
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                descriptor_flags: 0x0080_0412,
+                ..measured
+            }),
+            Some(expected),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x0040,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_flags: 0x0080_0001,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 1,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
         }
     }
 
