@@ -78,6 +78,7 @@ static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicU32 = AtomicU32::new(0);
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
+static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
@@ -101,6 +102,7 @@ pub struct HilAmpduInterceptSnapshot {
     pub enabled: bool,
     pub enabled_calls: u32,
     pub mapper_bypassed: u32,
+    pub mapper_already_prepared: u32,
     pub mapped_zero: u32,
     pub mapped_one: u32,
     pub mapped_two: u32,
@@ -137,6 +139,7 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         enabled: unsafe { load_enabled_from_callback_context() },
         enabled_calls: ENABLED_CALLS.load(Ordering::Acquire),
         mapper_bypassed: MAPPER_BYPASSED.load(Ordering::Acquire),
+        mapper_already_prepared: MAPPER_ALREADY_PREPARED.load(Ordering::Acquire),
         mapped_zero: MAPPED_ZERO.load(Ordering::Acquire),
         mapped_one: MAPPED_ONE.load(Ordering::Acquire),
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
@@ -287,16 +290,20 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         let mapper_pre = read_mapper_state(frame);
         // For the guarded strict STA QoS state, the recovered mapper oracle
         // leaves the already selected logical queue and every frame/peer word
-        // unchanged. Its only visible mutation is the descriptor treatment
-        // byte 0x20 -> 0x07. Omit ppProcessWaitingQueue, power-management and
-        // dynamic queue-search calls entirely.
+        // unchanged. A fresh frame needs the descriptor treatment byte
+        // 0x20 -> 0x07; a frame that crossed the preparation boundary before
+        // ADDBA activation can already contain 0x07. Omit ppProcessWaitingQueue,
+        // power-management and dynamic queue-search calls entirely.
         if mapper_pre[0] != 0x0000_2009
-            || mapper_pre[1] != 0x0000_0020
+            || (mapper_pre[1] != 0x0000_0020 && mapper_pre[1] != 0x0000_0007)
             || mapper_pre[2] != 0x0000_0304
             || mapper_pre[3] & 0x80 == 0
             || mapper_pre[4] != 0
         {
             fail_and_trap();
+        }
+        if mapper_pre[1] == 0x0000_0007 {
+            MAPPER_ALREADY_PREPARED.fetch_add(1, Ordering::Relaxed);
         }
         let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
         descriptor.add(4).write(7);
