@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub const PP_QUEUE_CAPACITY: usize = 256;
+pub const INTERNAL_EVENT_QUEUE_CAPACITY: usize = 64;
 pub const DEFAULT_EVENT_BUDGET: usize = 16;
 const SEMAPHORE_CAPACITY: usize = 32;
 // All storage is BSS-only. Ordinary vendor identities cannot consume the tail
@@ -120,6 +121,7 @@ pub enum InitializationDrainError {
 
 struct AdapterState {
     queue: RadioQueue<PP_QUEUE_CAPACITY>,
+    internal_queue: RadioQueue<INTERNAL_EVENT_QUEUE_CAPACITY>,
     probe: BlockingCallProbe,
     virtual_task: VirtualPpTask,
     semaphores: SemaphorePool<SEMAPHORE_CAPACITY>,
@@ -136,6 +138,7 @@ impl AdapterState {
     const fn new() -> Self {
         Self {
             queue: RadioQueue::new(),
+            internal_queue: RadioQueue::new(),
             probe: BlockingCallProbe::new(),
             virtual_task: VirtualPpTask::new(),
             semaphores: SemaphorePool::new(),
@@ -457,6 +460,10 @@ pub fn radio_queue() -> &'static RadioQueue<PP_QUEUE_CAPACITY> {
     &STATE.queue
 }
 
+pub fn internal_event_queue_snapshot() -> crate::queue::RadioQueueSnapshot {
+    STATE.internal_queue.snapshot()
+}
+
 pub fn blocking_probe() -> &'static BlockingCallProbe {
     &STATE.probe
 }
@@ -604,25 +611,25 @@ pub(crate) fn give_internal_semaphore(handle: *mut c_void) -> bool {
 #[cfg(target_arch = "riscv32")]
 #[allow(dead_code)]
 pub(crate) fn enqueue_internal_event(event: PpEvent) -> bool {
-    // Strict internal callbacks and pp_post are producers on the same radio
-    // hart, but an interrupt may preempt an executor/callback producer. The
-    // queue deliberately makes one CAS attempt and reports producer
-    // contention rather than spinning, so serialize that single publication
-    // with the same bounded local interrupt mask used by pp_post. This is not
-    // a cross-hart lock and contains no retry or wait.
+    // Strict internal callbacks share one radio hart, but an interrupt may
+    // preempt an executor/callback producer. Their queue deliberately makes
+    // one CAS attempt and reports producer contention rather than spinning,
+    // so serialize that single publication with the same bounded local
+    // interrupt mask used by pp_post. Vendor PP events use a separate queue.
+    // This is not a cross-hart lock and contains no retry or wait.
     if crate::critical::strict_wifi_hart_armed() {
         if !crate::critical::on_strict_wifi_hart() {
             return false;
         }
         let interrupt_state = unsafe { crate::critical::strict_wifi_int_disable() };
-        let queued = STATE.queue.try_push_deferred_wake(event).is_ok();
+        let queued = STATE.internal_queue.try_push_deferred_wake(event).is_ok();
         unsafe { crate::critical::strict_wifi_int_restore(interrupt_state) };
         if queued {
-            STATE.queue.wake_consumer();
+            STATE.internal_queue.wake_consumer();
         }
         queued
     } else {
-        STATE.queue.try_push(event).is_ok()
+        STATE.internal_queue.try_push(event).is_ok()
     }
 }
 
@@ -641,7 +648,9 @@ pub fn request_shutdown() -> Result<(), ShutdownQueueFull> {
 #[cfg(target_arch = "riscv32")]
 pub fn take_radio_future(
     event_budget: usize,
-) -> Option<RadioFuture<'static, VendorPpDispatcher, PP_QUEUE_CAPACITY>> {
+) -> Option<
+    RadioFuture<'static, VendorPpDispatcher, PP_QUEUE_CAPACITY, INTERNAL_EVENT_QUEUE_CAPACITY>,
+> {
     if STATE
         .radio_future_taken
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -651,6 +660,7 @@ pub fn take_radio_future(
     }
     Some(RadioFuture::new(
         &STATE.queue,
+        &STATE.internal_queue,
         VendorPpDispatcher::new(),
         event_budget,
     ))
@@ -665,7 +675,15 @@ pub fn take_wifi_runtime(
     timer_budget: usize,
     now: fn() -> u64,
     rearm_alarm: fn(Option<u64>),
-) -> Option<WifiRuntimeFuture<'static, VendorPpDispatcher, PP_QUEUE_CAPACITY, TIMER_CAPACITY>> {
+) -> Option<
+    WifiRuntimeFuture<
+        'static,
+        VendorPpDispatcher,
+        PP_QUEUE_CAPACITY,
+        INTERNAL_EVENT_QUEUE_CAPACITY,
+        TIMER_CAPACITY,
+    >,
+> {
     if STATE
         .radio_future_taken
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -676,6 +694,7 @@ pub fn take_wifi_runtime(
     TIME_SOURCE.store(now as usize, Ordering::Release);
     Some(WifiRuntimeFuture::new(
         &STATE.queue,
+        &STATE.internal_queue,
         VendorPpDispatcher::new(),
         &STATE.timers,
         now,

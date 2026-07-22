@@ -12,17 +12,18 @@ use crate::{
 
 /// Combined PP and OS-timer runtime. All vendor callbacks run to completion on
 /// one Rust executor stack; the hardware alarm only wakes this future.
-pub struct WifiRuntimeFuture<'a, D, const Q: usize, const T: usize> {
-    radio: RadioFuture<'a, D, Q>,
+pub struct WifiRuntimeFuture<'a, D, const Q: usize, const I: usize, const T: usize> {
+    radio: RadioFuture<'a, D, Q, I>,
     timers: &'a RuntimeTimerPool<T>,
     now: fn() -> u64,
     rearm_alarm: fn(Option<u64>),
     timer_budget: usize,
 }
 
-impl<'a, D, const Q: usize, const T: usize> WifiRuntimeFuture<'a, D, Q, T> {
+impl<'a, D, const Q: usize, const I: usize, const T: usize> WifiRuntimeFuture<'a, D, Q, I, T> {
     pub fn new(
         queue: &'a RadioQueue<Q>,
+        internal_queue: &'a RadioQueue<I>,
         dispatcher: D,
         timers: &'a RuntimeTimerPool<T>,
         now: fn() -> u64,
@@ -32,7 +33,7 @@ impl<'a, D, const Q: usize, const T: usize> WifiRuntimeFuture<'a, D, Q, T> {
     ) -> Self {
         assert!(timer_budget > 0);
         Self {
-            radio: RadioFuture::new(queue, dispatcher, event_budget),
+            radio: RadioFuture::new(queue, internal_queue, dispatcher, event_budget),
             timers,
             now,
             rearm_alarm,
@@ -40,13 +41,13 @@ impl<'a, D, const Q: usize, const T: usize> WifiRuntimeFuture<'a, D, Q, T> {
         }
     }
 
-    pub fn radio(&self) -> &RadioFuture<'a, D, Q> {
+    pub fn radio(&self) -> &RadioFuture<'a, D, Q, I> {
         &self.radio
     }
 }
 
-impl<D: PpDispatcher + Unpin, const Q: usize, const T: usize> Future
-    for WifiRuntimeFuture<'_, D, Q, T>
+impl<D: PpDispatcher + Unpin, const Q: usize, const I: usize, const T: usize> Future
+    for WifiRuntimeFuture<'_, D, Q, I, T>
 {
     type Output = Result<(), D::Error>;
 
@@ -114,6 +115,7 @@ mod tests {
     fn timer_callback_runs_on_the_runtime_stack() {
         RAN_IN_RADIO_CONTEXT.store(false, Ordering::Relaxed);
         let queue = RadioQueue::<2>::new();
+        let internal_queue = RadioQueue::<2>::new();
         let timers = RuntimeTimerPool::<1>::new();
         let mut raw = RawOsiTimer {
             next: core::ptr::null_mut(),
@@ -132,7 +134,16 @@ mod tests {
         });
         assert!(unsafe { timers.arm_at(timer, 10, false, 0) });
 
-        let mut runtime = WifiRuntimeFuture::new(&queue, Dispatcher, &timers, now, rearm, 2, 2);
+        let mut runtime = WifiRuntimeFuture::new(
+            &queue,
+            &internal_queue,
+            Dispatcher,
+            &timers,
+            now,
+            rearm,
+            2,
+            2,
+        );
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         assert_eq!(Pin::new(&mut runtime).poll(&mut context), Poll::Pending);

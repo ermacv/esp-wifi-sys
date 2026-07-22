@@ -576,12 +576,13 @@ object whose first buffer has already been detached cannot be inspected,
 queued, or safely recycled, so exactly one pointer may be quarantined and
 reported as consumed without dereferencing it. Repeated calls for that same
 pointer are idempotent; a second distinct detached pointer still traps instead
-of concealing pool corruption. Internal continuation publication is serialized
-against same-hart interrupt producers by a bounded local interrupt mask. The
-fixed queue still makes one CAS attempt and never spins; the mask only prevents
-normal ISR preemption from being misclassified as queue exhaustion. This
-feature may only be run in the current Wi-Fi-only image where
-Bluetooth/802.15.4 coexistence is not started.
+of concealing pool corruption. Rust continuations use a dedicated 64-entry
+static SRAM queue instead of competing with vendor `pp_post` producers. The
+single executor alternates that queue with the PP queue inside one bounded
+poll. Same-hart internal producers are serialized by a bounded local interrupt
+mask; each queue still makes one CAS attempt and never spins. This feature may
+only be run in the current Wi-Fi-only image where Bluetooth/802.15.4
+coexistence is not started.
 
 `BasicHtAmpduChain` now is that reversible ownership token. Besides the public
 first/last/count/length summary, it privately retains all 32 validated frame
