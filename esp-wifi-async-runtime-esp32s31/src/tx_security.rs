@@ -5,10 +5,7 @@ pub struct TxSecurityLayoutInput {
     pub layout: u16,
     pub buffer_flags: u32,
     pub descriptor_flags: u32,
-    pub descriptor_word_1: u32,
     pub descriptor_security: u32,
-    pub descriptor_word_12: u32,
-    pub rate: u8,
     pub frame_control: u16,
 }
 
@@ -31,11 +28,7 @@ pub const fn strict_tx_security_layout(
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const BUFFER_TERMINAL: u32 = 0x4000_0000;
 
-    if input.layout & !0x0007 != 0
-        || input.descriptor_word_1 != 7
-        || input.descriptor_word_12 != 0
-        || input.rate != 0
-    {
+    if input.layout & !0x0007 != 0 {
         return None;
     }
 
@@ -110,9 +103,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     const FRAME_LAYOUT_OFFSET: usize = 0x24;
     const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
     const BUFFER_DATA_OFFSET: usize = 0x04;
-    const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
     const DESCRIPTOR_SECURITY_OFFSET: usize = 0x10;
-    const DESCRIPTOR_WORD_12_OFFSET: usize = 0x30;
 
     if frame.is_null() {
         trap_invalid_tx_security();
@@ -153,16 +144,10 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
             .read_unaligned(),
         buffer_flags: first_buffer.cast::<u32>().read_unaligned(),
         descriptor_flags: descriptor.cast::<u32>().read_unaligned(),
-        descriptor_word_1: descriptor.add(4).cast::<u32>().read_unaligned(),
         descriptor_security: descriptor
             .add(DESCRIPTOR_SECURITY_OFFSET)
             .cast::<u32>()
             .read_unaligned(),
-        descriptor_word_12: descriptor
-            .add(DESCRIPTOR_WORD_12_OFFSET)
-            .cast::<u32>()
-            .read_unaligned(),
-        rate: descriptor.add(DESCRIPTOR_RATE_OFFSET).read(),
         frame_control: data.cast::<u16>().read_unaligned(),
     };
     let output = match strict_tx_security_layout(input) {
@@ -236,10 +221,7 @@ mod tests {
             layout,
             buffer_flags,
             descriptor_flags,
-            descriptor_word_1: 7,
             descriptor_security: 0,
-            descriptor_word_12: 0,
-            rate: 0,
             frame_control,
         }
     }
@@ -308,14 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unmeasured_security_rate_layout_and_length_states() {
+    fn ignores_rate_control_words_and_rejects_unmeasured_security_layout_and_length_states() {
         let base = input(0x0062_0018, 0, 0xc01e_8084, 0, 0x00b0);
         for rejected in [
             TxSecurityLayoutInput {
                 descriptor_security: 1,
                 ..base
             },
-            TxSecurityLayoutInput { rate: 1, ..base },
             TxSecurityLayoutInput {
                 layout: 0x2000,
                 ..base

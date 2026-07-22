@@ -569,7 +569,10 @@ write order. The pinned CCMP branch is stateless: selector `3` contributes an
 eight-byte MIC plus four-byte FCS trailer, while the common path reserves the
 eight-byte metadata prefix. It does not encrypt, allocate, wait, or access a
 global; hardware encryption remains selected by the unchanged `0x304`
-descriptor word. Any unqualified security state traps before mutation. The
+descriptor word. Rate-control words are deliberately outside this leaf's
+input because the pinned implementation never reads them; the mapper and
+scheduler validate those fields at their own boundary. Any unqualified
+security state traps before mutation. The
 remaining stateful prefix is therefore `rcGetSched` (rate-control state), which
 is why this feature remains a qualification boundary rather than the final
 runtime.
