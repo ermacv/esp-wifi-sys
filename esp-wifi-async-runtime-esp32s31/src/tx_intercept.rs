@@ -72,9 +72,32 @@ static SUBMITTED: AtomicU32 = AtomicU32::new(0);
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
 static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicU32 = AtomicU32::new(0);
+static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
+static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
+static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
+static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
+static MAPPED_OTHER: AtomicU32 = AtomicU32::new(0);
+static ELIGIBLE: AtomicU32 = AtomicU32::new(0);
+static LAST_MAPPED: AtomicU32 = AtomicU32::new(u32::MAX);
+static LAST_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
+static LAST_RATE: AtomicU32 = AtomicU32::new(0);
+static LAST_LAYOUT: AtomicU32 = AtomicU32::new(0);
+static LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HilAmpduInterceptSnapshot {
+    pub enabled: bool,
+    pub enabled_calls: u32,
+    pub mapped_zero: u32,
+    pub mapped_one: u32,
+    pub mapped_two: u32,
+    pub mapped_other: u32,
+    pub eligible: u32,
+    pub last_mapped: u32,
+    pub last_descriptor: u32,
+    pub last_rate: u8,
+    pub last_layout: u16,
+    pub last_frame_control: u16,
     pub retained: u32,
     pub submitted: u32,
     pub completed: u32,
@@ -85,6 +108,18 @@ pub struct HilAmpduInterceptSnapshot {
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     HilAmpduInterceptSnapshot {
+        enabled: unsafe { load_enabled_from_callback_context() },
+        enabled_calls: ENABLED_CALLS.load(Ordering::Acquire),
+        mapped_zero: MAPPED_ZERO.load(Ordering::Acquire),
+        mapped_one: MAPPED_ONE.load(Ordering::Acquire),
+        mapped_two: MAPPED_TWO.load(Ordering::Acquire),
+        mapped_other: MAPPED_OTHER.load(Ordering::Acquire),
+        eligible: ELIGIBLE.load(Ordering::Acquire),
+        last_mapped: LAST_MAPPED.load(Ordering::Acquire),
+        last_descriptor: LAST_DESCRIPTOR.load(Ordering::Acquire),
+        last_rate: LAST_RATE.load(Ordering::Acquire) as u8,
+        last_layout: LAST_LAYOUT.load(Ordering::Acquire) as u16,
+        last_frame_control: LAST_FRAME_CONTROL.load(Ordering::Acquire) as u16,
         retained: RETAINED.load(Ordering::Acquire),
         submitted: SUBMITTED.load(Ordering::Acquire),
         completed: COMPLETED.load(Ordering::Acquire),
@@ -124,9 +159,21 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
     // keeps that external edge visible under fat whole-program LTO.
     let enabled = load_enabled_from_callback_context();
-    if !enabled || mapped != 0 || !eligible_qos_data(frame) {
+    if !enabled {
         return mapped;
     }
+    ENABLED_CALLS.fetch_add(1, Ordering::Relaxed);
+    LAST_MAPPED.store(mapped as u32, Ordering::Release);
+    match mapped {
+        0 => MAPPED_ZERO.fetch_add(1, Ordering::Relaxed),
+        1 => MAPPED_ONE.fetch_add(1, Ordering::Relaxed),
+        2 => MAPPED_TWO.fetch_add(1, Ordering::Relaxed),
+        _ => MAPPED_OTHER.fetch_add(1, Ordering::Relaxed),
+    };
+    if mapped != 0 || !eligible_qos_data(frame) {
+        return mapped;
+    }
+    ELIGIBLE.fetch_add(1, Ordering::Relaxed);
     if push_ready(state, frame).is_err() {
         fail_and_trap();
     }
@@ -157,10 +204,16 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
         return false;
     }
     let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
-    if descriptor.is_null() || descriptor.cast::<u32>().read() & DESCRIPTOR_UNSUPPORTED_MASK != 0 {
+    if descriptor.is_null() {
+        return false;
+    }
+    let descriptor_word = descriptor.cast::<u32>().read();
+    LAST_DESCRIPTOR.store(descriptor_word, Ordering::Release);
+    if descriptor_word & DESCRIPTOR_UNSUPPORTED_MASK != 0 {
         return false;
     }
     let rate = descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
+    LAST_RATE.store(u32::from(rate), Ordering::Release);
     if !(15..=22).contains(&rate) {
         return false;
     }
@@ -178,10 +231,13 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
     if header.is_null() {
         return false;
     }
-    if frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read() & 0x2000 != 0 {
+    let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
+    LAST_LAYOUT.store(u32::from(layout), Ordering::Release);
+    if layout & 0x2000 != 0 {
         header = header.add(8);
     }
     let frame_control = header.cast::<u16>().read_unaligned();
+    LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Release);
     frame_control & 0x008c == 0x0088
 }
 
