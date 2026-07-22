@@ -1,3 +1,134 @@
+#[cfg(target_arch = "riscv32")]
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[cfg(target_arch = "riscv32")]
+const RATE_CONTEXT_PRIMARY_RATE_OFFSET: usize = 0x08;
+#[cfg(target_arch = "riscv32")]
+const RATE_CONTEXT_SECONDARY_RATE_OFFSET: usize = 0x09;
+#[cfg(target_arch = "riscv32")]
+const RATE_CONTEXT_MODE_OFFSET: usize = 0x0c;
+#[cfg(target_arch = "riscv32")]
+const RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET: usize = 0x64;
+#[cfg(target_arch = "riscv32")]
+const RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET: usize = 0x68;
+#[cfg(target_arch = "riscv32")]
+const DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
+#[cfg(target_arch = "riscv32")]
+const DESCRIPTOR_SCHEDULE_OFFSET: usize = 0x1c;
+#[cfg(target_arch = "riscv32")]
+const DESCRIPTOR_RATE_CLASS_OFFSET: usize = 0x2f;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FixedRateScheduleSnapshot {
+    pub primary: u32,
+    pub secondary: u32,
+    pub dynamic_fallbacks: u32,
+}
+
+#[cfg(target_arch = "riscv32")]
+static FIXED_RATE_PRIMARY: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "riscv32")]
+static FIXED_RATE_SECONDARY: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "riscv32")]
+static DYNAMIC_RATE_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "riscv32")]
+pub fn fixed_rate_schedule_snapshot() -> FixedRateScheduleSnapshot {
+    FixedRateScheduleSnapshot {
+        primary: FIXED_RATE_PRIMARY.load(Ordering::Acquire),
+        secondary: FIXED_RATE_SECONDARY.load(Ordering::Acquire),
+        dynamic_fallbacks: DYNAMIC_RATE_FALLBACKS.load(Ordering::Acquire),
+    }
+}
+
+/// Record a temporary HIL delegation to the pinned adaptive-rate body.
+///
+/// This counter exists only to prove that enabling both fixed-rate modes
+/// closes every active STA submission branch before the fallback is removed.
+#[cfg(target_arch = "riscv32")]
+pub fn record_dynamic_rate_schedule_fallback() {
+    DYNAMIC_RATE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+}
+
+const fn rate_class_bits(previous: u8, rate: u8) -> u8 {
+    if rate <= 7 {
+        previous & !0x78
+    } else if rate <= 15 {
+        (previous & !0x78) | 0x08
+    } else if rate <= 40 {
+        previous
+    } else {
+        (previous & !0x78) | 0x50
+    }
+}
+
+/// Recovered fixed-rate branches of the pinned `rcGetSched` implementation.
+///
+/// Returns `false` without modifying the descriptor if the selected branch is
+/// still configured for adaptive rate control. The HIL wrapper may then call
+/// the vendor oracle while measuring whether that branch remains reachable.
+///
+/// # Safety
+///
+/// `rate_context` and `descriptor` must point to live pinned vendor objects
+/// exclusively owned by the current run-to-completion TX submission.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_rate_schedule"]
+pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8) -> bool {
+    if rate_context.is_null() || descriptor.is_null() {
+        return false;
+    }
+
+    let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
+    let primary = descriptor_flags & 0x0200_0008 == 0x0000_0008;
+    let (mode_bit, rate_offset, schedule_offset) = if primary {
+        (
+            0x01_u16,
+            RATE_CONTEXT_PRIMARY_RATE_OFFSET,
+            RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET,
+        )
+    } else {
+        (
+            0x02_u16,
+            RATE_CONTEXT_SECONDARY_RATE_OFFSET,
+            RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET,
+        )
+    };
+    let mode = rate_context
+        .add(RATE_CONTEXT_MODE_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    if mode & mode_bit == 0 {
+        return false;
+    }
+
+    let schedule = rate_context
+        .add(schedule_offset)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    if schedule.is_null() {
+        return false;
+    }
+    let rate = rate_context.add(rate_offset).read();
+    let class = descriptor.add(DESCRIPTOR_RATE_CLASS_OFFSET).read();
+
+    descriptor
+        .add(DESCRIPTOR_SCHEDULE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule);
+    descriptor.add(DESCRIPTOR_SELECTED_RATE_OFFSET).write(rate);
+    descriptor
+        .add(DESCRIPTOR_RATE_CLASS_OFFSET)
+        .write(rate_class_bits(class, rate));
+
+    if primary {
+        FIXED_RATE_PRIMARY.fetch_add(1, Ordering::Relaxed);
+    } else {
+        FIXED_RATE_SECONDARY.fetch_add(1, Ordering::Relaxed);
+    }
+    true
+}
+
 /// Recovered finite body of the vendor `mac_tx_get_rts_rate` leaf for every
 /// non-HE rate admitted by the strict runtime.
 pub(crate) const fn basic_non_he_rts_rate(rate: u8) -> Option<u8> {
@@ -30,7 +161,16 @@ pub(crate) const fn basic_non_he_rts_rate(rate: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::basic_non_he_rts_rate;
+    use super::{basic_non_he_rts_rate, rate_class_bits};
+
+    #[test]
+    fn reproduces_rc_get_sched_rate_classes() {
+        assert_eq!(rate_class_bits(0xff, 7), 0x87);
+        assert_eq!(rate_class_bits(0xff, 8), 0x8f);
+        assert_eq!(rate_class_bits(0x35, 16), 0x35);
+        assert_eq!(rate_class_bits(0x35, 40), 0x35);
+        assert_eq!(rate_class_bits(0xff, 41), 0xd7);
+    }
 
     #[test]
     fn reproduces_every_legacy_rate() {

@@ -220,6 +220,11 @@ pub use tx_intercept::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use tx_proto::strict_pp_tx_proto_proc;
+pub use tx_rate::FixedRateScheduleSnapshot;
+#[cfg(target_arch = "riscv32")]
+pub use tx_rate::{
+    fixed_rate_schedule_snapshot, record_dynamic_rate_schedule_fallback, try_fixed_rate_schedule,
+};
 #[cfg(target_arch = "riscv32")]
 pub use tx_security::strict_pp_proc_tx_sec_frame;
 pub use tx_security::{strict_tx_security_layout, TxSecurityLayoutInput, TxSecurityLayoutOutput};
