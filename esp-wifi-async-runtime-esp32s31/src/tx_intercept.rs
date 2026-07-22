@@ -8,7 +8,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{compiler_fence, AtomicBool, AtomicU32, Ordering},
 };
 
 use crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY;
@@ -121,9 +121,9 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     let mapped = __real_ppMapTxQueue(frame);
     let state = &mut *STATE.0.get();
     // The activation edge is delivered by a management RX callback that is
-    // outside LLVM's ordinary call graph. Preserve the cross-context atomic
-    // observation under fat whole-program LTO.
-    let enabled = core::hint::black_box(&ENABLED).load(Ordering::Acquire);
+    // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
+    // keeps that external edge visible under fat whole-program LTO.
+    let enabled = load_enabled_from_callback_context();
     if !crate::critical::strict_wifi_hart_armed()
         || !enabled
         || mapped != 0
@@ -141,6 +141,19 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // `ppTxPkt` treats all values except 0, 1 and 2 as an already consumed
     // frame. Ownership is now exclusively in STATE.
     3
+}
+
+#[inline(always)]
+unsafe fn load_enabled_from_callback_context() -> bool {
+    let value: usize;
+    core::arch::asm!(
+        "lbu {value}, 0({address})",
+        value = out(reg) value,
+        address = in(reg) ENABLED.as_ptr(),
+        options(nostack, readonly),
+    );
+    compiler_fence(Ordering::Acquire);
+    value != 0
 }
 
 unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
