@@ -33,7 +33,7 @@ const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
 const DESCRIPTOR_UNSUPPORTED_MASK: u32 = 0x8060_0000;
 const MIN_HIL_MPDU_LENGTH: u32 = 1_200;
 const HIL_COALESCE_DELAY_US: u32 = 250;
-pub const HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY: usize = 8;
+pub const HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY: usize = 16;
 
 unsafe extern "C" {
     fn __real_ppMapTxQueue(frame: *mut u8) -> i32;
