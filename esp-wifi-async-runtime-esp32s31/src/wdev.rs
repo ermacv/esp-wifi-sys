@@ -15,6 +15,13 @@ unsafe extern "C" {
         frame_end: *mut u8,
         from_task: u32,
     );
+    #[link_name = "pm_on_data_rx"]
+    fn vendor_pm_on_data_rx(
+        receiver: *mut u8,
+        packet_class: u32,
+        transmitter: *mut u8,
+        interface: u32,
+    );
     #[link_name = "pm_on_data_tx"]
     fn vendor_pm_on_data_tx();
     #[link_name = "wDev_ftm_set_t1t4"]
@@ -31,6 +38,9 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_pm_on_beacon_rx as *const (),
         __wrap_pm_on_beacon_rx as *const (),
+    ) && core::ptr::eq(
+        vendor_pm_on_data_rx as *const (),
+        __wrap_pm_on_data_rx as *const (),
     ) && core::ptr::eq(
         vendor_pm_on_data_tx as *const (),
         __wrap_pm_on_data_tx as *const (),
@@ -95,6 +105,21 @@ pub unsafe extern "C" fn __wrap_pm_on_beacon_rx(
     _frame: *mut u8,
     _frame_end: *mut u8,
     _from_task: u32,
+) {
+}
+
+/// Remove RX power-management accounting under the verified `WIFI_PS_NONE`
+/// invariant.
+///
+/// `ppRxProtoProc` has already classified the ordinary frame and retains its
+/// independent receive-rate update. The stock ROM hook only advances modem
+/// sleep state and may enter OSI timers and Wi-Fi API locks.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pm_on_data_rx(
+    _receiver: *mut u8,
+    _packet_class: u32,
+    _transmitter: *mut u8,
+    _interface: u32,
 ) {
 }
 

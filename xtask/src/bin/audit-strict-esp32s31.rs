@@ -83,6 +83,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
     "pm_on_beacon_rx",
+    "pm_on_data_rx",
     "pm_on_data_tx",
     "dbg_read_tx_ppdu",
     "dbg_dump_rx_ppdu",
@@ -122,6 +123,7 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
     "pm_on_beacon_rx",
+    "pm_on_data_rx",
     "pm_on_data_tx",
     "dbg_read_tx_ppdu",
     "dbg_dump_rx_ppdu",
@@ -182,6 +184,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_tx_mgt_cb",
     "__wrap_wDev_record_ftm_data",
     "__wrap_pm_on_beacon_rx",
+    "__wrap_pm_on_data_rx",
     "__wrap_pm_on_data_tx",
     "__wrap_dbg_read_tx_ppdu",
     "__wrap_dbg_dump_rx_ppdu",
@@ -236,6 +239,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
 // also assign the generated wrapper name. The late linker fragment aliases the
 // public symbol directly to a uniquely named Rust function instead.
 const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
+    ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
     ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];

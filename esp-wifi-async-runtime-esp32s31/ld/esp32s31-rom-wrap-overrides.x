@@ -34,6 +34,9 @@ lmacTxDone = __wrap_lmacTxDone;
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 
+__real_pm_on_data_rx = 0x2f800e9c;
+pm_on_data_rx = __wrap_pm_on_data_rx;
+
 __real_pm_on_data_tx = 0x2f800ea0;
 pm_on_data_tx = __wrap_pm_on_data_tx;
 

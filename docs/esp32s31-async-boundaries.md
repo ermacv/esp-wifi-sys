@@ -263,12 +263,12 @@ state wrapper reads pinned MMIO without test/log hooks and exposes one
 completion/collision bitmap bit per event. The original archive sections must
 not remain in the final ELF.
 
-Nine ROM-exported entries cannot use LLD wrapping because the ROM linker
+Ten ROM-exported entries cannot use LLD wrapping because the ROM linker
 scripts assign their public symbols after `--wrap` rewriting. The late
 `esp32s31-rom-wrap-overrides.x` fragment instead aliases
 `ieee80211_set_tx_pti`, `esf_buf_alloc`, `esf_buf_recycle`,
 `hal_mac_get_txq_state`, `hal_mac_get_txq_complete`, `lmacTxDone`,
-`pm_on_beacon_rx`, `pm_on_data_tx`, and
+`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, and
 `esp_test_tx_enab_statistics` to Rust wrappers while pinning their
 `__real_*` names to the audited ROM addresses.
 
@@ -296,11 +296,13 @@ The NAN valid-slot hook retains its recovered descriptor-kind test: ordinary
 AP/STA frames return true, while NAN frames return false without entering the
 registered scheduler callback.
 
-The strict `WIFI_PS_NONE` profile also replaces `pm_on_beacon_rx` with a
-no-op. PP/net80211 performs ordinary beacon parsing and delivery before this
-hook; the removed tail is limited to power-save/mesh bookkeeping and contains
-the TIM-to-radio-shutdown delay path. Both direct calls and the saved vendor
-function-table pointer are redirected by the mandatory final-link wrapper.
+The strict `WIFI_PS_NONE` profile also replaces `pm_on_beacon_rx` and
+`pm_on_data_rx` with no-ops. PP/net80211 performs ordinary beacon/data parsing,
+delivery, and the independent RX rate update outside these hooks. The removed
+tails are limited to power-save/mesh bookkeeping: the beacon tail contains the
+TIM-to-radio-shutdown delay path, while the data tail reaches modem-sleep OSI
+timers and Wi-Fi API locks. Direct calls and saved vendor function-table
+pointers are redirected by mandatory final-link aliases.
 
 The three verbose PPDU/SIG-B decoders are also no-op wrappers under the verified
 `WIFI_LOG_NONE` policy. This removes their formatting loops and direct

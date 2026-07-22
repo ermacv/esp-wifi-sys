@@ -718,8 +718,10 @@ fn report(
          off-channel action subtypes before their node/key/channel state machines. \
          FTM capability bits are cleared and validated; `wDev_record_ftm_data` is additionally \
          wrapped so an unexpected FTM RX cannot enter its leading `ets_delay_us(50)`. \
-         Under the verified `WIFI_PS_NONE` invariant, `pm_on_beacon_rx` is a no-op wrapper: \
-         net80211 beacon parsing remains intact, while the PM TIM/radio-shutdown tail is absent. \
+         Under the verified `WIFI_PS_NONE` invariant, `pm_on_beacon_rx` and `pm_on_data_rx` are \
+         no-op wrappers: net80211 beacon/data parsing and the independent RX rate update remain \
+         intact, while the PM TIM/radio-shutdown, modem-sleep timer, and Wi-Fi API-lock tails \
+         are absent. \
          The verbose TX/RX PPDU and SIG-B decoders are no-op wrappers under `WIFI_LOG_NONE`, removing \
          their formatting loops and `puts`/`putchar` leaves from normal completion paths. The \
          variadic `wifi_log` dispatcher is also a mandatory no-op wrapper, preventing error \
