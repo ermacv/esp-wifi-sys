@@ -33,6 +33,7 @@ const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
 const DESCRIPTOR_UNSUPPORTED_MASK: u32 = 0x8060_0000;
 const MIN_HIL_MPDU_LENGTH: u32 = 1_200;
 const HIL_COALESCE_DELAY_US: u32 = 250;
+pub const HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY: usize = 8;
 
 unsafe extern "C" {
     fn __real_ppMapTxQueue(frame: *mut u8) -> i32;
@@ -77,6 +78,51 @@ struct TimerCell(UnsafeCell<crate::timer::RawOsiTimer>);
 
 unsafe impl Sync for TimerCell {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilPreEnableMapperRecord {
+    pub calls: u32,
+    pub mapped: i32,
+    pub rate: u8,
+    pub layout: u16,
+    pub frame_control: u16,
+    pub pre: [u32; 5],
+    pub post: [u32; 5],
+}
+
+impl HilPreEnableMapperRecord {
+    const EMPTY: Self = Self {
+        calls: 0,
+        mapped: i32::MIN,
+        rate: u8::MAX,
+        layout: u16::MAX,
+        frame_control: u16::MAX,
+        pre: [0; 5],
+        post: [0; 5],
+    };
+}
+
+struct PreEnableMapperOracle {
+    calls: u32,
+    count: u8,
+    overflow: u32,
+    records: [HilPreEnableMapperRecord; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
+}
+
+impl PreEnableMapperOracle {
+    const fn new() -> Self {
+        Self {
+            calls: 0,
+            count: 0,
+            overflow: 0,
+            records: [HilPreEnableMapperRecord::EMPTY; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
+        }
+    }
+}
+
+struct PreEnableMapperOracleCell(UnsafeCell<PreEnableMapperOracle>);
+
+unsafe impl Sync for PreEnableMapperOracleCell {}
+
 #[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
 static STATE: InterceptCell = InterceptCell(UnsafeCell::new(InterceptState::new()));
 #[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
@@ -87,6 +133,9 @@ static COALESCE_TIMER: TimerCell = TimerCell(UnsafeCell::new(crate::timer::RawOs
     callback: None,
     argument: ptr::null_mut(),
 }));
+#[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
+static PRE_ENABLE_MAPPER_ORACLE: PreEnableMapperOracleCell =
+    PreEnableMapperOracleCell(UnsafeCell::new(PreEnableMapperOracle::new()));
 // Activation crosses from the Rust RX/management path into the vendor TX
 // callback. Keep it atomic even on the single radio hart: interrupts are an
 // independent execution context, and an ordinary private bool can otherwise
@@ -191,6 +240,36 @@ pub struct HilAmpduInterceptSnapshot {
     pub subframes: u32,
     pub ready: u32,
     pub failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilPreEnableMapperSnapshot {
+    pub calls: u32,
+    pub count: u8,
+    pub overflow: u32,
+    pub records: [HilPreEnableMapperRecord; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
+}
+
+/// The oracle is written only before `ENABLED` is published with Release and
+/// read only after its Acquire observation. It is therefore immutable while
+/// this cross-hart snapshot copies its dedicated SRAM cell.
+pub fn hil_pre_enable_mapper_snapshot() -> HilPreEnableMapperSnapshot {
+    let enabled = ENABLED.load(Ordering::Acquire);
+    if !enabled {
+        return HilPreEnableMapperSnapshot {
+            calls: 0,
+            count: 0,
+            overflow: 0,
+            records: [HilPreEnableMapperRecord::EMPTY; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
+        };
+    }
+    let oracle = unsafe { &*PRE_ENABLE_MAPPER_ORACLE.0.get() };
+    HilPreEnableMapperSnapshot {
+        calls: oracle.calls,
+        count: oracle.count,
+        overflow: oracle.overflow,
+        records: oracle.records,
+    }
 }
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
@@ -390,7 +469,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // keeps that external edge visible under fat whole-program LTO.
     let enabled = load_enabled_from_callback_context();
     if !enabled {
-        return __real_ppMapTxQueue(frame);
+        return record_pre_enable_mapper_oracle(frame);
     }
     let state = &mut *STATE.0.get();
     ENABLED_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -519,6 +598,79 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         _ => MAPPED_OTHER.fetch_add(1, Ordering::Relaxed),
     };
     mapped
+}
+
+#[inline(always)]
+unsafe fn record_pre_enable_mapper_oracle(frame: *mut u8) -> i32 {
+    let pre = read_mapper_state(frame);
+    let (rate, layout, frame_control) = read_mapper_identity(frame);
+    let mapped = __real_ppMapTxQueue(frame);
+    let post = read_mapper_state(frame);
+    let oracle = &mut *PRE_ENABLE_MAPPER_ORACLE.0.get();
+    oracle.calls = oracle.calls.wrapping_add(1);
+
+    let mut index = 0_usize;
+    while index < usize::from(oracle.count) {
+        let record = &mut oracle.records[index];
+        if record.mapped == mapped
+            && record.rate == rate
+            && record.layout == layout
+            && record.frame_control == frame_control
+            && record.pre == pre
+            && record.post == post
+        {
+            record.calls = record.calls.wrapping_add(1);
+            return mapped;
+        }
+        index += 1;
+    }
+    if index == HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY {
+        oracle.overflow = oracle.overflow.wrapping_add(1);
+        return mapped;
+    }
+    oracle.records[index] = HilPreEnableMapperRecord {
+        calls: 1,
+        mapped,
+        rate,
+        layout,
+        frame_control,
+        pre,
+        post,
+    };
+    oracle.count = oracle.count.wrapping_add(1);
+    mapped
+}
+
+#[inline(always)]
+unsafe fn read_mapper_identity(frame: *mut u8) -> (u8, u16, u16) {
+    if frame.is_null() {
+        return (u8::MAX, u16::MAX, u16::MAX);
+    }
+    let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    let rate = if descriptor.is_null() {
+        u8::MAX
+    } else {
+        descriptor.add(DESCRIPTOR_RATE_OFFSET).read()
+    };
+    let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
+    let first_buffer = frame
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_buffer.is_null() {
+        return (rate, layout, u16::MAX);
+    }
+    let mut header = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if header.is_null() {
+        return (rate, layout, u16::MAX);
+    }
+    if layout & 0x2000 != 0 {
+        header = header.add(8);
+    }
+    (rate, layout, header.cast::<u16>().read_unaligned())
 }
 
 #[inline(always)]
