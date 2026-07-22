@@ -313,6 +313,10 @@ task-delay, direct-delay, and queue-rejection probes remained zero. The strict
 graph first fell from 95 to 74 violations. Interposing the PM-only beacon
 duration setter and proving that `rc_get_trc` removes one bit from a u32 peer
 bitmap per iteration then removes the last three `ppRxProtoProc` violations.
+The resulting image passed the same complete workload at 24.820 Mbit/s with
+unchanged allocation and zero blocking/delay/rejection probes. Its final-ELF
+audit reports 71 remaining violations and rejects any residual call to the
+interposed vendor duration setter.
 
 The three verbose PPDU/SIG-B decoders are also no-op wrappers under the verified
 `WIFI_LOG_NONE` policy. This removes their formatting loops and direct

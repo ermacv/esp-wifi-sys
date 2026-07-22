@@ -256,6 +256,8 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 // `ppProcessTxQ` export.
 const REQUIRED_SRAM_CODE: &[&str] =
     &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
+const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] =
+    &["ppProcessTxQ", "pm_set_beacon_duration"];
 const INTERNAL_SRAM_START: u64 = 0x2f00_0000;
 const INTERNAL_SRAM_END: u64 = 0x3000_0000;
 
@@ -817,11 +819,13 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
     let disassembly = text(checked(
         Command::new("llvm-objdump").arg("-d").arg("-C").arg(elf),
     )?)?;
-    if calls_symbol(&disassembly, "ppProcessTxQ") {
-        violations.insert(Violation::ElfSymbol {
-            category: "call to replaced vendor root",
-            symbol: "ppProcessTxQ".to_owned(),
-        });
+    for replaced in REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS {
+        if calls_symbol(&disassembly, replaced) {
+            violations.insert(Violation::ElfSymbol {
+                category: "call to replaced vendor root",
+                symbol: (*replaced).to_owned(),
+            });
+        }
     }
     for (_, wrapper) in DIRECT_HEAP_WRAPPERS {
         let violation = match linked_symbol_kinds.get(wrapper) {
@@ -1097,6 +1101,10 @@ mod tests {
                            2f00382c: jalr ra <ppProcessTxQ>\n";
         assert!(calls_symbol(disassembly, "ppProcessTxQ"));
         assert!(!calls_symbol("2f800f8c <ppProcessTxQ>:\n", "ppProcessTxQ"));
+        assert!(calls_symbol(
+            "40000000: jal ra <pm_set_beacon_duration>\n",
+            "pm_set_beacon_duration"
+        ));
     }
 
     #[test]
