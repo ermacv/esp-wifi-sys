@@ -383,6 +383,7 @@ pub(crate) fn txq_split_failed() -> bool {
 /// event for a captured remainder. This function therefore performs exactly
 /// one fixed completion decode and one statically selected outcome call.
 #[link_section = ".rwtext.wifi_strict.tx_complete_dispatch"]
+#[inline(never)]
 pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     let bits = __wrap_hal_mac_get_txq_state(2);
     if txq_split_failed() {
