@@ -176,6 +176,7 @@ pub enum TxDoneError {
     MissingTxDoneTail,
     UnsupportedCallbackBits(u32),
     UnexpectedBeaconCallbacks(u32),
+    InvalidBeaconFrame,
     CallbackRegistryMismatch(u8),
     UserCallbackInstalled,
     UnsupportedDescriptorFlags(u32),
@@ -425,7 +426,7 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
 ///
 /// # Safety
 ///
-/// `frame` must be the exact live beacon frame owned by hardware queue zero,
+/// `frame` must be the exact live beacon frame owned by logical queue one,
 /// after the completion decoder has made that queue idle.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.ap_beacon_success"]
@@ -453,6 +454,35 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     if registered != __wrap_ieee80211_hostapd_beacon_txcb as usize {
         return Err(TxDoneError::CallbackRegistryMismatch(CALLBACK_AP_BEACON));
     }
+    let first_buffer = frame.add(4).cast::<*mut u8>().read();
+    let tail_buffer = frame.add(8).cast::<*mut u8>().read();
+    if first_buffer.is_null() || first_buffer != tail_buffer {
+        return Err(TxDoneError::InvalidBeaconFrame);
+    }
+    let metadata = first_buffer.add(4).cast::<*mut u8>().read();
+    if metadata.is_null() || metadata.cast::<u32>().read_unaligned() != 0x90 {
+        return Err(TxDoneError::InvalidBeaconFrame);
+    }
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let layout = crate::tx_security::strict_ap_beacon_completion_layout(
+        crate::tx_security::TxSecurityLayoutInput {
+            header_len: lengths as u16,
+            remaining_len: (lengths >> 16) as u16,
+            layout: frame.add(0x24).cast::<u16>().read_unaligned(),
+            buffer_flags: first_buffer.cast::<u32>().read_unaligned(),
+            descriptor_flags,
+            descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
+            frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
+        },
+    )
+    .ok_or(TxDoneError::InvalidBeaconFrame)?;
+    frame
+        .add(0x16)
+        .cast::<u16>()
+        .write_unaligned(layout.remaining_len);
+    first_buffer
+        .cast::<u32>()
+        .write_unaligned(layout.buffer_flags);
     // `ieee80211_hostap_send_beacon_process` sets this ownership bit before
     // handing the persistent buffer to PP and refuses to reuse either beacon
     // buffer while it remains set. Hardware is complete at this boundary, so

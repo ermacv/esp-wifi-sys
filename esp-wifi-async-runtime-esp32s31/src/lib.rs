@@ -244,7 +244,10 @@ pub use tx_rate::FixedRateScheduleSnapshot;
 pub use tx_rate::{fixed_rate_schedule_snapshot, strict_rate_schedule, try_fixed_rate_schedule};
 #[cfg(target_arch = "riscv32")]
 pub use tx_security::strict_pp_proc_tx_sec_frame;
-pub use tx_security::{strict_tx_security_layout, TxSecurityLayoutInput, TxSecurityLayoutOutput};
+pub use tx_security::{
+    strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
+    TxSecurityLayoutInput, TxSecurityLayoutOutput,
+};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

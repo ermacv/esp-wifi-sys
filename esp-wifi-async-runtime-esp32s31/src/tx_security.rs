@@ -18,6 +18,40 @@ pub struct TxSecurityLayoutOutput {
     pub metadata_len: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApBeaconCompletionLayout {
+    pub remaining_len: u16,
+    pub buffer_flags: u32,
+}
+
+/// Remove the per-transmission FCS reservation from a persistent AP beacon
+/// while retaining its one-time PP metadata headroom.
+pub const fn strict_ap_beacon_completion_layout(
+    input: TxSecurityLayoutInput,
+) -> Option<ApBeaconCompletionLayout> {
+    const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
+
+    if input.header_len != 0x20
+        || input.remaining_len != 0x78
+        || input.layout & !0x2001 != 0
+        || input.layout & 0x2000 == 0
+        || input.descriptor_flags != 0x0080_0412
+        || input.descriptor_security != 0x0014_0000
+        || input.frame_control != 0x0080
+    {
+        return None;
+    }
+    let encoded_len = ((input.buffer_flags & BUFFER_LENGTH_MASK) >> 14) as u16;
+    if encoded_len != 0x98 {
+        return None;
+    }
+
+    Some(ApBeaconCompletionLayout {
+        remaining_len: 0x74,
+        buffer_flags: (input.buffer_flags & !BUFFER_LENGTH_MASK) | (0x94 << 14),
+    })
+}
+
 /// Recover the complete headroom/trailer transformation observed at the
 /// `ppProcTxSecFrame` boundary. This is deliberately a closed set: plaintext
 /// management/EAPOL/Action frames, the AP beacon descriptor, and the measured
@@ -241,7 +275,10 @@ unsafe fn trap_invalid_tx_security() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{strict_tx_security_layout, TxSecurityLayoutInput, TxSecurityLayoutOutput};
+    use super::{
+        strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
+        TxSecurityLayoutInput, TxSecurityLayoutOutput,
+    };
 
     const fn input(
         lengths: u32,
@@ -402,6 +439,33 @@ mod tests {
         ] {
             assert_eq!(strict_tx_security_layout(rejected), None);
         }
+    }
+
+    #[test]
+    fn completion_removes_only_the_persistent_beacon_trailer() {
+        let completed = TxSecurityLayoutInput {
+            header_len: 0x20,
+            remaining_len: 0x78,
+            layout: 0x2001,
+            buffer_flags: 0xc026_00f8,
+            descriptor_flags: 0x0080_0412,
+            descriptor_security: 0x0014_0000,
+            frame_control: 0x0080,
+        };
+        assert_eq!(
+            strict_ap_beacon_completion_layout(completed),
+            Some(ApBeaconCompletionLayout {
+                remaining_len: 0x74,
+                buffer_flags: 0xc025_00f8,
+            })
+        );
+        assert_eq!(
+            strict_ap_beacon_completion_layout(TxSecurityLayoutInput {
+                remaining_len: 0x74,
+                ..completed
+            }),
+            None
+        );
     }
 
     #[test]
