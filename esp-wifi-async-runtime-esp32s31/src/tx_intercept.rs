@@ -404,17 +404,16 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
     }
     let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
     LAST_LAYOUT.store(u32::from(layout), Ordering::Release);
-    // The qualified oracle is the strict CCMP layout with an eight-byte PP
-    // prefix and MPDUs large enough to form the captured >=2500-byte
-    // aggregate. Leave short control-plane traffic on the proven one-frame
-    // path until its A-MPDU hardware format is independently qualified.
+    // The qualified strict CCMP layout has an eight-byte PP prefix. Both the
+    // large throughput MPDUs and short post-link QoS MPDUs expose the same
+    // guarded mapper state; retain the size counter to keep the two classes
+    // visible in HIL diagnostics.
     if layout & 0x2000 == 0 {
         return false;
     }
     let mpdu_length = header.cast::<u32>().read() & 0x3fff;
     if mpdu_length < MIN_HIL_MPDU_LENGTH {
         BELOW_MIN_LENGTH.fetch_add(1, Ordering::Relaxed);
-        return false;
     }
     header = header.add(8);
     let frame_control = header.cast::<u16>().read_unaligned();
