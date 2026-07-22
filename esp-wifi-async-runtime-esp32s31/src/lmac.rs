@@ -2279,9 +2279,24 @@ unsafe fn finish_queue(state: &mut TxTimeoutState, queue: u8) -> Result<bool, Lm
         hal_mac_txq_disable(queue);
         queue_state.add(TX_QUEUE_STATUS_OFFSET).write(6);
         if !frame.is_null() {
-            // MPLEN is an aggregation-only hardware field. The strict basic
-            // profile disables AMPDU/AMSDU before init and checks descriptor
-            // aggregation bits again in `begin_discard`.
+            let descriptor = frame
+                .add(TX_FRAME_DESCRIPTOR_OFFSET)
+                .cast::<*mut u8>()
+                .read();
+            if descriptor.is_null() {
+                return Err(LmacAsyncError::InvalidDiscardContinuation);
+            }
+            if descriptor.cast::<u32>().read() & TX_FRAME_AMPDU_BIT != 0 {
+                // A hardware timeout has no BlockAck. Restore the statically
+                // owned chain and feed every MPDU into the same one-frame-per-
+                // event retry continuation used by a missing BlockAck bit.
+                // Returning `true` lets `finish_current_queue` clear the
+                // timeout interrupt and advance the finite queue bitmap.
+                let chain = take_basic_ht_ampdu_owner(queue)
+                    .ok_or(LmacAsyncError::MissingTxAmpduOwner(queue))?;
+                begin_basic_ht_ampdu_completion(queue_state, chain, None, 0)?;
+                return Ok(true);
+            }
             state.finish_timeout_queue = true;
             begin_discard(state, queue_state, frame)?;
             return Ok(false);
