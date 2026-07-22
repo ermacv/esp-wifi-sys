@@ -34,7 +34,7 @@ pub const fn strict_ap_beacon_completion_layout(
 
     if input.header_len != 0x20
         || input.remaining_len != 0x78
-        || input.layout & !0x2007 != 0
+        || input.layout & 0xc000 != 0
         || input.layout & 0x2000 == 0
         || input.descriptor_flags != 0x0080_0412
         || input.descriptor_security != 0x0114_0000
@@ -98,7 +98,7 @@ pub const fn strict_tx_security_layout(
     // management, EAPOL and data buffers are single-owner, one-shot objects.
     if headroom_applied
         && (!ap_beacon
-            || input.layout & !0x2007 != 0
+            || input.layout & 0xc000 != 0
             || input.header_len != 0x20
             || input.remaining_len != 0x74)
     {
@@ -435,7 +435,7 @@ mod tests {
                 ..refreshed
             },
             TxSecurityLayoutInput {
-                layout: 0x2008,
+                layout: 0x6001,
                 ..refreshed
             },
         ] {
@@ -461,6 +461,13 @@ mod tests {
                 buffer_flags: 0xc025_00f8,
                 descriptor_security: 0x0004_0000,
             })
+        );
+        assert_eq!(
+            strict_ap_beacon_completion_layout(TxSecurityLayoutInput {
+                layout: 0x2008,
+                ..completed
+            }),
+            strict_ap_beacon_completion_layout(completed)
         );
         assert_eq!(
             strict_ap_beacon_completion_layout(TxSecurityLayoutInput {
