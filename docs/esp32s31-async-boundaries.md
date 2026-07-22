@@ -500,12 +500,14 @@ as either one direct per-peer selection or at most four cumulative fallback
 table entries. It then performs the status-three descriptor transition,
 long-frame classification, lifetime timeout, bounded contention backoff, EDCA
 configuration, and basic queue enable in Rust/MMIO before calling only the
-finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, and `mac_tx_set_htsig` leaves
-directly. Rust reproduces the complete guarded `mac_tx_get_rts_rate` mapping,
-bounded RTS/data power-table reads, queue PPDU-control write,
-`coex_pti_tab[1]` priority clamp, and both PTI-register updates. This removes
+finite `mac_tx_set_plcp1` and `mac_tx_set_htsig` leaves directly. Rust
+reproduces the complete guarded `mac_tx_get_rts_rate` mapping, PLCP0
+address/format word, TX-protection registers, bounded RTS/data power-table
+reads, queue PPDU-control write, `coex_pti_tab[1]` priority clamp, and both
+PTI-register updates. This removes
 `hal_mac_tx_set_ppdu`, its indirect `mac_tx_set_pti` OSI callback,
-`hal_set_tx_pti`, and `mac_tx_get_rts_rate` in addition to
+`hal_set_tx_pti`, `mac_tx_get_rts_rate`, `mac_tx_set_plcp0`, and its internal
+`hal_he_set_tx_protection` leaf in addition to
 `lmacTxFrame`, ROM
 `lmacSetTxFrame`, `ppProcessLifeTime`, the OSI random callback, the common EDCA
 helper, and the common TXQ-enable helper from the retry path. In particular,
@@ -546,6 +548,14 @@ UDP datagrams and 4/4 HTTP transfers completed with zero queue rejection,
 allocation change, blocking callback, task delay, or direct delay. The final
 ELF has no call from the Rust submission path to `mac_tx_get_rts_rate`; the
 three remaining binary formatting leaves have a zero-violation graph audit.
+
+The subsequent PLCP0 replacement passed at 27.918 Mbit/s over 5,159
+completions. It exercised 318 ACK timeouts and 49 CTS timeouts, producing 367
+same-frame retries without a changed or detached frame. All 4,096 UDP
+datagrams and 4/4 HTTP transfers completed with zero queue rejection,
+allocation change, blocking callback, task delay, or direct delay. The final
+ELF has no call from the Rust submission path to either `mac_tx_set_plcp0` or
+`hal_he_set_tx_protection`; two audited binary formatting leaves remain.
 
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,

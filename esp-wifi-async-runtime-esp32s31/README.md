@@ -219,10 +219,12 @@ gate consumes and recycles it exactly once.
 The basic-HT retry path likewise no longer enters `hal_mac_tx_set_ppdu` or its
 indirect `mac_tx_set_pti` callback. Rust performs the bounded queue-control,
 power-table and PTI orchestration, including the terminal PTI MMIO writes, and
-reproduces the complete guarded RTS-rate mapping. It now calls only three
-audited finite PLCP/HTSIG leaves. A 4,964-completion HIL run exercised 174
-same-frame retries and passed the strict WPA2/UDP/HTTP workload at
-28.745 Mbit/s with every heap, blocking and delay probe at zero.
+reproduces the complete guarded RTS-rate mapping. That stage reduced the
+boundary to three audited finite PLCP/HTSIG leaves. PLCP0 and its internal
+TX-protection leaf are now Rust MMIO as well, leaving only PLCP1 and HTSIG.
+A 5,159-completion HIL run exercised 367 same-frame retries and passed the
+strict WPA2/UDP/HTTP workload at 27.918 Mbit/s with every heap, blocking and
+delay probe at zero.
 The low-level NAN-slot hook is also interposed: non-NAN AP/STA descriptors pass
 the recovered bit test, while a NAN descriptor returns false without invoking
 the optional scheduler callback.
