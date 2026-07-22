@@ -89,6 +89,9 @@ static LAST_FALLBACK_LAYOUT: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_PRE: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 static LAST_FALLBACK_POST: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+static NONZERO_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static LAST_NONZERO_FALLBACK_PRE: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+static LAST_NONZERO_FALLBACK_POST: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
@@ -121,6 +124,9 @@ pub struct HilAmpduInterceptSnapshot {
     pub last_fallback_frame_control: u16,
     pub last_fallback_pre: [u32; 5],
     pub last_fallback_post: [u32; 5],
+    pub nonzero_fallbacks: u32,
+    pub last_nonzero_fallback_pre: [u32; 5],
+    pub last_nonzero_fallback_post: [u32; 5],
     pub mapped_zero: u32,
     pub mapped_one: u32,
     pub mapped_two: u32,
@@ -149,12 +155,17 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     let mut last_mapper_post = [0_u32; 5];
     let mut last_fallback_pre = [0_u32; 5];
     let mut last_fallback_post = [0_u32; 5];
+    let mut last_nonzero_fallback_pre = [0_u32; 5];
+    let mut last_nonzero_fallback_post = [0_u32; 5];
     let mut index = 0_usize;
     while index < last_mapper_pre.len() {
         last_mapper_pre[index] = LAST_MAPPER_PRE[index].load(Ordering::Acquire);
         last_mapper_post[index] = LAST_MAPPER_POST[index].load(Ordering::Acquire);
         last_fallback_pre[index] = LAST_FALLBACK_PRE[index].load(Ordering::Acquire);
         last_fallback_post[index] = LAST_FALLBACK_POST[index].load(Ordering::Acquire);
+        last_nonzero_fallback_pre[index] = LAST_NONZERO_FALLBACK_PRE[index].load(Ordering::Acquire);
+        last_nonzero_fallback_post[index] =
+            LAST_NONZERO_FALLBACK_POST[index].load(Ordering::Acquire);
         index += 1;
     }
     HilAmpduInterceptSnapshot {
@@ -170,6 +181,9 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         last_fallback_frame_control: LAST_FALLBACK_FRAME_CONTROL.load(Ordering::Acquire) as u16,
         last_fallback_pre,
         last_fallback_post,
+        nonzero_fallbacks: NONZERO_FALLBACKS.load(Ordering::Acquire),
+        last_nonzero_fallback_pre,
+        last_nonzero_fallback_post,
         mapped_zero: MAPPED_ZERO.load(Ordering::Acquire),
         mapped_one: MAPPED_ONE.load(Ordering::Acquire),
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
@@ -378,6 +392,11 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     );
     record_mapper_state(&LAST_FALLBACK_PRE, &fallback_pre);
     record_mapper_state(&LAST_FALLBACK_POST, &fallback_post);
+    if fallback_pre[0] != 0 {
+        NONZERO_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        record_mapper_state(&LAST_NONZERO_FALLBACK_PRE, &fallback_pre);
+        record_mapper_state(&LAST_NONZERO_FALLBACK_POST, &fallback_post);
+    }
     LAST_MAPPED.store(mapped as u32, Ordering::Release);
     match mapped {
         0 => MAPPED_ZERO.fetch_add(1, Ordering::Relaxed),
