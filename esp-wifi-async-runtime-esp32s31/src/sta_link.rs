@@ -476,7 +476,7 @@ mod target {
     }
     const PHY_RATE_MCS7_SGI: u32 = 0x21;
 
-    unsafe fn set_default_sta_fixed_rates(primary_rate: u8, secondary_rate: u8) -> bool {
+    unsafe fn set_default_sta_fixed_rate(rate: u8) -> bool {
         // `trc_init` installs the three allocation-backed default contexts at
         // g_per_conn_trc + 0x4c/0x50/0x54. Strict takeover happens only after
         // that initialization. Interface 0 uses the first pointer. `rcGetSched`
@@ -488,10 +488,10 @@ mod target {
         if trc.is_null() {
             return false;
         }
-        trc.add(8).write(primary_rate);
-        trc.add(9).write(secondary_rate);
+        trc.add(8).write(rate);
+        trc.add(9).write(rate);
         let flags = trc.add(0x0c).cast::<u16>();
-        flags.write_unaligned(flags.read_unaligned() | 0x03);
+        flags.write_unaligned((flags.read_unaligned() & !0x03) | 0x01);
         true
     }
 
@@ -759,13 +759,6 @@ mod target {
             || attempts == 0
         {
             return Err(StaAuthError::InvalidAccessPoint);
-        }
-        // Before the first management submission, close both `rcGetSched`
-        // branches over a universally supported legacy rate. Association may
-        // later promote only the primary data branch to negotiated HT while
-        // management, EAPOL and secondary-class data remain at legacy rate 0.
-        if !unsafe { set_default_sta_fixed_rates(0, 0) } {
-            return Err(StaAuthError::InterfaceUnavailable);
         }
         let mut remaining = attempts;
         loop {
@@ -1520,7 +1513,7 @@ mod target {
             // negotiated HT independently of the vendor connection/runtime
             // state machine. Rust mutates only the already initialized
             // interface-0 default TRC context before the first data frame.
-            let applied = set_default_sta_fixed_rates(PHY_RATE_MCS7_SGI as u8, 0);
+            let applied = set_default_sta_fixed_rate(PHY_RATE_MCS7_SGI as u8);
             ASSOC_FIXED_HT20_RATE.store(
                 if applied { PHY_RATE_MCS7_SGI } else { u32::MAX },
                 Ordering::Release,

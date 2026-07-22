@@ -20,9 +20,9 @@ const DESCRIPTOR_RATE_CLASS_OFFSET: usize = 0x2f;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedRateScheduleSnapshot {
-    pub primary: u32,
-    pub secondary: u32,
-    pub dynamic_fallbacks: u32,
+    pub primary_fixed: u32,
+    pub secondary_stateless: u32,
+    pub vendor_fallbacks: u32,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -35,9 +35,9 @@ static DYNAMIC_RATE_FALLBACKS: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "riscv32")]
 pub fn fixed_rate_schedule_snapshot() -> FixedRateScheduleSnapshot {
     FixedRateScheduleSnapshot {
-        primary: FIXED_RATE_PRIMARY.load(Ordering::Acquire),
-        secondary: FIXED_RATE_SECONDARY.load(Ordering::Acquire),
-        dynamic_fallbacks: DYNAMIC_RATE_FALLBACKS.load(Ordering::Acquire),
+        primary_fixed: FIXED_RATE_PRIMARY.load(Ordering::Acquire),
+        secondary_stateless: FIXED_RATE_SECONDARY.load(Ordering::Acquire),
+        vendor_fallbacks: DYNAMIC_RATE_FALLBACKS.load(Ordering::Acquire),
     }
 }
 
@@ -62,6 +62,33 @@ const fn rate_class_bits(previous: u8, rate: u8) -> u8 {
     }
 }
 
+const fn stateless_schedule_rate(
+    primary: bool,
+    mode: u16,
+    descriptor_flags: u32,
+    configured_rate: u8,
+    schedule_rate: u8,
+) -> Option<u8> {
+    if primary {
+        return if mode & 0x01 != 0 {
+            Some(configured_rate)
+        } else {
+            None
+        };
+    }
+    if mode & 0x02 != 0 {
+        return Some(configured_rate);
+    }
+    // The ordinary secondary branch in the pinned body is already stateless:
+    // absent its adaptive/special-mode guards, it selects schedule[0]. This
+    // covers measured auth, association, EAPOL, Action and secondary data.
+    if mode & 0x80 == 0 && descriptor_flags & 0x0020_0800 == 0 {
+        Some(schedule_rate)
+    } else {
+        None
+    }
+}
+
 /// Recovered fixed-rate branches of the pinned `rcGetSched` implementation.
 ///
 /// Returns `false` without modifying the descriptor if the selected branch is
@@ -81,15 +108,13 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
 
     let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
     let primary = descriptor_flags & 0x0200_0008 == 0x0000_0008;
-    let (mode_bit, rate_offset, schedule_offset) = if primary {
+    let (rate_offset, schedule_offset) = if primary {
         (
-            0x01_u16,
             RATE_CONTEXT_PRIMARY_RATE_OFFSET,
             RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET,
         )
     } else {
         (
-            0x02_u16,
             RATE_CONTEXT_SECONDARY_RATE_OFFSET,
             RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET,
         )
@@ -98,10 +123,6 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
         .add(RATE_CONTEXT_MODE_OFFSET)
         .cast::<u16>()
         .read_unaligned();
-    if mode & mode_bit == 0 {
-        return false;
-    }
-
     let schedule = rate_context
         .add(schedule_offset)
         .cast::<*mut u8>()
@@ -109,7 +130,15 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
     if schedule.is_null() {
         return false;
     }
-    let rate = rate_context.add(rate_offset).read();
+    let Some(rate) = stateless_schedule_rate(
+        primary,
+        mode,
+        descriptor_flags,
+        rate_context.add(rate_offset).read(),
+        schedule.read(),
+    ) else {
+        return false;
+    };
     let class = descriptor.add(DESCRIPTOR_RATE_CLASS_OFFSET).read();
 
     descriptor
@@ -161,7 +190,21 @@ pub(crate) const fn basic_non_he_rts_rate(rate: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{basic_non_he_rts_rate, rate_class_bits};
+    use super::{basic_non_he_rts_rate, rate_class_bits, stateless_schedule_rate};
+
+    #[test]
+    fn admits_only_recovered_stateless_schedule_branches() {
+        assert_eq!(stateless_schedule_rate(true, 1, 0x2009, 33, 0), Some(33));
+        assert_eq!(stateless_schedule_rate(true, 0, 0x2009, 33, 0), None);
+        assert_eq!(stateless_schedule_rate(false, 0, 0, 33, 0), Some(0));
+        assert_eq!(
+            stateless_schedule_rate(false, 0, 0x0200_200c, 33, 0),
+            Some(0)
+        );
+        assert_eq!(stateless_schedule_rate(false, 2, 0, 7, 0), Some(7));
+        assert_eq!(stateless_schedule_rate(false, 0x80, 0, 7, 0), None);
+        assert_eq!(stateless_schedule_rate(false, 0, 0x0000_0800, 7, 0), None);
+    }
 
     #[test]
     fn reproduces_rc_get_sched_rate_classes() {
