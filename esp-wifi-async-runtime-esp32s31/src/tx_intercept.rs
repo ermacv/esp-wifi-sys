@@ -84,6 +84,10 @@ pub struct HilAmpduInterceptSnapshot {
 }
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
+    // GNU `--wrap` does not by itself form a Rust-level reference to a wrapper
+    // defined in an rlib. Keep the callback address observable so fat LTO
+    // cannot replace an unextracted wrapper with a direct linker thunk.
+    core::hint::black_box(__wrap_ppMapTxQueue as unsafe extern "C" fn(*mut u8) -> i32);
     HilAmpduInterceptSnapshot {
         retained: RETAINED.load(Ordering::Acquire),
         submitted: SUBMITTED.load(Ordering::Acquire),
