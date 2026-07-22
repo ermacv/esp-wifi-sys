@@ -37,5 +37,8 @@ pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 __real_pm_on_data_tx = 0x2f800ea0;
 pm_on_data_tx = __wrap_pm_on_data_tx;
 
+__real_ppTxProtoProc = 0x2f800fc8;
+ppTxProtoProc = __wrap_ppTxProtoProc;
+
 __real_esp_test_tx_enab_statistics = 0x2f801144;
 esp_test_tx_enab_statistics = __wrap_esp_test_tx_enab_statistics;
