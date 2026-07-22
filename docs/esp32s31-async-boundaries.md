@@ -506,10 +506,10 @@ byte. `lmacRetryTxFrame`, the outer ACK/CTS bodies, retry-failure bodies,
 end-exchange dispatcher, test hook, retry-limit helper, and lifetime helper are
 no longer called.
 
-A 5,014-completion hardware stress run exercised 222 ACK and one CTS timeout
-through this direct Rust rate-selection path. All 223 retries retained the same
+A 5,056-completion hardware stress run exercised 262 ACK and three CTS timeouts
+through this direct Rust rate-selection path. All 265 retries retained the same
 basic-HT frame, queue-zero/kind-three ownership, no TXOP, and no linked MPDU.
-The complete WPA2/DHCP/DNS/TCP/HTTP/UDP test passed at 25.979 Mbit/s with 4/4
+The complete WPA2/DHCP/DNS/TCP/HTTP/UDP test passed at 26.333 Mbit/s with 4/4
 HTTP transfers and zero post-takeover allocation, blocking callbacks, task
 delays, direct delays, or queue rejection. An earlier direct split stalled
 because `rcGetRate` had incorrectly been declared with one argument;
