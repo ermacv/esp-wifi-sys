@@ -490,6 +490,10 @@ pub fn next_timer_deadline_us() -> Option<u64> {
     configured_now().and_then(|now| STATE.timers.next_deadline_at(now()))
 }
 
+pub fn timer_snapshot() -> crate::timer::RuntimeTimerSnapshot {
+    STATE.timers.snapshot()
+}
+
 /// Publish the monotonic clock before vendor initialization can arm an OSI
 /// timer. This does not start the radio future or program an alarm.
 #[cfg(target_arch = "riscv32")]

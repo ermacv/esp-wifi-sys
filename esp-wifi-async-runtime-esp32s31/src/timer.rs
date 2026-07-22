@@ -59,6 +59,22 @@ impl TimerSlot {
 pub struct RuntimeTimerPool<const N: usize> {
     slots: [TimerSlot; N],
     waker: WakerCell,
+    set_callback_calls: AtomicUsize,
+    arm_calls: AtomicUsize,
+    disarm_calls: AtomicUsize,
+    done_calls: AtomicUsize,
+    callbacks_dispatched: AtomicUsize,
+    last_callback: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeTimerSnapshot {
+    pub set_callback_calls: usize,
+    pub arm_calls: usize,
+    pub disarm_calls: usize,
+    pub done_calls: usize,
+    pub callbacks_dispatched: usize,
+    pub last_callback: usize,
 }
 
 impl<const N: usize> RuntimeTimerPool<N> {
@@ -66,6 +82,23 @@ impl<const N: usize> RuntimeTimerPool<N> {
         Self {
             slots: [const { TimerSlot::new() }; N],
             waker: WakerCell::new(),
+            set_callback_calls: AtomicUsize::new(0),
+            arm_calls: AtomicUsize::new(0),
+            disarm_calls: AtomicUsize::new(0),
+            done_calls: AtomicUsize::new(0),
+            callbacks_dispatched: AtomicUsize::new(0),
+            last_callback: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> RuntimeTimerSnapshot {
+        RuntimeTimerSnapshot {
+            set_callback_calls: self.set_callback_calls.load(Ordering::Acquire),
+            arm_calls: self.arm_calls.load(Ordering::Acquire),
+            disarm_calls: self.disarm_calls.load(Ordering::Acquire),
+            done_calls: self.done_calls.load(Ordering::Acquire),
+            callbacks_dispatched: self.callbacks_dispatched.load(Ordering::Acquire),
+            last_callback: self.last_callback.load(Ordering::Acquire),
         }
     }
 
@@ -133,6 +166,7 @@ impl<const N: usize> RuntimeTimerPool<N> {
         callback: *mut c_void,
         argument: *mut c_void,
     ) -> bool {
+        self.set_callback_calls.fetch_add(1, Ordering::Relaxed);
         slot.armed.store(false, Ordering::Release);
         slot.argument.store(argument, Ordering::Release);
         slot.callback.store(callback as usize, Ordering::Release);
@@ -169,6 +203,8 @@ impl<const N: usize> RuntimeTimerPool<N> {
             return false;
         }
 
+        self.arm_calls.fetch_add(1, Ordering::Relaxed);
+
         let period = if repeat { timeout_us.max(1) } else { 0 };
         let deadline = now.wrapping_add(timeout_us);
         slot.period.store(period, Ordering::Release);
@@ -190,6 +226,7 @@ impl<const N: usize> RuntimeTimerPool<N> {
         if timer.is_null() {
             return false;
         }
+        self.disarm_calls.fetch_add(1, Ordering::Relaxed);
         if let Some(slot) = self.find(timer) {
             slot.armed.store(false, Ordering::Release);
             unsafe {
@@ -211,6 +248,7 @@ impl<const N: usize> RuntimeTimerPool<N> {
         if timer.is_null() {
             return false;
         }
+        self.done_calls.fetch_add(1, Ordering::Relaxed);
 
         let raw = timer.cast::<RawOsiTimer>();
         if let Some(slot) = self.find(timer) {
@@ -284,6 +322,8 @@ impl<const N: usize> RuntimeTimerPool<N> {
 
             let callback = slot.callback.load(Ordering::Acquire);
             if callback != 0 {
+                self.last_callback.store(callback, Ordering::Release);
+                self.callbacks_dispatched.fetch_add(1, Ordering::Relaxed);
                 let callback = unsafe { mem::transmute::<usize, TimerCallback>(callback) };
                 let argument = slot.argument.load(Ordering::Acquire);
                 let _context = RadioContextGuard::enter(TIMER_CONTEXT_EVENT);
