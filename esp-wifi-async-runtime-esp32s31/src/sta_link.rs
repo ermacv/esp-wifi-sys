@@ -1406,6 +1406,15 @@ mod target {
         node.add(0x0c).cast::<u32>().write(flags);
         node.add(0x15c).cast::<u16>().write_unaligned(capability);
         node.add(0x15e).write(element[4]);
+        // `rcUpdateAMPDUParam` normally derives this hardware protection
+        // spacing while the vendor connection state machine installs the
+        // peer. Strict association bypasses that state machine, so reproduce
+        // its finite density mapping from the AP's negotiated HT Parameters
+        // byte. `mac_tx_set_htsig` later copies the 10-bit value into all
+        // three protection-register fields.
+        node.add(0x82).cast::<u16>().write_unaligned(
+            crate::tx_ampdu::basic_ht_ampdu_protection_spacing(element[4]),
+        );
 
         // Pinned `ieee80211_setup_htrates` stores a count followed by an
         // explicit MCS-index list. The strict local profile owns one spatial

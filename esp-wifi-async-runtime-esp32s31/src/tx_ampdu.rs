@@ -226,6 +226,9 @@ pub struct BasicHtAmpduChain {
     original_first_descriptor_flags: u32,
     original_first_descriptor_word1: u32,
     original_first_timestamp: u32,
+    original_first_frame_count: u8,
+    original_first_spatial_count: u8,
+    original_first_coding_count: u8,
     original_tail_buffer_flags: [u32; TX_AMPDU_SLOT_CAPACITY],
 }
 
@@ -266,7 +269,23 @@ pub enum BasicHtAmpduRestoreError {
     NullDescriptor,
     NullPayload,
     AggregateStateMissing(u32),
+    FrameCountMismatch(u8),
+    DescriptorCountMismatch { spatial: u8, coding: u8 },
     TailStateMissing(u32),
+}
+
+/// Reproduce the `ni + 0x82` protection-spacing value written by the pinned
+/// `rcUpdateAMPDUParam` body from the peer's HT A-MPDU Parameters byte.
+///
+/// Bits 2..=4 encode the IEEE 802.11 minimum MPDU start spacing. The hardware
+/// consumes the recovered finite value in all three 10-bit protection fields.
+pub(crate) const fn basic_ht_ampdu_protection_spacing(parameters: u8) -> u16 {
+    match (parameters >> 2) & 0x07 {
+        0..=4 => 20,
+        5 => 40,
+        6 => 76,
+        _ => 148,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -487,12 +506,15 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
     const FRAME_HEADER_LENGTH_OFFSET: usize = 0x14;
     const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
     const FRAME_SEQUENCE_OFFSET: usize = 0x24;
+    const FRAME_AGGREGATE_COUNT_OFFSET: usize = 0x26;
     const FRAME_NEXT_OFFSET: usize = 0x30;
     const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
     const BUFFER_DATA_OFFSET: usize = 0x04;
     const BUFFER_NEXT_OFFSET: usize = 0x08;
     const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
     const DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+    const DESCRIPTOR_SPATIAL_COUNT_OFFSET: usize = 0x2a;
+    const DESCRIPTOR_CODING_COUNT_OFFSET: usize = 0x2e;
 
     if frames.is_empty() {
         return Err(BasicHtAmpduChainError::Empty);
@@ -632,6 +654,9 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         .add(DESCRIPTOR_TIMESTAMP_OFFSET)
         .cast::<u32>()
         .read();
+    let original_first_frame_count = first.add(FRAME_AGGREGATE_COUNT_OFFSET).read();
+    let original_first_spatial_count = first_descriptor.add(DESCRIPTOR_SPATIAL_COUNT_OFFSET).read();
+    let original_first_coding_count = first_descriptor.add(DESCRIPTOR_CODING_COUNT_OFFSET).read();
     let mut owned_frames = [core::ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY];
     owned_frames[..frames.len()].copy_from_slice(frames);
 
@@ -680,6 +705,19 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         .add(DESCRIPTOR_TIMESTAMP_OFFSET)
         .cast::<u32>()
         .write(output.first_timestamp);
+    // `ppCalTxAMPDULength` clears these three bytes, then increments each one
+    // for every accepted MPDU before entering `ppAssembleAMPDU`. They are not
+    // cosmetic scheduler state: `mac_tx_set_htsig` copies the two descriptor
+    // bytes into the HT control register.
+    first
+        .add(FRAME_AGGREGATE_COUNT_OFFSET)
+        .write(aggregate.subframes);
+    first_descriptor
+        .add(DESCRIPTOR_SPATIAL_COUNT_OFFSET)
+        .write(aggregate.subframes);
+    first_descriptor
+        .add(DESCRIPTOR_CODING_COUNT_OFFSET)
+        .write(aggregate.subframes);
 
     Ok(BasicHtAmpduChain {
         first,
@@ -693,6 +731,9 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         original_first_descriptor_flags,
         original_first_descriptor_word1,
         original_first_timestamp,
+        original_first_frame_count,
+        original_first_spatial_count,
+        original_first_coding_count,
         original_tail_buffer_flags,
     })
 }
@@ -719,11 +760,14 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
     const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
     const FRAME_TAIL_BUFFER_OFFSET: usize = 0x08;
     const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
+    const FRAME_AGGREGATE_COUNT_OFFSET: usize = 0x26;
     const FRAME_NEXT_OFFSET: usize = 0x30;
     const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
     const BUFFER_DATA_OFFSET: usize = 0x04;
     const BUFFER_NEXT_OFFSET: usize = 0x08;
     const DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+    const DESCRIPTOR_SPATIAL_COUNT_OFFSET: usize = 0x2a;
+    const DESCRIPTOR_CODING_COUNT_OFFSET: usize = 0x2e;
 
     if chain.subframes < 2 || usize::from(chain.subframes) > TX_AMPDU_SLOT_CAPACITY {
         return Err(BasicHtAmpduRestoreError::InvalidCount(chain.subframes));
@@ -774,6 +818,18 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
     let flags = first_descriptor.cast::<u32>().read();
     if flags & TX_DESCRIPTOR_AMPDU_BIT == 0 {
         return Err(BasicHtAmpduRestoreError::AggregateStateMissing(flags));
+    }
+    let frame_count = chain.first.add(FRAME_AGGREGATE_COUNT_OFFSET).read();
+    if frame_count != chain.subframes {
+        return Err(BasicHtAmpduRestoreError::FrameCountMismatch(frame_count));
+    }
+    let spatial_count = first_descriptor.add(DESCRIPTOR_SPATIAL_COUNT_OFFSET).read();
+    let coding_count = first_descriptor.add(DESCRIPTOR_CODING_COUNT_OFFSET).read();
+    if spatial_count != chain.subframes || coding_count != chain.subframes {
+        return Err(BasicHtAmpduRestoreError::DescriptorCountMismatch {
+            spatial: spatial_count,
+            coding: coding_count,
+        });
     }
     let first_buffer = chain
         .first
@@ -836,6 +892,16 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
         .add(FRAME_REMAINING_LENGTH_OFFSET)
         .cast::<u16>()
         .write(chain.original_first_remaining_length);
+    chain
+        .first
+        .add(FRAME_AGGREGATE_COUNT_OFFSET)
+        .write(chain.original_first_frame_count);
+    first_descriptor
+        .add(DESCRIPTOR_SPATIAL_COUNT_OFFSET)
+        .write(chain.original_first_spatial_count);
+    first_descriptor
+        .add(DESCRIPTOR_CODING_COUNT_OFFSET)
+        .write(chain.original_first_coding_count);
     Ok(())
 }
 
@@ -1681,6 +1747,9 @@ mod tests {
             original_first_descriptor_flags: 0x0004_2009,
             original_first_descriptor_word1: 0xa5a5_0020,
             original_first_timestamp: 0x1234_5678,
+            original_first_frame_count: 1,
+            original_first_spatial_count: 1,
+            original_first_coding_count: 1,
             original_tail_buffer_flags: {
                 let mut flags = [0_u32; TX_AMPDU_SLOT_CAPACITY];
                 flags[1] = 0xa186_8612;
@@ -1694,6 +1763,20 @@ mod tests {
         assert_eq!(chain.sequence(0), Some(0x014));
         assert_eq!(chain.sequence(1), Some(0x015));
         assert_eq!(chain.sequence(2), None);
+    }
+
+    #[test]
+    fn protection_spacing_matches_every_recovered_density_branch() {
+        let expected = [20, 20, 20, 20, 20, 40, 76, 148];
+        for (density, expected) in expected.into_iter().enumerate() {
+            assert_eq!(
+                basic_ht_ampdu_protection_spacing((density as u8) << 2),
+                expected
+            );
+        }
+        // Maximum A-MPDU length exponent and reserved high bits do not alter
+        // the minimum-spacing field.
+        assert_eq!(basic_ht_ampdu_protection_spacing(0xf7), 40);
     }
 
     #[test]
