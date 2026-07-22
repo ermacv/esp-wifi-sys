@@ -493,6 +493,18 @@ confirm both the sequence metadata offset and every field programmed by the
 strict aggregate-submit leaf. The oracle-only vendor/RTOS throughput run was
 about 53.4 Mbit/s UDP; it is a format baseline, not part of the final runtime.
 
+A third oracle interposed the ROM `ppResortTxAMPDU` only for one partial
+BlockAck. The aggregate covered sequences `0x020..=0x034`; bitmap
+`0x001f7fff` acknowledged every MPDU except `0x02f`. The blob detached every
+old frame/buffer link. Acknowledged descriptors changed `0x00042009` to
+`0x00442009` and queue word `0x00a00304` to `0x01a00304`. The missing MPDU's
+MAC frame control changed only from `0x4188` to `0x4988` (IEEE 802.11 Retry),
+then it became the head of a new aggregate containing newly queued frames.
+Its payload metadata and CCMP-ready ownership were otherwise retained.
+`basic_ht_ampdu_completion` and the SRAM-only
+`apply_basic_ht_ampdu_completion` reproduce just these bounded per-frame
+markers after restoration; neither enters the stock resort/recycle graph.
+
 `HtAmpduLengthAccumulator`, `prepare_basic_ht_ampdu_chain`, and
 `assemble_basic_ht_ampdu` now reproduce those rules with a maximum of 32
 static frame pointers. The target build places both raw chain operations in
@@ -518,12 +530,11 @@ initialized by `ppCalTxAMPDULength` are carried as the recovered constant
 The entry point and every Rust helper reachable from it are emitted in
 `.rwtext.wifi_strict.*`; its mutable backoff seed is in critical SRAM.
 
-The leaf cannot be invoked safely yet. The next required boundary is to retain
-the already constructed/CCMP-ready ESF frames and the reversible assembly
-metadata in Rust-owned fixed slots, detach the chain after hardware completion,
-then route each BlockAck bit through one executor continuation. Until that
-completion owner is installed, the existing single-frame success/retry path
-continues to reject every linked or aggregate descriptor.
+The leaf is still not connected to ordinary data submission. The remaining
+boundary is to detach the retained chain after hardware completion and route
+each BlockAck bit through one executor continuation. Until that dispatcher is
+installed, the existing single-frame success/retry path continues to reject
+every linked or aggregate descriptor.
 
 `BasicHtAmpduChain` now is that reversible ownership token. Besides the public
 first/last/count/length summary, it privately retains all 32 validated frame
@@ -536,6 +547,12 @@ link plus the aggregate first/tail markers before its first write, then removes
 both chains and restores the original payload word, descriptor words,
 remaining length, timestamp, and tail flags. It deliberately performs no
 recycle or retry; those decisions remain executor continuations.
+
+The token is deliberately non-`Copy`: `submit_basic_ht_ampdu` transfers it
+into one of four fixed SRAM owner slots immediately before enabling hardware.
+An occupied slot fails fast, and a failed enable removes the just-installed
+owner. Thus completion can recover the exact chain without a heap object,
+lookup allocation, lock, or RTOS queue.
 
 The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
 The original `0x81e`-byte body performs the required fixed MMIO decode first,

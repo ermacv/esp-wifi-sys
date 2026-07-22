@@ -155,6 +155,47 @@ pub struct BasicHtAmpduAssemblyOutput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BasicHtAmpduCompletionInput {
+    pub descriptor_flags: u32,
+    pub descriptor_queue_word: u32,
+    pub frame_control: u16,
+    pub acknowledged: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BasicHtAmpduCompletionOutput {
+    pub descriptor_flags: u32,
+    pub descriptor_queue_word: u32,
+    pub frame_control: u16,
+}
+
+/// Reproduce the per-MPDU markers observed around `ppResortTxAMPDU` after the
+/// aggregate topology has been detached.
+///
+/// Acknowledged MPDUs retain the aggregate marker so the later TX-done stage
+/// skips duplicate per-frame rate control and gain bit 24 in the descriptor
+/// queue word. A missing MPDU remains a normal detached descriptor and gains
+/// only the IEEE 802.11 Retry bit; its CCMP-ready payload is reused unchanged.
+#[inline(always)]
+pub const fn basic_ht_ampdu_completion(
+    input: BasicHtAmpduCompletionInput,
+) -> BasicHtAmpduCompletionOutput {
+    if input.acknowledged {
+        BasicHtAmpduCompletionOutput {
+            descriptor_flags: input.descriptor_flags | TX_DESCRIPTOR_AMPDU_BIT,
+            descriptor_queue_word: input.descriptor_queue_word | 0x0100_0000,
+            frame_control: input.frame_control,
+        }
+    } else {
+        BasicHtAmpduCompletionOutput {
+            descriptor_flags: input.descriptor_flags,
+            descriptor_queue_word: input.descriptor_queue_word,
+            frame_control: input.frame_control | 0x0800,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BasicHtAmpduChainError {
     Empty,
     TooManyFrames(usize),
@@ -172,7 +213,7 @@ pub enum BasicHtAmpduChainError {
     Assembly(BasicHtAmpduAssemblyError),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BasicHtAmpduChain {
     pub first: *mut u8,
     pub last: *mut u8,
@@ -226,6 +267,18 @@ pub enum BasicHtAmpduRestoreError {
     NullPayload,
     AggregateStateMissing(u32),
     TailStateMissing(u32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BasicHtAmpduFrameCompletionError {
+    NullFrame,
+    FrameStillLinked,
+    NullDescriptor,
+    UnsupportedDescriptor(u32),
+    NullBufferDescriptor,
+    BufferStillLinked,
+    NullPayload,
+    UnsupportedFrameControl(u16),
 }
 
 /// Reproduce the mutation made by the pinned non-HE `ppAssembleAMPDU` body.
@@ -772,6 +825,114 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
     tail_buffer
         .cast::<u32>()
         .write(chain.original_tail_buffer_flags);
+    Ok(())
+}
+
+/// Apply one BlockAck disposition to an already restored basic-HT MPDU.
+///
+/// This leaf only changes the three fields proven by the partial-BlockAck
+/// oracle. It does not recycle, queue, encrypt, submit, retry, or invoke rate
+/// control; the executor retains ownership and advances one MPDU per event.
+///
+/// # Safety
+///
+/// `frame` and its descriptor/buffer/payload pointers must remain exclusively
+/// owned writable SRAM. `restore_basic_ht_ampdu_chain` must have detached it
+/// from both aggregate linked representations before this call.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_completion"]
+pub unsafe fn apply_basic_ht_ampdu_completion(
+    frame: *mut u8,
+    response: u8,
+    acknowledged: bool,
+) -> Result<(), BasicHtAmpduFrameCompletionError> {
+    const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_TAIL_BUFFER_OFFSET: usize = 0x08;
+    const FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
+    const FRAME_NEXT_OFFSET: usize = 0x30;
+    const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const BUFFER_NEXT_OFFSET: usize = 0x08;
+    const DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
+    const DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
+    const DESCRIPTOR_REASON_OFFSET: usize = 0x13;
+
+    if frame.is_null() {
+        return Err(BasicHtAmpduFrameCompletionError::NullFrame);
+    }
+    if !frame
+        .add(FRAME_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+    {
+        return Err(BasicHtAmpduFrameCompletionError::FrameStillLinked);
+    }
+    let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    if descriptor.is_null() {
+        return Err(BasicHtAmpduFrameCompletionError::NullDescriptor);
+    }
+    let descriptor_flags = descriptor.cast::<u32>().read();
+    if descriptor_flags & (TX_DESCRIPTOR_HE_BIT | TX_DESCRIPTOR_BAR_BIT | TX_DESCRIPTOR_AMPDU_BIT)
+        != 0
+    {
+        return Err(BasicHtAmpduFrameCompletionError::UnsupportedDescriptor(
+            descriptor_flags,
+        ));
+    }
+    let first_buffer = frame
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let tail_buffer = frame.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+    if first_buffer.is_null() || tail_buffer.is_null() {
+        return Err(BasicHtAmpduFrameCompletionError::NullBufferDescriptor);
+    }
+    if !tail_buffer
+        .add(BUFFER_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+    {
+        return Err(BasicHtAmpduFrameCompletionError::BufferStillLinked);
+    }
+    let mut header = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if header.is_null() {
+        return Err(BasicHtAmpduFrameCompletionError::NullPayload);
+    }
+    if frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read() & 0x2000 != 0 {
+        header = header.add(8);
+    }
+    let frame_control = header.cast::<u16>().read_unaligned();
+    if frame_control & 0x000c != 0x0008 {
+        return Err(BasicHtAmpduFrameCompletionError::UnsupportedFrameControl(
+            frame_control,
+        ));
+    }
+    let descriptor_queue_word = descriptor
+        .add(DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .read();
+    let output = basic_ht_ampdu_completion(BasicHtAmpduCompletionInput {
+        descriptor_flags,
+        descriptor_queue_word,
+        frame_control,
+        acknowledged,
+    });
+
+    descriptor.cast::<u32>().write(output.descriptor_flags);
+    descriptor
+        .add(DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .write(output.descriptor_queue_word);
+    header.cast::<u16>().write_unaligned(output.frame_control);
+    if acknowledged {
+        descriptor.add(DESCRIPTOR_RESPONSE_OFFSET).write(response);
+        descriptor.add(DESCRIPTOR_REASON_OFFSET).write(1);
+    }
     Ok(())
 }
 
@@ -1411,6 +1572,35 @@ mod tests {
                 tail_buffer_flags: 0xe186_8612,
                 first_timestamp: 0x1234_5678,
             })
+        );
+    }
+
+    #[test]
+    fn partial_block_ack_mutations_match_the_s31_retry_oracle() {
+        let base = BasicHtAmpduCompletionInput {
+            descriptor_flags: 0x0004_2009,
+            descriptor_queue_word: 0x00a0_0304,
+            frame_control: 0x4188,
+            acknowledged: true,
+        };
+        assert_eq!(
+            basic_ht_ampdu_completion(base),
+            BasicHtAmpduCompletionOutput {
+                descriptor_flags: 0x0044_2009,
+                descriptor_queue_word: 0x01a0_0304,
+                frame_control: 0x4188,
+            }
+        );
+        assert_eq!(
+            basic_ht_ampdu_completion(BasicHtAmpduCompletionInput {
+                acknowledged: false,
+                ..base
+            }),
+            BasicHtAmpduCompletionOutput {
+                descriptor_flags: 0x0004_2009,
+                descriptor_queue_word: 0x00a0_0304,
+                frame_control: 0x4988,
+            }
         );
     }
 

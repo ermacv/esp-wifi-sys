@@ -146,6 +146,7 @@ pub enum LmacAsyncError {
     UnsupportedTxSubmissionMetadata(u32),
     UnsupportedTxSubmissionPti { priority: u8, count: u16 },
     UnsupportedTxAmpduChain { subframes: u8, length: u16 },
+    TxAmpduOwnerBusy(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +186,12 @@ struct StateCell(UnsafeCell<TxTimeoutState>);
 
 unsafe impl Sync for StateCell {}
 
+#[cfg(target_arch = "riscv32")]
+struct AmpduOwnersCell(UnsafeCell<[Option<BasicHtAmpduChain>; 4]>);
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Sync for AmpduOwnersCell {}
+
 struct TimerCell(UnsafeCell<RawOsiTimer>);
 
 impl TimerCell {
@@ -202,6 +209,9 @@ impl TimerCell {
 unsafe impl Sync for TimerCell {}
 
 static STATE: StateCell = StateCell(UnsafeCell::new(TxTimeoutState::new()));
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.tx_ampdu_owners"]
+static AMPDU_OWNERS: AmpduOwnersCell = AmpduOwnersCell(UnsafeCell::new([const { None }; 4]));
 static TIMER: TimerCell = TimerCell::new();
 static TXQ_SPLIT_FAILED: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(
@@ -1123,20 +1133,52 @@ pub unsafe fn submit_basic_ht_ampdu(
 
     queue_state.cast::<*mut u8>().write(chain.first);
     configure_basic_timeout(queue_state, descriptor);
-    guard_basic_ampdu_ppdu_inputs(chain, descriptor)?;
+    guard_basic_ampdu_ppdu_inputs(&chain, descriptor)?;
     let txrx = ptr::addr_of_mut!(pTxRx).read();
     if txrx.is_null() {
         return Err(LmacAsyncError::TxRxUnavailable);
     }
-    format_basic_ht_ampdu_ppdu(queue_state, chain, descriptor, txrx)?;
+    format_basic_ht_ampdu_ppdu(queue_state, &chain, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
-    enable_basic_tx_queue(queue_state, descriptor)
+    install_basic_ht_ampdu_owner(hardware_queue, chain)?;
+    match enable_basic_tx_queue(queue_state, descriptor) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = take_basic_ht_ampdu_owner(hardware_queue);
+            Err(error)
+        }
+    }
+}
+
+/// Transfer the prepared chain into the fixed owner slot before hardware can
+/// expose a completion edge. The radio executor is the sole writer; no lock,
+/// allocation, compare/retry loop, or scheduler primitive is involved.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_owner"]
+unsafe fn install_basic_ht_ampdu_owner(
+    queue: u8,
+    chain: BasicHtAmpduChain,
+) -> Result<(), LmacAsyncError> {
+    let owners = &mut *AMPDU_OWNERS.0.get();
+    let owner = &mut owners[usize::from(queue)];
+    if owner.is_some() {
+        return Err(LmacAsyncError::TxAmpduOwnerBusy(queue));
+    }
+    *owner = Some(chain);
+    Ok(())
+}
+
+/// Take the exact aggregate token associated with one hardware completion.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_owner"]
+unsafe fn take_basic_ht_ampdu_owner(queue: u8) -> Option<BasicHtAmpduChain> {
+    (&mut *AMPDU_OWNERS.0.get())[usize::from(queue)].take()
 }
 
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.tx_ampdu_guard"]
 unsafe fn guard_basic_ampdu_ppdu_inputs(
-    chain: BasicHtAmpduChain,
+    chain: &BasicHtAmpduChain,
     descriptor: *mut u8,
 ) -> Result<(), LmacAsyncError> {
     if chain
@@ -1185,7 +1227,7 @@ unsafe fn guard_basic_ampdu_ppdu_inputs(
 #[link_section = ".rwtext.wifi_strict.tx_ampdu_format"]
 unsafe fn format_basic_ht_ampdu_ppdu(
     queue_state: *mut u8,
-    chain: BasicHtAmpduChain,
+    chain: &BasicHtAmpduChain,
     descriptor: *mut u8,
     txrx: *mut u8,
 ) -> Result<(), LmacAsyncError> {
