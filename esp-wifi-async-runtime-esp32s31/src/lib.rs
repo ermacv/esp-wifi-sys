@@ -210,7 +210,9 @@ pub use tx_ampdu::{
     ADDBA_ACTION_BODY_LEN, TX_AMPDU_SLOT_CAPACITY, TX_BLOCK_ACK_MAX_WINDOW,
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
-pub use tx_intercept::{hil_ampdu_intercept_snapshot, HilAmpduInterceptSnapshot};
+pub use tx_intercept::{
+    hil_ampdu_intercept_pp_map_tx_queue, hil_ampdu_intercept_snapshot, HilAmpduInterceptSnapshot,
+};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

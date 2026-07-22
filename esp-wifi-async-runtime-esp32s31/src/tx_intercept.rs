@@ -84,10 +84,6 @@ pub struct HilAmpduInterceptSnapshot {
 }
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
-    // GNU `--wrap` does not by itself form a Rust-level reference to a wrapper
-    // defined in an rlib. Keep the callback address observable so fat LTO
-    // cannot replace an unextracted wrapper with a direct linker thunk.
-    core::hint::black_box(__wrap_ppMapTxQueue as unsafe extern "C" fn(*mut u8) -> i32);
     HilAmpduInterceptSnapshot {
         retained: RETAINED.load(Ordering::Acquire),
         submitted: SUBMITTED.load(Ordering::Acquire),
@@ -120,9 +116,8 @@ pub(crate) unsafe fn enable(window: u16) {
 /// GNU-ld wrapper around the last vendor preparation leaf used by `ppTxPkt`.
 /// Returning a value other than 0/1/2 makes `ppTxPkt` return without inserting
 /// the frame into any vendor PP list or recycling it.
-#[no_mangle]
 #[link_section = ".rwtext.wifi_strict.hil_ampdu_intercept"]
-pub unsafe extern "C" fn __wrap_ppMapTxQueue(frame: *mut u8) -> i32 {
+pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> i32 {
     let mapped = __real_ppMapTxQueue(frame);
     let state = &mut *STATE.0.get();
     if !crate::critical::strict_wifi_hart_armed()
