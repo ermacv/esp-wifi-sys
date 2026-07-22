@@ -20,8 +20,9 @@ pub struct TxSecurityLayoutOutput {
 
 /// Recover the complete headroom/trailer transformation observed at the
 /// `ppProcTxSecFrame` boundary. This is deliberately a closed set: plaintext
-/// management/EAPOL/Action frames and the measured WPA2-CCMP QoS descriptor
-/// states are admitted; any new descriptor state must be measured first.
+/// management/EAPOL/Action frames, the AP beacon descriptor, and the measured
+/// WPA2-CCMP QoS descriptor states are admitted; any new descriptor state must
+/// be measured first.
 pub const fn strict_tx_security_layout(
     input: TxSecurityLayoutInput,
 ) -> Option<TxSecurityLayoutOutput> {
@@ -32,11 +33,17 @@ pub const fn strict_tx_security_layout(
         return None;
     }
 
-    let trailer_len = if input.descriptor_security == 0
+    let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
-            || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c))
+            || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c)))
+        || (input.frame_control == 0x0080
+            && input.descriptor_flags == 0x0080_0412
+            && input.descriptor_security == 0x0004_0000)
     {
+        // AP beacons carry the pinned hardware-key direction word even though
+        // the 802.11 Protected bit is clear. The first strict AP bring-up
+        // trapped this exact descriptor tuple before any state was mutated.
         4_u16
     } else if input.frame_control == 0x4188
         && matches!(input.descriptor_flags, 0x0000_2009 | 0x0200_2009)
@@ -297,6 +304,41 @@ mod tests {
                 ..expected
             }),
         );
+    }
+
+    #[test]
+    fn reproduces_hardware_observed_wpa2_ap_beacon_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0074_0018, 0, 0xc023_00f8, 0x0080_0412, 0x0080)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x78,
+                layout: 0x2000,
+                buffer_flags: 0xc026_00f8,
+                metadata_len: 0x90,
+            })
+        );
+
+        for rejected in [
+            TxSecurityLayoutInput {
+                descriptor_flags: 0x0080_0410,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                frame_control: 0x4080,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
     }
 
     #[test]
