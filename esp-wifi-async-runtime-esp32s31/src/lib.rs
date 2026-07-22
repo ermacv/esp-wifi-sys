@@ -170,7 +170,9 @@ pub use michael::{
     uninstall_async_michael_callback, MichaelInstallError,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use net80211_timer::{rejected_net80211_timer_events, Net80211TimerError};
+pub use net80211_timer::{
+    rejected_net80211_timer_events, request_initial_ap_beacon, Net80211TimerError,
+};
 pub use osi::{OsiPpQueue, RawQueueError};
 #[cfg(target_arch = "riscv32")]
 pub use policy::{

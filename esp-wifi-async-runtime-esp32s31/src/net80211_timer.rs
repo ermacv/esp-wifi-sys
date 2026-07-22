@@ -94,6 +94,41 @@ fn slot_index(argument: *mut c_void) -> Option<usize> {
     (index < TIMER_SLOT_CAPACITY).then_some(index)
 }
 
+fn enqueue_strict_timer(id: u8, argument: *mut c_void) -> bool {
+    let Some(index) = claim_slot() else {
+        return false;
+    };
+    let slot = &TIMER_SLOTS[index];
+    unsafe {
+        slot.envelope.get().write(TimerEnvelope {
+            id,
+            padding: [0; 3],
+            argument,
+        });
+    }
+    let queued = crate::adapter::enqueue_internal_event(PpEvent {
+        kind: NET80211_TIMER_EVENT,
+        argument: slot.envelope.get().cast(),
+    });
+    if !queued {
+        release_slot(index);
+    }
+    queued
+}
+
+/// Publish the first AP beacon continuation after cold takeover.
+///
+/// The S31 AP start path creates both beacon buffers and registers its TX
+/// completion callback, but does not arm the first OSI timer without its
+/// original task lifecycle. One bounded internal event supplies that missing
+/// edge. Every later beacon is rearmed by the beacon TX completion callback on
+/// the same async timer pool.
+pub fn request_initial_ap_beacon() -> bool {
+    crate::critical::strict_wifi_hart_armed()
+        && crate::critical::on_strict_wifi_hart()
+        && enqueue_strict_timer(9, ptr::null_mut())
+}
+
 /// Final-link replacement for the heap-owning timer-event producer.
 ///
 /// Before the strict proof this delegates to the original initialization
@@ -120,27 +155,7 @@ pub unsafe extern "C" fn __wrap_ieee80211_timer_process(
         );
         return -1;
     }
-    let Some(index) = claim_slot() else {
-        REJECTED_TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
-        crate::adapter::blocking_probe().record(
-            BlockingCall::Net80211TimerRejected,
-            kind,
-            id as usize,
-        );
-        return -1;
-    };
-    let slot = &TIMER_SLOTS[index];
-    slot.envelope.get().write(TimerEnvelope {
-        id: id as u8,
-        padding: [0; 3],
-        argument,
-    });
-    let queued = crate::adapter::enqueue_internal_event(PpEvent {
-        kind: NET80211_TIMER_EVENT,
-        argument: slot.envelope.get().cast(),
-    });
-    if !queued {
-        release_slot(index);
+    if !enqueue_strict_timer(id as u8, argument) {
         REJECTED_TIMER_EVENTS.fetch_add(1, Ordering::Relaxed);
         crate::adapter::blocking_probe().record(
             BlockingCall::Net80211TimerRejected,
