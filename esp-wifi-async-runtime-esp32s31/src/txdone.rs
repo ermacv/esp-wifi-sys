@@ -189,6 +189,7 @@ struct TxDoneState {
     callbacks: u32,
     resume_timeout: bool,
     resume_queue: bool,
+    resume_ampdu: bool,
 }
 
 impl TxDoneState {
@@ -201,6 +202,7 @@ impl TxDoneState {
             callbacks: 0,
             resume_timeout: false,
             resume_queue: false,
+            resume_ampdu: false,
         }
     }
 }
@@ -335,7 +337,7 @@ pub(crate) const fn is_lmac_continuation(kind: u32) -> bool {
 /// timeout/discard path. Mode-1 callbacks are split into separate executor
 /// events before the frame is appended to the vendor TX-done list.
 pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> {
-    begin_lmac(frame, true, false)
+    begin_lmac(frame, true, false, false)
 }
 
 /// Continue a Rust-owned successful LMAC completion. This is the recovered
@@ -343,13 +345,22 @@ pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> 
 /// remain separate bounded executor events.
 pub(crate) unsafe fn begin_from_tx_success(frame: *mut u8) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, true)
+    begin_lmac(frame, false, true, false)
+}
+
+/// Complete one acknowledged MPDU from a Rust-owned A-MPDU. Queue resumption
+/// must wait until every BlockAck disposition has been consumed, so this path
+/// returns to the aggregate continuation instead of posting the PP queue.
+pub(crate) unsafe fn begin_from_ampdu_success(frame: *mut u8) -> Result<(), TxDoneError> {
+    crate::channel_switch::tx_done_edge();
+    begin_lmac(frame, false, false, true)
 }
 
 unsafe fn begin_lmac(
     frame: *mut u8,
     resume_timeout: bool,
     resume_queue: bool,
+    resume_ampdu: bool,
 ) -> Result<(), TxDoneError> {
     let state = &mut *LMAC_STATE.0.get();
     if state.failed {
@@ -376,6 +387,7 @@ unsafe fn begin_lmac(
     state.callbacks = callbacks;
     state.resume_timeout = resume_timeout;
     state.resume_queue = resume_queue;
+    state.resume_ampdu = resume_ampdu;
     state.phase = if callbacks == 0 {
         PHASE_RECYCLE
     } else {
@@ -497,12 +509,14 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
 
     let resume_timeout = state.resume_timeout;
     let resume_queue = state.resume_queue;
+    let resume_ampdu = state.resume_ampdu;
     let queue = descriptor_queue(descriptor);
     state.active = false;
     state.phase = PHASE_IDLE;
     state.frame = ptr::null_mut();
     state.resume_timeout = false;
     state.resume_queue = false;
+    state.resume_ampdu = false;
     if resume_timeout {
         return crate::lmac::resume_after_tx_done().map_err(|_| TxDoneError::InternalQueueFull);
     }
@@ -518,13 +532,16 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
             return Err(TxDoneError::InternalQueueFull);
         }
     }
+    if resume_ampdu {
+        return crate::lmac::resume_ampdu_completion().map_err(|_| TxDoneError::InternalQueueFull);
+    }
     Ok(())
 }
 
 unsafe fn begin_from_wrapped_lmac(frame: *mut u8, mode: u32) -> Result<(), TxDoneError> {
     match mode {
-        0 => begin_lmac(frame, false, false),
-        1 => begin_lmac(frame, false, true),
+        0 => begin_lmac(frame, false, false, false),
+        1 => begin_lmac(frame, false, true, false),
         value => Err(TxDoneError::UnsupportedLmacMode(value)),
     }
 }
@@ -548,6 +565,7 @@ pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
         state.frame = ptr::null_mut();
         state.resume_timeout = false;
         state.resume_queue = false;
+        state.resume_ampdu = false;
         // A wrapper cannot return a Rust error through the vendor C ABI. Post
         // a private event so the radio owner observes `PreviousFailure` and
         // terminates instead of continuing with partially completed TX state.

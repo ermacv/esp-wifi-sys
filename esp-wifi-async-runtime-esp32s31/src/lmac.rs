@@ -10,6 +10,7 @@ use crate::tx_ampdu::BasicHtAmpduChain;
 use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
 
 pub(crate) const TX_DISCARD_CONTINUATION: u32 = u32::MAX - 1;
+pub(crate) const TX_AMPDU_COMPLETION_CONTINUATION: u32 = u32::MAX - 4;
 
 const TX_DISABLE_SETTLE_US: u32 = 16;
 const TXQ_INTERRUPT_CLEAR_REG: *mut u32 = 0x2010_4cb0 as *mut u32;
@@ -147,6 +148,12 @@ pub enum LmacAsyncError {
     UnsupportedTxSubmissionPti { priority: u8, count: u16 },
     UnsupportedTxAmpduChain { subframes: u8, length: u16 },
     TxAmpduOwnerBusy(u8),
+    MissingTxAmpduOwner(u8),
+    TxAmpduCompletionBusy,
+    PreviousTxAmpduCompletionFailure,
+    InvalidTxAmpduContinuation,
+    TxAmpduRestore(crate::tx_ampdu::BasicHtAmpduRestoreError),
+    TxAmpduFrameCompletion(crate::tx_ampdu::BasicHtAmpduFrameCompletionError),
 }
 
 #[derive(Clone, Copy)]
@@ -192,6 +199,46 @@ struct AmpduOwnersCell(UnsafeCell<[Option<BasicHtAmpduChain>; 4]>);
 #[cfg(target_arch = "riscv32")]
 unsafe impl Sync for AmpduOwnersCell {}
 
+#[cfg(target_arch = "riscv32")]
+struct AmpduCompletionState {
+    active: bool,
+    failed: bool,
+    chain: Option<BasicHtAmpduChain>,
+    block_ack: Option<crate::tx_ampdu::TxBlockAckBitmap>,
+    response: u8,
+    next: u8,
+    logical_queue: u8,
+    retry_count: u8,
+    retry_take: u8,
+    retries: [*mut u8; crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
+    retry_sequences: [u16; crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
+}
+
+#[cfg(target_arch = "riscv32")]
+impl AmpduCompletionState {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            failed: false,
+            chain: None,
+            block_ack: None,
+            response: 0,
+            next: 0,
+            logical_queue: 0,
+            retry_count: 0,
+            retry_take: 0,
+            retries: [ptr::null_mut(); crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
+            retry_sequences: [0; crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+struct AmpduCompletionCell(UnsafeCell<AmpduCompletionState>);
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Sync for AmpduCompletionCell {}
+
 struct TimerCell(UnsafeCell<RawOsiTimer>);
 
 impl TimerCell {
@@ -212,6 +259,10 @@ static STATE: StateCell = StateCell(UnsafeCell::new(TxTimeoutState::new()));
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".critical.bss.wifi_strict.tx_ampdu_owners"]
 static AMPDU_OWNERS: AmpduOwnersCell = AmpduOwnersCell(UnsafeCell::new([const { None }; 4]));
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.tx_ampdu_completion_state"]
+static AMPDU_COMPLETION: AmpduCompletionCell =
+    AmpduCompletionCell(UnsafeCell::new(AmpduCompletionState::new()));
 static TIMER: TimerCell = TimerCell::new();
 static TXQ_SPLIT_FAILED: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(
@@ -454,8 +505,10 @@ pub unsafe extern "C" fn __wrap_hal_mac_get_txq_state(kind: u32) -> u32 {
 ///
 /// The stock body starts with these fixed register decodes, then enters HE
 /// MPLEN maintenance, connection-state queries, formatters, and debug logs.
-/// Strict STA advertises HT rather than HE and keeps AMPDU/AMSDU disabled, so
-/// those tails are forbidden invariants rather than required completion work.
+/// Strict STA advertises HT rather than HE. Ordinary MPDUs and Rust-owned HT
+/// A-MPDUs share this fixed register prefix; aggregate BlockAck registers are
+/// read separately by the completion continuation. HE/BAR tails remain
+/// forbidden invariants.
 #[no_mangle]
 #[link_section = ".rwtext.wifi_strict.txq_complete"]
 pub unsafe extern "C" fn __wrap_hal_mac_get_txq_complete(
@@ -490,9 +543,7 @@ pub unsafe extern "C" fn __wrap_hal_mac_get_txq_complete(
         .add(TX_FRAME_DESCRIPTOR_OFFSET)
         .cast::<*mut u32>()
         .read();
-    if descriptor.is_null()
-        || descriptor.read() & (TX_FRAME_HE_BIT | TX_FRAME_BAR_BIT | TX_FRAME_AMPDU_BIT) != 0
-    {
+    if descriptor.is_null() || descriptor.read() & (TX_FRAME_HE_BIT | TX_FRAME_BAR_BIT) != 0 {
         reject_txq_completion();
     }
 
@@ -597,6 +648,19 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         return Ok(());
     }
 
+    let completed_frame = queue_state.cast::<*mut u8>().read();
+    if completed_frame.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let completed_descriptor = completed_frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if completed_descriptor.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let aggregate = completed_descriptor.cast::<u32>().read() & TX_FRAME_AMPDU_BIT != 0;
+
     let mut completion = [0_u8; 6];
     let mut auxiliary = [0_u32; 2];
     __wrap_hal_mac_get_txq_complete(
@@ -628,9 +692,27 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     #[cfg(feature = "hil-vendor-tx")]
     record_tx_complete(queue_state, queue, status, completion[2]);
 
+    let block_ack = if aggregate && status == 0 {
+        Some(
+            crate::tx_ampdu::read_ht_block_ack(queue)
+                .map_err(|_| LmacAsyncError::UnsupportedTxSubmissionQueue(queue))?
+                .block_ack,
+        )
+    } else {
+        None
+    };
+
     // `esp_test_tx_tb_complete` is diagnostic-only. The strict path omits it
     // and clears the hardware completion bit before entering the outcome.
     hal_mac_clr_txq_state(2, queue);
+    if aggregate {
+        if !matches!(status, 0 | 1 | 2 | 4 | 5) {
+            return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status));
+        }
+        let chain =
+            take_basic_ht_ampdu_owner(queue).ok_or(LmacAsyncError::MissingTxAmpduOwner(queue))?;
+        return begin_basic_ht_ampdu_completion(queue_state, chain, block_ack, completion[2]);
+    }
     match status {
         0 => process_tx_success(queue_state, completion[2])?,
         1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
@@ -1077,6 +1159,13 @@ pub unsafe fn submit_basic_ht_ampdu(
     queue_state: *mut u8,
     chain: BasicHtAmpduChain,
 ) -> Result<(), LmacAsyncError> {
+    let completion = &*AMPDU_COMPLETION.0.get();
+    if completion.failed {
+        return Err(LmacAsyncError::PreviousTxAmpduCompletionFailure);
+    }
+    if completion.active || completion.retry_count != 0 {
+        return Err(LmacAsyncError::TxAmpduCompletionBusy);
+    }
     if chain.subframes < 2 || chain.subframes > 32 || chain.aggregate_length == 0 {
         return Err(LmacAsyncError::UnsupportedTxAmpduChain {
             subframes: chain.subframes,
@@ -1173,6 +1262,186 @@ unsafe fn install_basic_ht_ampdu_owner(
 #[link_section = ".rwtext.wifi_strict.tx_ampdu_owner"]
 unsafe fn take_basic_ht_ampdu_owner(queue: u8) -> Option<BasicHtAmpduChain> {
     (&mut *AMPDU_OWNERS.0.get())[usize::from(queue)].take()
+}
+
+/// Start disposition of one hardware A-MPDU. The complete pointer topology is
+/// validated and detached before the first MPDU can reach TX-done or retry
+/// ownership. A non-success hardware outcome deliberately supplies no
+/// BlockAck, making every MPDU retryable.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_completion"]
+unsafe fn begin_basic_ht_ampdu_completion(
+    queue_state: *mut u8,
+    chain: BasicHtAmpduChain,
+    block_ack: Option<crate::tx_ampdu::TxBlockAckBitmap>,
+    response: u8,
+) -> Result<(), LmacAsyncError> {
+    let state = &mut *AMPDU_COMPLETION.0.get();
+    if state.failed {
+        return Err(LmacAsyncError::PreviousTxAmpduCompletionFailure);
+    }
+    if state.active || state.retry_count != 0 {
+        return Err(LmacAsyncError::TxAmpduCompletionBusy);
+    }
+
+    let descriptor = chain
+        .first
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if descriptor.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let logical_queue = descriptor_queue(descriptor);
+    crate::tx_ampdu::restore_basic_ht_ampdu_chain(&chain)
+        .map_err(LmacAsyncError::TxAmpduRestore)?;
+
+    queue_state.add(TX_QUEUE_STATUS_OFFSET).write(0);
+    queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(3);
+    let completed = queue_state
+        .add(TX_QUEUE_COMPLETED_COUNT_OFFSET)
+        .cast::<u32>();
+    completed.write(completed.read().wrapping_add(1));
+
+    state.active = true;
+    state.chain = Some(chain);
+    state.block_ack = block_ack;
+    state.response = response;
+    state.next = 0;
+    state.logical_queue = logical_queue;
+    state.retry_take = 0;
+    if let Err(error) = enqueue_ampdu_completion() {
+        state.failed = true;
+        state.active = false;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn enqueue_ampdu_completion() -> Result<(), LmacAsyncError> {
+    if crate::adapter::enqueue_internal_event(crate::event::PpEvent {
+        kind: TX_AMPDU_COMPLETION_CONTINUATION,
+        argument: ptr::null_mut(),
+    }) {
+        Ok(())
+    } else {
+        Err(LmacAsyncError::InternalQueueFull)
+    }
+}
+
+pub(crate) const fn is_ampdu_completion_continuation(kind: u32) -> bool {
+    kind == TX_AMPDU_COMPLETION_CONTINUATION
+}
+
+/// Advance exactly one MPDU disposition, or perform the constant-size final
+/// ownership transition after the last acknowledged frame has completed its
+/// TX-done callback/recycle handoff.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_completion"]
+pub(crate) unsafe fn dispatch_ampdu_completion() -> Result<(), LmacAsyncError> {
+    let state = &mut *AMPDU_COMPLETION.0.get();
+    if state.failed {
+        return Err(LmacAsyncError::PreviousTxAmpduCompletionFailure);
+    }
+    if !state.active {
+        return Err(LmacAsyncError::InvalidTxAmpduContinuation);
+    }
+    let result = dispatch_ampdu_completion_step(state);
+    if result.is_err() {
+        state.failed = true;
+        state.active = false;
+    }
+    result
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn dispatch_ampdu_completion_step(
+    state: &mut AmpduCompletionState,
+) -> Result<(), LmacAsyncError> {
+    let chain = state
+        .chain
+        .as_ref()
+        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+    if state.next >= chain.subframes {
+        let logical_queue = state.logical_queue;
+        let retry_count = state.retry_count;
+        state.chain = None;
+        state.block_ack = None;
+        state.active = false;
+        state.next = 0;
+        if retry_count == 0 && pp_post(u32::from(logical_queue), ptr::null_mut()) != 0 {
+            return Err(LmacAsyncError::InternalQueueFull);
+        }
+        return Ok(());
+    }
+
+    let index = state.next;
+    let frame = chain
+        .frame(index)
+        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+    let sequence = chain
+        .sequence(index)
+        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+    let acknowledged = state
+        .block_ack
+        .is_some_and(|block_ack| block_ack.acknowledges(sequence));
+    crate::tx_ampdu::apply_basic_ht_ampdu_completion(frame, state.response, acknowledged)
+        .map_err(LmacAsyncError::TxAmpduFrameCompletion)?;
+    state.next = state.next.wrapping_add(1);
+
+    if acknowledged {
+        crate::txdone::begin_from_ampdu_success(frame).map_err(LmacAsyncError::TxDone)
+    } else {
+        let retry_index = usize::from(state.retry_count);
+        if retry_index >= crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY {
+            return Err(LmacAsyncError::InvalidTxAmpduContinuation);
+        }
+        state.retries[retry_index] = frame;
+        state.retry_sequences[retry_index] = sequence;
+        state.retry_count = state.retry_count.wrapping_add(1);
+        enqueue_ampdu_completion()
+    }
+}
+
+/// Resume the aggregate after one acknowledged MPDU has been transferred to
+/// the ordinary one-frame TX-done pipeline.
+pub(crate) fn resume_ampdu_completion() -> Result<(), LmacAsyncError> {
+    enqueue_ampdu_completion()
+}
+
+/// One detached, CCMP-ready MPDU retained after a missing BlockAck bit.
+/// Sequence ownership is explicit because retry aggregates need not be
+/// consecutive.
+pub(crate) struct BasicHtAmpduRetryFrame {
+    pub(crate) frame: *mut u8,
+    pub(crate) sequence: u16,
+}
+
+/// Transfer at most one pending retry MPDU to the future Rust aggregation
+/// scheduler. The caller becomes the sole owner of the returned SRAM frame.
+///
+/// # Safety
+///
+/// This is a radio-executor-only ownership operation. It must not race an
+/// aggregate completion or another retry consumer.
+pub(crate) unsafe fn take_basic_ht_ampdu_retry() -> Option<BasicHtAmpduRetryFrame> {
+    let state = &mut *AMPDU_COMPLETION.0.get();
+    if state.active || state.failed || state.retry_take >= state.retry_count {
+        return None;
+    }
+    let index = usize::from(state.retry_take);
+    let retry = BasicHtAmpduRetryFrame {
+        frame: state.retries[index],
+        sequence: state.retry_sequences[index],
+    };
+    state.retries[index] = ptr::null_mut();
+    state.retry_sequences[index] = 0;
+    state.retry_take = state.retry_take.wrapping_add(1);
+    if state.retry_take == state.retry_count {
+        state.retry_take = 0;
+        state.retry_count = 0;
+    }
+    Some(retry)
 }
 
 #[cfg(target_arch = "riscv32")]

@@ -530,11 +530,17 @@ initialized by `ppCalTxAMPDULength` are carried as the recovered constant
 The entry point and every Rust helper reachable from it are emitted in
 `.rwtext.wifi_strict.*`; its mutable backoff seed is in critical SRAM.
 
-The leaf is still not connected to ordinary data submission. The remaining
-boundary is to detach the retained chain after hardware completion and route
-each BlockAck bit through one executor continuation. Until that dispatcher is
-installed, the existing single-frame success/retry path continues to reject
-every linked or aggregate descriptor.
+The leaf is still not connected to ordinary data submission. Its completion
+side is now installed: strict event 23 recognizes the owned aggregate, reads
+the fixed BlockAck registers before clearing the hardware edge, takes the
+queue's unique owner token, validates and detaches both chains, and schedules
+one private executor continuation. Every continuation mutates exactly one
+acknowledged/retry MPDU. Acknowledged frames enter the existing one-frame
+TX-done/recycle pipeline and explicitly resume the aggregate afterwards;
+missing frames remain in a fixed 32-entry SRAM retry handoff. No call to
+`ppResortTxAMPDU`, linked-list drain, allocation, wait, or rate-control callback
+is made. The remaining boundary is to connect that retry handoff and the
+ordinary prepared-frame stream to a Rust aggregation scheduler.
 
 `BasicHtAmpduChain` now is that reversible ownership token. Besides the public
 first/last/count/length summary, it privately retains all 32 validated frame
@@ -558,14 +564,16 @@ The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
 The original `0x81e`-byte body performs the required fixed MMIO decode first,
 then enters HE MPLEN list maintenance, connection-state locks, formatters, and
 debug logging. The replacement reproduces the two six/eight-byte completion
-records and traps after recording a strict failure if it observes HE, BAR,
-A-MPDU, or live MPLEN state. A trap is required because the pinned vendor
+records for both ordinary basic-HT MPDUs and Rust-owned A-MPDUs. Aggregate
+BlockAck remains a separate three-load leaf. It traps after recording a strict
+failure if it observes HE, BAR, or live MPLEN state. A trap is required because the pinned vendor
 caller discards the callee's return value and would otherwise interpret a
 returned error as a completion record. Rust now owns the basic completion
-outcome state machine while rejecting those unrelated tails.
+outcome state machine, including one-MPDU-per-event aggregate disposition,
+while rejecting those unrelated tails.
 The independent `hal_mac_tx_get_blockack` leaf is only `0x3e` bytes, contains
-fixed MMIO loads/stores and no calls or cycles, and passes the strict auditor as
-the future Rust A-MPDU completion input.
+fixed MMIO loads/stores and no calls or cycles, and is the active Rust A-MPDU
+completion input.
 
 Strict event 23 no longer enters `lmacProcessTxComplete`. Rust selects one bit
 from the completion bitmap, decodes one fixed completion record, copies the six

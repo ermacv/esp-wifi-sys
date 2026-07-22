@@ -256,6 +256,13 @@ impl PpDispatcher for VendorPpDispatcher {
             }
 
             #[cfg(feature = "strict-no-wait")]
+            if crate::lmac::is_ampdu_completion_continuation(event.kind) {
+                crate::lmac::dispatch_ampdu_completion()
+                    .map_err(VendorDispatchError::LmacContinuation)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
             if crate::rx::is_continuation(event.kind) {
                 crate::rx::dispatch().map_err(VendorDispatchError::RxPump)?;
                 return Ok(DispatchControl::Continue);
