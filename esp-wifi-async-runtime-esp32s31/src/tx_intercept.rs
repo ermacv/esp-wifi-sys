@@ -34,7 +34,6 @@ unsafe extern "C" {
 }
 
 struct InterceptState {
-    enabled: bool,
     event_pending: bool,
     waiting_hardware: bool,
     window: u8,
@@ -46,7 +45,6 @@ struct InterceptState {
 impl InterceptState {
     const fn new() -> Self {
         Self {
-            enabled: false,
             event_pending: false,
             waiting_hardware: false,
             window: 0,
@@ -63,6 +61,11 @@ unsafe impl Sync for InterceptCell {}
 
 #[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
 static STATE: InterceptCell = InterceptCell(UnsafeCell::new(InterceptState::new()));
+// Activation crosses from the Rust RX/management path into the vendor TX
+// callback. Keep it atomic even on the single radio hart: interrupts are an
+// independent execution context, and an ordinary private bool can otherwise
+// be proven permanently false by whole-program LTO.
+static ENABLED: AtomicBool = AtomicBool::new(false);
 static FAILED: AtomicBool = AtomicBool::new(false);
 static RETAINED: AtomicU32 = AtomicU32::new(0);
 static SUBMITTED: AtomicU32 = AtomicU32::new(0);
@@ -107,7 +110,7 @@ pub enum TxInterceptError {
 pub(crate) unsafe fn enable(window: u16) {
     let state = &mut *STATE.0.get();
     state.window = window.clamp(2, TX_AMPDU_SLOT_CAPACITY as u16) as u8;
-    state.enabled = true;
+    ENABLED.store(true, Ordering::Release);
 }
 
 /// GNU-ld wrapper around the last vendor preparation leaf used by `ppTxPkt`.
@@ -119,7 +122,7 @@ pub unsafe extern "C" fn __wrap_ppMapTxQueue(frame: *mut u8) -> i32 {
     let mapped = __real_ppMapTxQueue(frame);
     let state = &mut *STATE.0.get();
     if !crate::critical::strict_wifi_hart_armed()
-        || !state.enabled
+        || !ENABLED.load(Ordering::Acquire)
         || mapped != 0
         || !eligible_qos_data(frame)
     {
