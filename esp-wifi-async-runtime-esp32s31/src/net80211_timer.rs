@@ -47,6 +47,7 @@ static REJECTED_TIMER_EVENTS: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "C" {
     fn ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
     fn __real_ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
+    fn ieee80211_hostap_send_beacon_process();
     fn cnx_auth_timeout_process();
     fn cnx_assoc_timeout_process();
     fn cnx_connect_next_ap_timeout_process();
@@ -60,7 +61,7 @@ pub(crate) fn timer_process_link_wrapper_active() -> bool {
 }
 
 const fn supported_strict_timer(id: u8) -> bool {
-    matches!(id, 0 | 8 | 11 | 13 | 44)
+    matches!(id, 0 | 8 | 9 | 11 | 13 | 44)
 }
 
 fn claim_slot() -> Option<usize> {
@@ -176,6 +177,14 @@ pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211Timer
         // callback and accepts this bridge exactly once.
         8 => crate::channel_switch::complete_legacy_scan_dwell(original_argument as usize)
             .map_err(Net80211TimerError::ChannelSwitch),
+        // The AP beacon timer's producer carries no state in its argument.
+        // Run the finite beacon preparation/transmit leaf directly on the
+        // radio-owner stack, without recreating the heap/API-lock envelope in
+        // `ieee80211_timer_process`.
+        9 => {
+            ieee80211_hostap_send_beacon_process();
+            Ok(())
+        }
         // Authentication and association retries are ordinary executor timer
         // continuations. Call their finite state-machine leaves directly,
         // bypassing the heap-owning timer envelope in the vendor producer.
