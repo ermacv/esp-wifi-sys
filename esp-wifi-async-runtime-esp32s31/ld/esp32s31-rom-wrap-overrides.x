@@ -45,5 +45,12 @@ ppTxProtoProc = wifi_strict_pp_tx_proto_proc;
 EXTERN(wifi_strict_pp_proc_tx_sec_frame);
 ppProcTxSecFrame = wifi_strict_pp_proc_tx_sec_frame;
 
+/* `ppSearchTxframe` is another ROM export. Keep the observation boundary as
+ * a direct late alias so LLD cannot replace its Rust definition while
+ * rewriting --wrap linker-script assignments. */
+__real_ppSearchTxframe = 0x2f800fb4;
+EXTERN(wifi_strict_pp_search_txframe);
+ppSearchTxframe = wifi_strict_pp_search_txframe;
+
 __real_esp_test_tx_enab_statistics = 0x2f801144;
 esp_test_tx_enab_statistics = __wrap_esp_test_tx_enab_statistics;
