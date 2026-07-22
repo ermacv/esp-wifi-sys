@@ -459,6 +459,27 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
             RATE0_STATE_B.fetch_add(1, Ordering::Relaxed);
             record_rate0_diagnostic(&LAST_RATE0_B, &diagnostic);
         }
+        let layout = diagnostic[0] as u16;
+        let length = diagnostic[5] & 0x3fff;
+        let frame_control = diagnostic[7] as u16;
+        let qos_data = fallback_pre[0] == 0x0200_2009
+            && layout & 0x2000 != 0
+            && length < MIN_HIL_MPDU_LENGTH
+            && frame_control & 0x008c == 0x0088;
+        let action = fallback_pre[0] == 0
+            && layout & 0x2000 != 0
+            && length < MIN_HIL_MPDU_LENGTH
+            && frame_control & 0x00fc == 0x00d0;
+        if qos_data || action {
+            if push_ready(state, frame).is_err()
+                || reconcile_coalesce_deadline(state).is_err()
+                || schedule(state).is_err()
+            {
+                fail_and_trap();
+            }
+            RETAINED.fetch_add(1, Ordering::Relaxed);
+            return 3;
+        }
         return 0;
     }
     let mapped = __real_ppMapTxQueue(frame);
@@ -901,7 +922,7 @@ unsafe fn submit_one(
 ) -> Result<(), TxInterceptError> {
     let frame = state.frames[0];
     state.direct_frame = frame;
-    if let Err(error) = crate::lmac::submit_basic_ht_frame(queue_state, frame) {
+    if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         state.direct_frame = ptr::null_mut();
         return Err(TxInterceptError::Submit(error));
     }

@@ -919,7 +919,7 @@ unsafe fn submit_basic_retry(
     if txrx.is_null() {
         return Err(LmacAsyncError::TxRxUnavailable);
     }
-    format_basic_ht_ppdu(queue_state, frame, descriptor, txrx)?;
+    format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
 
     configure_basic_edca(queue_state, descriptor);
     enable_basic_tx_queue(queue_state, descriptor)?;
@@ -933,7 +933,7 @@ unsafe fn submit_basic_retry(
 /// strict branch admits only rates 16 through 35, invokes the finite PLCP and
 /// HTSIG hardware-formatting leaves, reproduces the two bounded power-table
 /// lookups, and programs PTI through the terminal SRAM/MMIO leaf directly.
-unsafe fn format_basic_ht_ppdu(
+unsafe fn format_basic_non_he_ppdu(
     queue_state: *mut u8,
     frame: *mut u8,
     descriptor: *mut u8,
@@ -950,7 +950,7 @@ unsafe fn format_basic_ht_ppdu(
         return Err(LmacAsyncError::InvalidTxSubmissionPointer);
     }
     let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
-    let Some(rts_rate) = crate::tx_rate::basic_ht_rts_rate(rate) else {
+    let Some(rts_rate) = crate::tx_rate::basic_non_he_rts_rate(rate) else {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
             descriptor.cast::<u32>().read(),
         ));
@@ -968,11 +968,29 @@ unsafe fn format_basic_ht_ppdu(
     let rts_power = (power_table.add(rts_rate * 2).read() as i32 as u32) << 16
         | (power_table.add(rts_rate * 2 + 1).read() as i32 as u32) << 24;
 
-    // HE and FTM are rejected before entering this function, so the selected
-    // 16..=35 branch is exactly the finite HTSIG path.
-    program_htsig(queue, frame, descriptor, txrx, rate, rts_rate as u8, None);
-
-    let data_rate = if rate <= 25 { rate } else { rate - 10 };
+    let data_rate = if rate < 16 {
+        // The queue kinds at or below two enter the vendor HW-TXOP linked-list
+        // formatter. Strict one-frame completion is qualified only for the
+        // ordinary kind-three queue, whose TXOP leaf merely clears fields that
+        // are already zero in `basic_length_control_word`.
+        let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
+        if queue_kind <= 2 {
+            return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
+                descriptor.cast::<u32>().read(),
+            ));
+        }
+        program_basic_legacy_length(queue, descriptor, rts_rate);
+        rate
+    } else {
+        // HE and FTM are rejected before entering this function, so rates
+        // 16..=35 are exactly the finite HTSIG path.
+        program_htsig(queue, frame, descriptor, txrx, rate, rts_rate, None);
+        if rate <= 25 {
+            rate
+        } else {
+            rate - 10
+        }
+    };
     let data_rate = usize::from(data_rate);
     let data_power = power_table.add(data_rate * 2).read() as i32 as u32
         | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8;
@@ -1025,17 +1043,31 @@ unsafe fn program_basic_plcp0(queue: u8, frame: *mut u8, descriptor: *mut u8) {
     }
 }
 
-/// Recovered guarded basic-HT body of `mac_tx_set_plcp1`.
+/// Recovered guarded non-HE body of `mac_tx_set_plcp1`.
 unsafe fn program_basic_plcp1(queue: u8, descriptor: *mut u8, rate: u8) {
-    debug_assert!((16..=35).contains(&rate));
+    debug_assert!(rate <= 35);
     let flags = descriptor.cast::<u32>().read();
     debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
     let queue_word_low = descriptor.add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET).read();
     let protection = descriptor.add(8).cast::<u32>().read();
-    let plcp1 = crate::tx_plcp::basic_plcp1_word(rate, flags, queue_word_low, protection);
+    let plcp1 = crate::tx_plcp::basic_non_he_plcp1_word(rate, flags, queue_word_low, protection);
 
     let register = (TXQ_PLCP1_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     register.write_volatile(plcp1);
+}
+
+/// Legacy branch of `mac_tx_set_len`. Unlike HT, it uses the fixed entry flag
+/// one and does not program the HT data-length register.
+unsafe fn program_basic_legacy_length(queue: u8, descriptor: *mut u8, rts_rate: u8) {
+    debug_assert!(descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read() < 16);
+    let queue_word = descriptor
+        .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .read();
+    let length_control = crate::tx_plcp::basic_length_control_word(rts_rate, 1, queue_word);
+    let register =
+        (TXQ_LENGTH_CONTROL_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    register.write_volatile(length_control);
 }
 
 /// Recovered non-aggregate body of `mac_tx_set_htsig` and its terminal
@@ -1239,8 +1271,8 @@ pub unsafe fn submit_basic_ht_ampdu(
     }
 }
 
-/// Submit one already prepared strict basic-HT MPDU directly to an idle
-/// hardware queue.
+/// Submit one already prepared strict non-HE MPDU directly to an idle hardware
+/// queue. Rates 0..=15 use the finite legacy PPDU branch; rates 16..=35 use HT.
 ///
 /// This is the non-aggregate sibling of `submit_basic_ht_ampdu`. It performs
 /// only bounded descriptor updates and finite SRAM/MMIO leaves; it does not
@@ -1252,7 +1284,7 @@ pub unsafe fn submit_basic_ht_ampdu(
 /// writable SRAM under the single radio owner until the completion edge.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.tx_single_submit"]
-pub unsafe fn submit_basic_ht_frame(
+pub unsafe fn submit_basic_non_he_frame(
     queue_state: *mut u8,
     frame: *mut u8,
 ) -> Result<(), LmacAsyncError> {
@@ -1319,7 +1351,7 @@ pub unsafe fn submit_basic_ht_frame(
     if txrx.is_null() {
         return Err(LmacAsyncError::TxRxUnavailable);
     }
-    format_basic_ht_ppdu(queue_state, frame, descriptor, txrx)?;
+    format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
     enable_basic_tx_queue(queue_state, descriptor)
 }
@@ -1595,7 +1627,7 @@ unsafe fn format_basic_ht_ampdu_ppdu(
 ) -> Result<(), LmacAsyncError> {
     let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
     let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
-    let Some(rts_rate) = crate::tx_rate::basic_ht_rts_rate(rate) else {
+    let Some(rts_rate) = crate::tx_rate::basic_non_he_rts_rate(rate) else {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
             descriptor.cast::<u32>().read(),
         ));

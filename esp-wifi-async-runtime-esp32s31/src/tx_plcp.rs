@@ -15,14 +15,17 @@ pub(crate) const fn basic_plcp0_word(metadata_address: usize, flags: u32) -> u32
     word
 }
 
-/// Build the queue PLCP1 word for a rate already guarded to 16..=35.
-pub(crate) const fn basic_plcp1_word(
+/// Build the queue PLCP1 word for a rate already guarded to the finite legacy
+/// or HT non-HE range 0..=35.
+pub(crate) const fn basic_non_he_plcp1_word(
     rate: u8,
     flags: u32,
     queue_word_low: u8,
     protection: u32,
 ) -> u32 {
-    let mut word = if flags & 0x0100_0000 != 0 {
+    let mut word = if rate < 16 {
+        0
+    } else if flags & 0x0100_0000 != 0 {
         0x0600_0000
     } else {
         0x0200_0000
@@ -67,8 +70,8 @@ pub(crate) const fn basic_data_length_word(rate: u8, length: u32, entry_flags: u
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_data_length_word, basic_htsig_word, basic_length_control_word, basic_plcp0_word,
-        basic_plcp1_word, ht_htsig_word,
+        basic_data_length_word, basic_htsig_word, basic_length_control_word,
+        basic_non_he_plcp1_word, basic_plcp0_word, ht_htsig_word,
     };
 
     const ADDRESS: usize = 0x2f12_3456;
@@ -90,17 +93,26 @@ mod tests {
 
     #[test]
     fn reproduces_basic_ht_plcp1_format_and_rate_fields() {
-        assert_eq!(basic_plcp1_word(16, 0, 0, 0), 0x0201_0000);
-        assert_eq!(basic_plcp1_word(35, 0x0100_0000, 0, 0), 0x0600_3000);
-        assert_eq!(basic_plcp1_word(16, 0x0100_0000, 0x12, 0), 0x0625_0000);
+        assert_eq!(basic_non_he_plcp1_word(16, 0, 0, 0), 0x0201_0000);
+        assert_eq!(basic_non_he_plcp1_word(35, 0x0100_0000, 0, 0), 0x0600_3000);
+        assert_eq!(
+            basic_non_he_plcp1_word(16, 0x0100_0000, 0x12, 0),
+            0x0625_0000
+        );
+    }
+
+    #[test]
+    fn reproduces_legacy_plcp1_without_ht_format_bits() {
+        assert_eq!(basic_non_he_plcp1_word(0, 0, 0, 0), 0);
+        assert_eq!(basic_non_he_plcp1_word(15, 0, 0x12, 0), 0x0024_f000);
     }
 
     #[test]
     fn sets_protection_only_when_both_guard_bits_are_present() {
-        assert_eq!(basic_plcp1_word(16, 0x0000_4000, 0, 0), 0x0201_0000);
-        assert_eq!(basic_plcp1_word(16, 0, 0, 0x0000_8000), 0x0201_0000);
+        assert_eq!(basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0), 0x0201_0000);
+        assert_eq!(basic_non_he_plcp1_word(16, 0, 0, 0x0000_8000), 0x0201_0000);
         assert_eq!(
-            basic_plcp1_word(16, 0x0000_4000, 0, 0x0000_8000),
+            basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0x0000_8000),
             0x2201_0000
         );
     }
