@@ -24,7 +24,7 @@ const FRAME_NEXT_OFFSET: usize = 0x30;
 const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const FRAME_TYPE_OFFSET: usize = 0x1a;
 const DESCRIPTOR_CALLBACK_MASK_OFFSET: usize = 0x14;
-const DESCRIPTOR_FRAGMENT_BIT: u32 = 0x0080_0000;
+const DESCRIPTOR_PERSISTENT_BIT: u32 = 0x0080_0000;
 const DESCRIPTOR_DIRECT_RECYCLE_BIT: u32 = 0x0400_0000;
 const DESCRIPTOR_RATE_CONTROL_BIT: u32 = 0x0000_0008;
 const DESCRIPTOR_RATE_CONTROL_SKIP_MASK: u32 = 0x4040_4000;
@@ -497,7 +497,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     // publish the buffer as reusable before the callback arms the next TBTT.
     descriptor
         .cast::<u32>()
-        .write(descriptor_flags & !DESCRIPTOR_FRAGMENT_BIT);
+        .write(descriptor_flags & !DESCRIPTOR_PERSISTENT_BIT);
     __wrap_ieee80211_hostapd_beacon_txcb(frame.cast());
     if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
         return Err(TxDoneError::StrictCallbackFailed);
@@ -919,11 +919,13 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     // The stock bit-13 branch only feeds `trc_onPPTxDone` after inspecting
     // optional tracing metadata. Strict mode has no tracing consumer and
     // intentionally omits that side effect; the bit does not alter ownership
-    // or recycling. Fragment completion, in contrast, rewrites and requeues
-    // the frame and remains unsupported.
-    let unsupported = flags & DESCRIPTOR_FRAGMENT_BIT;
-    if unsupported != 0 {
-        return Err(TxDoneError::UnsupportedDescriptorFlags(unsupported));
+    // or recycling. Bit 23 marks a retained management object: restore its
+    // original cached layout and deliberately leave it owned by net80211.
+    if flags & DESCRIPTOR_PERSISTENT_BIT != 0 {
+        restore_persistent_management(frame, descriptor)?;
+        state.frame = ptr::null_mut();
+        state.phase = PHASE_LOAD;
+        return enqueue_step();
     }
     if ptr::addr_of!(g_tx_done_cb_func).read() != 0 {
         return Err(TxDoneError::UserCallbackInstalled);
@@ -947,6 +949,61 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     state.frame = ptr::null_mut();
     state.phase = PHASE_LOAD;
     enqueue_step()
+}
+
+unsafe fn restore_persistent_management(
+    frame: *mut u8,
+    descriptor: *mut u8,
+) -> Result<(), TxDoneError> {
+    let first_buffer = frame.add(4).cast::<*mut u8>().read_unaligned();
+    let tail_buffer = frame.add(8).cast::<*mut u8>().read_unaligned();
+    if first_buffer.is_null()
+        || first_buffer != tail_buffer
+        || !crate::esf::is_strict_recyclable_frame(frame)
+    {
+        return Err(TxDoneError::NonStaticFrameType(
+            frame.add(FRAME_TYPE_OFFSET).read(),
+        ));
+    }
+    let metadata = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
+    if metadata.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let layout = frame.add(0x24).cast::<u16>().read_unaligned();
+    let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
+    let input = crate::tx_security::TxSecurityLayoutInput {
+        header_len: lengths as u16,
+        remaining_len: (lengths >> 16) as u16,
+        layout,
+        buffer_flags: first_buffer.cast::<u32>().read_unaligned(),
+        descriptor_flags,
+        descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
+        frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
+    };
+    let output = crate::tx_security::strict_persistent_management_completion_layout(input)
+        .ok_or(TxDoneError::UnsupportedDescriptorFlags(descriptor_flags))?;
+
+    first_buffer
+        .add(4)
+        .cast::<*mut u8>()
+        .write_unaligned(metadata.add(8));
+    frame
+        .add(0x14)
+        .cast::<u16>()
+        .write_unaligned(output.header_len);
+    frame
+        .add(0x16)
+        .cast::<u16>()
+        .write_unaligned(output.remaining_len);
+    frame.add(0x24).cast::<u16>().write_unaligned(output.layout);
+    first_buffer
+        .cast::<u32>()
+        .write_unaligned(output.buffer_flags);
+    descriptor
+        .cast::<u32>()
+        .write_unaligned(output.descriptor_flags);
+    Ok(())
 }
 
 #[cfg(feature = "hil-vendor-tx")]

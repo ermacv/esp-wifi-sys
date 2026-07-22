@@ -25,6 +25,61 @@ pub struct ApBeaconCompletionLayout {
     pub descriptor_security: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistentManagementCompletionLayout {
+    pub header_len: u16,
+    pub remaining_len: u16,
+    pub layout: u16,
+    pub buffer_flags: u32,
+    pub descriptor_flags: u32,
+}
+
+/// Restore one retained plaintext management buffer after its transmission.
+///
+/// The pinned `ppProcTxDone` branch removes the four-byte FCS reservation and
+/// the one-transmission eight-byte PP metadata prefix, then leaves the ESF
+/// owned by net80211 instead of recycling it. AP probe/authentication/
+/// association replies use this path so their cached fixed-pool object can be
+/// submitted again.
+pub const fn strict_persistent_management_completion_layout(
+    input: TxSecurityLayoutInput,
+) -> Option<PersistentManagementCompletionLayout> {
+    const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
+    const PERSISTENT_BIT: u32 = 0x0080_0000;
+
+    let subtype = input.frame_control & 0x00f0;
+    if input.frame_control & 0x000c != 0
+        || !matches!(subtype, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
+        || input.header_len < 8
+        || input.remaining_len < 4
+        || input.layout & 0xe000 != 0x2000
+        || input.descriptor_flags != PERSISTENT_BIT
+        || input.descriptor_security != 0
+    {
+        return None;
+    }
+    let encoded_len = ((input.buffer_flags & BUFFER_LENGTH_MASK) >> 14) as u16;
+    let transmitted_len = match input.header_len.checked_add(input.remaining_len) {
+        Some(value) => value,
+        None => return None,
+    };
+    if encoded_len != transmitted_len {
+        return None;
+    }
+    let restored_len = match encoded_len.checked_sub(12) {
+        Some(value) => value,
+        None => return None,
+    };
+
+    Some(PersistentManagementCompletionLayout {
+        header_len: input.header_len - 8,
+        remaining_len: input.remaining_len - 4,
+        layout: input.layout & !0x2000,
+        buffer_flags: (input.buffer_flags & !BUFFER_LENGTH_MASK) | ((restored_len as u32) << 14),
+        descriptor_flags: input.descriptor_flags & !PERSISTENT_BIT,
+    })
+}
+
 /// Remove the per-transmission FCS reservation from a persistent AP beacon
 /// while retaining its one-time PP metadata headroom.
 pub const fn strict_ap_beacon_completion_layout(
@@ -278,7 +333,8 @@ unsafe fn trap_invalid_tx_security() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
+        strict_ap_beacon_completion_layout, strict_persistent_management_completion_layout,
+        strict_tx_security_layout, ApBeaconCompletionLayout, PersistentManagementCompletionLayout,
         TxSecurityLayoutInput, TxSecurityLayoutOutput,
     };
 
@@ -337,6 +393,41 @@ mod tests {
 
         for (input, expected) in cases {
             assert_eq!(strict_tx_security_layout(input), Some(expected));
+        }
+    }
+
+    #[test]
+    fn restores_retained_management_layout_without_recycling_it() {
+        let completed = input(0x0066_0020, 0x2000, 0xc021_8084, 0x0080_0000, 0x00b0);
+        assert_eq!(
+            strict_persistent_management_completion_layout(completed),
+            Some(PersistentManagementCompletionLayout {
+                header_len: 0x18,
+                remaining_len: 0x62,
+                layout: 0,
+                buffer_flags: 0xc01e_8084,
+                descriptor_flags: 0,
+            })
+        );
+
+        for rejected in [
+            TxSecurityLayoutInput {
+                layout: 0,
+                ..completed
+            },
+            TxSecurityLayoutInput {
+                frame_control: 0x0080,
+                ..completed
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0000,
+                ..completed
+            },
+        ] {
+            assert_eq!(
+                strict_persistent_management_completion_layout(rejected),
+                None
+            );
         }
     }
 
