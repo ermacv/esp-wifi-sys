@@ -157,10 +157,33 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
 
     // No packet state is mutated until every pointer and recovered invariant
     // above has been checked. Unknown states therefore trap transactionally.
+    // Keep the admitted mutation order identical to the pinned leaf because
+    // the frame is shared with the TX interrupt path once preparation starts.
+    const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
+    const BUFFER_TERMINAL: u32 = 0x4000_0000;
+    let encoded_len = ((input.buffer_flags & BUFFER_LENGTH_MASK) >> 14) as u16;
+    let security_len = encoded_len + 4;
+    let security_flags =
+        (input.buffer_flags & !BUFFER_LENGTH_MASK) | (u32::from(security_len) << 14);
+
+    frame
+        .add(FRAME_LENGTHS_OFFSET + 2)
+        .cast::<u16>()
+        .write_unaligned(output.remaining_len);
+    tail_buffer.cast::<u32>().write_unaligned(security_flags);
+    tail_buffer
+        .cast::<u32>()
+        .write_unaligned(security_flags | BUFFER_TERMINAL);
+
+    let metadata = data.sub(8);
+    first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(metadata);
     frame
         .add(FRAME_LENGTHS_OFFSET)
-        .cast::<u32>()
-        .write_unaligned(u32::from(output.header_len) | (u32::from(output.remaining_len) << 16));
+        .cast::<u16>()
+        .write_unaligned(output.header_len);
     frame
         .add(FRAME_LAYOUT_OFFSET)
         .cast::<u16>()
@@ -168,13 +191,10 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     first_buffer
         .cast::<u32>()
         .write_unaligned(output.buffer_flags);
-    let metadata = data.sub(8);
-    metadata.cast::<u32>().write_unaligned(output.metadata_len);
+
+    metadata.cast::<u32>().write_unaligned(0);
     metadata.add(4).cast::<u32>().write_unaligned(0);
-    first_buffer
-        .add(BUFFER_DATA_OFFSET)
-        .cast::<*mut u8>()
-        .write_unaligned(metadata);
+    metadata.cast::<u32>().write_unaligned(output.metadata_len);
     0
 }
 
