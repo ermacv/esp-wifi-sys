@@ -269,9 +269,8 @@ pub(crate) unsafe fn enable(window: u16) {
 /// the frame into any vendor PP list or recycling it.
 #[link_section = ".rwtext.wifi_strict.hil_ampdu_intercept"]
 pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> i32 {
-    record_mapper_state(frame, &LAST_MAPPER_PRE);
+    let mapper_pre = read_mapper_state(frame);
     let mapped = __real_ppMapTxQueue(frame);
-    record_mapper_state(frame, &LAST_MAPPER_POST);
     let state = &mut *STATE.0.get();
     // The activation edge is delivered by a management RX callback that is
     // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
@@ -291,6 +290,9 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     if mapped != 0 || !eligible_qos_data(frame) {
         return mapped;
     }
+    record_mapper_state(&LAST_MAPPER_PRE, &mapper_pre);
+    let mapper_post = read_mapper_state(frame);
+    record_mapper_state(&LAST_MAPPER_POST, &mapper_post);
     ELIGIBLE.fetch_add(1, Ordering::Relaxed);
     if push_ready(state, frame).is_err() {
         fail_and_trap();
@@ -305,7 +307,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
 }
 
 #[inline(always)]
-unsafe fn record_mapper_state(frame: *mut u8, destination: &[AtomicU32; 5]) {
+unsafe fn read_mapper_state(frame: *mut u8) -> [u32; 5] {
     let mut words = [0_u32; 5];
     if !frame.is_null() {
         let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
@@ -320,6 +322,11 @@ unsafe fn record_mapper_state(frame: *mut u8, destination: &[AtomicU32; 5]) {
             words[4] = u32::from(peer.add(0x84).read());
         }
     }
+    words
+}
+
+#[inline(always)]
+fn record_mapper_state(destination: &[AtomicU32; 5], words: &[u32; 5]) {
     let mut index = 0_usize;
     while index < words.len() {
         destination[index].store(words[index], Ordering::Release);
