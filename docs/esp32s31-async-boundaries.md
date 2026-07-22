@@ -424,8 +424,8 @@ The strict gate still intentionally fails. Confirmed remaining paths include:
 - the stock WPA2-Personal `eapol_txcb` target reaching `calloc/free` through
   eloop timeouts and `ets_delay_us` through deauthentication if strict
   integration fails to install the provided async TX-done callback first;
-- basic retry submission now enters only the pinned PPDU-formatting leaf and
-  its finite PHY/MMIO helpers; unobserved RTS and generic-error outcomes still
+- basic retry submission now enters only the pinned finite PLCP/HTSIG and
+  terminal PHY/MMIO leaves; unobserved RTS and generic-error outcomes still
   enter their complete vendor handlers, and collision plus
   connection-management state transitions are not yet reconstructed;
 - explicit disassociation, deauthentication, and off-channel action completion
@@ -500,7 +500,11 @@ as either one direct per-peer selection or at most four cumulative fallback
 table entries. It then performs the status-three descriptor transition,
 long-frame classification, lifetime timeout, bounded contention backoff, EDCA
 configuration, and basic queue enable in Rust/MMIO before calling
-`hal_mac_tx_set_ppdu` exactly once. This removes `lmacTxFrame`, ROM
+the finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, `mac_tx_set_htsig`,
+`mac_tx_get_rts_rate`, and `hal_set_tx_pti` leaves directly. Rust reproduces
+the bounded RTS/data power-table reads, queue PPDU-control write, and the
+`coex_pti_tab[1]` priority clamp. This removes `hal_mac_tx_set_ppdu` and its
+indirect `mac_tx_set_pti` OSI callback in addition to `lmacTxFrame`, ROM
 `lmacSetTxFrame`, `ppProcessLifeTime`, the OSI random callback, the common EDCA
 helper, and the common TXQ-enable helper from the retry path. In particular,
 the unsupported-type `wifi_log` plus infinite loop in `ppProcessLifeTime` is no
@@ -517,10 +521,19 @@ WPA2/DHCP/DNS/TCP/HTTP/UDP test passed at 27.263 Mbit/s with 4/4 HTTP transfers
 and zero post-takeover allocation, blocking callbacks, task delays, direct
 delays, or queue rejection.
 
+The following PPDU-boundary HIL run exercised the Rust-owned formatting branch
+over 5,016 completions: 4,791 successes, 215 ACK timeouts, ten CTS timeouts,
+and 225 same-frame retries. WPA2/DHCP/DNS/TCP/HTTP plus 4,096/4,096 UDP
+datagrams passed at 28.670 Mbit/s. All application and PP queues had zero
+rejects, the allocation snapshot remained unchanged, and every blocking,
+task-delay, and direct-delay probe remained zero. A separate graph audit of
+the five remaining formatting leaves found no indirect call or control-flow
+cycle.
+
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
 TXOP/list state, and descriptor flags. This remains the HIL oracle for the
-remaining PPDU-formatting/PHY leaves and future aggregate enablement. RTS-error
+remaining PLCP/HTSIG/PHY leaves and future aggregate enablement. RTS-error
 and generic TX-error outcomes were not observed and remain vendor roots.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
@@ -562,8 +575,9 @@ AP authorization lives in a fixed Rust peer table and must gate every ordinary
 data-channel operation; EAPOL uses a separate pre-auth path. TXQ bitmap
 processing, the common TX-done tail, beacon completion, ordinary management
 completion, basic retry accounting/discard, and retry rate selection are
-classified. Basic retry scheduling and queue enable are Rust-owned; PPDU/PHY
-formatting and connection paths are not yet fully Rust-owned. Key installation additionally
+classified. Basic retry scheduling, PPDU orchestration, PTI selection, and
+queue enable are Rust-owned; the terminal PLCP/HTSIG/PHY leaves and connection
+paths are not yet fully Rust-owned. Key installation additionally
 requires no live RX fragment from the old key, because the stock cleanup path
 can call `wifi_log`.
 

@@ -216,6 +216,12 @@ The adjacent TX-PTI wrapper does not call the OSI coexistence callback. For a
 validated event below 48 it performs the pinned `coex_pti_tab[event]` byte read
 directly; an invalid event marks the buffer so the following management-output
 gate consumes and recycles it exactly once.
+The basic-HT retry path likewise no longer enters `hal_mac_tx_set_ppdu` or its
+indirect `mac_tx_set_pti` callback. Rust performs the bounded queue-control,
+power-table and PTI orchestration and calls only the five audited finite
+PLCP/HTSIG/PHY/MMIO leaves. A 5,016-completion HIL run exercised 225 retries and
+passed the strict WPA2/UDP/HTTP workload at 28.670 Mbit/s with every heap,
+blocking and delay probe at zero.
 The low-level NAN-slot hook is also interposed: non-NAN AP/STA descriptors pass
 the recovered bit test, while a NAN descriptor returns false without invoking
 the optional scheduler callback.
