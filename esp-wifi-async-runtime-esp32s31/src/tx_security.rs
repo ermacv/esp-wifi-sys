@@ -28,7 +28,7 @@ pub const fn strict_tx_security_layout(
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const BUFFER_TERMINAL: u32 = 0x4000_0000;
 
-    if input.layout & !0x0007 != 0 {
+    if input.layout & 0x2000 != 0 {
         return None;
     }
 
@@ -286,6 +286,16 @@ mod tests {
                 ..measured
             }),
             Some(expected),
+        );
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                layout: 8,
+                ..measured
+            }),
+            Some(TxSecurityLayoutOutput {
+                layout: 0x2008,
+                ..expected
+            }),
         );
     }
 
