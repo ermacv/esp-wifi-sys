@@ -214,7 +214,7 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
     }
     let rate = descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
     LAST_RATE.store(u32::from(rate), Ordering::Release);
-    if !(15..=22).contains(&rate) {
+    if !(16..=35).contains(&rate) {
         return false;
     }
     let first_buffer = frame
