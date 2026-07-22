@@ -604,7 +604,26 @@ pub(crate) fn give_internal_semaphore(handle: *mut c_void) -> bool {
 #[cfg(target_arch = "riscv32")]
 #[allow(dead_code)]
 pub(crate) fn enqueue_internal_event(event: PpEvent) -> bool {
-    STATE.queue.try_push(event).is_ok()
+    // Strict internal callbacks and pp_post are producers on the same radio
+    // hart, but an interrupt may preempt an executor/callback producer. The
+    // queue deliberately makes one CAS attempt and reports producer
+    // contention rather than spinning, so serialize that single publication
+    // with the same bounded local interrupt mask used by pp_post. This is not
+    // a cross-hart lock and contains no retry or wait.
+    if crate::critical::strict_wifi_hart_armed() {
+        if !crate::critical::on_strict_wifi_hart() {
+            return false;
+        }
+        let interrupt_state = unsafe { crate::critical::strict_wifi_int_disable() };
+        let queued = STATE.queue.try_push_deferred_wake(event).is_ok();
+        unsafe { crate::critical::strict_wifi_int_restore(interrupt_state) };
+        if queued {
+            STATE.queue.wake_consumer();
+        }
+        queued
+    } else {
+        STATE.queue.try_push(event).is_ok()
+    }
 }
 
 /// Queue the vendor's shutdown event without entering `pp_delete_task`, whose
