@@ -63,6 +63,8 @@ mod tx_mapper;
 mod tx_plcp;
 mod tx_proto;
 mod tx_rate;
+#[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
+mod tx_security_oracle;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod txdone;
 #[cfg(target_arch = "riscv32")]
@@ -219,6 +221,11 @@ pub use tx_intercept::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use tx_proto::strict_pp_tx_proto_proc;
+#[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
+pub use tx_security_oracle::{
+    hil_observe_tx_security, hil_tx_security_snapshot, HilTxSecurityRecord, HilTxSecuritySnapshot,
+    VendorTxSecurityLeaf, HIL_TX_SECURITY_CLASS_CAPACITY,
+};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
