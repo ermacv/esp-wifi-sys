@@ -1,5 +1,8 @@
 #[cfg(target_arch = "riscv32")]
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 #[cfg(target_arch = "riscv32")]
 const RATE_CONTEXT_PRIMARY_RATE_OFFSET: usize = 0x08;
@@ -19,11 +22,17 @@ const DESCRIPTOR_SCHEDULE_OFFSET: usize = 0x1c;
 const DESCRIPTOR_RATE_CLASS_OFFSET: usize = 0x2f;
 
 #[cfg(target_arch = "riscv32")]
+struct ScheduleCell(UnsafeCell<[u8; 12]>);
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Sync for ScheduleCell {}
+
+#[cfg(target_arch = "riscv32")]
 #[used]
 #[link_section = ".critical.data.wifi_strict.basic_secondary_schedule"]
-static BASIC_SECONDARY_SCHEDULE: [u8; 12] = [
+static BASIC_SECONDARY_SCHEDULE: ScheduleCell = ScheduleCell(UnsafeCell::new([
     0x00, 0x02, 0x00, 0x02, 0x00, 0x03, 0x00, 0x19, 0x20, 0x1e, 0x00, 0x00,
-];
+]));
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedRateScheduleSnapshot {
@@ -158,10 +167,10 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
                 },
             )
         }
-        3 => (
-            BASIC_SECONDARY_SCHEDULE.as_ptr().cast_mut(),
-            BASIC_SECONDARY_SCHEDULE[0],
-        ),
+        3 => {
+            let schedule = BASIC_SECONDARY_SCHEDULE.0.get().cast::<u8>();
+            (schedule, schedule.read())
+        }
         _ => return false,
     };
     if schedule.is_null() {
