@@ -1354,6 +1354,14 @@ unsafe extern "C" fn task_ms_to_tick(milliseconds: u32) -> i32 {
 }
 
 unsafe extern "C" fn task_get_current() -> *mut c_void {
+    #[cfg(target_arch = "riscv32")]
+    if STATE.virtual_task.is_started() && !crate::critical::strict_wifi_hart_armed() {
+        // There is one serialized composition-root caller between ppTask
+        // virtualization and strict takeover. Give that caller the logical
+        // Wi-Fi identity so `ieee80211_ioctl` executes finite control leaves
+        // inline instead of posting work to the task that does not exist.
+        return PP_TASK_HANDLE;
+    }
     current_task_handle()
 }
 
