@@ -192,14 +192,17 @@ pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, TIMER_CONTEXT_EVENT};
 #[cfg(target_arch = "riscv32")]
-pub use tx_ampdu::{assemble_basic_ht_ampdu, prepare_basic_ht_ampdu_chain, read_ht_block_ack};
+pub use tx_ampdu::{
+    assemble_basic_ht_ampdu, prepare_basic_ht_ampdu_chain, read_ht_block_ack,
+    restore_basic_ht_ampdu_chain,
+};
 pub use tx_ampdu::{
     basic_ht_ampdu_assembly, decode_ht_block_ack_registers, AddbaRequest,
     BasicHtAmpduAssemblyError, BasicHtAmpduAssemblyInput, BasicHtAmpduAssemblyOutput,
-    BasicHtAmpduChain, BasicHtAmpduChainError, HtAmpduLength, HtAmpduLengthAccumulator,
-    HtAmpduLengthError, HtBlockAckReadError, HtBlockAckRegisters, OperationalTxBlockAck,
-    TxAmpduBatch, TxAmpduBatchError, TxAmpduCompletion, TxAmpduDisposition, TxAmpduMpdu,
-    TxAmpduSlot, TxBlockAckAlarm, TxBlockAckBitmap, TxBlockAckConfig, TxBlockAckError,
+    BasicHtAmpduChain, BasicHtAmpduChainError, BasicHtAmpduRestoreError, HtAmpduLength,
+    HtAmpduLengthAccumulator, HtAmpduLengthError, HtBlockAckReadError, HtBlockAckRegisters,
+    OperationalTxBlockAck, TxAmpduBatch, TxAmpduBatchError, TxAmpduCompletion, TxAmpduDisposition,
+    TxAmpduMpdu, TxAmpduSlot, TxBlockAckAlarm, TxBlockAckBitmap, TxBlockAckConfig, TxBlockAckError,
     TxBlockAckResponse, TxBlockAckSession, ADDBA_ACTION_BODY_LEN, TX_AMPDU_SLOT_CAPACITY,
     TX_BLOCK_ACK_MAX_WINDOW,
 };

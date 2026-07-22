@@ -516,6 +516,15 @@ then route each BlockAck bit through one executor continuation. Until that
 completion owner is installed, the existing single-frame success/retry path
 continues to reject every linked or aggregate descriptor.
 
+`BasicHtAmpduChain` now is that reversible ownership token. Besides the public
+first/last/count/length summary, it privately retains all 32 validated frame
+pointers and the exact pre-assembly scalar values. The SRAM-only
+`restore_basic_ht_ampdu_chain` validates every frame link and every tail-buffer
+link plus the aggregate first/tail markers before its first write, then removes
+both chains and restores the original payload word, descriptor words,
+remaining length, timestamp, and tail flags. It deliberately performs no
+recycle or retry; those decisions remain executor continuations.
+
 The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
 The original `0x81e`-byte body performs the required fixed MMIO decode first,
 then enters HE MPLEN list maintenance, connection-state locks, formatters, and

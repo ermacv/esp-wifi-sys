@@ -178,6 +178,40 @@ pub struct BasicHtAmpduChain {
     pub last: *mut u8,
     pub aggregate_length: u16,
     pub subframes: u8,
+    frames: [*mut u8; TX_AMPDU_SLOT_CAPACITY],
+    original_first_remaining_length: u16,
+    original_first_payload_word: u32,
+    original_first_descriptor_flags: u32,
+    original_first_descriptor_word1: u32,
+    original_first_timestamp: u32,
+    original_tail_buffer_flags: u32,
+}
+
+impl BasicHtAmpduChain {
+    /// Return one frame owned by this prepared aggregate.
+    ///
+    /// The fixed array is intentionally private so no caller can substitute a
+    /// pointer after validation and before hardware completion.
+    pub const fn frame(&self, index: u8) -> Option<*mut u8> {
+        if index < self.subframes {
+            Some(self.frames[index as usize])
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BasicHtAmpduRestoreError {
+    InvalidCount(u8),
+    NullFrame(u8),
+    FrameLinkMismatch(u8),
+    NullBufferDescriptor(u8),
+    BufferLinkMismatch(u8),
+    NullDescriptor,
+    NullPayload,
+    AggregateStateMissing(u32),
+    TailStateMissing(u32),
 }
 
 /// Reproduce the mutation made by the pinned non-HE `ppAssembleAMPDU` body.
@@ -511,6 +545,21 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
     })
     .map_err(BasicHtAmpduChainError::Assembly)?;
 
+    let original_first_remaining_length = first
+        .add(FRAME_REMAINING_LENGTH_OFFSET)
+        .cast::<u16>()
+        .read();
+    let original_first_payload_word = first_payload.cast::<u32>().read();
+    let original_first_descriptor_flags = first_descriptor.cast::<u32>().read();
+    let original_first_descriptor_word1 = first_descriptor.add(4).cast::<u32>().read();
+    let original_first_timestamp = first_descriptor
+        .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .read();
+    let original_tail_buffer_flags = tail_buffer.cast::<u32>().read();
+    let mut owned_frames = [core::ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY];
+    owned_frames[..frames.len()].copy_from_slice(frames);
+
     index = 0;
     while index < frames.len() {
         let frame = frames[index];
@@ -556,7 +605,156 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         last,
         aggregate_length: aggregate.bytes,
         subframes: aggregate.subframes,
+        frames: owned_frames,
+        original_first_remaining_length,
+        original_first_payload_word,
+        original_first_descriptor_flags,
+        original_first_descriptor_word1,
+        original_first_timestamp,
+        original_tail_buffer_flags,
     })
+}
+
+/// Validate and undo the exact mutations made by
+/// `prepare_basic_ht_ampdu_chain`.
+///
+/// Validation covers the complete fixed frame/buffer topology before the
+/// first write. Restoration then detaches both linked representations and
+/// reinstates every scalar changed by the assembly oracle. It neither
+/// recycles nor retries a frame; the executor remains the sole owner of all
+/// returned MPDUs and can process one completion per wake.
+///
+/// # Safety
+///
+/// `chain` must still exclusively own every SRAM pointer captured during
+/// preparation. Hardware must be idle for the corresponding queue and no
+/// frame may be recycled or relinked concurrently.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_restore"]
+pub unsafe fn restore_basic_ht_ampdu_chain(
+    chain: &BasicHtAmpduChain,
+) -> Result<(), BasicHtAmpduRestoreError> {
+    const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_TAIL_BUFFER_OFFSET: usize = 0x08;
+    const FRAME_REMAINING_LENGTH_OFFSET: usize = 0x16;
+    const FRAME_NEXT_OFFSET: usize = 0x30;
+    const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const BUFFER_NEXT_OFFSET: usize = 0x08;
+    const DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+
+    if chain.subframes < 2 || usize::from(chain.subframes) > TX_AMPDU_SLOT_CAPACITY {
+        return Err(BasicHtAmpduRestoreError::InvalidCount(chain.subframes));
+    }
+    let count = usize::from(chain.subframes);
+    let mut index = 0_usize;
+    while index < count {
+        let frame = chain.frames[index];
+        if frame.is_null() {
+            return Err(BasicHtAmpduRestoreError::NullFrame(index as u8));
+        }
+        let expected_next = if index + 1 < count {
+            chain.frames[index + 1]
+        } else {
+            core::ptr::null_mut()
+        };
+        let actual_next = frame.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
+        if actual_next != expected_next {
+            return Err(BasicHtAmpduRestoreError::FrameLinkMismatch(index as u8));
+        }
+        let tail_buffer = frame.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+        if tail_buffer.is_null() {
+            return Err(BasicHtAmpduRestoreError::NullBufferDescriptor(index as u8));
+        }
+        let expected_next_buffer = if expected_next.is_null() {
+            core::ptr::null_mut()
+        } else {
+            expected_next
+                .add(FRAME_FIRST_BUFFER_OFFSET)
+                .cast::<*mut u8>()
+                .read()
+        };
+        let actual_next_buffer = tail_buffer.add(BUFFER_NEXT_OFFSET).cast::<*mut u8>().read();
+        if actual_next_buffer != expected_next_buffer {
+            return Err(BasicHtAmpduRestoreError::BufferLinkMismatch(index as u8));
+        }
+        index += 1;
+    }
+
+    let first_descriptor = chain
+        .first
+        .add(FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_descriptor.is_null() {
+        return Err(BasicHtAmpduRestoreError::NullDescriptor);
+    }
+    let flags = first_descriptor.cast::<u32>().read();
+    if flags & TX_DESCRIPTOR_AMPDU_BIT == 0 {
+        return Err(BasicHtAmpduRestoreError::AggregateStateMissing(flags));
+    }
+    let first_buffer = chain
+        .first
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let tail_buffer = chain
+        .last
+        .add(FRAME_TAIL_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_buffer.is_null() || tail_buffer.is_null() {
+        return Err(BasicHtAmpduRestoreError::NullBufferDescriptor(0));
+    }
+    let first_payload = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if first_payload.is_null() {
+        return Err(BasicHtAmpduRestoreError::NullPayload);
+    }
+    let tail_flags = tail_buffer.cast::<u32>().read();
+    if tail_flags & TX_BUFFER_END_BIT == 0 {
+        return Err(BasicHtAmpduRestoreError::TailStateMissing(tail_flags));
+    }
+
+    index = 0;
+    while index < count {
+        let frame = chain.frames[index];
+        let tail_buffer = frame.add(FRAME_TAIL_BUFFER_OFFSET).cast::<*mut u8>().read();
+        frame
+            .add(FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(core::ptr::null_mut());
+        tail_buffer
+            .add(BUFFER_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(core::ptr::null_mut());
+        index += 1;
+    }
+    first_payload
+        .cast::<u32>()
+        .write(chain.original_first_payload_word);
+    first_descriptor
+        .cast::<u32>()
+        .write(chain.original_first_descriptor_flags);
+    first_descriptor
+        .add(4)
+        .cast::<u32>()
+        .write(chain.original_first_descriptor_word1);
+    first_descriptor
+        .add(DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .write(chain.original_first_timestamp);
+    chain
+        .first
+        .add(FRAME_REMAINING_LENGTH_OFFSET)
+        .cast::<u16>()
+        .write(chain.original_first_remaining_length);
+    tail_buffer
+        .cast::<u32>()
+        .write(chain.original_tail_buffer_flags);
+    Ok(())
 }
 
 const BA_PARAMETER_AMSDU: u16 = 1;
@@ -1219,6 +1417,30 @@ mod tests {
                 0xe186_8612
             ))
         );
+    }
+
+    #[test]
+    fn prepared_chain_exposes_only_its_validated_frame_prefix() {
+        let mut frames = [core::ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY];
+        frames[0] = 0x1000_usize as *mut u8;
+        frames[1] = 0x2000_usize as *mut u8;
+        let chain = BasicHtAmpduChain {
+            first: frames[0],
+            last: frames[1],
+            aggregate_length: 3_000,
+            subframes: 2,
+            frames,
+            original_first_remaining_length: 1_466,
+            original_first_payload_word: 0x0100_0612,
+            original_first_descriptor_flags: 0x0004_2009,
+            original_first_descriptor_word1: 0xa5a5_0020,
+            original_first_timestamp: 0x1234_5678,
+            original_tail_buffer_flags: 0xa186_8612,
+        };
+        assert_eq!(chain.frame(0), Some(0x1000_usize as *mut u8));
+        assert_eq!(chain.frame(1), Some(0x2000_usize as *mut u8));
+        assert_eq!(chain.frame(2), None);
+        assert_eq!(chain.frame(u8::MAX), None);
     }
 
     #[test]
