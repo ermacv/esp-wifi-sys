@@ -12,7 +12,6 @@ const ROOTS: &[&str] = &[
     "pp_timer_do_process",
     "pp_default_event_handler",
     // The Rust event-23 dispatcher owns every hardware-completion outcome.
-    "lmacProcessCollisions_task",
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
     // dispatch both mode-0 and the timeout/discard mode-1 bits directly. The
@@ -78,6 +77,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacProcessAckTimeout",
     "lmacProcessTxRtsError",
     "lmacProcessTxError",
+    "lmacProcessCollisions_task",
     "ppRxPkt",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",

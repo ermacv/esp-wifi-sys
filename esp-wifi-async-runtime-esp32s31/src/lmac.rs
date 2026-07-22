@@ -143,6 +143,7 @@ pub enum LmacAsyncError {
     UnsupportedTxRetryChain,
     UnsupportedTxRetryDescriptor(u32),
     UnsupportedTxRetryState(u32),
+    UnsupportedTxCollisionMplen(u32),
     InvalidTxRetryRateControl,
     InvalidTxRetryScheduler,
     InvalidTxSubmissionPointer,
@@ -289,6 +290,7 @@ pub struct LmacTxCompleteSnapshot {
     pub cts_timeout: u32,
     pub tx_error: u32,
     pub ack_timeout: u32,
+    pub collisions: u32,
     pub unexpected_status: u32,
     pub success_queue_mask: u32,
     pub success_queue_kind_mask: u32,
@@ -334,6 +336,7 @@ struct TxCompleteCounters {
     completions: AtomicU32,
     stale: AtomicU32,
     outcomes: [AtomicU32; 6],
+    collisions: AtomicU32,
     unexpected_status: AtomicU32,
     success_queue_mask: AtomicU32,
     success_queue_kind_mask: AtomicU32,
@@ -405,6 +408,7 @@ impl TxCompleteCounters {
             completions: AtomicU32::new(0),
             stale: AtomicU32::new(0),
             outcomes: [const { AtomicU32::new(0) }; 6],
+            collisions: AtomicU32::new(0),
             unexpected_status: AtomicU32::new(0),
             success_queue_mask: AtomicU32::new(0),
             success_queue_kind_mask: AtomicU32::new(0),
@@ -437,6 +441,7 @@ pub fn lmac_tx_complete_snapshot() -> LmacTxCompleteSnapshot {
         cts_timeout: counters.outcomes[2].load(Ordering::Acquire),
         tx_error: counters.outcomes[4].load(Ordering::Acquire),
         ack_timeout: counters.outcomes[5].load(Ordering::Acquire),
+        collisions: counters.collisions.load(Ordering::Acquire),
         unexpected_status: counters.unexpected_status.load(Ordering::Acquire),
         success_queue_mask: counters.success_queue_mask.load(Ordering::Acquire),
         success_queue_kind_mask: counters.success_queue_kind_mask.load(Ordering::Acquire),
@@ -739,6 +744,62 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
     }
     Ok(())
+}
+
+/// Replace event 24 with one collision queue per executor action.
+///
+/// `__wrap_hal_mac_get_txq_state(0)` exposes one bitmap bit and reposts a
+/// captured remainder. Strict basic-HT keeps MPLEN disabled, so the stock
+/// linked-list clear is a proven no-op; an unexpected live MPLEN state fails
+/// before the queue or frame is mutated.
+#[link_section = ".rwtext.wifi_strict.tx_collision_dispatch"]
+#[inline(never)]
+#[export_name = "__esp_wifi_strict_process_tx_collision"]
+pub(crate) unsafe fn process_tx_collision() -> Result<(), LmacAsyncError> {
+    let bits = __wrap_hal_mac_get_txq_state(0);
+    if txq_split_failed() {
+        return Err(LmacAsyncError::TxQueueSplitFailed);
+    }
+    if bits == 0 {
+        return Ok(());
+    }
+
+    let queue = bits.trailing_zeros() as u8;
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    if instances.is_null() {
+        return Err(LmacAsyncError::InstancesUnavailable);
+    }
+    let queue_state = instances.add(usize::from(queue) * TX_QUEUE_STATE_SIZE);
+    if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 1 {
+        hal_mac_clr_txq_state(0, queue);
+        return Ok(());
+    }
+    let frame = queue_state.cast::<*mut u8>().read();
+    if frame.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if descriptor.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+
+    let ppdu_control =
+        (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *const u32;
+    let ppdu_state = ppdu_control.read_volatile();
+    if ppdu_state & 0x08 != 0 {
+        return Err(LmacAsyncError::UnsupportedTxCollisionMplen(ppdu_state));
+    }
+
+    hal_mac_txq_disable(queue);
+    hal_mac_clr_txq_state(0, queue);
+    #[cfg(feature = "hil-vendor-tx")]
+    TX_COMPLETE_COUNTERS
+        .collisions
+        .fetch_add(1, Ordering::Relaxed);
+    process_tx_retry(queue_state, BasicRetryCause::Collision)
 }
 
 /// Recovered basic-HT ACK/CTS retry path.

@@ -44,6 +44,7 @@ unsafe extern "C" {
     fn lmacProcessTxTimeout();
     #[cfg(not(feature = "strict-no-wait"))]
     fn lmacProcessTxComplete();
+    #[cfg(not(feature = "strict-no-wait"))]
     fn lmacProcessCollisions_task();
     fn wdevProcessRxSucDataAll();
     #[cfg(not(feature = "strict-no-wait"))]
@@ -384,7 +385,7 @@ impl PpDispatcher for VendorPpDispatcher {
                     ppProcessRxPktHdr(event.argument)
                 }
                 PpAction::Fatal => {
-                    return Err(VendorDispatchError::FatalEvent(event.argument as usize))
+                    return Err(VendorDispatchError::FatalEvent(event.argument as usize));
                 }
                 PpAction::Shutdown => {
                     crate::adapter::mark_shutdown_processed();
@@ -429,7 +430,13 @@ impl PpDispatcher for VendorPpDispatcher {
                     #[cfg(not(feature = "strict-no-wait"))]
                     lmacProcessTxComplete();
                 }
-                PpAction::LmacCollision => lmacProcessCollisions_task(),
+                PpAction::LmacCollision => {
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::lmac::process_tx_collision()
+                        .map_err(VendorDispatchError::LmacContinuation)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    lmacProcessCollisions_task();
+                }
                 PpAction::WdevRxSuccess => {
                     wdevProcessRxSucDataAll();
                     #[cfg(feature = "strict-no-wait")]
