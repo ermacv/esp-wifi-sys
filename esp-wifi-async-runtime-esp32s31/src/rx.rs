@@ -29,6 +29,7 @@ unsafe extern "C" {
     fn ppDequeueRxq_Locked() -> *mut u8;
     fn ppRxProtoProc(packet: *mut u8, rx_control: *mut u8) -> i32;
     fn ppRecycleRxPkt(packet: *mut u8);
+    fn hostap_input(packet: *mut u8, rssi: i32, signal_length: u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,16 +262,35 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
         return;
     }
 
-    if flags & (0x20 | 0x40) != 0 {
-        let offset = if flags & 0x20 != 0 {
-            RX_AUX_CALLBACK_1_OFFSET
-        } else {
-            RX_AUX_CALLBACK_2_OFFSET
+    if flags & 0x20 != 0 {
+        let registered = unsafe {
+            txrx.add(RX_AUX_CALLBACK_1_OFFSET)
+                .cast::<Option<RxCallback>>()
+                .read()
         };
-        let registered = unsafe { txrx.add(offset).cast::<Option<RxCallback>>().read() }.is_some();
-        if registered {
+        if registered.map(|callback| callback as usize) != Some(hostap_input as usize) {
+            COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
+            unsafe { ppRecycleRxPkt(packet) };
+            return;
+        }
+        COUNTERS.auxiliary_callback.fetch_add(1, Ordering::Relaxed);
+        let rssi = unsafe { rx_control.cast::<i8>().read() } as i32;
+        let signal_length = unsafe { rx_control.add(20).read() } as u32;
+        unsafe { hostap_input(packet, rssi, signal_length) };
+        return;
+    }
+    if flags & 0x40 != 0 {
+        let registered = unsafe {
+            txrx.add(RX_AUX_CALLBACK_2_OFFSET)
+                .cast::<Option<RxCallback>>()
+                .read()
+        };
+        if registered.is_some() {
             COUNTERS.auxiliary_callback.fetch_add(1, Ordering::Relaxed);
         }
+        // Interface two is NAN in the pinned registration table. The strict
+        // STA/AP profile keeps it disabled and never enters its callback.
+        COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
     }
     unsafe { ppRecycleRxPkt(packet) };
 }
