@@ -19,6 +19,9 @@ strict-no-wait = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []
+# Laboratory bridge: retain fully prepared MPDUs at ppMapTxQueue and feed the
+# Rust A-MPDU submit/completion path. The vendor mapper remains in the graph.
+hil-ampdu-intercept = ["hil-vendor-tx"]
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-wifi-sys-esp32s31 = { path = "../esp-wifi-sys-esp32s31" }

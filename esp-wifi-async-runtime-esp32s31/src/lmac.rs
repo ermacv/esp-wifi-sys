@@ -1369,6 +1369,9 @@ unsafe fn dispatch_ampdu_completion_step(
         state.block_ack = None;
         state.active = false;
         state.next = 0;
+        #[cfg(feature = "hil-ampdu-intercept")]
+        crate::tx_intercept::on_hardware_completion()
+            .map_err(|_| LmacAsyncError::InternalQueueFull)?;
         if retry_count == 0 && pp_post(u32::from(logical_queue), ptr::null_mut()) != 0 {
             return Err(LmacAsyncError::InternalQueueFull);
         }

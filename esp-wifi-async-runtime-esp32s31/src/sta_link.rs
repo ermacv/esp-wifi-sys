@@ -1126,6 +1126,10 @@ mod target {
                     TX_ADDBA_ACCEPTED.fetch_add(1, Ordering::Relaxed);
                     TX_ADDBA_LAST_STATUS.store(0, Ordering::Release);
                     TX_ADDBA_WINDOW.store(u32::from(agreement.window), Ordering::Release);
+                    #[cfg(feature = "hil-ampdu-intercept")]
+                    unsafe {
+                        crate::tx_intercept::enable(agreement.window);
+                    }
                 }
                 Ok(TxBlockAckResponse::Rejected(status)) => {
                     unsafe {

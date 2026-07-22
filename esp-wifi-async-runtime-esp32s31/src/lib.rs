@@ -57,6 +57,8 @@ pub mod strict;
 pub mod task;
 pub mod timer;
 pub mod tx_ampdu;
+#[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
+mod tx_intercept;
 mod tx_plcp;
 mod tx_rate;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
@@ -207,6 +209,8 @@ pub use tx_ampdu::{
     TxBlockAckConfig, TxBlockAckError, TxBlockAckResponse, TxBlockAckSession,
     ADDBA_ACTION_BODY_LEN, TX_AMPDU_SLOT_CAPACITY, TX_BLOCK_ACK_MAX_WINDOW,
 };
+#[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
+pub use tx_intercept::{hil_ampdu_intercept_snapshot, HilAmpduInterceptSnapshot};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

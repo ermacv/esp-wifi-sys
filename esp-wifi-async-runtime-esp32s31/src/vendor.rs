@@ -88,6 +88,8 @@ pub enum VendorDispatchError {
     RxPump(crate::rx::RxPumpError),
     #[cfg(feature = "strict-no-wait")]
     ChannelSwitch(crate::channel_switch::ChannelSwitchError),
+    #[cfg(feature = "hil-ampdu-intercept")]
+    TxAmpduIntercept(crate::tx_intercept::TxInterceptError),
 }
 
 /// Calls the original finite PP handlers selected by the recovered `ppTask`
@@ -259,6 +261,12 @@ impl PpDispatcher for VendorPpDispatcher {
             if crate::lmac::is_ampdu_completion_continuation(event.kind) {
                 crate::lmac::dispatch_ampdu_completion()
                     .map_err(VendorDispatchError::LmacContinuation)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "hil-ampdu-intercept")]
+            if crate::tx_intercept::is_event(event.kind) {
+                crate::tx_intercept::dispatch().map_err(VendorDispatchError::TxAmpduIntercept)?;
                 return Ok(DispatchControl::Continue);
             }
 
