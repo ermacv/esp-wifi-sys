@@ -1,10 +1,11 @@
 //! HIL-only bridge from the prepared vendor MPDU boundary to Rust A-MPDU.
 //!
-//! This module deliberately remains behind `hil-ampdu-intercept`. Large QoS
-//! MPDUs use the recovered bounded Rust preparation path, while short and
-//! pre-ADDBA frames still call the real `ppMapTxQueue` as a qualification
-//! oracle. That remaining stateful dependency is not acceptable in the final
-//! strict runtime.
+//! This module deliberately remains behind `hil-ampdu-intercept`. Post-ADDBA
+//! QoS MPDUs use the recovered bounded Rust mapper preparation; large MPDUs
+//! continue into Rust A-MPDU while short MPDUs retain the proven one-frame
+//! submit path. Pre-ADDBA frames still call the real `ppMapTxQueue` as a
+//! qualification oracle. That remaining stateful dependency is not acceptable
+//! in the final strict runtime.
 
 use core::{
     cell::UnsafeCell,
@@ -286,7 +287,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     }
     let state = &mut *STATE.0.get();
     ENABLED_CALLS.fetch_add(1, Ordering::Relaxed);
-    if eligible_qos_data(frame) {
+    if let Some(aggregate_eligible) = strict_qos_data(frame) {
         let mapper_pre = read_mapper_state(frame);
         // For the guarded strict STA QoS state, the recovered mapper oracle
         // leaves the already selected logical queue and every frame/peer word
@@ -313,6 +314,12 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         MAPPER_BYPASSED.fetch_add(1, Ordering::Relaxed);
         LAST_MAPPED.store(0, Ordering::Release);
         MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
+        if !aggregate_eligible {
+            // The mapper is fully bypassed, but ppTxPkt retains ownership and
+            // submits this short QoS MPDU on its proven one-frame path. Short
+            // A-MPDU assembly is qualified independently.
+            return 0;
+        }
         ELIGIBLE.fetch_add(1, Ordering::Relaxed);
         if push_ready(state, frame).is_err() {
             fail_and_trap();
@@ -377,37 +384,39 @@ unsafe fn load_enabled_from_callback_context() -> bool {
     value != 0
 }
 
-unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
+/// Return whether a strict QoS data frame is large enough for the qualified
+/// A-MPDU path. `Some(false)` remains a valid mapper-bypass candidate.
+unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
     if frame.is_null() {
-        return false;
+        return None;
     }
     let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
     if descriptor.is_null() {
-        return false;
+        return None;
     }
     let descriptor_word = descriptor.cast::<u32>().read();
     LAST_DESCRIPTOR.store(descriptor_word, Ordering::Release);
     if descriptor_word & DESCRIPTOR_UNSUPPORTED_MASK != 0 {
-        return false;
+        return None;
     }
     let rate = descriptor.add(DESCRIPTOR_RATE_OFFSET).read();
     LAST_RATE.store(u32::from(rate), Ordering::Release);
     if !(16..=35).contains(&rate) {
-        return false;
+        return None;
     }
     let first_buffer = frame
         .add(FRAME_FIRST_BUFFER_OFFSET)
         .cast::<*mut u8>()
         .read();
     if first_buffer.is_null() {
-        return false;
+        return None;
     }
     let mut header = first_buffer
         .add(BUFFER_DATA_OFFSET)
         .cast::<*mut u8>()
         .read();
     if header.is_null() {
-        return false;
+        return None;
     }
     let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
     LAST_LAYOUT.store(u32::from(layout), Ordering::Release);
@@ -416,16 +425,20 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
     // guarded mapper state; retain the size counter to keep the two classes
     // visible in HIL diagnostics.
     if layout & 0x2000 == 0 {
-        return false;
+        return None;
     }
     let mpdu_length = header.cast::<u32>().read() & 0x3fff;
-    if mpdu_length < MIN_HIL_MPDU_LENGTH {
-        BELOW_MIN_LENGTH.fetch_add(1, Ordering::Relaxed);
-    }
+    let aggregate_eligible = mpdu_length >= MIN_HIL_MPDU_LENGTH;
     header = header.add(8);
     let frame_control = header.cast::<u16>().read_unaligned();
     LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Release);
-    frame_control & 0x008c == 0x0088
+    if frame_control & 0x008c != 0x0088 {
+        return None;
+    }
+    if !aggregate_eligible {
+        BELOW_MIN_LENGTH.fetch_add(1, Ordering::Relaxed);
+    }
+    Some(aggregate_eligible)
 }
 
 unsafe fn push_ready(state: &mut InterceptState, frame: *mut u8) -> Result<(), TxInterceptError> {
