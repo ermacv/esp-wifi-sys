@@ -94,6 +94,23 @@ pub(crate) fn enable_prearm_management_pool(expected_hart: usize) {
     PREARM_MANAGEMENT_HART.store(expected_hart, Ordering::Release);
 }
 
+/// Route management allocations through the fixed SRAM pool before the
+/// strict runtime is armed.
+///
+/// WPA2 AP startup constructs a larger beacon than the open-AP path. The
+/// vendor pre-start ESF pool can reject that frame, so the composition root
+/// must enable the same bounded pool used during strict association before it
+/// applies the AP configuration.
+///
+/// Returns `false` when the required final-link ESF wrappers are absent.
+pub fn enable_prestart_management_pool() -> bool {
+    if !link_wrappers_active() {
+        return false;
+    }
+    enable_prearm_management_pool(crate::critical::current_hart());
+    true
+}
+
 fn prearm_management_pool_enabled() -> bool {
     PREARM_MANAGEMENT_HART.load(Ordering::Acquire) != NO_PREARM_HART
 }

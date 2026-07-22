@@ -102,6 +102,8 @@ pub use adapter::{
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use allocation::{allow_heap_for_wifi_teardown, patch_allocator_probes};
+#[cfg(target_arch = "riscv32")]
+pub use esf::enable_prestart_management_pool;
 pub use channel::{BoundedChannel, Receive, TrySendError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
