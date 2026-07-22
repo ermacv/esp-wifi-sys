@@ -2,11 +2,8 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
-
-#[cfg(feature = "hil-vendor-tx")]
-use core::sync::atomic::AtomicU32;
 
 use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
 
@@ -16,6 +13,9 @@ const TX_DISABLE_SETTLE_US: u32 = 16;
 const TXQ_INTERRUPT_CLEAR_REG: *mut u32 = 0x2010_4cb0 as *mut u32;
 const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
+const MAC_CLOCK_REG: *const u32 = 0x2010_d800 as *const u32;
+const TXQ_CONFIG_BASE_REG: usize = 0x2010_4d6c;
+const TXQ_ENABLE_BASE_REG: usize = 0x2010_4d70;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_RATE_OFFSET: usize = 0x08;
@@ -44,6 +44,8 @@ const TX_DESCRIPTOR_RATE_CONTROL_OFFSET: usize = 0x1c;
 const TX_DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
 const TX_DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
 const TX_DESCRIPTOR_PHY_FLAGS_OFFSET: usize = 0x30;
+const TX_DESCRIPTOR_LENGTH_LOW_OFFSET: usize = 0x40;
+const TX_DESCRIPTOR_LENGTH_HIGH_OFFSET: usize = 0x44;
 const TX_RATE_CONTEXT_MODE_OFFSET: usize = 0x0c;
 const TX_RATE_CONTEXT_ALT_RATE_OFFSET: usize = 0x08;
 const TX_RATE_CONTEXT_DEFAULT_RATE_OFFSET: usize = 0x09;
@@ -58,6 +60,8 @@ const TX_FRAME_RETRY_SCHEDULER_MASK: u32 = 0x0060_0002;
 const TX_FRAME_RETRY_RATE_TIME_BIT: u32 = 0x0000_0040;
 const TX_FRAME_FORCE_SHORT_DISCARD_BIT: u32 = 0x1000_0000;
 const TX_FRAME_RATE_LIMIT_BIT: u32 = 0x0800_0000;
+const TX_FRAME_OFFCHANNEL_BIT: u32 = 0x0001_0000;
+const TX_FRAME_FTM_BIT: u32 = 0x2000_0000;
 const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
 const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
 const TXRX_QUEUE_SIZE: usize = 0x34;
@@ -91,7 +95,7 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn lmacTxFrame(frame: *mut u8, queue: u8);
+    fn hal_mac_tx_set_ppdu(queue_state: *mut u8, txrx: *mut u8) -> i32;
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -120,6 +124,11 @@ pub enum LmacAsyncError {
     UnsupportedTxRetryState(u32),
     InvalidTxRetryRateControl,
     InvalidTxRetryScheduler,
+    InvalidTxSubmissionPointer,
+    UnsupportedTxSubmissionQueue(u8),
+    UnsupportedTxSubmissionQueueStatus(u8),
+    UnsupportedTxSubmissionDescriptor(u32),
+    UnsupportedTxSubmissionMetadata(u32),
 }
 
 #[derive(Clone, Copy)]
@@ -178,6 +187,7 @@ unsafe impl Sync for TimerCell {}
 static STATE: StateCell = StateCell(UnsafeCell::new(TxTimeoutState::new()));
 static TIMER: TimerCell = TimerCell::new();
 static TXQ_SPLIT_FAILED: AtomicBool = AtomicBool::new(false);
+static BACKOFF_SEQUENCE: AtomicU32 = AtomicU32::new(0x6d2b_79f5);
 
 /// HIL-only observations captured immediately before the selected completion
 /// outcome runs. They let us prove the narrow basic-HT success invariants
@@ -737,12 +747,227 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
             post_rate_flags,
         ));
     }
-    lmacTxFrame(
-        frame,
-        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
-    );
+    submit_basic_retry(queue_state, frame, descriptor)?;
     queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
     Ok(())
+}
+
+/// Submit one strict basic-HT retry without the stock `lmacTxFrame` wrapper.
+///
+/// The rejected branches cover off-channel/NAN/FTM, TXOP, HE and test-only
+/// paths which can log, assert, discard synchronously, or call an indirect
+/// callback. The admitted path performs fixed descriptor updates and MMIO
+/// writes before invoking the remaining PPDU-formatting leaf exactly once.
+unsafe fn submit_basic_retry(
+    queue_state: *mut u8,
+    frame: *mut u8,
+    descriptor: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let queue_status = queue_state.add(TX_QUEUE_STATUS_OFFSET).read();
+    if queue_status != 3 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueueStatus(
+            queue_status,
+        ));
+    }
+    let hardware_queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    if hardware_queue > 3 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueue(hardware_queue));
+    }
+
+    let mut flags = descriptor.cast::<u32>().read();
+    let descriptor_word = descriptor.add(0x10).cast::<u32>().read();
+    if flags & (TX_FRAME_OFFCHANNEL_BIT | TX_FRAME_FTM_BIT) != 0
+        || descriptor_word & 0x00c0_0000 == 0x0080_0000
+    {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+
+    // Recovered status-three branch: status four is the pre-existing-frame
+    // assertion path and is deliberately outside the strict profile.
+    queue_state.cast::<*mut u8>().write(frame);
+
+    if flags & 0x0000_2102 == 0x0000_2000 {
+        flags |= 0x0000_1000;
+    }
+    if basic_frame_is_long(frame, descriptor) && flags & 0x02 == 0 {
+        flags = (flags & !0x0000_1000) | TX_FRAME_LONG_RETRY_BIT;
+    }
+    if flags & 0x0000_1000 != 0 && descriptor.add(5).read() >= lmacConfMib[42] {
+        flags = (flags & !0x0000_1000) | TX_FRAME_LONG_RETRY_BIT;
+        descriptor.add(7).write(descriptor.add(6).read());
+        descriptor.add(6).write(0);
+    }
+    descriptor.cast::<u32>().write(flags);
+
+    apply_basic_rate_override(descriptor);
+    configure_basic_timeout(queue_state, descriptor);
+    guard_basic_ppdu_inputs(frame, descriptor)?;
+    let txrx = ptr::addr_of_mut!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(LmacAsyncError::TxRxUnavailable);
+    }
+    let _ = hal_mac_tx_set_ppdu(queue_state, txrx);
+
+    configure_basic_edca(queue_state, descriptor);
+    enable_basic_tx_queue(queue_state, descriptor)?;
+    Ok(())
+}
+
+unsafe fn basic_frame_is_long(frame: *mut u8, descriptor: *mut u8) -> bool {
+    debug_assert_eq!(descriptor.cast::<u32>().read() & TX_FRAME_HE_BIT, 0);
+    let length = u32::from(frame.add(20).cast::<u16>().read())
+        .wrapping_add(u32::from(frame.add(22).cast::<u16>().read()));
+    let threshold = u32::from(
+        ptr::addr_of!(lmacConfMib)
+            .cast::<u8>()
+            .add(22)
+            .cast::<u16>()
+            .read_unaligned(),
+    );
+    length > threshold
+}
+
+unsafe fn apply_basic_rate_override(descriptor: *mut u8) {
+    if lmacConfMib[46] == 0 {
+        return;
+    }
+    let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
+    if lmacConfMib[45] != 0 {
+        let adjusted = rate.wrapping_sub(4);
+        if adjusted <= 3 {
+            descriptor
+                .add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET)
+                .write(adjusted);
+        }
+    } else if rate.wrapping_sub(1) <= 2 {
+        descriptor
+            .add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET)
+            .write(rate.wrapping_add(4));
+    }
+}
+
+unsafe fn configure_basic_timeout(queue_state: *mut u8, descriptor: *mut u8) {
+    let lifetime = ptr::addr_of!(lmacConfMib)
+        .cast::<u8>()
+        .add(8)
+        .cast::<u32>()
+        .read_unaligned()
+        << 10;
+    let now = MAC_CLOCK_REG.read_volatile();
+    let timestamp = descriptor
+        .add(TX_DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .read();
+    let remaining = lifetime.wrapping_sub(now).wrapping_add(timestamp);
+    let timeout = if remaining >= lifetime {
+        10
+    } else {
+        (remaining >> 10).max(1)
+    };
+
+    let high = descriptor
+        .add(TX_DESCRIPTOR_LENGTH_HIGH_OFFSET)
+        .cast::<u32>()
+        .read();
+    let low = descriptor
+        .add(TX_DESCRIPTOR_LENGTH_LOW_OFFSET)
+        .cast::<u32>()
+        .read();
+    let mut hardware_timeout = (low >> 10) | (high << 22);
+    if high >> 10 != 0 || hardware_timeout >= 0x1000 {
+        hardware_timeout = 0x0fff;
+    }
+    hardware_timeout = hardware_timeout.max(timeout);
+
+    let register = txq_config_register(queue_state);
+    let current = register.read_volatile();
+    register.write_volatile((current & 0xffff_f000) | hardware_timeout);
+}
+
+unsafe fn guard_basic_ppdu_inputs(
+    frame: *mut u8,
+    descriptor: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let metadata = frame.add(4).cast::<*mut u8>().read();
+    if metadata.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let metadata_flags = metadata.add(4).cast::<u32>().read();
+    if metadata_flags & 0x03 != 0 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionMetadata(
+            metadata_flags,
+        ));
+    }
+
+    let peer = frame.add(44).cast::<*mut u8>().read();
+    if !peer.is_null()
+        && peer.add(148).cast::<u32>().read() == 2
+        && descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read() <= 7
+    {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
+            descriptor.cast::<u32>().read(),
+        ));
+    }
+    Ok(())
+}
+
+unsafe fn configure_basic_edca(queue_state: *mut u8, descriptor: *mut u8) {
+    let contention_window = next_backoff_random();
+    let exponent = u32::from(queue_state.add(8).read());
+    let mask = !u32::MAX.wrapping_shl(exponent);
+    queue_state
+        .add(6)
+        .cast::<u16>()
+        .write((contention_window & mask) as u16);
+
+    let register = txq_config_register(queue_state);
+    let mut value = register.read_volatile();
+    value = (value & 0xf0ff_ffff) | (u32::from(queue_state.add(5).read() & 0x0f) << 24);
+    register.write_volatile(value);
+
+    value = register.read_volatile();
+    value = (value & 0xffc0_0fff)
+        | ((u32::from(queue_state.add(6).cast::<u16>().read()) & 0x03ff) << 12);
+    register.write_volatile(value);
+
+    value = register.read_volatile();
+    let phy = (descriptor.add(0x10).cast::<u32>().read() >> 18) & 0x03;
+    register.write_volatile((value & 0xff3f_ffff) | (phy << 22));
+}
+
+fn next_backoff_random() -> u32 {
+    let mut value = BACKOFF_SEQUENCE
+        .fetch_add(0x9e37_79b9, Ordering::Relaxed)
+        .wrapping_add(unsafe { MAC_CLOCK_REG.read_volatile() });
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^ (value << 5)
+}
+
+unsafe fn enable_basic_tx_queue(
+    queue_state: *mut u8,
+    descriptor: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let he_tb = descriptor.add(47).read() & 0x70;
+    if he_tb == 0x30 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
+            descriptor.cast::<u32>().read(),
+        ));
+    }
+
+    let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    queue_state.add(TX_QUEUE_STATUS_OFFSET).write(1);
+    let register = (TXQ_ENABLE_BASE_REG - usize::from(queue) * 16) as *mut u32;
+    register.write_volatile(register.read_volatile() | 0xc000_0000);
+    queue_state
+        .add(40)
+        .write(queue_state.add(40).read() & !0x02);
+    Ok(())
+}
+
+unsafe fn txq_config_register(queue_state: *mut u8) -> *mut u32 {
+    let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    (TXQ_CONFIG_BASE_REG - usize::from(queue) * 16) as *mut u32
 }
 
 /// Recovered non-HE body of the pinned `rcGetRate` implementation.
