@@ -119,6 +119,10 @@ static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_OTHER: AtomicU32 = AtomicU32::new(0);
+static RATE0_STATE_A: AtomicU32 = AtomicU32::new(0);
+static RATE0_STATE_B: AtomicU32 = AtomicU32::new(0);
+static LAST_RATE0_A: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+static LAST_RATE0_B: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
 static ELIGIBLE: AtomicU32 = AtomicU32::new(0);
 static BELOW_MIN_LENGTH: AtomicU32 = AtomicU32::new(0);
 static LAST_MAPPED: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -154,6 +158,12 @@ pub struct HilAmpduInterceptSnapshot {
     pub mapped_one: u32,
     pub mapped_two: u32,
     pub mapped_other: u32,
+    pub rate0_state_a: u32,
+    pub rate0_state_b: u32,
+    /// Layout/frame words, buffer words and the first three payload words for
+    /// the two exact rate-zero identity states.
+    pub last_rate0_a: [u32; 8],
+    pub last_rate0_b: [u32; 8],
     pub eligible: u32,
     pub below_min_length: u32,
     pub last_mapped: u32,
@@ -184,6 +194,8 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     let mut last_fallback_post = [0_u32; 5];
     let mut last_nonzero_fallback_pre = [0_u32; 5];
     let mut last_nonzero_fallback_post = [0_u32; 5];
+    let mut last_rate0_a = [0_u32; 8];
+    let mut last_rate0_b = [0_u32; 8];
     let mut index = 0_usize;
     while index < last_mapper_pre.len() {
         last_mapper_pre[index] = LAST_MAPPER_PRE[index].load(Ordering::Acquire);
@@ -193,6 +205,12 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         last_nonzero_fallback_pre[index] = LAST_NONZERO_FALLBACK_PRE[index].load(Ordering::Acquire);
         last_nonzero_fallback_post[index] =
             LAST_NONZERO_FALLBACK_POST[index].load(Ordering::Acquire);
+        index += 1;
+    }
+    index = 0;
+    while index < last_rate0_a.len() {
+        last_rate0_a[index] = LAST_RATE0_A[index].load(Ordering::Acquire);
+        last_rate0_b[index] = LAST_RATE0_B[index].load(Ordering::Acquire);
         index += 1;
     }
     HilAmpduInterceptSnapshot {
@@ -215,6 +233,10 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         mapped_one: MAPPED_ONE.load(Ordering::Acquire),
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
         mapped_other: MAPPED_OTHER.load(Ordering::Acquire),
+        rate0_state_a: RATE0_STATE_A.load(Ordering::Acquire),
+        rate0_state_b: RATE0_STATE_B.load(Ordering::Acquire),
+        last_rate0_a,
+        last_rate0_b,
         eligible: ELIGIBLE.load(Ordering::Acquire),
         below_min_length: BELOW_MIN_LENGTH.load(Ordering::Acquire),
         last_mapped: LAST_MAPPED.load(Ordering::Acquire),
@@ -429,6 +451,14 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         MAPPER_BYPASSED.fetch_add(1, Ordering::Relaxed);
         LAST_MAPPED.store(0, Ordering::Release);
         MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
+        let diagnostic = read_rate0_diagnostic(frame);
+        if fallback_pre[0] == 0x0200_2009 {
+            RATE0_STATE_A.fetch_add(1, Ordering::Relaxed);
+            record_rate0_diagnostic(&LAST_RATE0_A, &diagnostic);
+        } else {
+            RATE0_STATE_B.fetch_add(1, Ordering::Relaxed);
+            record_rate0_diagnostic(&LAST_RATE0_B, &diagnostic);
+        }
         return 0;
     }
     let mapped = __real_ppMapTxQueue(frame);
@@ -483,6 +513,61 @@ unsafe fn read_mapper_state(frame: *mut u8) -> [u32; 5] {
 
 #[inline(always)]
 fn record_mapper_state(destination: &[AtomicU32; 5], words: &[u32; 5]) {
+    let mut index = 0_usize;
+    while index < words.len() {
+        destination[index].store(words[index], Ordering::Release);
+        index += 1;
+    }
+}
+
+#[inline(always)]
+unsafe fn read_rate0_diagnostic(frame: *mut u8) -> [u32; 8] {
+    let first_buffer = frame
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let header = if first_buffer.is_null() {
+        ptr::null_mut()
+    } else {
+        first_buffer
+            .add(BUFFER_DATA_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+    };
+    [
+        u32::from(frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read()),
+        frame.add(0x20).cast::<u32>().read_unaligned(),
+        frame.add(0x28).cast::<u32>().read_unaligned(),
+        if first_buffer.is_null() {
+            0
+        } else {
+            first_buffer.cast::<u32>().read_unaligned()
+        },
+        if first_buffer.is_null() {
+            0
+        } else {
+            first_buffer.add(8).cast::<u32>().read_unaligned()
+        },
+        if header.is_null() {
+            0
+        } else {
+            header.cast::<u32>().read_unaligned()
+        },
+        if header.is_null() {
+            0
+        } else {
+            header.add(4).cast::<u32>().read_unaligned()
+        },
+        if header.is_null() {
+            0
+        } else {
+            header.add(8).cast::<u32>().read_unaligned()
+        },
+    ]
+}
+
+#[inline(always)]
+fn record_rate0_diagnostic(destination: &[AtomicU32; 8], words: &[u32; 8]) {
     let mut index = 0_usize;
     while index < words.len() {
         destination[index].store(words[index], Ordering::Release);
