@@ -25,7 +25,7 @@ unsafe extern "C" {
     #[cfg(not(feature = "strict-no-wait"))]
     static mut g_timer_func: Option<EventCallback>;
 
-    fn ppProcessTxQ(queue: u8);
+    fn ppProcessTxQ(queue: u8) -> i32;
     #[cfg(feature = "strict-no-wait")]
     fn ieee80211_output_process();
     #[cfg(feature = "strict-no-wait")]
@@ -323,7 +323,12 @@ impl PpDispatcher for VendorPpDispatcher {
             Self::account_received_event(event)?;
 
             match event.action() {
-                PpAction::ProcessTxQueue(queue) => ppProcessTxQ(queue),
+                PpAction::ProcessTxQueue(queue) => {
+                    #[cfg(all(feature = "strict-no-wait", feature = "hil-vendor-tx"))]
+                    crate::tx_queue::hil_process_tx_queue(queue);
+                    #[cfg(not(all(feature = "strict-no-wait", feature = "hil-vendor-tx")))]
+                    ppProcessTxQ(queue);
+                }
                 PpAction::Net80211Tx => {
                     #[cfg(feature = "strict-no-wait")]
                     {
