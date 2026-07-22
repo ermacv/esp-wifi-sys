@@ -17,6 +17,7 @@ const MAC_CLOCK_REG: *const u32 = 0x2010_d800 as *const u32;
 const TXQ_CONFIG_BASE_REG: usize = 0x2010_4d6c;
 const TXQ_ENABLE_BASE_REG: usize = 0x2010_4d70;
 const TXQ_PPDU_CONTROL_BASE_REG: usize = 0x2010_4d68;
+const TXQ_PTI_BASE_REG: usize = 0x2010_54e0;
 const TXQ_POWER_BASE_REG: usize = 0x2010_5500;
 const TXQ_REGISTER_STRIDE: usize = 0x10;
 const TXQ_POWER_STRIDE: usize = 0x7c;
@@ -105,7 +106,6 @@ unsafe extern "C" {
     fn mac_tx_set_plcp1(queue_state: *mut u8) -> i32;
     fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
     fn mac_tx_get_rts_rate(rate: u8) -> u8;
-    fn hal_set_tx_pti(queue: u8, active: u8, ack: u8, data: u8, retry: u8, timeout: u8, count: u16);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -139,6 +139,7 @@ pub enum LmacAsyncError {
     UnsupportedTxSubmissionQueueStatus(u8),
     UnsupportedTxSubmissionDescriptor(u32),
     UnsupportedTxSubmissionMetadata(u32),
+    UnsupportedTxSubmissionPti { priority: u8, count: u16 },
 }
 
 #[derive(Clone, Copy)]
@@ -876,20 +877,54 @@ unsafe fn format_basic_ht_ppdu(
     let power_register = (TXQ_POWER_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     power_register.write_volatile(data_power | rts_power);
 
-    program_basic_tx_pti(queue, descriptor);
+    program_basic_tx_pti(queue, descriptor)?;
 
     Ok(())
 }
 
-/// Finite success branch of `mac_tx_set_pti` without its OSI-table callback.
-unsafe fn program_basic_tx_pti(queue: u8, descriptor: *mut u8) {
+/// Finite success branch of `mac_tx_set_pti` and `hal_set_tx_pti` without the
+/// OSI-table callback or the remaining binary MMIO leaf.
+unsafe fn program_basic_tx_pti(queue: u8, descriptor: *mut u8) -> Result<(), LmacAsyncError> {
     let original = descriptor.add(0x20).read();
     // The removed callback is `coex_core_pti_get(1, &adjusted)`. Its pinned
     // success branch is one bounded byte read from the exported 48-byte table.
     let adjusted = ptr::read_volatile(ptr::addr_of_mut!(coex_pti_tab).cast::<u8>().add(1));
     let active = original.min(adjusted);
     let count = descriptor.add(0x22).cast::<u16>().read();
-    hal_set_tx_pti(queue, active, original, original, original, original, count);
+    if original > 0x0f || count > 0x0fff {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionPti {
+            priority: original,
+            count,
+        });
+    }
+
+    let queue_control =
+        (TXQ_CONFIG_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    let mut value = queue_control.read_volatile();
+    value = (value & 0x0fff_ffff) | (u32::from(active) << 28);
+    queue_control.write_volatile(value);
+
+    let pti_register = (TXQ_PTI_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    value = pti_register.read_volatile();
+    value = (value & 0xffff_0fff) | (u32::from(original) << 12);
+    pti_register.write_volatile(value);
+
+    value = pti_register.read_volatile();
+    value = (value & 0xffff_f0ff) | (u32::from(original) << 8);
+    pti_register.write_volatile(value);
+
+    value = pti_register.read_volatile();
+    value = (value & 0xffff_ff0f) | (u32::from(original) << 4);
+    pti_register.write_volatile(value);
+
+    value = pti_register.read_volatile();
+    value = (value & 0xfff0_ffff) | (u32::from(original) << 16);
+    pti_register.write_volatile(value);
+
+    value = pti_register.read_volatile();
+    value = (value & 0x000f_ffff) | (u32::from(count) << 20);
+    pti_register.write_volatile(value);
+    Ok(())
 }
 
 unsafe fn basic_frame_is_long(frame: *mut u8, descriptor: *mut u8) -> bool {

@@ -35,7 +35,6 @@ const ROOTS: &[&str] = &[
     "mac_tx_set_plcp1",
     "mac_tx_set_htsig",
     "mac_tx_get_rts_rate",
-    "hal_set_tx_pti",
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
