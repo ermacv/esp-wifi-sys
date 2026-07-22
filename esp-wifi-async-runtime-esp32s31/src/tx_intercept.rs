@@ -32,6 +32,7 @@ const BUFFER_DATA_OFFSET: usize = 0x04;
 const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
 const DESCRIPTOR_UNSUPPORTED_MASK: u32 = 0x8060_0000;
 const MIN_HIL_MPDU_LENGTH: u32 = 1_200;
+const HIL_COALESCE_DELAY_US: u32 = 250;
 
 unsafe extern "C" {
     fn __real_ppMapTxQueue(frame: *mut u8) -> i32;
@@ -44,6 +45,8 @@ struct InterceptState {
     window: u8,
     count: u8,
     retry_prefix: u8,
+    coalesce_armed: bool,
+    coalesce_due: bool,
     direct_frame: *mut u8,
     frames: [*mut u8; TX_AMPDU_SLOT_CAPACITY],
 }
@@ -56,6 +59,8 @@ impl InterceptState {
             window: 0,
             count: 0,
             retry_prefix: 0,
+            coalesce_armed: false,
+            coalesce_due: false,
             direct_frame: ptr::null_mut(),
             frames: [ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY],
         }
@@ -66,8 +71,20 @@ struct InterceptCell(UnsafeCell<InterceptState>);
 
 unsafe impl Sync for InterceptCell {}
 
+struct TimerCell(UnsafeCell<crate::timer::RawOsiTimer>);
+
+unsafe impl Sync for TimerCell {}
+
 #[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
 static STATE: InterceptCell = InterceptCell(UnsafeCell::new(InterceptState::new()));
+#[link_section = ".critical.bss.wifi_strict.hil_ampdu_intercept"]
+static COALESCE_TIMER: TimerCell = TimerCell(UnsafeCell::new(crate::timer::RawOsiTimer {
+    next: ptr::null_mut(),
+    expire: 0,
+    period: 0,
+    callback: None,
+    argument: ptr::null_mut(),
+}));
 // Activation crosses from the Rust RX/management path into the vendor TX
 // callback. Keep it atomic even on the single radio hart: interrupts are an
 // independent execution context, and an ordinary private bool can otherwise
@@ -79,6 +96,8 @@ static SUBMITTED: AtomicU32 = AtomicU32::new(0);
 static COMPLETED: AtomicU32 = AtomicU32::new(0);
 static DIRECT_SUBMITTED: AtomicU32 = AtomicU32::new(0);
 static DIRECT_COMPLETED: AtomicU32 = AtomicU32::new(0);
+static COALESCE_ARMED: AtomicU32 = AtomicU32::new(0);
+static COALESCE_EXPIRED: AtomicU32 = AtomicU32::new(0);
 static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicU32 = AtomicU32::new(0);
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
@@ -151,6 +170,8 @@ pub struct HilAmpduInterceptSnapshot {
     pub completed: u32,
     pub direct_submitted: u32,
     pub direct_completed: u32,
+    pub coalesce_armed: u32,
+    pub coalesce_expired: u32,
     pub subframes: u32,
     pub ready: u32,
     pub failed: bool,
@@ -208,6 +229,8 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         completed: COMPLETED.load(Ordering::Acquire),
         direct_submitted: DIRECT_SUBMITTED.load(Ordering::Acquire),
         direct_completed: DIRECT_COMPLETED.load(Ordering::Acquire),
+        coalesce_armed: COALESCE_ARMED.load(Ordering::Acquire),
+        coalesce_expired: COALESCE_EXPIRED.load(Ordering::Acquire),
         subframes: SUBFRAMES.load(Ordering::Acquire),
         ready: READY.load(Ordering::Acquire),
         failed: FAILED.load(Ordering::Acquire),
@@ -313,6 +336,8 @@ pub enum TxInterceptError {
     InstancesUnavailable,
     InvalidHardwareQueue(u8),
     MissingDirectOwner,
+    CoalesceTimerSchedule,
+    CoalesceTimerCancel,
     Aggregate(crate::tx_ampdu::BasicHtAmpduChainError),
     Submit(crate::lmac::LmacAsyncError),
 }
@@ -367,7 +392,10 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         LAST_MAPPED.store(0, Ordering::Release);
         MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
         if !aggregate_eligible {
-            if push_ready(state, frame).is_err() || schedule(state).is_err() {
+            if push_ready(state, frame).is_err()
+                || reconcile_coalesce_deadline(state).is_err()
+                || schedule(state).is_err()
+            {
                 fail_and_trap();
             }
             RETAINED.fetch_add(1, Ordering::Relaxed);
@@ -380,6 +408,9 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
             fail_and_trap();
         }
         RETAINED.fetch_add(1, Ordering::Relaxed);
+        if reconcile_coalesce_deadline(state).is_err() {
+            fail_and_trap();
+        }
         if state.count >= 2 && schedule(state).is_err() {
             fail_and_trap();
         }
@@ -586,6 +617,54 @@ fn schedule(state: &mut InterceptState) -> Result<(), TxInterceptError> {
     Ok(())
 }
 
+#[link_section = ".rwtext.wifi_strict.hil_ampdu_intercept"]
+unsafe extern "C" fn coalesce_timeout(_argument: *mut c_void) {
+    let state = &mut *STATE.0.get();
+    if !state.coalesce_armed {
+        return;
+    }
+    state.coalesce_armed = false;
+    if state.count == 0 {
+        state.coalesce_due = false;
+        return;
+    }
+    state.coalesce_due = true;
+    COALESCE_EXPIRED.fetch_add(1, Ordering::Relaxed);
+    if schedule(state).is_err() {
+        fail_and_trap();
+    }
+}
+
+unsafe fn reconcile_coalesce_deadline(state: &mut InterceptState) -> Result<(), TxInterceptError> {
+    let needs_deadline = state.count == 1
+        && !state.frames[0].is_null()
+        && aggregate_eligible_prepared(state.frames[0]);
+    if !needs_deadline {
+        if state.coalesce_armed {
+            if !crate::adapter::cancel_internal_timer(COALESCE_TIMER.0.get().cast()) {
+                return Err(TxInterceptError::CoalesceTimerCancel);
+            }
+            state.coalesce_armed = false;
+        }
+        state.coalesce_due = false;
+        return Ok(());
+    }
+    if state.coalesce_due || state.coalesce_armed {
+        return Ok(());
+    }
+    if !crate::adapter::schedule_internal_timer(
+        COALESCE_TIMER.0.get().cast(),
+        coalesce_timeout,
+        ptr::null_mut(),
+        HIL_COALESCE_DELAY_US,
+    ) {
+        return Err(TxInterceptError::CoalesceTimerSchedule);
+    }
+    state.coalesce_armed = true;
+    COALESCE_ARMED.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
 pub(crate) const fn is_event(kind: u32) -> bool {
     kind == HIL_AMPDU_INTERCEPT_EVENT
 }
@@ -603,6 +682,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     if let Some(retry) = crate::lmac::take_basic_ht_ampdu_retry() {
         let _sequence = retry.sequence;
         push_retry_front(state, retry.frame)?;
+        reconcile_coalesce_deadline(state)?;
         schedule(state)?;
         return Ok(());
     }
@@ -628,8 +708,11 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     if !aggregate_eligible_prepared(state.frames[0]) {
         return submit_one(state, queue_state, count);
     }
-    if count < 2 {
+    if count < 2 && !state.coalesce_due {
         return Ok(());
+    }
+    if count < 2 {
+        return submit_one(state, queue_state, count);
     }
     let mut selected = count.min(usize::from(state.window)).min(MAX_HIL_SUBFRAMES);
     let first_descriptor = state.frames[0]
@@ -684,6 +767,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     state.retry_prefix = state.retry_prefix.saturating_sub(selected as u8);
     state.waiting_hardware = true;
     READY.store(remaining as u32, Ordering::Release);
+    reconcile_coalesce_deadline(state)?;
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
     SUBFRAMES.fetch_add(selected as u32, Ordering::Relaxed);
     Ok(())
@@ -748,6 +832,7 @@ unsafe fn submit_one(
     state.retry_prefix = state.retry_prefix.saturating_sub(1);
     state.waiting_hardware = true;
     READY.store(u32::from(state.count), Ordering::Release);
+    reconcile_coalesce_deadline(state)?;
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
     SUBFRAMES.fetch_add(1, Ordering::Relaxed);
     DIRECT_SUBMITTED.fetch_add(1, Ordering::Relaxed);
