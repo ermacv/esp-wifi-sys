@@ -105,7 +105,6 @@ unsafe extern "C" {
     fn mac_tx_set_plcp0(queue_state: *mut u8) -> i32;
     fn mac_tx_set_plcp1(queue_state: *mut u8) -> i32;
     fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
-    fn mac_tx_get_rts_rate(rate: u8) -> u8;
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -848,11 +847,11 @@ unsafe fn format_basic_ht_ppdu(
         return Err(LmacAsyncError::InvalidTxSubmissionPointer);
     }
     let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
-    if !(16..=35).contains(&rate) {
+    let Some(rts_rate) = crate::tx_rate::basic_ht_rts_rate(rate) else {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
             descriptor.cast::<u32>().read(),
         ));
-    }
+    };
 
     let _ = mac_tx_set_plcp0(queue_state);
     let _ = mac_tx_set_plcp1(queue_state);
@@ -862,7 +861,7 @@ unsafe fn format_basic_ht_ppdu(
     ppdu_control.write_volatile(ppdu_control.read_volatile() & !0x08);
 
     let power_table = ptr::addr_of!(s_phy_get_max_pwr).cast::<i8>();
-    let rts_rate = usize::from(mac_tx_get_rts_rate(rate));
+    let rts_rate = usize::from(rts_rate);
     let rts_power = (power_table.add(rts_rate * 2).read() as i32 as u32) << 16
         | (power_table.add(rts_rate * 2 + 1).read() as i32 as u32) << 24;
 
