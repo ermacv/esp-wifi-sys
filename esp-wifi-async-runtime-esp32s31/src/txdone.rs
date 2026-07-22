@@ -232,6 +232,54 @@ static STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 )]
 static LMAC_STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 static STRICT_CALLBACK_FAILED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "riscv32")]
+static INITIAL_AP_START_SIGNAL: crate::interrupt::InterruptSignal =
+    crate::interrupt::InterruptSignal::new();
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn initial_ap_is_active() -> bool {
+    let ic = ptr::addr_of!(g_ic).cast::<u8>();
+    let interface = ic.add(0x14).cast::<*mut u8>().read();
+    !interface.is_null() && interface.add(321).read() & 1 != 0
+}
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitialApStartError {
+    StrictRuntimeAlreadyArmed,
+    DeferredTransitionMissing,
+    CompletionDidNotStartAp,
+}
+
+/// Await the one initialization beacon completion that finishes a deferred
+/// softAP start.
+///
+/// This is an interrupt-driven edge: it does not poll AP state, delay, allocate,
+/// or wait on an RTOS primitive.
+#[cfg(target_arch = "riscv32")]
+pub async fn wait_for_initial_ap_start() -> Result<(), InitialApStartError> {
+    if unsafe { initial_ap_is_active() } {
+        return Ok(());
+    }
+    if crate::critical::strict_wifi_hart_armed() {
+        return Err(InitialApStartError::StrictRuntimeAlreadyArmed);
+    }
+
+    let observed = INITIAL_AP_START_SIGNAL.generation();
+    if unsafe { initial_ap_is_active() } {
+        return Ok(());
+    }
+    if unsafe { BEACON_SEND_START_FLAG } & 2 == 0 {
+        return Err(InitialApStartError::DeferredTransitionMissing);
+    }
+
+    INITIAL_AP_START_SIGNAL.wait_after(observed).await;
+    if unsafe { initial_ap_is_active() } {
+        Ok(())
+    } else {
+        Err(InitialApStartError::CompletionDidNotStartAp)
+    }
+}
 
 pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
     core::ptr::eq(
@@ -361,6 +409,9 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
         // takeover; replacing it too early leaves beacon_send_start_flag at
         // 0b11 and the AP interface permanently disabled.
         initialization_hostapd_beacon_txcb(frame);
+        if initial_ap_is_active() {
+            INITIAL_AP_START_SIGNAL.notify_from_isr();
+        }
         return;
     }
     if strict_ap_beacon_txdone().is_err() {
