@@ -65,6 +65,16 @@ dispatch therefore rejects event 8 as a profile-invariant violation and the
 final ELF audit forbids every call to `pp_timer_do_process`; non-strict builds
 retain the vendor behavior.
 
+The AP beacon-completion tail formerly called `ic_get_next_tbtt`, whose
+`wDev_Get_Next_TBTT` body catches up a stale 32-bit beacon tick by adding one
+interval and rereading TSF on every iteration. That is a potentially enormous
+busy loop after a delayed completion. The strict final link replaces it with
+the equivalent wrapping quotient/remainder calculation: one TSF read, one
+non-zero interval check and one `BcnSendTick` update. Zero interval fails
+closed instead of looping. Exhaustive bounded cases plus TSF-wrap edge cases
+are compared against the recovered iterative state transition in Rust tests;
+the finite `hal_get_tsf_time(1)` leaf remains the only vendor root.
+
 Event 14 is deliberately reported as a runtime error instead of reproducing the vendor infinite loop. Event 15 is a lifecycle boundary handled by the Rust runtime. Event 13 is rejected before its promiscuous callback and two OSI frees. Events 5 through 7 are strict boundaries: the stock output handler drains a shared list, the ioctl envelope carries an arbitrary callback plus heap/semaphore/PM ownership, and the timer envelope is heap allocated. A final-link wrapper replaces the timer producer with sixteen fixed slots and a private one-action event. Only timer ID 0 is completed locally; `chm_dwell` and all recovery timers fail closed because downstream paths contain dynamic callbacks, OSI synchronization, MAC teardown, or synchronous channel switching.
 
 ## WPA execution boundaries

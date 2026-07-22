@@ -55,6 +55,7 @@ pub mod scan;
 mod sta_link;
 pub mod strict;
 pub mod task;
+mod tbtt;
 pub mod timer;
 pub mod tx_ampdu;
 #[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]

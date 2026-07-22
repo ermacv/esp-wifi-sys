@@ -144,6 +144,8 @@ unsafe extern "C" {
     static mut BEACON_NEXT_TBTT: u32;
     #[link_name = "__esp_s31_beacon_dtim_send_mc"]
     static BEACON_DTIM_SEND_MC: u8;
+    static mut BcnSendTick: u32;
+    static BcnInterval: u32;
 
     fn sta_eapol_txdone_cb(frame: *mut c_void);
     #[link_name = "ieee80211_tx_mgt_cb"]
@@ -151,7 +153,9 @@ unsafe extern "C" {
     #[link_name = "ieee80211_hostapd_beacon_txcb"]
     fn vendor_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
-    fn ic_get_next_tbtt() -> u32;
+    #[link_name = "ic_get_next_tbtt"]
+    fn vendor_ic_get_next_tbtt() -> u32;
+    fn hal_get_tsf_time(interface: u32) -> u32;
     #[cfg(not(feature = "strict-no-wait"))]
     fn pp_coex_tx_release(frame: *mut c_void);
     fn esf_buf_recycle(frame: *mut c_void);
@@ -233,7 +237,28 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
     ) && core::ptr::eq(
         vendor_tx_mgt_cb as *const (),
         __wrap_ieee80211_tx_mgt_cb as *const (),
+    ) && core::ptr::eq(
+        vendor_ic_get_next_tbtt as *const (),
+        __wrap_ic_get_next_tbtt as *const (),
     )
+}
+
+/// Constant-time replacement for the vendor TBTT catch-up loop.
+///
+/// The final strict link must use `--wrap=ic_get_next_tbtt`. This function
+/// reads the same two exported words and the same TSF source as the pinned
+/// vendor body, but never advances one missed beacon at a time.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_ic_get_next_tbtt() -> u32 {
+    let interval = ptr::addr_of!(BcnInterval).read_volatile();
+    let send_tick = ptr::addr_of!(BcnSendTick).read_volatile();
+    let now = hal_get_tsf_time(1);
+    let Some((next_tick, delay)) = crate::tbtt::next_tbtt_delay(send_tick, interval, now) else {
+        STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+        return 0;
+    };
+    ptr::addr_of_mut!(BcnSendTick).write_volatile(next_tick);
+    delay
 }
 
 unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
@@ -301,7 +326,10 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     }
 
     BEACON_SEND_START_FLAG &= !1;
-    let next_tbtt = ic_get_next_tbtt();
+    let next_tbtt = __wrap_ic_get_next_tbtt();
+    if next_tbtt == 0 {
+        return Err(());
+    }
     BEACON_NEXT_TBTT = next_tbtt;
     let Some(osi) = ptr::addr_of!(g_osi_funcs_p).read().as_ref() else {
         return Err(());

@@ -26,7 +26,7 @@ const ROOTS: &[&str] = &[
     "lmacReleaseTxopQueue",
     "ppDequeueTxQ",
     "rcUpdateTxDone",
-    "ic_get_next_tbtt",
+    "hal_get_tsf_time",
     // Direct finite leaves used by the Rust-owned channel switch and strict
     // passive-scan receive-policy branches.
     "chm_get_chan_info",
@@ -60,6 +60,7 @@ const ROOTS: &[&str] = &[
 ];
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
+    "ic_get_next_tbtt",
     "pp_timer_do_process",
     "pp_default_event_handler",
     "pp_coex_tx_release",
@@ -182,6 +183,7 @@ const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
 ];
 
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
+    "__wrap_ic_get_next_tbtt",
     "__wrap_lmacTxDone",
     "__wrap_hal_mac_get_txq_state",
     "__wrap_hal_mac_get_txq_complete",
@@ -257,6 +259,7 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 const REQUIRED_SRAM_CODE: &[&str] =
     &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
+    "ic_get_next_tbtt",
     "pp_timer_do_process",
     "ppProcessTxQ",
     "pp_default_event_handler",
@@ -1113,6 +1116,10 @@ mod tests {
         assert!(calls_symbol(
             "2f000100: jal ra <pp_timer_do_process>\n",
             "pp_timer_do_process"
+        ));
+        assert!(calls_symbol(
+            "40000000: jal ra <ic_get_next_tbtt>\n",
+            "ic_get_next_tbtt"
         ));
     }
 

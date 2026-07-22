@@ -174,6 +174,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=ieee80211_timer_process
 -Wl,--wrap=ieee80211_mgmt_output
 -Wl,--wrap=ieee80211_hostapd_beacon_txcb
+-Wl,--wrap=ic_get_next_tbtt
 -Wl,--wrap=ieee80211_tx_mgt_cb
 -Wl,--wrap=wDev_record_ftm_data
 -Wl,--wrap=pm_set_beacon_duration
