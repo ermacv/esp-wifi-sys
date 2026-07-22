@@ -120,12 +120,60 @@ static RX_DISPATCH_ENTERED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hil-vendor-tx")]
 static RX_DISPATCH_COMPLETED: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(feature = "hil-vendor-tx")]
+static PP_TIMER_DISPATCH_ENTERED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static PP_TIMER_ID_MASK: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static PP_TIMER_NULL_ARGUMENTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static PP_TIMER_INVALID_IDS: AtomicUsize = AtomicUsize::new(0);
+
 /// Read the event-17 counters without calling into the vendor library.
 #[cfg(feature = "hil-vendor-tx")]
 pub fn vendor_rx_diagnostic_snapshot() -> VendorRxDiagnosticSnapshot {
     VendorRxDiagnosticSnapshot {
         entered: RX_DISPATCH_ENTERED.load(Ordering::Acquire),
         completed: RX_DISPATCH_COMPLETED.load(Ordering::Acquire),
+    }
+}
+
+/// Laboratory-only observation of PP event 8.
+///
+/// The recovered table has exactly sixteen IDs (`0..=15`). Recording only a
+/// count and bitmap keeps the observation allocation-free and does not alter
+/// the vendor callback/free ownership of the timer envelope.
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PpTimerDiagnosticSnapshot {
+    pub entered: usize,
+    pub id_mask: usize,
+    pub null_arguments: usize,
+    pub invalid_ids: usize,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+pub fn pp_timer_diagnostic_snapshot() -> PpTimerDiagnosticSnapshot {
+    PpTimerDiagnosticSnapshot {
+        entered: PP_TIMER_DISPATCH_ENTERED.load(Ordering::Acquire),
+        id_mask: PP_TIMER_ID_MASK.load(Ordering::Acquire),
+        null_arguments: PP_TIMER_NULL_ARGUMENTS.load(Ordering::Acquire),
+        invalid_ids: PP_TIMER_INVALID_IDS.load(Ordering::Acquire),
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn observe_pp_timer(argument: *mut c_void) {
+    PP_TIMER_DISPATCH_ENTERED.fetch_add(1, Ordering::Relaxed);
+    let Some(argument) = argument.cast::<u8>().as_ref() else {
+        PP_TIMER_NULL_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let id = *argument as usize;
+    if id < 16 {
+        PP_TIMER_ID_MASK.fetch_or(1 << id, Ordering::Release);
+    } else {
+        PP_TIMER_INVALID_IDS.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -386,7 +434,11 @@ impl PpDispatcher for VendorPpDispatcher {
                     #[cfg(not(feature = "strict-no-wait"))]
                     Self::optional_event(ptr::addr_of!(g_timer_func), event.argument)
                 }
-                PpAction::PpTimer => pp_timer_do_process(event.argument),
+                PpAction::PpTimer => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    observe_pp_timer(event.argument);
+                    pp_timer_do_process(event.argument)
+                }
                 PpAction::Default => {
                     #[cfg(feature = "strict-no-wait")]
                     return Err(VendorDispatchError::UnsupportedStrictAction(

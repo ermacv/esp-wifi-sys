@@ -246,7 +246,10 @@ pub use txdone::{
     HilEapolTxDoneSnapshot,
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
-pub use vendor::{vendor_rx_diagnostic_snapshot, VendorRxDiagnosticSnapshot};
+pub use vendor::{
+    pp_timer_diagnostic_snapshot, vendor_rx_diagnostic_snapshot, PpTimerDiagnosticSnapshot,
+    VendorRxDiagnosticSnapshot,
+};
 #[cfg(target_arch = "riscv32")]
 pub use vendor::{VendorDispatchError, VendorPpDispatcher};
 pub use wpa2::{
