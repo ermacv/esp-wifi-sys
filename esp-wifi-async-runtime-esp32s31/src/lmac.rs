@@ -1477,7 +1477,12 @@ unsafe fn guard_basic_ampdu_ppdu_inputs(
         return Err(LmacAsyncError::InvalidTxSubmissionPointer);
     }
     let metadata_flags = length_source.cast::<u32>().read();
-    if metadata_flags == 0 || metadata_flags & 0x03 != 0x02 {
+    // Bits 0..13 are the MPDU byte length, not fixed format bits. The first
+    // oracle happened to contain 1,554-byte frames (`...0612`), whose low two
+    // bits are 2; real short frames legitimately exercise every residue.
+    // `prepare_basic_ht_ampdu_chain` has already accounted for the required
+    // four-byte padding, so only a zero encoded length is invalid here.
+    if metadata_flags & 0x3fff == 0 {
         return Err(LmacAsyncError::UnsupportedTxSubmissionMetadata(
             metadata_flags,
         ));
