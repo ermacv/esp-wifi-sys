@@ -22,6 +22,7 @@ pub(crate) const fn basic_non_he_plcp1_word(
     flags: u32,
     queue_word_low: u8,
     protection: u32,
+    legacy_signal: u32,
 ) -> u32 {
     let mut word = if rate < 16 {
         0
@@ -33,6 +34,9 @@ pub(crate) const fn basic_non_he_plcp1_word(
 
     word = (word & 0xfe01_ffff) | (queue_word_low as u32) << 17;
     word = (word & 0xfffe_0fff) | ((rate & 0x1f) as u32) << 12;
+    if rate < 16 {
+        word = (word & 0xffff_f000) | (legacy_signal & 0x0000_0fff);
+    }
     if flags & 0x0000_4000 != 0 && protection & 0x0000_8000 != 0 {
         word |= 0x2000_0000;
     }
@@ -93,26 +97,45 @@ mod tests {
 
     #[test]
     fn reproduces_basic_ht_plcp1_format_and_rate_fields() {
-        assert_eq!(basic_non_he_plcp1_word(16, 0, 0, 0), 0x0201_0000);
-        assert_eq!(basic_non_he_plcp1_word(35, 0x0100_0000, 0, 0), 0x0600_3000);
+        assert_eq!(basic_non_he_plcp1_word(16, 0, 0, 0, 0x4188), 0x0201_0000);
         assert_eq!(
-            basic_non_he_plcp1_word(16, 0x0100_0000, 0x12, 0),
+            basic_non_he_plcp1_word(35, 0x0100_0000, 0, 0, 0x00d0),
+            0x0600_3000
+        );
+        assert_eq!(
+            basic_non_he_plcp1_word(16, 0x0100_0000, 0x12, 0, 0),
             0x0625_0000
         );
     }
 
     #[test]
     fn reproduces_legacy_plcp1_without_ht_format_bits() {
-        assert_eq!(basic_non_he_plcp1_word(0, 0, 0, 0), 0);
-        assert_eq!(basic_non_he_plcp1_word(15, 0, 0x12, 0), 0x0024_f000);
+        assert_eq!(
+            basic_non_he_plcp1_word(0, 0, 0, 0, 0x0000_4188),
+            0x0000_0188
+        );
+        assert_eq!(
+            basic_non_he_plcp1_word(0, 0, 0, 0, 0x0000_00d0),
+            0x0000_00d0
+        );
+        assert_eq!(
+            basic_non_he_plcp1_word(15, 0, 0x12, 0, 0x1234_5abc),
+            0x0024_fabc
+        );
     }
 
     #[test]
     fn sets_protection_only_when_both_guard_bits_are_present() {
-        assert_eq!(basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0), 0x0201_0000);
-        assert_eq!(basic_non_he_plcp1_word(16, 0, 0, 0x0000_8000), 0x0201_0000);
         assert_eq!(
-            basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0x0000_8000),
+            basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0, 0),
+            0x0201_0000
+        );
+        assert_eq!(
+            basic_non_he_plcp1_word(16, 0, 0, 0x0000_8000, 0),
+            0x0201_0000
+        );
+        assert_eq!(
+            basic_non_he_plcp1_word(16, 0x0000_4000, 0, 0x0000_8000, 0),
             0x2201_0000
         );
     }

@@ -957,7 +957,7 @@ unsafe fn format_basic_non_he_ppdu(
     };
 
     program_basic_plcp0(queue, frame, descriptor);
-    program_basic_plcp1(queue, descriptor, rate);
+    program_basic_plcp1(queue, frame, descriptor, rate);
 
     let ppdu_control =
         (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
@@ -968,7 +968,7 @@ unsafe fn format_basic_non_he_ppdu(
     let rts_power = (power_table.add(rts_rate_index * 2).read() as i32 as u32) << 16
         | (power_table.add(rts_rate_index * 2 + 1).read() as i32 as u32) << 24;
 
-    let data_rate = if rate < 16 {
+    let data_power = if rate < 16 {
         // The queue kinds at or below two enter the vendor HW-TXOP linked-list
         // formatter. Strict one-frame completion is qualified only for the
         // ordinary kind-three queue, whose TXOP leaf merely clears fields that
@@ -980,20 +980,16 @@ unsafe fn format_basic_non_he_ppdu(
             ));
         }
         program_basic_legacy_length(queue, descriptor, rts_rate);
-        rate
+        power_table.add(usize::from(rate) * 2).read() as i32 as u32
     } else {
         // HE and FTM are rejected before entering this function, so rates
         // 16..=35 are exactly the finite HTSIG path.
         program_htsig(queue, frame, descriptor, txrx, rate, rts_rate, None);
-        if rate <= 25 {
-            rate
-        } else {
-            rate - 10
-        }
+        let data_rate = if rate <= 25 { rate } else { rate - 10 };
+        let data_rate = usize::from(data_rate);
+        power_table.add(data_rate * 2).read() as i32 as u32
+            | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8
     };
-    let data_rate = usize::from(data_rate);
-    let data_power = power_table.add(data_rate * 2).read() as i32 as u32
-        | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8;
     let power_register = (TXQ_POWER_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     power_register.write_volatile(data_power | rts_power);
 
@@ -1044,13 +1040,26 @@ unsafe fn program_basic_plcp0(queue: u8, frame: *mut u8, descriptor: *mut u8) {
 }
 
 /// Recovered guarded non-HE body of `mac_tx_set_plcp1`.
-unsafe fn program_basic_plcp1(queue: u8, descriptor: *mut u8, rate: u8) {
+unsafe fn program_basic_plcp1(queue: u8, frame: *mut u8, descriptor: *mut u8, rate: u8) {
     debug_assert!(rate <= 35);
     let flags = descriptor.cast::<u32>().read();
     debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
     let queue_word_low = descriptor.add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET).read();
     let protection = descriptor.add(8).cast::<u32>().read();
-    let plcp1 = crate::tx_plcp::basic_non_he_plcp1_word(rate, flags, queue_word_low, protection);
+    let legacy_signal = if rate < 16 {
+        let metadata = frame.add(4).cast::<*mut u8>().read();
+        let data = metadata.add(4).cast::<*const u32>().read();
+        data.read_unaligned()
+    } else {
+        0
+    };
+    let plcp1 = crate::tx_plcp::basic_non_he_plcp1_word(
+        rate,
+        flags,
+        queue_word_low,
+        protection,
+        legacy_signal,
+    );
 
     let register = (TXQ_PLCP1_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     register.write_volatile(plcp1);
@@ -1634,7 +1643,7 @@ unsafe fn format_basic_ht_ampdu_ppdu(
     };
 
     program_basic_plcp0(queue, chain.first, descriptor);
-    program_basic_plcp1(queue, descriptor, rate);
+    program_basic_plcp1(queue, chain.first, descriptor, rate);
     let ppdu_control =
         (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
     ppdu_control.write_volatile(ppdu_control.read_volatile() & !0x08);
