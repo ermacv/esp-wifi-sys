@@ -174,6 +174,32 @@ pub struct LmacTxCompleteSnapshot {
     pub last_descriptor_flags: u32,
 }
 
+/// HIL-only before/after view of the vendor retry outcome bodies that remain
+/// after the Rust-owned completion decoder.
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LmacRetrySnapshot {
+    pub ack_timeout: u32,
+    pub cts_timeout: u32,
+    pub returned: u32,
+    pub same_frame: u32,
+    pub changed_frame: u32,
+    pub detached_frame: u32,
+    pub queue_kind_mask: u32,
+    pub pre_status_mask: u32,
+    pub post_status_mask: u32,
+    pub descriptor_flags_or: u32,
+    pub long_frame_flag: u32,
+    pub next_nonnull: u32,
+    pub txop_nonzero: u32,
+    pub last_pre_queue_counters: u32,
+    pub last_post_queue_counters: u32,
+    pub last_pre_queue_state: u32,
+    pub last_post_queue_state: u32,
+    pub last_pre_descriptor_counters: u32,
+    pub last_post_descriptor_counters: u32,
+}
+
 #[cfg(feature = "hil-vendor-tx")]
 struct TxCompleteCounters {
     completions: AtomicU32,
@@ -191,6 +217,56 @@ struct TxCompleteCounters {
     last_txop_outstanding: AtomicU32,
     last_response: AtomicU32,
     last_descriptor_flags: AtomicU32,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+struct RetryCounters {
+    ack_timeout: AtomicU32,
+    cts_timeout: AtomicU32,
+    returned: AtomicU32,
+    same_frame: AtomicU32,
+    changed_frame: AtomicU32,
+    detached_frame: AtomicU32,
+    queue_kind_mask: AtomicU32,
+    pre_status_mask: AtomicU32,
+    post_status_mask: AtomicU32,
+    descriptor_flags_or: AtomicU32,
+    long_frame_flag: AtomicU32,
+    next_nonnull: AtomicU32,
+    txop_nonzero: AtomicU32,
+    last_pre_queue_counters: AtomicU32,
+    last_post_queue_counters: AtomicU32,
+    last_pre_queue_state: AtomicU32,
+    last_post_queue_state: AtomicU32,
+    last_pre_descriptor_counters: AtomicU32,
+    last_post_descriptor_counters: AtomicU32,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+impl RetryCounters {
+    const fn new() -> Self {
+        Self {
+            ack_timeout: AtomicU32::new(0),
+            cts_timeout: AtomicU32::new(0),
+            returned: AtomicU32::new(0),
+            same_frame: AtomicU32::new(0),
+            changed_frame: AtomicU32::new(0),
+            detached_frame: AtomicU32::new(0),
+            queue_kind_mask: AtomicU32::new(0),
+            pre_status_mask: AtomicU32::new(0),
+            post_status_mask: AtomicU32::new(0),
+            descriptor_flags_or: AtomicU32::new(0),
+            long_frame_flag: AtomicU32::new(0),
+            next_nonnull: AtomicU32::new(0),
+            txop_nonzero: AtomicU32::new(0),
+            last_pre_queue_counters: AtomicU32::new(0),
+            last_post_queue_counters: AtomicU32::new(0),
+            last_pre_queue_state: AtomicU32::new(0),
+            last_post_queue_state: AtomicU32::new(0),
+            last_pre_descriptor_counters: AtomicU32::new(0),
+            last_post_descriptor_counters: AtomicU32::new(0),
+        }
+    }
 }
 
 #[cfg(feature = "hil-vendor-tx")]
@@ -218,6 +294,8 @@ impl TxCompleteCounters {
 
 #[cfg(feature = "hil-vendor-tx")]
 static TX_COMPLETE_COUNTERS: TxCompleteCounters = TxCompleteCounters::new();
+#[cfg(feature = "hil-vendor-tx")]
+static RETRY_COUNTERS: RetryCounters = RetryCounters::new();
 
 #[cfg(feature = "hil-vendor-tx")]
 pub fn lmac_tx_complete_snapshot() -> LmacTxCompleteSnapshot {
@@ -242,6 +320,36 @@ pub fn lmac_tx_complete_snapshot() -> LmacTxCompleteSnapshot {
         last_txop_outstanding: counters.last_txop_outstanding.load(Ordering::Acquire) as u8,
         last_response: counters.last_response.load(Ordering::Acquire) as u8,
         last_descriptor_flags: counters.last_descriptor_flags.load(Ordering::Acquire),
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+pub fn lmac_retry_snapshot() -> LmacRetrySnapshot {
+    let counters = &RETRY_COUNTERS;
+    LmacRetrySnapshot {
+        ack_timeout: counters.ack_timeout.load(Ordering::Acquire),
+        cts_timeout: counters.cts_timeout.load(Ordering::Acquire),
+        returned: counters.returned.load(Ordering::Acquire),
+        same_frame: counters.same_frame.load(Ordering::Acquire),
+        changed_frame: counters.changed_frame.load(Ordering::Acquire),
+        detached_frame: counters.detached_frame.load(Ordering::Acquire),
+        queue_kind_mask: counters.queue_kind_mask.load(Ordering::Acquire),
+        pre_status_mask: counters.pre_status_mask.load(Ordering::Acquire),
+        post_status_mask: counters.post_status_mask.load(Ordering::Acquire),
+        descriptor_flags_or: counters.descriptor_flags_or.load(Ordering::Acquire),
+        long_frame_flag: counters.long_frame_flag.load(Ordering::Acquire),
+        next_nonnull: counters.next_nonnull.load(Ordering::Acquire),
+        txop_nonzero: counters.txop_nonzero.load(Ordering::Acquire),
+        last_pre_queue_counters: counters.last_pre_queue_counters.load(Ordering::Acquire),
+        last_post_queue_counters: counters.last_post_queue_counters.load(Ordering::Acquire),
+        last_pre_queue_state: counters.last_pre_queue_state.load(Ordering::Acquire),
+        last_post_queue_state: counters.last_post_queue_state.load(Ordering::Acquire),
+        last_pre_descriptor_counters: counters
+            .last_pre_descriptor_counters
+            .load(Ordering::Acquire),
+        last_post_descriptor_counters: counters
+            .last_post_descriptor_counters
+            .load(Ordering::Acquire),
     }
 }
 
@@ -453,12 +561,142 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     match status {
         0 => process_tx_success(queue_state, completion[2])?,
         1 => lmacProcessTxRtsError(queue, completion[1] & 0x0f, completion[0], 0),
-        2 => lmacProcessCtsTimeout(queue, 0),
+        2 => {
+            #[cfg(feature = "hil-vendor-tx")]
+            let retry_frame = record_retry_before(queue_state, false);
+            lmacProcessCtsTimeout(queue, 0);
+            #[cfg(feature = "hil-vendor-tx")]
+            record_retry_after(queue_state, retry_frame);
+        }
         4 => lmacProcessTxError(queue, completion[0], 0),
-        5 => lmacProcessAckTimeout(queue, 0),
+        5 => {
+            #[cfg(feature = "hil-vendor-tx")]
+            let retry_frame = record_retry_before(queue_state, true);
+            lmacProcessAckTimeout(queue, 0);
+            #[cfg(feature = "hil-vendor-tx")]
+            record_retry_after(queue_state, retry_frame);
+        }
         status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
     }
     Ok(())
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn record_retry_before(queue_state: *mut u8, ack_timeout: bool) -> *mut u8 {
+    let counters = &RETRY_COUNTERS;
+    if ack_timeout {
+        counters.ack_timeout.fetch_add(1, Ordering::Relaxed);
+    } else {
+        counters.cts_timeout.fetch_add(1, Ordering::Relaxed);
+    }
+    let frame = queue_state.cast::<*mut u8>().read();
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let flags = descriptor.cast::<u32>().read();
+    let kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
+    let status = queue_state.add(TX_QUEUE_STATUS_OFFSET).read();
+    if kind < 32 {
+        counters
+            .queue_kind_mask
+            .fetch_or(1_u32 << kind, Ordering::Relaxed);
+    }
+    if status < 32 {
+        counters
+            .pre_status_mask
+            .fetch_or(1_u32 << status, Ordering::Relaxed);
+    }
+    counters
+        .descriptor_flags_or
+        .fetch_or(flags, Ordering::Relaxed);
+    if flags & 0x0000_0100 != 0 {
+        counters.long_frame_flag.fetch_add(1, Ordering::Relaxed);
+    }
+    if !frame
+        .add(TX_FRAME_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+    {
+        counters.next_nonnull.fetch_add(1, Ordering::Relaxed);
+    }
+    if queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read() != 0 {
+        counters.txop_nonzero.fetch_add(1, Ordering::Relaxed);
+    }
+    counters.last_pre_queue_counters.store(
+        pack_four_bytes(queue_state, 8, 9, 10, 11),
+        Ordering::Relaxed,
+    );
+    counters.last_pre_queue_state.store(
+        pack_four_bytes(
+            queue_state,
+            12,
+            TX_QUEUE_STATUS_OFFSET,
+            TX_QUEUE_KIND_OFFSET,
+            0x34,
+        ),
+        Ordering::Relaxed,
+    );
+    counters.last_pre_descriptor_counters.store(
+        pack_four_bytes(descriptor, 5, 6, 7, TX_DESCRIPTOR_REASON_OFFSET),
+        Ordering::Release,
+    );
+    frame
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn record_retry_after(queue_state: *mut u8, previous_frame: *mut u8) {
+    let counters = &RETRY_COUNTERS;
+    counters.returned.fetch_add(1, Ordering::Relaxed);
+    let frame = queue_state.cast::<*mut u8>().read();
+    if frame.is_null() {
+        counters.detached_frame.fetch_add(1, Ordering::Relaxed);
+    } else if frame == previous_frame {
+        counters.same_frame.fetch_add(1, Ordering::Relaxed);
+    } else {
+        counters.changed_frame.fetch_add(1, Ordering::Relaxed);
+    }
+    let status = queue_state.add(TX_QUEUE_STATUS_OFFSET).read();
+    if status < 32 {
+        counters
+            .post_status_mask
+            .fetch_or(1_u32 << status, Ordering::Relaxed);
+    }
+    counters.last_post_queue_counters.store(
+        pack_four_bytes(queue_state, 8, 9, 10, 11),
+        Ordering::Relaxed,
+    );
+    counters.last_post_queue_state.store(
+        pack_four_bytes(
+            queue_state,
+            12,
+            TX_QUEUE_STATUS_OFFSET,
+            TX_QUEUE_KIND_OFFSET,
+            0x34,
+        ),
+        Ordering::Relaxed,
+    );
+    if !previous_frame.is_null() {
+        let descriptor = previous_frame
+            .add(TX_FRAME_DESCRIPTOR_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        if !descriptor.is_null() {
+            counters.last_post_descriptor_counters.store(
+                pack_four_bytes(descriptor, 5, 6, 7, TX_DESCRIPTOR_REASON_OFFSET),
+                Ordering::Release,
+            );
+        }
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+unsafe fn pack_four_bytes(pointer: *mut u8, a: usize, b: usize, c: usize, d: usize) -> u32 {
+    u32::from(pointer.add(a).read())
+        | (u32::from(pointer.add(b).read()) << 8)
+        | (u32::from(pointer.add(c).read()) << 16)
+        | (u32::from(pointer.add(d).read()) << 24)
 }
 
 /// Recovered basic-HT success path for the strict one-descriptor profile.

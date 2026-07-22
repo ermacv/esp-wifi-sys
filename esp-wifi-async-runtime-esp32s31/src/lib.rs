@@ -145,7 +145,9 @@ pub use interrupt::{InterruptSignal, WaitForInterrupt};
     feature = "strict-no-wait",
     feature = "hil-vendor-tx"
 ))]
-pub use lmac::{lmac_tx_complete_snapshot, LmacTxCompleteSnapshot};
+pub use lmac::{
+    lmac_retry_snapshot, lmac_tx_complete_snapshot, LmacRetrySnapshot, LmacTxCompleteSnapshot,
+};
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-mic"))]
 pub use michael::{
     async_michael_callback_installed, install_async_michael_callback,
