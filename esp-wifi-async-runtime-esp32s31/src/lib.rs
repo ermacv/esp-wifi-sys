@@ -62,6 +62,8 @@ mod tx_intercept;
 mod tx_mapper;
 mod tx_plcp;
 mod tx_proto;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod tx_queue;
 mod tx_rate;
 mod tx_security;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
@@ -220,6 +222,12 @@ pub use tx_intercept::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use tx_proto::strict_pp_tx_proto_proc;
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-vendor-tx"
+))]
+pub use tx_queue::{hil_tx_queue_search, hil_tx_queue_search_snapshot, HilTxQueueSearchSnapshot};
 pub use tx_rate::FixedRateScheduleSnapshot;
 #[cfg(target_arch = "riscv32")]
 pub use tx_rate::{fixed_rate_schedule_snapshot, strict_rate_schedule, try_fixed_rate_schedule};
