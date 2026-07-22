@@ -366,6 +366,8 @@ pub unsafe extern "C" fn __wrap_ieee80211_tx_mgt_cb(frame: *mut c_void) {
 }
 
 unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
+    const STRICT_AP_BEACON_INTERVAL_US: u32 = 100 * 1_024;
+
     let ic = ptr::addr_of_mut!(g_ic).cast::<u8>();
     if TmpSTAAPCloseAP != 0 || ic.add(0x74).cast::<usize>().read() != 0 {
         return Err(());
@@ -381,11 +383,13 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     }
 
     BEACON_SEND_START_FLAG &= !1;
-    let next_tbtt = __wrap_ic_get_next_tbtt();
-    if next_tbtt == 0 {
+    let interval = ptr::addr_of!(BcnInterval).read_volatile();
+    if interval != STRICT_AP_BEACON_INTERVAL_US {
         return Err(());
     }
-    BEACON_NEXT_TBTT = next_tbtt;
+    let send_tick = ptr::addr_of!(BcnSendTick).read_volatile();
+    ptr::addr_of_mut!(BcnSendTick).write_volatile(send_tick.wrapping_add(interval));
+    BEACON_NEXT_TBTT = interval;
     let Some(osi) = ptr::addr_of!(g_osi_funcs_p).read().as_ref() else {
         return Err(());
     };
@@ -397,7 +401,7 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     };
     let timer = ptr::addr_of_mut!(BEACON_TIMER).cast::<c_void>();
     disarm(timer);
-    arm_us(timer, next_tbtt, false);
+    arm_us(timer, interval, false);
     Ok(())
 }
 
