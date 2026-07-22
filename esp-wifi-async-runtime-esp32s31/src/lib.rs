@@ -76,6 +76,7 @@ mod wdev;
 pub mod wpa2;
 pub mod wpa2_aes;
 pub mod wpa2_ap;
+pub mod wpa2_ap_async;
 pub mod wpa2_crypto;
 pub mod wpa2_frames;
 pub mod wpa2_io;
@@ -259,7 +260,8 @@ pub use wpa2::{
     EAPOL_KEY_FIXED_LEN, EAPOL_KEY_PACKET_LEN,
 };
 pub use wpa2_aes::{
-    AsyncWpa2KeyUnwrap, SoftwareAesKeyUnwrapError, Wpa2SoftwareAes, Wpa2UnwrappedKeyData,
+    AsyncWpa2KeyUnwrap, AsyncWpa2KeyWrap, SoftwareAesKeyUnwrapError, SoftwareAesKeyWrapError,
+    Wpa2SoftwareAes, Wpa2UnwrappedKeyData, Wpa2WrappedKeyData, WPA2_WRAPPED_KEY_DATA_CAPACITY,
 };
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_ap::{
@@ -268,6 +270,11 @@ pub use wpa2_ap::{
 pub use wpa2_ap::{
     receive_wpa2_ap_event, rejected_wpa2_ap_events, try_receive_wpa2_ap_event,
     validate_wpa2_ap_rsn, Wpa2ApPeerEvent, Wpa2ApRsnError, WPA2_AP_ASSOC_CAPACITY,
+};
+pub use wpa2_ap_async::{
+    complete_wpa2_ap_message2, complete_wpa2_ap_message4, complete_wpa2_ap_pairwise_key_install,
+    start_wpa2_ap_handshake, Wpa2ApMessage2, Wpa2ApMessage2Error, Wpa2ApMessage3,
+    Wpa2ApMessage3Error, Wpa2ApMessage4Error, Wpa2ApStartError,
 };
 pub use wpa2_crypto::{
     new_key_data_job, new_key_data_wrap_job, new_mic_job, new_ptk_job, new_tx_mic_job, verify_mic,

@@ -519,6 +519,16 @@ a fixed peer limit and authorizes a station only after M2/M4 MIC completion and
 pairwise-key installation. Every transition emits at most one owned
 crypto/install/TX action and returns.
 
+`start_wpa2_ap_handshake`, `complete_wpa2_ap_message2`,
+`complete_wpa2_ap_pairwise_key_install`, and `complete_wpa2_ap_message4` close
+the allocation-free AP orchestration boundary. They turn owned ingress into an
+owned M1, pairwise-key install, MIC-protected M3, and controlled-port command,
+respectively. RFC 3394 wrapping is exposed through `AsyncWpa2KeyWrap`; the
+bounded software backend performs finite CPU work and the trait also permits an
+interrupt-completed hardware implementation. The application must still keep
+the returned install and transmit commands in FIFO order and own a fixed peer
+session table.
+
 PTK PRF-384, HMAC-SHA1 EAPOL MIC, and RFC 3394 key unwrap have fixed
 `CryptoJob` constructors. EAPOL MIC input is copied with the MIC field cleared,
 MIC comparison is constant-time, and the persistent 48-byte CCMP PTK wipes KCK,
