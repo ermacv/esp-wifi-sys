@@ -59,8 +59,14 @@ impl TimerSlot {
 pub struct RuntimeTimerPool<const N: usize> {
     slots: [TimerSlot; N],
     waker: WakerCell,
+    set_callback_attempts: AtomicUsize,
     set_callback_calls: AtomicUsize,
+    set_callback_rejections: AtomicUsize,
+    last_set_callback: AtomicUsize,
+    arm_attempts: AtomicUsize,
     arm_calls: AtomicUsize,
+    arm_rejections: AtomicUsize,
+    last_arm_timeout_us: AtomicUsize,
     disarm_calls: AtomicUsize,
     done_calls: AtomicUsize,
     callbacks_dispatched: AtomicUsize,
@@ -69,8 +75,14 @@ pub struct RuntimeTimerPool<const N: usize> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeTimerSnapshot {
+    pub set_callback_attempts: usize,
     pub set_callback_calls: usize,
+    pub set_callback_rejections: usize,
+    pub last_set_callback: usize,
+    pub arm_attempts: usize,
     pub arm_calls: usize,
+    pub arm_rejections: usize,
+    pub last_arm_timeout_us: usize,
     pub disarm_calls: usize,
     pub done_calls: usize,
     pub callbacks_dispatched: usize,
@@ -82,8 +94,14 @@ impl<const N: usize> RuntimeTimerPool<N> {
         Self {
             slots: [const { TimerSlot::new() }; N],
             waker: WakerCell::new(),
+            set_callback_attempts: AtomicUsize::new(0),
             set_callback_calls: AtomicUsize::new(0),
+            set_callback_rejections: AtomicUsize::new(0),
+            last_set_callback: AtomicUsize::new(0),
+            arm_attempts: AtomicUsize::new(0),
             arm_calls: AtomicUsize::new(0),
+            arm_rejections: AtomicUsize::new(0),
+            last_arm_timeout_us: AtomicUsize::new(0),
             disarm_calls: AtomicUsize::new(0),
             done_calls: AtomicUsize::new(0),
             callbacks_dispatched: AtomicUsize::new(0),
@@ -93,8 +111,14 @@ impl<const N: usize> RuntimeTimerPool<N> {
 
     pub fn snapshot(&self) -> RuntimeTimerSnapshot {
         RuntimeTimerSnapshot {
+            set_callback_attempts: self.set_callback_attempts.load(Ordering::Acquire),
             set_callback_calls: self.set_callback_calls.load(Ordering::Acquire),
+            set_callback_rejections: self.set_callback_rejections.load(Ordering::Acquire),
+            last_set_callback: self.last_set_callback.load(Ordering::Acquire),
+            arm_attempts: self.arm_attempts.load(Ordering::Acquire),
             arm_calls: self.arm_calls.load(Ordering::Acquire),
+            arm_rejections: self.arm_rejections.load(Ordering::Acquire),
+            last_arm_timeout_us: self.last_arm_timeout_us.load(Ordering::Acquire),
             disarm_calls: self.disarm_calls.load(Ordering::Acquire),
             done_calls: self.done_calls.load(Ordering::Acquire),
             callbacks_dispatched: self.callbacks_dispatched.load(Ordering::Acquire),
@@ -132,11 +156,15 @@ impl<const N: usize> RuntimeTimerPool<N> {
         argument: *mut c_void,
         reserved_tail: usize,
     ) -> bool {
+        self.set_callback_attempts.fetch_add(1, Ordering::Relaxed);
+        self.last_set_callback
+            .store(callback as usize, Ordering::Release);
         let end = N.saturating_sub(reserved_tail.min(N));
         let Some(slot) = self
             .find(timer)
             .or_else(|| self.find_or_claim_in(timer, 0, end))
         else {
+            self.set_callback_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         self.configure_slot(slot, timer, callback, argument)
@@ -196,10 +224,15 @@ impl<const N: usize> RuntimeTimerPool<N> {
         repeat: bool,
         now: u32,
     ) -> bool {
+        self.arm_attempts.fetch_add(1, Ordering::Relaxed);
+        self.last_arm_timeout_us
+            .store(timeout_us as usize, Ordering::Release);
         let Some(slot) = self.find(timer) else {
+            self.arm_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         if slot.callback.load(Ordering::Acquire) == 0 {
+            self.arm_rejections.fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
