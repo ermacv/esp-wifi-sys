@@ -18,6 +18,13 @@ const DESCRIPTOR_SCHEDULE_OFFSET: usize = 0x1c;
 #[cfg(target_arch = "riscv32")]
 const DESCRIPTOR_RATE_CLASS_OFFSET: usize = 0x2f;
 
+#[cfg(target_arch = "riscv32")]
+#[used]
+#[link_section = ".critical.data.wifi_strict.basic_secondary_schedule"]
+static BASIC_SECONDARY_SCHEDULE: [u8; 12] = [
+    0x00, 0x02, 0x00, 0x02, 0x00, 0x03, 0x00, 0x19, 0x20, 0x1e, 0x00, 0x00,
+];
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedRateScheduleSnapshot {
     pub primary_fixed: u32,
@@ -62,30 +69,32 @@ const fn rate_class_bits(previous: u8, rate: u8) -> u8 {
     }
 }
 
-const fn stateless_schedule_rate(
+const fn stateless_schedule_source(
     primary: bool,
     mode: u16,
     descriptor_flags: u32,
-    configured_rate: u8,
-    schedule_rate: u8,
-) -> Option<u8> {
+    descriptor_control: u32,
+) -> u8 {
     if primary {
-        return if mode & 0x01 != 0 {
-            Some(configured_rate)
-        } else {
-            None
-        };
+        return if mode & 0x01 != 0 { 1 } else { 0 };
     }
     if mode & 0x02 != 0 {
-        return Some(configured_rate);
+        return 1;
     }
-    // The ordinary secondary branch in the pinned body is already stateless:
-    // absent its adaptive/special-mode guards, it selects schedule[0]. This
-    // covers measured auth, association, EAPOL, Action and secondary data.
-    if mode & 0x80 == 0 && descriptor_flags & 0x0020_0800 == 0 {
-        Some(schedule_rate)
+    if mode & 0x80 != 0 {
+        // `.LANCHOR23 + 0x24` is the immutable 12-byte basic-rate schedule
+        // selected by the pinned bit-7 branch when none of its PHY/NVS
+        // overrides apply.
+        return if descriptor_control & 0x00c3_0000 == 0 {
+            3
+        } else {
+            0
+        };
+    }
+    if descriptor_flags & 0x0020_0800 == 0 {
+        2
     } else {
-        None
+        0
     }
 }
 
@@ -108,37 +117,56 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
 
     let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
     let primary = descriptor_flags & 0x0200_0008 == 0x0000_0008;
-    let (rate_offset, schedule_offset) = if primary {
-        (
-            RATE_CONTEXT_PRIMARY_RATE_OFFSET,
-            RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET,
-        )
-    } else {
-        (
-            RATE_CONTEXT_SECONDARY_RATE_OFFSET,
-            RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET,
-        )
-    };
     let mode = rate_context
         .add(RATE_CONTEXT_MODE_OFFSET)
         .cast::<u16>()
         .read_unaligned();
-    let schedule = rate_context
-        .add(schedule_offset)
-        .cast::<*mut u8>()
-        .read_unaligned();
+    let descriptor_control = descriptor.add(0x10).cast::<u32>().read_unaligned();
+    let source = stateless_schedule_source(primary, mode, descriptor_flags, descriptor_control);
+    let (schedule, rate) = match source {
+        1 => {
+            let (rate_offset, schedule_offset) = if primary {
+                (
+                    RATE_CONTEXT_PRIMARY_RATE_OFFSET,
+                    RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET,
+                )
+            } else {
+                (
+                    RATE_CONTEXT_SECONDARY_RATE_OFFSET,
+                    RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET,
+                )
+            };
+            (
+                rate_context
+                    .add(schedule_offset)
+                    .cast::<*mut u8>()
+                    .read_unaligned(),
+                rate_context.add(rate_offset).read(),
+            )
+        }
+        2 => {
+            let schedule = rate_context
+                .add(RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET)
+                .cast::<*mut u8>()
+                .read_unaligned();
+            (
+                schedule,
+                if schedule.is_null() {
+                    0
+                } else {
+                    schedule.read()
+                },
+            )
+        }
+        3 => (
+            BASIC_SECONDARY_SCHEDULE.as_ptr().cast_mut(),
+            BASIC_SECONDARY_SCHEDULE[0],
+        ),
+        _ => return false,
+    };
     if schedule.is_null() {
         return false;
     }
-    let Some(rate) = stateless_schedule_rate(
-        primary,
-        mode,
-        descriptor_flags,
-        rate_context.add(rate_offset).read(),
-        schedule.read(),
-    ) else {
-        return false;
-    };
     let class = descriptor.add(DESCRIPTOR_RATE_CLASS_OFFSET).read();
 
     descriptor
@@ -190,20 +218,17 @@ pub(crate) const fn basic_non_he_rts_rate(rate: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{basic_non_he_rts_rate, rate_class_bits, stateless_schedule_rate};
+    use super::{basic_non_he_rts_rate, rate_class_bits, stateless_schedule_source};
 
     #[test]
     fn admits_only_recovered_stateless_schedule_branches() {
-        assert_eq!(stateless_schedule_rate(true, 1, 0x2009, 33, 0), Some(33));
-        assert_eq!(stateless_schedule_rate(true, 0, 0x2009, 33, 0), None);
-        assert_eq!(stateless_schedule_rate(false, 0, 0, 33, 0), Some(0));
-        assert_eq!(
-            stateless_schedule_rate(false, 0, 0x0200_200c, 33, 0),
-            Some(0)
-        );
-        assert_eq!(stateless_schedule_rate(false, 2, 0, 7, 0), Some(7));
-        assert_eq!(stateless_schedule_rate(false, 0x80, 0, 7, 0), None);
-        assert_eq!(stateless_schedule_rate(false, 0, 0x0000_0800, 7, 0), None);
+        assert_eq!(stateless_schedule_source(true, 1, 0x2009, 0x304), 1);
+        assert_eq!(stateless_schedule_source(true, 0, 0x2009, 0x304), 0);
+        assert_eq!(stateless_schedule_source(false, 0, 0, 0), 2);
+        assert_eq!(stateless_schedule_source(false, 0x80, 0x0200_200c, 0), 3);
+        assert_eq!(stateless_schedule_source(false, 2, 0, 0), 1);
+        assert_eq!(stateless_schedule_source(false, 0x80, 0, 0x10000), 0);
+        assert_eq!(stateless_schedule_source(false, 0, 0x0000_0800, 0), 0);
     }
 
     #[test]
