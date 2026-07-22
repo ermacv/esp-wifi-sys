@@ -25,6 +25,7 @@ unsafe extern "C" {
     #[cfg(not(feature = "strict-no-wait"))]
     static mut g_timer_func: Option<EventCallback>;
 
+    #[cfg(not(feature = "strict-no-wait"))]
     fn ppProcessTxQ(queue: u8) -> i32;
     #[cfg(feature = "strict-no-wait")]
     fn ieee80211_output_process();
@@ -73,6 +74,8 @@ pub enum VendorDispatchError {
     InternalQueueFull,
     #[cfg(feature = "strict-no-wait")]
     LmacContinuation(crate::lmac::LmacAsyncError),
+    #[cfg(feature = "strict-no-wait")]
+    TxQueue(crate::tx_queue::TxQueueProcessError),
     #[cfg(feature = "strict-no-wait")]
     UnsupportedStrictAction(PpAction),
     #[cfg(feature = "strict-no-wait")]
@@ -324,9 +327,10 @@ impl PpDispatcher for VendorPpDispatcher {
 
             match event.action() {
                 PpAction::ProcessTxQueue(queue) => {
-                    #[cfg(all(feature = "strict-no-wait", feature = "hil-vendor-tx"))]
-                    crate::tx_queue::hil_process_tx_queue(queue);
-                    #[cfg(not(all(feature = "strict-no-wait", feature = "hil-vendor-tx")))]
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::tx_queue::process_tx_queue(queue)
+                        .map_err(VendorDispatchError::TxQueue)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
                     ppProcessTxQ(queue);
                 }
                 PpAction::Net80211Tx => {
