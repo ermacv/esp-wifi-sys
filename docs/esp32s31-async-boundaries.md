@@ -561,11 +561,23 @@ tree depends only on two MAC-header bytes and two existing descriptor words,
 and host tests cover every branch. The final ELF aliases `ppTxProtoProc`
 directly to the Rust entry because applying GNU `--wrap` to this ECO0 ROM
 export would otherwise replace the wrapper symbol itself with the ROM address.
-The remaining stateful prefix is `ppProcTxSecFrame` (CCMP/security layout) and
-`rcGetSched` (rate-control state); those two calls are why this feature remains
-a qualification boundary rather than the final runtime. It may only be run in
-the current Wi-Fi-only image where Bluetooth/802.15.4 coexistence is not
-started.
+The reachable plaintext branch of `ppProcTxSecFrame` is likewise replaced by
+an SRAM-resident Rust leaf. It accepts only the exact observed management,
+EAPOL and Action layouts, validates the complete transformation before its
+first write, and then preserves the vendor write order while reserving the
+eight-byte security prefix and four-byte trailer. Protected-data/CCMP states
+are not inferred: any such unqualified input traps before mutation. The
+remaining stateful prefix is therefore `rcGetSched` (rate-control state), which
+is why this feature remains a qualification boundary rather than the final
+runtime.
+
+The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
+object whose first buffer has already been detached cannot be inspected,
+queued, or safely recycled, so exactly one pointer may be quarantined and
+reported as consumed without dereferencing it. Repeated calls for that same
+pointer are idempotent; a second distinct detached pointer still traps instead
+of concealing pool corruption. This feature may only be run in the current
+Wi-Fi-only image where Bluetooth/802.15.4 coexistence is not started.
 
 `BasicHtAmpduChain` now is that reversible ownership token. Besides the public
 first/last/count/length summary, it privately retains all 32 validated frame

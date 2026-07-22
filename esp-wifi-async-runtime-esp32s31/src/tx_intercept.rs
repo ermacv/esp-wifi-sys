@@ -156,6 +156,8 @@ static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static NULL_BUFFER_QUARANTINE_CALLS: AtomicU32 = AtomicU32::new(0);
+static NULL_BUFFER_QUARANTINE_FRAME: AtomicU32 = AtomicU32::new(0);
 static CLASSIFICATION_REJECT_REASON: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_REASON: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
@@ -196,6 +198,8 @@ pub struct HilAmpduInterceptSnapshot {
     pub mapper_bypassed: u32,
     pub mapper_already_prepared: u32,
     pub mapper_fallbacks: u32,
+    pub null_buffer_quarantine_calls: u32,
+    pub null_buffer_quarantine_frame: u32,
     pub last_fallback_reason: u8,
     pub last_fallback_descriptor: u32,
     pub last_fallback_rate: u8,
@@ -303,6 +307,8 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         mapper_bypassed: MAPPER_BYPASSED.load(Ordering::Acquire),
         mapper_already_prepared: MAPPER_ALREADY_PREPARED.load(Ordering::Acquire),
         mapper_fallbacks: MAPPER_FALLBACKS.load(Ordering::Acquire),
+        null_buffer_quarantine_calls: NULL_BUFFER_QUARANTINE_CALLS.load(Ordering::Acquire),
+        null_buffer_quarantine_frame: NULL_BUFFER_QUARANTINE_FRAME.load(Ordering::Acquire),
         last_fallback_reason: LAST_FALLBACK_REASON.load(Ordering::Acquire) as u8,
         last_fallback_descriptor: LAST_FALLBACK_DESCRIPTOR.load(Ordering::Acquire),
         last_fallback_rate: LAST_FALLBACK_RATE.load(Ordering::Acquire) as u8,
@@ -526,8 +532,28 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         return 3;
     }
 
+    let reject_reason = CLASSIFICATION_REJECT_REASON.load(Ordering::Relaxed);
+    if reject_reason == 5 && !frame.is_null() {
+        // A completion/recycle edge can leave one late ppTxPkt invocation with
+        // its frame object still addressable but its first buffer already
+        // detached. It cannot be inspected, queued or safely recycled here.
+        // Quarantine exactly one pointer and report it as consumed; a second
+        // distinct pointer still traps so pool corruption cannot be hidden.
+        let frame_address = frame as usize as u32;
+        let quarantined = NULL_BUFFER_QUARANTINE_FRAME.compare_exchange(
+            0,
+            frame_address,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if quarantined.is_ok() || quarantined == Err(frame_address) {
+            NULL_BUFFER_QUARANTINE_CALLS.fetch_add(1, Ordering::Relaxed);
+            return 3;
+        }
+    }
+
     let fallback_pre = read_mapper_state(frame);
-    if CLASSIFICATION_REJECT_REASON.load(Ordering::Relaxed) == 4
+    if reject_reason == 4
         && (fallback_pre == [0x0200_2009, 0x0000_0007, 0x0000_0304, 0x0000_0081, 0]
             || fallback_pre == [0, 0x0000_0007, 0, 0x0000_0081, 0])
     {
