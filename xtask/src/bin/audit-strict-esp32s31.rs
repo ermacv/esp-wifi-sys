@@ -5,10 +5,9 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 const ROOTS: &[&str] = &[
-    "ppProcessTxQ",
     "pp_timer_do_process",
     "pp_default_event_handler",
     // The Rust event-23 dispatcher owns every hardware-completion outcome.
@@ -64,6 +63,7 @@ const ROOTS: &[&str] = &[
 ];
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
+    "ppProcessTxQ",
     "lmacProcessTxTimeout",
     "lmacDiscardFrameExchangeSequence",
     "lmacDiscardMSDU",
@@ -239,6 +239,15 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
     ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];
+
+// This is the one-action, fail-closed replacement reached by strict PP events
+// 0..=4. It must remain executable from internal SRAM, and the final image must
+// not contain an instruction which transfers control to the absolute ROM
+// `ppProcessTxQ` export.
+const REQUIRED_SRAM_CODE: &[&str] =
+    &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
+const INTERNAL_SRAM_START: u64 = 0x2f00_0000;
+const INTERNAL_SRAM_END: u64 = 0x3000_0000;
 
 const DIRECT_HEAP_WRAPPERS: [(&str, &str); 4] = [
     ("malloc", "__wrap_malloc"),
@@ -761,6 +770,49 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
         })
         .collect::<BTreeMap<_, _>>();
     let mut violations = BTreeSet::new();
+
+    let all_symbols = text(checked(
+        Command::new("llvm-nm").arg("-C").arg("-n").arg(elf),
+    )?)?;
+    let all_linked_symbols = all_symbols
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 3 {
+                return None;
+            }
+            let address = u64::from_str_radix(fields[0], 16).ok()?;
+            let kind = (*fields.get(fields.len().checked_sub(2)?)?).to_owned();
+            Some((normalize_symbol(fields.last()?), (kind, address)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for required in REQUIRED_SRAM_CODE {
+        match all_linked_symbols.get(*required) {
+            None => {
+                violations.insert(Violation::ElfSymbol {
+                    category: "missing strict SRAM code",
+                    symbol: (*required).to_owned(),
+                });
+            }
+            Some((kind, address)) if !is_internal_sram_code(kind, *address) => {
+                violations.insert(Violation::ElfSymbol {
+                    category: "strict code outside internal SRAM",
+                    symbol: format!("{required}@0x{address:08x}"),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    let disassembly = text(checked(
+        Command::new("llvm-objdump").arg("-d").arg("-C").arg(elf),
+    )?)?;
+    if calls_symbol(&disassembly, "ppProcessTxQ") {
+        violations.insert(Violation::ElfSymbol {
+            category: "call to replaced vendor root",
+            symbol: "ppProcessTxQ".to_owned(),
+        });
+    }
     for (_, wrapper) in DIRECT_HEAP_WRAPPERS {
         let violation = match linked_symbol_kinds.get(wrapper) {
             None => Some(Violation::ElfSymbol {
@@ -847,6 +899,17 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
 
 fn is_code_symbol_kind(kind: &str) -> bool {
     matches!(kind, "T" | "t" | "W" | "w")
+}
+
+fn is_internal_sram_code(kind: &str, address: u64) -> bool {
+    is_code_symbol_kind(kind) && (INTERNAL_SRAM_START..INTERNAL_SRAM_END).contains(&address)
+}
+
+fn calls_symbol(disassembly: &str, symbol: &str) -> bool {
+    let reference = format!("<{symbol}>");
+    disassembly.lines().any(|line| {
+        line.contains(&reference) && !line.trim_end().ends_with(&format!("{reference}:"))
+    })
 }
 
 fn print_report(
@@ -972,8 +1035,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        definition_name, direct_relocation_target, indirect_site, is_code_symbol_kind,
-        is_pinned_bounded_cycle, parse_object,
+        calls_symbol, definition_name, direct_relocation_target, indirect_site,
+        is_code_symbol_kind, is_internal_sram_code, is_pinned_bounded_cycle, parse_object,
     };
 
     #[test]
@@ -1016,6 +1079,21 @@ mod tests {
         assert!(is_code_symbol_kind("T"));
         assert!(is_code_symbol_kind("W"));
         assert!(!is_code_symbol_kind("A"));
+    }
+
+    #[test]
+    fn final_elf_rejects_only_calls_to_replaced_rom_root() {
+        let disassembly = "2f003828 <replacement>:\n\
+                           2f00382c: jalr ra <ppProcessTxQ>\n";
+        assert!(calls_symbol(disassembly, "ppProcessTxQ"));
+        assert!(!calls_symbol("2f800f8c <ppProcessTxQ>:\n", "ppProcessTxQ"));
+    }
+
+    #[test]
+    fn strict_queue_action_must_be_code_in_internal_sram() {
+        assert!(is_internal_sram_code("t", 0x2f00_3828));
+        assert!(!is_internal_sram_code("A", 0x2f00_3828));
+        assert!(!is_internal_sram_code("t", 0x400c_5abc));
     }
 
     #[test]

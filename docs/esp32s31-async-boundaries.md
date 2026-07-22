@@ -721,6 +721,28 @@ or direct delay. Final-ELF disassembly confirms that strict basic-HT retry
 formatting contains no `mac_tx_set_plcp0`, `mac_tx_set_plcp1`,
 `mac_tx_set_htsig`, or `mac_tx_set_len` call.
 
+The outer TX software-queue action is now Rust-owned as well. A complete HIL
+oracle around the pinned `ppProcessTxQ` body observed 5,486 queue-zero calls
+during the strict workload: 4,793 submitted exactly one frame and 693 found no
+frame. Events one through four were never posted. Every submitted frame used
+logical and hardware queue zero, queue kind three, status one after submission,
+no linked successor, and the already qualified basic non-HE/non-A-MPDU layout.
+The replacement accepts only that profile, removes at most one pointer from
+the fixed `pTxRx` queue, validates the peer and descriptor before mutation, and
+calls the existing finite Rust basic-frame submit path. An error before
+hardware ownership restores the pointer at the queue head; exhaustion and a
+busy hardware queue return immediately. Events one through four fail closed.
+
+Hardware qualification of the replacement completed WPA2 association,
+DHCP/DNS/TCP/HTTP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
+25.520 Mbit/s. It handled 5,485 queue actions and submitted 4,792 frames with
+zero unexpected outcomes, allocation changes, blocking callbacks, task delays,
+direct delays, or queue rejection. Final-ELF enforcement requires the Rust
+action to reside in internal SRAM and rejects any instruction that calls the
+absolute ROM `ppProcessTxQ` symbol. The absolute export may remain in the symbol
+table because it is supplied by the ROM linker script; symbol presence alone
+does not make it reachable.
+
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
 TXOP/list state, and descriptor flags. This remains the HIL oracle for future

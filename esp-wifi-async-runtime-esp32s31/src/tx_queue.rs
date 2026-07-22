@@ -4,17 +4,19 @@
 //! to event/logical/hardware queue zero and one basic MPDU. The active strict
 //! path now reproduces that subset as one Rust executor action.
 
-use core::{
-    ptr,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use core::ptr;
+#[cfg(feature = "hil-vendor-tx")]
+use core::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(feature = "hil-vendor-tx")]
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+#[cfg(feature = "hil-vendor-tx")]
 const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
+#[cfg(feature = "hil-vendor-tx")]
 const TX_DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
