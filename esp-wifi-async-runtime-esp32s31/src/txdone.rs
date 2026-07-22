@@ -483,6 +483,10 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     first_buffer
         .cast::<u32>()
         .write_unaligned(layout.buffer_flags);
+    descriptor
+        .add(0x10)
+        .cast::<u32>()
+        .write_unaligned(layout.descriptor_security);
     // `ieee80211_hostap_send_beacon_process` sets this ownership bit before
     // handing the persistent buffer to PP and refuses to reuse either beacon
     // buffer while it remains set. Hardware is complete at this boundary, so

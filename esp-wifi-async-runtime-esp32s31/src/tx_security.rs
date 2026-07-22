@@ -22,6 +22,7 @@ pub struct TxSecurityLayoutOutput {
 pub struct ApBeaconCompletionLayout {
     pub remaining_len: u16,
     pub buffer_flags: u32,
+    pub descriptor_security: u32,
 }
 
 /// Remove the per-transmission FCS reservation from a persistent AP beacon
@@ -49,6 +50,7 @@ pub const fn strict_ap_beacon_completion_layout(
     Some(ApBeaconCompletionLayout {
         remaining_len: 0x74,
         buffer_flags: (input.buffer_flags & !BUFFER_LENGTH_MASK) | (0x94 << 14),
+        descriptor_security: 0x0004_0000,
     })
 }
 
@@ -457,6 +459,7 @@ mod tests {
             Some(ApBeaconCompletionLayout {
                 remaining_len: 0x74,
                 buffer_flags: 0xc025_00f8,
+                descriptor_security: 0x0004_0000,
             })
         );
         assert_eq!(
