@@ -424,10 +424,10 @@ The strict gate still intentionally fails. Confirmed remaining paths include:
 - the stock WPA2-Personal `eapol_txcb` target reaching `calloc/free` through
   eloop timeouts and `ets_delay_us` through deauthentication if strict
   integration fails to install the provided async TX-done callback first;
-- basic retry submission now enters only the pinned hardware-transmit leaf;
-  unobserved RTS and generic-error outcomes still enter their complete vendor
-  handlers, and collision plus connection-management state transitions are
-  not yet reconstructed;
+- basic retry submission now enters only the pinned PPDU-formatting leaf and
+  its finite PHY/MMIO helpers; unobserved RTS and generic-error outcomes still
+  enter their complete vendor handlers, and collision plus
+  connection-management state transitions are not yet reconstructed;
 - explicit disassociation, deauthentication, and off-channel action completion
   is not implemented; the Rust management wrapper rejects those subtypes before
   the stock channel-change and `hal_mac_deinit -> ets_delay_us` branches;
@@ -497,29 +497,30 @@ or enters the existing one-frame-per-event discard continuation. It rejects
 TXOP, linked, HE, BAR, A-MPDU, aborted, and trigger/MU states before mutation.
 The narrow submission body implements the pinned non-HE `rcGetRate` behavior
 as either one direct per-peer selection or at most four cumulative fallback
-table entries, then submits exactly one frame with `lmacTxFrame`. This removes
-the vendor rate helper and its `wifi_assert` failure path. HE and aggregate
-descriptors are rejected before selection, so the nested `rcGetSMPDURate`
-logic is outside this profile. `ppCalFrameTimes` is also absent: its controlling
-bit is rejected before mutation and the Rust selector changes only the rate
-byte. `lmacRetryTxFrame`, the outer ACK/CTS bodies, retry-failure bodies,
-end-exchange dispatcher, test hook, retry-limit helper, and lifetime helper are
-no longer called.
+table entries. It then performs the status-three descriptor transition,
+long-frame classification, lifetime timeout, bounded contention backoff, EDCA
+configuration, and basic queue enable in Rust/MMIO before calling
+`hal_mac_tx_set_ppdu` exactly once. This removes `lmacTxFrame`, ROM
+`lmacSetTxFrame`, `ppProcessLifeTime`, the OSI random callback, the common EDCA
+helper, and the common TXQ-enable helper from the retry path. In particular,
+the unsupported-type `wifi_log` plus infinite loop in `ppProcessLifeTime` is no
+longer reachable. Off-channel, NAN, FTM, HE-TB, test, and assertion branches
+fail before hardware mutation. HE and aggregate descriptors are rejected
+before selection, so the nested `rcGetSMPDURate` logic is outside this profile.
+`ppCalFrameTimes` is also absent: its controlling bit is rejected before
+mutation and the Rust selector changes only the rate byte.
 
-A 5,056-completion hardware stress run exercised 262 ACK and three CTS timeouts
-through this direct Rust rate-selection path. All 265 retries retained the same
-basic-HT frame, queue-zero/kind-three ownership, no TXOP, and no linked MPDU.
-The complete WPA2/DHCP/DNS/TCP/HTTP/UDP test passed at 26.333 Mbit/s with 4/4
-HTTP transfers and zero post-takeover allocation, blocking callbacks, task
-delays, direct delays, or queue rejection. An earlier direct split stalled
-because `rcGetRate` had incorrectly been declared with one argument;
-disassembly confirmed its two-argument ABI before the equivalent bounded body
-was moved into Rust.
+A 5,026-completion hardware stress run exercised 235 ACK timeouts through this
+Rust submission wrapper. All retries retained the same basic-HT frame,
+queue-zero/kind-three ownership, no TXOP, and no linked MPDU. The complete
+WPA2/DHCP/DNS/TCP/HTTP/UDP test passed at 27.263 Mbit/s with 4/4 HTTP transfers
+and zero post-takeover allocation, blocking callbacks, task delays, direct
+delays, or queue rejection.
 
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
 TXOP/list state, and descriptor flags. This remains the HIL oracle for the
-remaining hardware-transmit leaf and future aggregate enablement. RTS-error
+remaining PPDU-formatting/PHY leaves and future aggregate enablement. RTS-error
 and generic TX-error outcomes were not observed and remain vendor roots.
 
 For WPA2 specifically, `hal_crypto_set_key_entry` is replaced at final link.
@@ -561,8 +562,8 @@ AP authorization lives in a fixed Rust peer table and must gate every ordinary
 data-channel operation; EAPOL uses a separate pre-auth path. TXQ bitmap
 processing, the common TX-done tail, beacon completion, ordinary management
 completion, basic retry accounting/discard, and retry rate selection are
-classified. Final hardware submission and connection paths are not yet fully
-Rust-owned. Key installation additionally
+classified. Basic retry scheduling and queue enable are Rust-owned; PPDU/PHY
+formatting and connection paths are not yet fully Rust-owned. Key installation additionally
 requires no live RX fragment from the old key, because the stock cleanup path
 can call `wifi_log`.
 
