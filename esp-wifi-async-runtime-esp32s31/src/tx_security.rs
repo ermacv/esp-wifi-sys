@@ -36,7 +36,7 @@ pub const fn strict_ap_beacon_completion_layout(
         || input.layout & !0x2001 != 0
         || input.layout & 0x2000 == 0
         || input.descriptor_flags != 0x0080_0412
-        || input.descriptor_security != 0x0014_0000
+        || input.descriptor_security != 0x0114_0000
         || input.frame_control != 0x0080
     {
         return None;
@@ -449,7 +449,7 @@ mod tests {
             layout: 0x2001,
             buffer_flags: 0xc026_00f8,
             descriptor_flags: 0x0080_0412,
-            descriptor_security: 0x0014_0000,
+            descriptor_security: 0x0114_0000,
             frame_control: 0x0080,
         };
         assert_eq!(
