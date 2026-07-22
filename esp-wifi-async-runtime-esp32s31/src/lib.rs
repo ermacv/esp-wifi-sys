@@ -61,6 +61,7 @@ pub mod tx_ampdu;
 mod tx_intercept;
 mod tx_mapper;
 mod tx_plcp;
+mod tx_proto;
 mod tx_rate;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod txdone;
@@ -216,6 +217,8 @@ pub use tx_intercept::{
     hil_pre_enable_mapper_snapshot, HilAmpduHardwareSnapshot, HilAmpduInterceptSnapshot,
     HilPreEnableMapperRecord, HilPreEnableMapperSnapshot, HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY,
 };
+#[cfg(target_arch = "riscv32")]
+pub use tx_proto::strict_pp_tx_proto_proc;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
