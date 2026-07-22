@@ -53,10 +53,12 @@ pub const fn strict_persistent_frame_completion_layout(
         && matches!(subtype, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
         && (input.descriptor_flags == PERSISTENT_BIT
             || input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412)
-        && input.descriptor_security == 0;
+        && input.descriptor_security == 0x0114_0000;
     let beacon = input.frame_control == 0x0080
         && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
-        && input.descriptor_security == 0x0114_0000;
+        && input.descriptor_security == 0x0114_0000
+        && input.header_len == 0x20
+        && input.remaining_len == 0x78;
     if input.frame_control & 0x000c != 0
         || !(management_reply || beacon)
         || input.header_len < 8
@@ -132,7 +134,7 @@ pub const fn strict_tx_security_layout(
     let ap_beacon = input.frame_control == 0x0080
         && input.descriptor_flags == 0x0080_0412
         && input.descriptor_security == 0x0004_0000;
-    let persistent_management_reply = input.descriptor_security == 0
+    let persistent_management_reply = input.descriptor_security == 0x0004_0000
         && matches!(input.frame_control, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
         && matches!(input.descriptor_flags, 0x0080_0000 | 0x0080_0412);
     let trailer_len = if (input.descriptor_security == 0
@@ -409,11 +411,14 @@ mod tests {
 
     #[test]
     fn reproduces_retained_ap_management_reply_layouts() {
-        let measured = input(0x0069_0018, 0x0063, 0xc020_4084, 0x0080_0000, 0x0050);
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0069_0018, 0x006c, 0xc020_4084, 0x0080_0000, 0x0050)
+        };
         let expected = TxSecurityLayoutOutput {
             header_len: 0x20,
             remaining_len: 0x6d,
-            layout: 0x2063,
+            layout: 0x206c,
             buffer_flags: 0xc023_4084,
             metadata_len: 0x85,
         };
@@ -445,7 +450,7 @@ mod tests {
                 ..measured
             },
             TxSecurityLayoutInput {
-                descriptor_security: 1,
+                descriptor_security: 0,
                 ..measured
             },
         ] {
@@ -455,7 +460,10 @@ mod tests {
 
     #[test]
     fn restores_retained_management_and_beacon_layouts() {
-        let completed = input(0x0066_0020, 0x2000, 0xc021_8084, 0x0080_0412, 0x00b0);
+        let completed = TxSecurityLayoutInput {
+            descriptor_security: 0x0114_0000,
+            ..input(0x0066_0020, 0x2000, 0xc021_8084, 0x0080_0412, 0x00b0)
+        };
         assert_eq!(
             strict_persistent_frame_completion_layout(completed),
             Some(PersistentFrameCompletionLayout {
