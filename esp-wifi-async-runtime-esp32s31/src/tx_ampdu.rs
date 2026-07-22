@@ -226,7 +226,7 @@ pub struct BasicHtAmpduChain {
     original_first_descriptor_flags: u32,
     original_first_descriptor_word1: u32,
     original_first_timestamp: u32,
-    original_tail_buffer_flags: u32,
+    original_tail_buffer_flags: [u32; TX_AMPDU_SLOT_CAPACITY],
 }
 
 impl BasicHtAmpduChain {
@@ -505,6 +505,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         .map_err(BasicHtAmpduChainError::Length)?;
     let mut first_rate = 0_u8;
     let mut sequences = [0_u16; TX_AMPDU_SLOT_CAPACITY];
+    let mut original_tail_buffer_flags = [0_u32; TX_AMPDU_SLOT_CAPACITY];
     let mut index = 0_usize;
     while index < frames.len() {
         let frame = frames[index];
@@ -573,6 +574,7 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         {
             return Err(BasicHtAmpduChainError::ExistingBufferLink(index_u8));
         }
+        original_tail_buffer_flags[index] = tail_buffer.cast::<u32>().read();
         let payload = first_buffer
             .add(BUFFER_DATA_OFFSET)
             .cast::<*mut u8>()
@@ -607,7 +609,11 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         first_descriptor_flags: first_descriptor.cast::<u32>().read(),
         first_descriptor_word1: first_descriptor.add(4).cast::<u32>().read(),
         first_rate,
-        tail_buffer_flags: tail_buffer.cast::<u32>().read(),
+        // `ppMapTxQueue` presents every independently mapped MPDU as a
+        // complete one-frame DMA chain, so its tail already carries END.
+        // The recovered `ppAssembleAMPDU` leaf instead receives a chain whose
+        // intermediate END markers have been cleared by the scheduler.
+        tail_buffer_flags: tail_buffer.cast::<u32>().read() & !TX_BUFFER_END_BIT,
         tail_timestamp: tail_descriptor
             .add(DESCRIPTOR_TIMESTAMP_OFFSET)
             .cast::<u32>()
@@ -626,7 +632,6 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
         .add(DESCRIPTOR_TIMESTAMP_OFFSET)
         .cast::<u32>()
         .read();
-    let original_tail_buffer_flags = tail_buffer.cast::<u32>().read();
     let mut owned_frames = [core::ptr::null_mut(); TX_AMPDU_SLOT_CAPACITY];
     owned_frames[..frames.len()].copy_from_slice(frames);
 
@@ -649,6 +654,12 @@ pub unsafe fn prepare_basic_ht_ampdu_chain(
             .add(BUFFER_NEXT_OFFSET)
             .cast::<*mut u8>()
             .write(next_buffer);
+        // Clear the terminal marker while this independently mapped frame is
+        // a member of the aggregate. The final aggregate tail receives END
+        // from `output.tail_buffer_flags` below.
+        tail_buffer
+            .cast::<u32>()
+            .write(original_tail_buffer_flags[index] & !TX_BUFFER_END_BIT);
         index += 1;
     }
 
@@ -801,6 +812,9 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
             .add(BUFFER_NEXT_OFFSET)
             .cast::<*mut u8>()
             .write(core::ptr::null_mut());
+        tail_buffer
+            .cast::<u32>()
+            .write(chain.original_tail_buffer_flags[index]);
         index += 1;
     }
     first_payload
@@ -822,9 +836,6 @@ pub unsafe fn restore_basic_ht_ampdu_chain(
         .add(FRAME_REMAINING_LENGTH_OFFSET)
         .cast::<u16>()
         .write(chain.original_first_remaining_length);
-    tail_buffer
-        .cast::<u32>()
-        .write(chain.original_tail_buffer_flags);
     Ok(())
 }
 
@@ -1670,7 +1681,11 @@ mod tests {
             original_first_descriptor_flags: 0x0004_2009,
             original_first_descriptor_word1: 0xa5a5_0020,
             original_first_timestamp: 0x1234_5678,
-            original_tail_buffer_flags: 0xa186_8612,
+            original_tail_buffer_flags: {
+                let mut flags = [0_u32; TX_AMPDU_SLOT_CAPACITY];
+                flags[1] = 0xa186_8612;
+                flags
+            },
         };
         assert_eq!(chain.frame(0), Some(0x1000_usize as *mut u8));
         assert_eq!(chain.frame(1), Some(0x2000_usize as *mut u8));
