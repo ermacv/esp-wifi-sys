@@ -29,17 +29,16 @@ pub const fn strict_tx_security_layout(
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const BUFFER_TERMINAL: u32 = 0x4000_0000;
 
-    if input.layout & 0x2000 != 0 {
-        return None;
-    }
+    let headroom_applied = input.layout & 0x2000 != 0;
 
+    let ap_beacon = input.frame_control == 0x0080
+        && input.descriptor_flags == 0x0080_0412
+        && input.descriptor_security == 0x0004_0000;
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
             || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c)))
-        || (input.frame_control == 0x0080
-            && input.descriptor_flags == 0x0080_0412
-            && input.descriptor_security == 0x0004_0000)
+        || ap_beacon
     {
         // AP beacons carry the pinned hardware-key direction word even though
         // the 802.11 Protected bit is clear. The first strict AP bring-up
@@ -56,6 +55,20 @@ pub const fn strict_tx_security_layout(
         return None;
     };
 
+    // The two hostap beacon buffers are persistent. Their constructor resets
+    // the current MPDU/body length before every TBTT, but deliberately keeps
+    // the PP metadata headroom installed by the first transmission. This is
+    // the only measured path allowed to re-enter with that bit set; ordinary
+    // management, EAPOL and data buffers are single-owner, one-shot objects.
+    if headroom_applied
+        && (!ap_beacon
+            || input.layout & !0x2001 != 0
+            || input.header_len != 0x20
+            || input.remaining_len != 0x74)
+    {
+        return None;
+    }
+
     let payload_len = match input.header_len.checked_add(input.remaining_len) {
         Some(value) => value,
         None => return None,
@@ -65,22 +78,27 @@ pub const fn strict_tx_security_layout(
         return None;
     }
 
-    let header_len = match input.header_len.checked_add(8) {
-        Some(value) => value,
-        None => return None,
+    let header_len = if headroom_applied {
+        input.header_len
+    } else {
+        match input.header_len.checked_add(8) {
+            Some(value) => value,
+            None => return None,
+        }
     };
     let remaining_len = match input.remaining_len.checked_add(trailer_len) {
         Some(value) => value,
         None => return None,
     };
-    let buffer_len = match encoded_len.checked_add(8) {
+    let headroom_len = if headroom_applied { 0 } else { 8 };
+    let buffer_len = match encoded_len.checked_add(headroom_len) {
         Some(value) => match value.checked_add(trailer_len) {
             Some(value) if value <= 0x3fff => value,
             _ => return None,
         },
         None => return None,
     };
-    let metadata_len = payload_len as u32 + trailer_len as u32;
+    let metadata_len = header_len as u32 + remaining_len as u32 - 8;
 
     Some(TxSecurityLayoutOutput {
         header_len,
@@ -142,20 +160,26 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
         .add(FRAME_LENGTHS_OFFSET)
         .cast::<u32>()
         .read_unaligned();
+    let layout = frame
+        .add(FRAME_LAYOUT_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    let header = if layout & 0x2000 != 0 {
+        data.add(8)
+    } else {
+        data
+    };
     let input = TxSecurityLayoutInput {
         header_len: lengths as u16,
         remaining_len: (lengths >> 16) as u16,
-        layout: frame
-            .add(FRAME_LAYOUT_OFFSET)
-            .cast::<u16>()
-            .read_unaligned(),
+        layout,
         buffer_flags: first_buffer.cast::<u32>().read_unaligned(),
         descriptor_flags: descriptor.cast::<u32>().read_unaligned(),
         descriptor_security: descriptor
             .add(DESCRIPTOR_SECURITY_OFFSET)
             .cast::<u32>()
             .read_unaligned(),
-        frame_control: data.cast::<u16>().read_unaligned(),
+        frame_control: header.cast::<u16>().read_unaligned(),
     };
     let output = match strict_tx_security_layout(input) {
         Some(value) => value,
@@ -182,7 +206,11 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
         .cast::<u32>()
         .write_unaligned(security_flags | BUFFER_TERMINAL);
 
-    let metadata = data.sub(8);
+    let metadata = if input.layout & 0x2000 != 0 {
+        data
+    } else {
+        data.sub(8)
+    };
     first_buffer
         .add(BUFFER_DATA_OFFSET)
         .cast::<*mut u8>()
@@ -335,6 +363,41 @@ mod tests {
             TxSecurityLayoutInput {
                 frame_control: 0x4080,
                 ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn refreshes_persistent_wpa2_ap_beacon_without_duplicating_headroom() {
+        let refreshed = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0074_0020, 0x2001, 0xc025_00f8, 0x0080_0412, 0x0080)
+        };
+        assert_eq!(
+            strict_tx_security_layout(refreshed),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x78,
+                layout: 0x2001,
+                buffer_flags: 0xc026_00f8,
+                metadata_len: 0x90,
+            })
+        );
+
+        for rejected in [
+            TxSecurityLayoutInput {
+                header_len: 0x28,
+                ..refreshed
+            },
+            TxSecurityLayoutInput {
+                remaining_len: 0x78,
+                ..refreshed
+            },
+            TxSecurityLayoutInput {
+                layout: 0x2008,
+                ..refreshed
             },
         ] {
             assert_eq!(strict_tx_security_layout(rejected), None);
