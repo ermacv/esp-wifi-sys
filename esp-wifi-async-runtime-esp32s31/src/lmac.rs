@@ -21,6 +21,10 @@ const TXQ_PROTECTION_BASE_REG: usize = 0x2010_4d64;
 const TXQ_PROTECTION_DURATION_BASE_REG: usize = 0x2010_54dc;
 const TXQ_PTI_BASE_REG: usize = 0x2010_54e0;
 const TXQ_PLCP1_BASE_REG: usize = 0x2010_54d8;
+const TXQ_HTSIG_BASE_REG: usize = 0x2010_54e8;
+const TXQ_HT_CONTROL_BASE_REG: usize = 0x2010_5504;
+const TXQ_DATA_LENGTH_BASE_REG: usize = 0x2010_550c;
+const TXQ_LENGTH_CONTROL_BASE_REG: usize = 0x2010_5510;
 const TXQ_POWER_BASE_REG: usize = 0x2010_5500;
 const TXQ_REGISTER_STRIDE: usize = 0x10;
 const TXQ_POWER_STRIDE: usize = 0x7c;
@@ -105,7 +109,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -868,7 +871,7 @@ unsafe fn format_basic_ht_ppdu(
 
     // HE and FTM are rejected before entering this function, so the selected
     // 16..=35 branch is exactly the finite HTSIG path.
-    let _ = mac_tx_set_htsig(queue_state, txrx);
+    program_basic_htsig(queue, frame, descriptor, txrx, rate, rts_rate as u8);
 
     let data_rate = if rate <= 25 { rate } else { rate - 10 };
     let data_rate = usize::from(data_rate);
@@ -934,6 +937,92 @@ unsafe fn program_basic_plcp1(queue: u8, descriptor: *mut u8, rate: u8) {
 
     let register = (TXQ_PLCP1_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     register.write_volatile(plcp1);
+}
+
+/// Recovered non-aggregate body of `mac_tx_set_htsig` and its terminal
+/// `mac_tx_set_len` leaf.
+unsafe fn program_basic_htsig(
+    queue: u8,
+    frame: *mut u8,
+    descriptor: *mut u8,
+    txrx: *mut u8,
+    rate: u8,
+    rts_rate: u8,
+) {
+    let flags = descriptor.cast::<u32>().read();
+    debug_assert_eq!(flags & (TX_FRAME_HE_BIT | TX_FRAME_AMPDU_BIT), 0);
+
+    let peer = frame
+        .add(TX_FRAME_RATE_CONTEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let mut extension = false;
+    let mut peer_state = 0_u16;
+    if !peer.is_null() {
+        let kind = peer.add(0x86).read();
+        extension = kind.wrapping_sub(4) < 2;
+        peer_state = peer.add(0x82).cast::<u16>().read();
+    }
+    if flags & 0x0000_4000 != 0 {
+        extension = descriptor.add(8).cast::<u32>().read() & 0x0000_8000 != 0;
+    }
+
+    let metadata = frame.add(4).cast::<*mut u8>().read();
+    debug_assert!(!metadata.is_null());
+    let length_source = metadata.add(4).cast::<*const u32>().read();
+    debug_assert!(!length_source.is_null());
+    let length = length_source.read() & 0x3fff;
+
+    let htsig = crate::tx_plcp::basic_htsig_word(rate, extension, length);
+    let htsig_register = (TXQ_HTSIG_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    htsig_register.write_volatile(htsig);
+
+    let control_register =
+        (TXQ_HT_CONTROL_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    let spatial = descriptor.add(0x2a).read();
+    let coding = descriptor.add(0x2e).read();
+    let mut control = control_register.read_volatile();
+    control = (control & 0xffff_ff80) | u32::from(spatial & 0x7f);
+    control_register.write_volatile(control);
+    control = control_register.read_volatile();
+    control = (control & 0xffff_c07f) | ((u32::from(coding) << 7) & 0x0000_3f80);
+    control_register.write_volatile(control);
+    control = control_register.read_volatile();
+    control = (control & 0xffe0_3fff) | ((u32::from(spatial) << 14) & 0x01fc_0000);
+    control_register.write_volatile(control);
+
+    let protection_register =
+        (TXQ_PROTECTION_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    let peer_state = u32::from(peer_state & 0x03ff);
+    let mut protection = protection_register.read_volatile();
+    protection = (protection & 0xffff_fc00) | peer_state;
+    protection_register.write_volatile(protection);
+    protection = protection_register.read_volatile();
+    protection = (protection & 0xfff0_03ff) | (peer_state << 10);
+    protection_register.write_volatile(protection);
+    protection = protection_register.read_volatile();
+    protection = (protection & 0xc00f_ffff) | (peer_state << 20);
+    protection_register.write_volatile(protection);
+
+    let queue_word = descriptor
+        .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .read();
+    let index = ((queue_word >> 20) & 0x0f) as usize;
+    let entry = txrx.add(index * TXRX_QUEUE_SIZE);
+    let length_control =
+        crate::tx_plcp::basic_length_control_word(rts_rate, entry.add(0x40).read(), queue_word);
+    let length_control_register =
+        (TXQ_LENGTH_CONTROL_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    length_control_register.write_volatile(length_control);
+
+    if flags & 0x0100_0000 == 0 {
+        let data_length =
+            crate::tx_plcp::basic_data_length_word(rate, length, entry.add(0x41).read());
+        let data_length_register =
+            (TXQ_DATA_LENGTH_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+        data_length_register.write_volatile(data_length);
+    }
 }
 
 /// Finite success branch of `mac_tx_set_pti` and `hal_set_tx_pti` without the

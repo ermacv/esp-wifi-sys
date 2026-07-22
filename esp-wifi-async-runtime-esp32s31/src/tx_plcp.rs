@@ -36,9 +36,36 @@ pub(crate) const fn basic_plcp1_word(
     word
 }
 
+pub(crate) const fn basic_htsig_word(rate: u8, extension: bool, length: u32) -> u32 {
+    let mcs = if rate <= 25 { rate - 16 } else { rate - 26 };
+    let low = mcs | ((extension as u8) << 7);
+    let high = 0x07 | (((rate >= 26) as u8) << 7);
+    u32::from_le_bytes([low, length as u8, (length >> 8) as u8, high])
+}
+
+pub(crate) const fn basic_length_control_word(
+    rts_rate: u8,
+    entry_flags: u8,
+    queue_word: u32,
+) -> u32 {
+    let one_symbol = ((queue_word & 0x0000_f000) == 0x0000_1000) as u32;
+    (((entry_flags & 0x03) as u32) << 22)
+        | (one_symbol << 1)
+        | (((rts_rate as u32) << 6) & 0x0000_3fc0)
+        | 0x04
+}
+
+pub(crate) const fn basic_data_length_word(rate: u8, length: u32, entry_flags: u8) -> u32 {
+    let rate = if rate <= 25 { rate - 16 } else { rate - 26 };
+    (((entry_flags & 0x03) as u32) << 22) | (length & 0x003f_ffff) | ((rate as u32) << 28)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{basic_plcp0_word, basic_plcp1_word};
+    use super::{
+        basic_data_length_word, basic_htsig_word, basic_length_control_word, basic_plcp0_word,
+        basic_plcp1_word,
+    };
 
     const ADDRESS: usize = 0x2f12_3456;
     const BASE: u32 = 0x0062_3456;
@@ -72,5 +99,26 @@ mod tests {
             basic_plcp1_word(16, 0x0000_4000, 0, 0x0000_8000),
             0x2201_0000
         );
+    }
+
+    #[test]
+    fn reproduces_htsig_rate_class_extension_and_length() {
+        assert_eq!(basic_htsig_word(16, false, 0x1234), 0x0712_3400);
+        assert_eq!(basic_htsig_word(25, true, 0x3fff), 0x073f_ff89);
+        assert_eq!(basic_htsig_word(26, false, 0x0201), 0x8702_0100);
+        assert_eq!(basic_htsig_word(35, true, 0x0001), 0x8700_0189);
+    }
+
+    #[test]
+    fn reproduces_length_control_fields() {
+        assert_eq!(basic_length_control_word(11, 0, 0), 0x0000_02c4);
+        assert_eq!(basic_length_control_word(9, 3, 0x0000_1000), 0x00c0_0246);
+    }
+
+    #[test]
+    fn reproduces_data_length_fields() {
+        assert_eq!(basic_data_length_word(16, 0x1234, 0), 0x0000_1234);
+        assert_eq!(basic_data_length_word(25, 0x3fff, 3), 0x90c0_3fff);
+        assert_eq!(basic_data_length_word(35, 0x0201, 1), 0x9040_0201);
     }
 }
