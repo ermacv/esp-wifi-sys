@@ -21,6 +21,7 @@ const MAX_HIL_AGGREGATE_LENGTH: u16 = 0x7fff;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
+const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
 const FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
 const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
@@ -83,6 +84,10 @@ static LAST_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
 static LAST_RATE: AtomicU32 = AtomicU32::new(0);
 static LAST_LAYOUT: AtomicU32 = AtomicU32::new(0);
 static LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_QUEUE_STATE: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_FRAME: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
+static SUBMIT_REGISTERS: [AtomicU32; 11] = [const { AtomicU32::new(0) }; 11];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HilAmpduInterceptSnapshot {
@@ -126,6 +131,97 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         subframes: SUBFRAMES.load(Ordering::Acquire),
         ready: READY.load(Ordering::Acquire),
         failed: FAILED.load(Ordering::Acquire),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilAmpduHardwareSnapshot {
+    /// Packed bytes: hardware queue, software status, queue kind, byte 0x28.
+    pub submit_queue_state: u32,
+    pub submit_frame: u32,
+    pub submit_descriptor: u32,
+    /// protection, PPDU control, config, PLCP0, PLCP1, PTI, HTSIG, power,
+    /// HT control, data length, and length control captured after enable.
+    pub submit_registers: [u32; 11],
+    pub live_interrupt_state: u32,
+    pub live_complete_state: u32,
+    pub live_registers: [u32; 11],
+    /// Primary/secondary completion words followed by the three BlockAck
+    /// words and the two adjacent completion auxiliaries for TXQ2.
+    pub live_completion_registers: [u32; 7],
+}
+
+/// Read-only HIL evidence. Mutable queue SRAM is copied to atomics by the
+/// radio owner at submission; this accessor reads only those atomics and MMIO,
+/// so diagnostics on the network hart cannot race Rust-owned queue state.
+pub fn hil_ampdu_hardware_snapshot() -> HilAmpduHardwareSnapshot {
+    let mut submit_registers = [0_u32; 11];
+    let mut index = 0_usize;
+    while index < submit_registers.len() {
+        submit_registers[index] = SUBMIT_REGISTERS[index].load(Ordering::Acquire);
+        index += 1;
+    }
+    let live_registers = unsafe { read_hardware_registers() };
+    const QUEUE_OFFSET: usize = HIL_HARDWARE_QUEUE as usize * 0x7c;
+    HilAmpduHardwareSnapshot {
+        submit_queue_state: SUBMIT_QUEUE_STATE.load(Ordering::Acquire),
+        submit_frame: SUBMIT_FRAME.load(Ordering::Acquire),
+        submit_descriptor: SUBMIT_DESCRIPTOR.load(Ordering::Acquire),
+        submit_registers,
+        live_interrupt_state: unsafe { (0x2010_4cb4_usize as *const u32).read_volatile() },
+        live_complete_state: unsafe { (0x2010_4cbc_usize as *const u32).read_volatile() },
+        live_registers,
+        live_completion_registers: unsafe {
+            [
+                ((0x2010_553c_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_5540_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_5530_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_552c_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_5528_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_5534_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+                ((0x2010_5524_usize - QUEUE_OFFSET) as *const u32).read_volatile(),
+            ]
+        },
+    }
+}
+
+unsafe fn read_hardware_registers() -> [u32; 11] {
+    const QUEUE_16: usize = HIL_HARDWARE_QUEUE as usize * 0x10;
+    const QUEUE_124: usize = HIL_HARDWARE_QUEUE as usize * 0x7c;
+    [
+        ((0x2010_4d64_usize - QUEUE_16) as *const u32).read_volatile(),
+        ((0x2010_4d68_usize - QUEUE_16) as *const u32).read_volatile(),
+        ((0x2010_4d6c_usize - QUEUE_16) as *const u32).read_volatile(),
+        ((0x2010_4d70_usize - QUEUE_16) as *const u32).read_volatile(),
+        ((0x2010_54d8_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_54e0_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_54e8_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_5500_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_5504_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_550c_usize - QUEUE_124) as *const u32).read_volatile(),
+        ((0x2010_5510_usize - QUEUE_124) as *const u32).read_volatile(),
+    ]
+}
+
+unsafe fn record_hardware_submit(queue_state: *mut u8) {
+    let frame = queue_state.cast::<*mut u8>().read();
+    let descriptor = if frame.is_null() {
+        ptr::null_mut()
+    } else {
+        frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read()
+    };
+    let packed = u32::from(queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read())
+        | (u32::from(queue_state.add(TX_QUEUE_STATUS_OFFSET).read()) << 8)
+        | (u32::from(queue_state.add(TX_QUEUE_KIND_OFFSET).read()) << 16)
+        | (u32::from(queue_state.add(0x28).read()) << 24);
+    SUBMIT_QUEUE_STATE.store(packed, Ordering::Release);
+    SUBMIT_FRAME.store(frame as usize as u32, Ordering::Release);
+    SUBMIT_DESCRIPTOR.store(descriptor as usize as u32, Ordering::Release);
+    let registers = read_hardware_registers();
+    let mut index = 0_usize;
+    while index < registers.len() {
+        SUBMIT_REGISTERS[index].store(registers[index], Ordering::Release);
+        index += 1;
     }
 }
 
@@ -359,6 +455,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
         // bridge; silently falling back would duplicate frame ownership.
         return fail(TxInterceptError::Submit(error));
     }
+    record_hardware_submit(queue_state);
 
     let remaining = count - selected;
     let mut source = selected;

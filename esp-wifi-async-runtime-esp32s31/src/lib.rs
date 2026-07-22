@@ -211,7 +211,8 @@ pub use tx_ampdu::{
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
 pub use tx_intercept::{
-    hil_ampdu_intercept_pp_map_tx_queue, hil_ampdu_intercept_snapshot, HilAmpduInterceptSnapshot,
+    hil_ampdu_hardware_snapshot, hil_ampdu_intercept_pp_map_tx_queue, hil_ampdu_intercept_snapshot,
+    HilAmpduHardwareSnapshot, HilAmpduInterceptSnapshot,
 };
 #[cfg(all(
     target_arch = "riscv32",
