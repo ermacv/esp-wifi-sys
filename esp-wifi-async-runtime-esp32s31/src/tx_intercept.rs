@@ -1,8 +1,10 @@
 //! HIL-only bridge from the prepared vendor MPDU boundary to Rust A-MPDU.
 //!
-//! This module deliberately remains behind `hil-ampdu-intercept`: it calls the
-//! real `ppMapTxQueue`, which is useful for hardware qualification but is not
-//! an acceptable final strict-runtime dependency.
+//! This module deliberately remains behind `hil-ampdu-intercept`. Large QoS
+//! MPDUs use the recovered bounded Rust preparation path, while short and
+//! pre-ADDBA frames still call the real `ppMapTxQueue` as a qualification
+//! oracle. That remaining stateful dependency is not acceptable in the final
+//! strict runtime.
 
 use core::{
     cell::UnsafeCell,
@@ -75,6 +77,7 @@ static COMPLETED: AtomicU32 = AtomicU32::new(0);
 static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicU32 = AtomicU32::new(0);
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
+static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ZERO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
@@ -97,6 +100,7 @@ static SUBMIT_REGISTERS: [AtomicU32; 11] = [const { AtomicU32::new(0) }; 11];
 pub struct HilAmpduInterceptSnapshot {
     pub enabled: bool,
     pub enabled_calls: u32,
+    pub mapper_bypassed: u32,
     pub mapped_zero: u32,
     pub mapped_one: u32,
     pub mapped_two: u32,
@@ -132,6 +136,7 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     HilAmpduInterceptSnapshot {
         enabled: unsafe { load_enabled_from_callback_context() },
         enabled_calls: ENABLED_CALLS.load(Ordering::Acquire),
+        mapper_bypassed: MAPPER_BYPASSED.load(Ordering::Acquire),
         mapped_zero: MAPPED_ZERO.load(Ordering::Acquire),
         mapped_one: MAPPED_ONE.load(Ordering::Acquire),
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
@@ -269,17 +274,51 @@ pub(crate) unsafe fn enable(window: u16) {
 /// the frame into any vendor PP list or recycling it.
 #[link_section = ".rwtext.wifi_strict.hil_ampdu_intercept"]
 pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> i32 {
-    let mapper_pre = read_mapper_state(frame);
-    let mapped = __real_ppMapTxQueue(frame);
-    let state = &mut *STATE.0.get();
     // The activation edge is delivered by a management RX callback that is
     // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
     // keeps that external edge visible under fat whole-program LTO.
     let enabled = load_enabled_from_callback_context();
     if !enabled {
-        return mapped;
+        return __real_ppMapTxQueue(frame);
     }
+    let state = &mut *STATE.0.get();
     ENABLED_CALLS.fetch_add(1, Ordering::Relaxed);
+    if eligible_qos_data(frame) {
+        let mapper_pre = read_mapper_state(frame);
+        // For the guarded strict STA QoS state, the recovered mapper oracle
+        // leaves the already selected logical queue and every frame/peer word
+        // unchanged. Its only visible mutation is the descriptor treatment
+        // byte 0x20 -> 0x07. Omit ppProcessWaitingQueue, power-management and
+        // dynamic queue-search calls entirely.
+        if mapper_pre[0] != 0x0000_2009
+            || mapper_pre[1] != 0x0000_0020
+            || mapper_pre[2] != 0x0000_0304
+            || mapper_pre[3] & 0x80 == 0
+            || mapper_pre[4] != 0
+        {
+            fail_and_trap();
+        }
+        let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+        descriptor.add(4).write(7);
+        record_mapper_state(&LAST_MAPPER_PRE, &mapper_pre);
+        let mapper_post = read_mapper_state(frame);
+        record_mapper_state(&LAST_MAPPER_POST, &mapper_post);
+        MAPPER_BYPASSED.fetch_add(1, Ordering::Relaxed);
+        LAST_MAPPED.store(0, Ordering::Release);
+        MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
+        ELIGIBLE.fetch_add(1, Ordering::Relaxed);
+        if push_ready(state, frame).is_err() {
+            fail_and_trap();
+        }
+        RETAINED.fetch_add(1, Ordering::Relaxed);
+        if state.count >= 2 && schedule(state).is_err() {
+            fail_and_trap();
+        }
+        // `ppTxPkt` treats all values except 0, 1 and 2 as already consumed.
+        return 3;
+    }
+
+    let mapped = __real_ppMapTxQueue(frame);
     LAST_MAPPED.store(mapped as u32, Ordering::Release);
     match mapped {
         0 => MAPPED_ZERO.fetch_add(1, Ordering::Relaxed),
@@ -287,23 +326,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         2 => MAPPED_TWO.fetch_add(1, Ordering::Relaxed),
         _ => MAPPED_OTHER.fetch_add(1, Ordering::Relaxed),
     };
-    if mapped != 0 || !eligible_qos_data(frame) {
-        return mapped;
-    }
-    record_mapper_state(&LAST_MAPPER_PRE, &mapper_pre);
-    let mapper_post = read_mapper_state(frame);
-    record_mapper_state(&LAST_MAPPER_POST, &mapper_post);
-    ELIGIBLE.fetch_add(1, Ordering::Relaxed);
-    if push_ready(state, frame).is_err() {
-        fail_and_trap();
-    }
-    RETAINED.fetch_add(1, Ordering::Relaxed);
-    if state.count >= 2 && schedule(state).is_err() {
-        fail_and_trap();
-    }
-    // `ppTxPkt` treats all values except 0, 1 and 2 as an already consumed
-    // frame. Ownership is now exclusively in STATE.
-    3
+    mapped
 }
 
 #[inline(always)]
