@@ -19,10 +19,10 @@ const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
 #[cfg(feature = "hil-vendor-tx")]
 const TX_DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
+const TXRX_QUEUE_SIZE: usize = 0x34;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
 const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
 const TXRX_QUEUE_BUSY_OFFSET: usize = 0x29;
-const TXRX_QUEUE_ACTIVE_FRAME_OFFSET: usize = 0x34;
 
 unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
@@ -35,6 +35,8 @@ pub enum TxQueueProcessError {
     InstancesUnavailable,
     TxRxUnavailable,
     UnsupportedQueueKind(u8),
+    UnsupportedLogicalQueue(u8),
+    AmbiguousLogicalQueues,
     InvalidFrame,
     Submit(crate::lmac::LmacAsyncError),
 }
@@ -155,11 +157,12 @@ fn load_array(counters: &[AtomicU32; 5]) -> [u32; 5] {
 
 /// Run one strict basic-MPDU TX-queue action.
 ///
-/// Hardware qualification observed only PP event zero, logical queue zero,
-/// hardware queue zero, queue kind three, and a single non-HE MPDU. This leaf
-/// removes at most one head and submits it through the already qualified
-/// finite Rust LMAC path. Busy and empty states complete without retrying;
-/// their completion/enqueue edges will post a later executor event.
+/// Hardware qualification observed PP event zero selecting logical queue zero
+/// for STA traffic and logical queue one for AP beacons, with hardware queue
+/// zero, queue kind three, and one basic non-HE MPDU. This leaf removes at most
+/// one unambiguous head and submits it through the already qualified finite
+/// Rust LMAC path. Busy and empty states complete without retrying; their
+/// completion/enqueue edges will post a later executor event.
 ///
 /// # Safety
 ///
@@ -196,21 +199,15 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if txrx.is_null() {
         return Err(TxQueueProcessError::TxRxUnavailable);
     }
-    if txrx.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0
-        || !txrx
-            .add(TXRX_QUEUE_ACTIVE_FRAME_OFFSET)
-            .cast::<*mut u8>()
-            .read()
-            .is_null()
-    {
+    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx)? else {
+        HIL_COUNTERS.no_frame[0].fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    };
+    if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
         HIL_COUNTERS.no_frame[0].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
-    let frame = dequeue_one(txrx);
-    if frame.is_null() {
-        HIL_COUNTERS.no_frame[0].fetch_add(1, Ordering::Relaxed);
-        return Ok(());
-    }
+    let frame = dequeue_one(entry);
     if !frame
         .add(TX_FRAME_NEXT_OFFSET)
         .cast::<*mut u8>()
@@ -218,7 +215,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         .is_null()
         || frame.add(0x2c).cast::<*mut u8>().read().is_null()
     {
-        requeue_front(txrx, frame);
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
     }
     let descriptor = frame
@@ -226,7 +223,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         .cast::<*mut u8>()
         .read();
     if descriptor.is_null() {
-        requeue_front(txrx, frame);
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
     }
     let logical_queue = (descriptor
@@ -235,13 +232,13 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         .read()
         >> 20)
         & 0x0f;
-    if logical_queue != 0 {
-        requeue_front(txrx, frame);
+    if logical_queue != u32::from(expected_logical_queue) {
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
     }
 
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
-        requeue_front(txrx, frame);
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::Submit(error));
     }
     HIL_COUNTERS.submitted[0].fetch_add(1, Ordering::Relaxed);
@@ -270,19 +267,13 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if txrx.is_null() {
         return Err(TxQueueProcessError::TxRxUnavailable);
     }
-    if txrx.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0
-        || !txrx
-            .add(TXRX_QUEUE_ACTIVE_FRAME_OFFSET)
-            .cast::<*mut u8>()
-            .read()
-            .is_null()
-    {
+    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx)? else {
+        return Ok(());
+    };
+    if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
         return Ok(());
     }
-    let frame = dequeue_one(txrx);
-    if frame.is_null() {
-        return Ok(());
-    }
+    let frame = dequeue_one(entry);
     let peer = frame.add(0x2c).cast::<*mut u8>().read();
     let descriptor = frame
         .add(TX_FRAME_DESCRIPTOR_OFFSET)
@@ -301,16 +292,51 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
             .read()
             >> 20)
             & 0x0f
-            != 0
+            != u32::from(expected_logical_queue)
     {
-        requeue_front(txrx, frame);
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
     }
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(instances, frame) {
-        requeue_front(txrx, frame);
+        requeue_front(entry, frame);
         return Err(TxQueueProcessError::Submit(error));
     }
     Ok(())
+}
+
+unsafe fn select_logical_queue(
+    txrx: *mut u8,
+) -> Result<Option<(*mut u8, u8)>, TxQueueProcessError> {
+    let mut head_mask = 0_u16;
+    let mut logical_queue = 0_u8;
+    while logical_queue < 16 {
+        let entry = txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE);
+        let head = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
+        if !head.is_null() {
+            head_mask |= 1_u16 << logical_queue;
+        }
+        logical_queue += 1;
+    }
+    Ok(measured_logical_queue(head_mask)?.map(|logical_queue| {
+        (
+            txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE),
+            logical_queue,
+        )
+    }))
+}
+
+const fn measured_logical_queue(head_mask: u16) -> Result<Option<u8>, TxQueueProcessError> {
+    if head_mask == 0 {
+        return Ok(None);
+    }
+    if head_mask.count_ones() != 1 {
+        return Err(TxQueueProcessError::AmbiguousLogicalQueues);
+    }
+    let logical_queue = head_mask.trailing_zeros() as u8;
+    if logical_queue > 1 {
+        return Err(TxQueueProcessError::UnsupportedLogicalQueue(logical_queue));
+    }
+    Ok(Some(logical_queue))
 }
 
 unsafe fn dequeue_one(entry: *mut u8) -> *mut u8 {
@@ -427,5 +453,25 @@ unsafe fn record_submitted(queue_state: *mut u8, frame: *mut u8) {
 fn record_small_mask(counter: &AtomicU32, value: u8) {
     if value < 32 {
         counter.fetch_or(1_u32 << value, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{measured_logical_queue, TxQueueProcessError};
+
+    #[test]
+    fn selects_only_the_measured_sta_and_ap_logical_queues() {
+        assert_eq!(measured_logical_queue(0), Ok(None));
+        assert_eq!(measured_logical_queue(1), Ok(Some(0)));
+        assert_eq!(measured_logical_queue(2), Ok(Some(1)));
+        assert_eq!(
+            measured_logical_queue(4),
+            Err(TxQueueProcessError::UnsupportedLogicalQueue(2))
+        );
+        assert_eq!(
+            measured_logical_queue(3),
+            Err(TxQueueProcessError::AmbiguousLogicalQueues)
+        );
     }
 }
