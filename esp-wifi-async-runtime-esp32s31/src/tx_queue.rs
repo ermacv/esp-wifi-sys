@@ -1,8 +1,9 @@
 //! Strict TX-queue processing boundary.
 //!
 //! Hardware observation first narrowed the pinned `ppProcessTxQ` state machine
-//! to event/logical/hardware queue zero and one basic MPDU. The active strict
-//! path now reproduces that subset as one Rust executor action.
+//! to admitted logical queues zero and one and one basic MPDU. The pinned
+//! `lmacTxFrame` body maps each event to a 0x38-byte hardware-queue state; the
+//! active strict path reproduces that subset as one Rust executor action.
 
 use core::ptr;
 #[cfg(feature = "hil-vendor-tx")]
@@ -10,6 +11,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(feature = "hil-vendor-tx")]
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
+const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
@@ -157,9 +159,9 @@ fn load_array(counters: &[AtomicU32; 5]) -> [u32; 5] {
 
 /// Run one strict basic-MPDU TX-queue action.
 ///
-/// Hardware qualification observed PP event zero selecting logical queue zero
-/// for STA traffic and logical queue one for AP beacons, with hardware queue
-/// zero, queue kind three, and one basic non-HE MPDU. This leaf removes at most
+/// Hardware qualification observed the admitted logical queues, queue kind
+/// three, and one basic non-HE MPDU. The pinned binary supplies the matching
+/// hardware queue as the event number. This leaf removes at most
 /// one unambiguous head and submits it through the already qualified finite
 /// Rust LMAC path. Busy and empty states complete without retrying; their
 /// completion/enqueue edges will post a later executor event.
@@ -174,7 +176,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if input < HIL_COUNTERS.calls.len() {
         HIL_COUNTERS.calls[input].fetch_add(1, Ordering::Relaxed);
     }
-    if queue != 0 {
+    if queue > 1 {
         HIL_COUNTERS
             .unexpected_result
             .fetch_add(1, Ordering::Relaxed);
@@ -185,9 +187,9 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if instances.is_null() {
         return Err(TxQueueProcessError::InstancesUnavailable);
     }
-    let queue_state = instances;
+    let queue_state = instances.add(usize::from(queue) * TX_QUEUE_STATE_SIZE);
     if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 0 {
-        HIL_COUNTERS.idle_or_disallowed[0].fetch_add(1, Ordering::Relaxed);
+        HIL_COUNTERS.idle_or_disallowed[input].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
     let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
@@ -200,11 +202,11 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         return Err(TxQueueProcessError::TxRxUnavailable);
     }
     let Some((entry, expected_logical_queue)) = select_logical_queue(txrx)? else {
-        HIL_COUNTERS.no_frame[0].fetch_add(1, Ordering::Relaxed);
+        HIL_COUNTERS.no_frame[input].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     };
     if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
-        HIL_COUNTERS.no_frame[0].fetch_add(1, Ordering::Relaxed);
+        HIL_COUNTERS.no_frame[input].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
     let frame = dequeue_one(entry);
@@ -241,25 +243,26 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         requeue_front(entry, frame);
         return Err(TxQueueProcessError::Submit(error));
     }
-    HIL_COUNTERS.submitted[0].fetch_add(1, Ordering::Relaxed);
-    record_submitted(queue_state, frame);
+    HIL_COUNTERS.submitted[input].fetch_add(1, Ordering::Relaxed);
+    record_submitted(input, queue_state, frame);
     Ok(())
 }
 
 #[cfg(not(feature = "hil-vendor-tx"))]
 #[link_section = ".rwtext.wifi_strict.tx_queue_process"]
 pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessError> {
-    if queue != 0 {
+    if queue > 1 {
         return Err(TxQueueProcessError::UnsupportedEventQueue(queue));
     }
     let instances = ptr::addr_of!(our_instances_ptr).read();
     if instances.is_null() {
         return Err(TxQueueProcessError::InstancesUnavailable);
     }
-    if instances.add(TX_QUEUE_STATUS_OFFSET).read() != 0 {
+    let queue_state = instances.add(usize::from(queue) * TX_QUEUE_STATE_SIZE);
+    if queue_state.add(TX_QUEUE_STATUS_OFFSET).read() != 0 {
         return Ok(());
     }
-    let queue_kind = instances.add(TX_QUEUE_KIND_OFFSET).read();
+    let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
     if queue_kind != 3 {
         return Err(TxQueueProcessError::UnsupportedQueueKind(queue_kind));
     }
@@ -297,7 +300,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
     }
-    if let Err(error) = crate::lmac::submit_basic_non_he_frame(instances, frame) {
+    if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         requeue_front(entry, frame);
         return Err(TxQueueProcessError::Submit(error));
     }
@@ -381,7 +384,7 @@ unsafe fn requeue_front(entry: *mut u8, frame: *mut u8) {
 }
 
 #[cfg(feature = "hil-vendor-tx")]
-unsafe fn record_submitted(queue_state: *mut u8, frame: *mut u8) {
+unsafe fn record_submitted(input: usize, queue_state: *mut u8, frame: *mut u8) {
     record_small_mask(
         &HIL_COUNTERS.hardware_queue_mask,
         queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
@@ -435,7 +438,7 @@ unsafe fn record_submitted(queue_state: *mut u8, frame: *mut u8) {
     HIL_COUNTERS
         .logical_queue_mask
         .fetch_or(logical_bit, Ordering::Relaxed);
-    HIL_COUNTERS.input_logical_masks[0].fetch_or(logical_bit, Ordering::Relaxed);
+    HIL_COUNTERS.input_logical_masks[input].fetch_or(logical_bit, Ordering::Relaxed);
 
     let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
     if rate < 32 {
