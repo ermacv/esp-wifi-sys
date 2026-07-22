@@ -964,9 +964,9 @@ unsafe fn format_basic_non_he_ppdu(
     ppdu_control.write_volatile(ppdu_control.read_volatile() & !0x08);
 
     let power_table = ptr::addr_of!(s_phy_get_max_pwr).cast::<i8>();
-    let rts_rate = usize::from(rts_rate);
-    let rts_power = (power_table.add(rts_rate * 2).read() as i32 as u32) << 16
-        | (power_table.add(rts_rate * 2 + 1).read() as i32 as u32) << 24;
+    let rts_rate_index = usize::from(rts_rate);
+    let rts_power = (power_table.add(rts_rate_index * 2).read() as i32 as u32) << 16
+        | (power_table.add(rts_rate_index * 2 + 1).read() as i32 as u32) << 24;
 
     let data_rate = if rate < 16 {
         // The queue kinds at or below two enter the vendor HW-TXOP linked-list
