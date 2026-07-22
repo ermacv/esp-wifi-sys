@@ -451,6 +451,7 @@ mod target {
     static TX_ADDBA_LAST_STATUS: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_WINDOW: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_ALARM_GENERATION: AtomicU32 = AtomicU32::new(0);
+    const TX_ADDBA_MAX_ATTEMPTS: u32 = 3;
 
     unsafe extern "C" {
         static mut g_ic: u8;
@@ -960,6 +961,12 @@ mod target {
         };
         if (*TX_BLOCK_ACK_SESSION.0.get()).on_alarm(alarm) {
             TX_ADDBA_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+            // A retry is driven exclusively by this expired async timer edge.
+            // There is no delay loop or polling path, and the fixed attempt
+            // bound keeps a non-responsive peer from retaining work forever.
+            if TX_ADDBA_SUBMITTED.load(Ordering::Acquire) < TX_ADDBA_MAX_ATTEMPTS {
+                let _ = start_sta_tx_block_ack();
+            }
         }
     }
 
@@ -972,7 +979,7 @@ mod target {
             || !crate::context::in_radio_context()
             || ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) == 0
             || ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) == 0
-            || TX_ADDBA_SUBMITTED.load(Ordering::Acquire) != 0
+            || TX_ADDBA_SUBMITTED.load(Ordering::Acquire) >= TX_ADDBA_MAX_ATTEMPTS
             || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0
         {
             return false;
