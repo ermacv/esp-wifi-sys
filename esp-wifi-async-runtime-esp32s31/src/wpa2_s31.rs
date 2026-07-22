@@ -106,6 +106,10 @@ impl<const N: usize> StaticAuthorizedPeers<N> {
             .any(|candidate| candidate.as_ref() == Some(peer))
     }
 
+    fn any(&self) -> bool {
+        self.peers.iter().any(Option::is_some)
+    }
+
     fn set(&mut self, peer: [u8; 6], authorized: bool) -> Result<(), ()> {
         if let Some(slot) = self
             .peers
@@ -780,6 +784,18 @@ mod target {
             self.sta_authorized_peer.is_some()
         }
 
+        fn has_ap_transmit_group_key(&self) -> bool {
+            (0..K).any(|index| {
+                self.keys.get(index).is_some_and(|key| {
+                    key.interface() == Wpa2Interface::AccessPoint
+                        && matches!(
+                            key.kind(),
+                            Wpa2KeyKind::Group { transmit: true, .. }
+                        )
+                })
+            })
+        }
+
         /// Submit one frame received from the fixed application TX channel.
         ///
         /// This performs one immediate static-pool attempt. AP traffic is
@@ -800,8 +816,16 @@ mod target {
                 Wpa2Interface::Station if !self.is_sta_peer_authorized() => {
                     return Err(S31Wpa2IoError::StaPeerUnauthorized);
                 }
-                Wpa2Interface::AccessPoint if !self.is_ap_peer_authorized(frame.destination()) => {
-                    return Err(S31Wpa2IoError::ApPeerUnauthorized);
+                Wpa2Interface::AccessPoint => {
+                    let destination = frame.destination();
+                    let authorized = if destination[0] & 1 != 0 {
+                        self.authorized_peers.any() && self.has_ap_transmit_group_key()
+                    } else {
+                        self.is_ap_peer_authorized(destination)
+                    };
+                    if !authorized {
+                        return Err(S31Wpa2IoError::ApPeerUnauthorized);
+                    }
                 }
                 _ => {}
             }
@@ -1300,10 +1324,13 @@ mod tests {
         let mut peers = StaticAuthorizedPeers::<1>::new();
 
         assert!(!peers.contains(&first));
+        assert!(!peers.any());
         assert_eq!(peers.set(first, true), Ok(()));
         assert!(peers.contains(&first));
+        assert!(peers.any());
         assert_eq!(peers.set(second, true), Err(()));
         assert_eq!(peers.set(first, false), Ok(()));
+        assert!(!peers.any());
         assert_eq!(peers.set(first, false), Ok(()));
         assert_eq!(peers.set(second, true), Ok(()));
         assert!(peers.contains(&second));
