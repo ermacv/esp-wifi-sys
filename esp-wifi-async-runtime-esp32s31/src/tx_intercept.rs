@@ -86,6 +86,8 @@ static LAST_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
 static LAST_RATE: AtomicU32 = AtomicU32::new(0);
 static LAST_LAYOUT: AtomicU32 = AtomicU32::new(0);
 static LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+static LAST_MAPPER_PRE: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
+static LAST_MAPPER_POST: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
 static SUBMIT_QUEUE_STATE: AtomicU32 = AtomicU32::new(0);
 static SUBMIT_FRAME: AtomicU32 = AtomicU32::new(0);
 static SUBMIT_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
@@ -106,6 +108,10 @@ pub struct HilAmpduInterceptSnapshot {
     pub last_rate: u8,
     pub last_layout: u16,
     pub last_frame_control: u16,
+    /// Descriptor flags/word1/queue word followed by peer flags/queue selector
+    /// immediately before and after the vendor mapper oracle.
+    pub last_mapper_pre: [u32; 5],
+    pub last_mapper_post: [u32; 5],
     pub retained: u32,
     pub submitted: u32,
     pub completed: u32,
@@ -115,6 +121,14 @@ pub struct HilAmpduInterceptSnapshot {
 }
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
+    let mut last_mapper_pre = [0_u32; 5];
+    let mut last_mapper_post = [0_u32; 5];
+    let mut index = 0_usize;
+    while index < last_mapper_pre.len() {
+        last_mapper_pre[index] = LAST_MAPPER_PRE[index].load(Ordering::Acquire);
+        last_mapper_post[index] = LAST_MAPPER_POST[index].load(Ordering::Acquire);
+        index += 1;
+    }
     HilAmpduInterceptSnapshot {
         enabled: unsafe { load_enabled_from_callback_context() },
         enabled_calls: ENABLED_CALLS.load(Ordering::Acquire),
@@ -129,6 +143,8 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         last_rate: LAST_RATE.load(Ordering::Acquire) as u8,
         last_layout: LAST_LAYOUT.load(Ordering::Acquire) as u16,
         last_frame_control: LAST_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+        last_mapper_pre,
+        last_mapper_post,
         retained: RETAINED.load(Ordering::Acquire),
         submitted: SUBMITTED.load(Ordering::Acquire),
         completed: COMPLETED.load(Ordering::Acquire),
@@ -253,7 +269,9 @@ pub(crate) unsafe fn enable(window: u16) {
 /// the frame into any vendor PP list or recycling it.
 #[link_section = ".rwtext.wifi_strict.hil_ampdu_intercept"]
 pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> i32 {
+    record_mapper_state(frame, &LAST_MAPPER_PRE);
     let mapped = __real_ppMapTxQueue(frame);
+    record_mapper_state(frame, &LAST_MAPPER_POST);
     let state = &mut *STATE.0.get();
     // The activation edge is delivered by a management RX callback that is
     // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
@@ -284,6 +302,29 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // `ppTxPkt` treats all values except 0, 1 and 2 as an already consumed
     // frame. Ownership is now exclusively in STATE.
     3
+}
+
+#[inline(always)]
+unsafe fn record_mapper_state(frame: *mut u8, destination: &[AtomicU32; 5]) {
+    let mut words = [0_u32; 5];
+    if !frame.is_null() {
+        let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+        if !descriptor.is_null() {
+            words[0] = descriptor.cast::<u32>().read();
+            words[1] = descriptor.add(4).cast::<u32>().read();
+            words[2] = descriptor.add(0x10).cast::<u32>().read();
+        }
+        let peer = frame.add(0x2c).cast::<*mut u8>().read();
+        if !peer.is_null() {
+            words[3] = peer.add(0x0c).cast::<u32>().read();
+            words[4] = u32::from(peer.add(0x84).read());
+        }
+    }
+    let mut index = 0_usize;
+    while index < words.len() {
+        destination[index].store(words[index], Ordering::Release);
+        index += 1;
+    }
 }
 
 #[inline(always)]
