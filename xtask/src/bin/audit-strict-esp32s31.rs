@@ -28,6 +28,14 @@ const ROOTS: &[&str] = &[
     "ieee80211_hostapd_data_txcb",
     // Direct vendor leaves called by the Rust event-22 continuation.
     "hal_mac_tx_set_cca",
+    // Finite hardware-formatting leaves used by the Rust-owned basic-HT retry
+    // submission. The Rust caller rejects legacy/HE/FTM/aggregate and invalid
+    // metadata branches before any of these entries is invoked.
+    "mac_tx_set_plcp0",
+    "mac_tx_set_plcp1",
+    "mac_tx_set_htsig",
+    "mac_tx_get_rts_rate",
+    "hal_set_tx_pti",
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",

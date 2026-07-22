@@ -16,6 +16,10 @@ const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const MAC_CLOCK_REG: *const u32 = 0x2010_d800 as *const u32;
 const TXQ_CONFIG_BASE_REG: usize = 0x2010_4d6c;
 const TXQ_ENABLE_BASE_REG: usize = 0x2010_4d70;
+const TXQ_PPDU_CONTROL_BASE_REG: usize = 0x2010_4d68;
+const TXQ_POWER_BASE_REG: usize = 0x2010_5500;
+const TXQ_REGISTER_STRIDE: usize = 0x10;
+const TXQ_POWER_STRIDE: usize = 0x7c;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_RATE_OFFSET: usize = 0x08;
@@ -77,6 +81,8 @@ unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
     static mut pTxRx: *mut u8;
     static lmacConfMib: [u8; 48];
+    static s_phy_get_max_pwr: i8;
+    static mut coex_pti_tab: [u8; 48];
 
     fn hal_mac_tx_set_cca(value: u32);
     fn hal_mac_get_txq_state(kind: u32) -> u32;
@@ -95,7 +101,11 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn hal_mac_tx_set_ppdu(queue_state: *mut u8, txrx: *mut u8) -> i32;
+    fn mac_tx_set_plcp0(queue_state: *mut u8) -> i32;
+    fn mac_tx_set_plcp1(queue_state: *mut u8) -> i32;
+    fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
+    fn mac_tx_get_rts_rate(rate: u8) -> u8;
+    fn hal_set_tx_pti(queue: u8, active: u8, ack: u8, data: u8, retry: u8, timeout: u8, count: u16);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -757,7 +767,7 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
 /// The rejected branches cover off-channel/NAN/FTM, TXOP, HE and test-only
 /// paths which can log, assert, discard synchronously, or call an indirect
 /// callback. The admitted path performs fixed descriptor updates and MMIO
-/// writes before invoking the remaining PPDU-formatting leaf exactly once.
+/// writes before invoking the remaining finite PLCP/HTSIG and PHY/MMIO leaves.
 unsafe fn submit_basic_retry(
     queue_state: *mut u8,
     frame: *mut u8,
@@ -806,11 +816,80 @@ unsafe fn submit_basic_retry(
     if txrx.is_null() {
         return Err(LmacAsyncError::TxRxUnavailable);
     }
-    let _ = hal_mac_tx_set_ppdu(queue_state, txrx);
+    format_basic_ht_ppdu(queue_state, frame, descriptor, txrx)?;
 
     configure_basic_edca(queue_state, descriptor);
     enable_basic_tx_queue(queue_state, descriptor)?;
     Ok(())
+}
+
+/// Recovered basic-HT branch of `hal_mac_tx_set_ppdu`.
+///
+/// The stock wrapper contains diagnostic branches and ends in
+/// `mac_tx_set_pti`, which calls the coexistence OSI table indirectly. The
+/// strict branch admits only rates 16 through 35, invokes the finite PLCP and
+/// HTSIG hardware-formatting leaves, reproduces the two bounded power-table
+/// lookups, and programs PTI through the terminal SRAM/MMIO leaf directly.
+unsafe fn format_basic_ht_ppdu(
+    queue_state: *mut u8,
+    frame: *mut u8,
+    descriptor: *mut u8,
+    txrx: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    debug_assert!(queue <= 3);
+    if frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        != descriptor
+    {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
+    if !(16..=35).contains(&rate) {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
+            descriptor.cast::<u32>().read(),
+        ));
+    }
+
+    let _ = mac_tx_set_plcp0(queue_state);
+    let _ = mac_tx_set_plcp1(queue_state);
+
+    let ppdu_control =
+        (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    ppdu_control.write_volatile(ppdu_control.read_volatile() & !0x08);
+
+    let power_table = ptr::addr_of!(s_phy_get_max_pwr).cast::<i8>();
+    let rts_rate = usize::from(mac_tx_get_rts_rate(rate));
+    let rts_power = (power_table.add(rts_rate * 2).read() as i32 as u32) << 16
+        | (power_table.add(rts_rate * 2 + 1).read() as i32 as u32) << 24;
+
+    // HE and FTM are rejected before entering this function, so the selected
+    // 16..=35 branch is exactly the finite HTSIG path.
+    let _ = mac_tx_set_htsig(queue_state, txrx);
+
+    let data_rate = if rate <= 25 { rate } else { rate - 10 };
+    let data_rate = usize::from(data_rate);
+    let data_power = power_table.add(data_rate * 2).read() as i32 as u32
+        | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8;
+    let power_register = (TXQ_POWER_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    power_register.write_volatile(data_power | rts_power);
+
+    program_basic_tx_pti(queue, descriptor);
+
+    Ok(())
+}
+
+/// Finite success branch of `mac_tx_set_pti` without its OSI-table callback.
+unsafe fn program_basic_tx_pti(queue: u8, descriptor: *mut u8) {
+    let original = descriptor.add(0x20).read();
+    // The removed callback is `coex_core_pti_get(1, &adjusted)`. Its pinned
+    // success branch is one bounded byte read from the exported 48-byte table.
+    let adjusted = ptr::read_volatile(ptr::addr_of_mut!(coex_pti_tab).cast::<u8>().add(1));
+    let active = original.min(adjusted);
+    let count = descriptor.add(0x22).cast::<u16>().read();
+    hal_set_tx_pti(queue, active, original, original, original, original, count);
 }
 
 unsafe fn basic_frame_is_long(frame: *mut u8, descriptor: *mut u8) -> bool {
@@ -893,20 +972,22 @@ unsafe fn guard_basic_ppdu_inputs(
         return Err(LmacAsyncError::InvalidTxSubmissionPointer);
     }
     let metadata_flags = metadata.add(4).cast::<u32>().read();
-    if metadata_flags & 0x03 != 0 {
+    if metadata_flags == 0 || metadata_flags & 0x03 != 0 {
         return Err(LmacAsyncError::UnsupportedTxSubmissionMetadata(
             metadata_flags,
         ));
     }
 
     let peer = frame.add(44).cast::<*mut u8>().read();
+    let flags = descriptor.cast::<u32>().read();
+    if peer.is_null() && flags & 0x0000_4000 == 0 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
     if !peer.is_null()
         && peer.add(148).cast::<u32>().read() == 2
         && descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read() <= 7
     {
-        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
-            descriptor.cast::<u32>().read(),
-        ));
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
     }
     Ok(())
 }
