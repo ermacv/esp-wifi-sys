@@ -9,7 +9,6 @@ use anyhow::{bail, Context, Result};
 
 const ROOTS: &[&str] = &[
     "pp_timer_do_process",
-    "pp_default_event_handler",
     // The Rust event-23 dispatcher owns every hardware-completion outcome.
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
@@ -40,7 +39,6 @@ const ROOTS: &[&str] = &[
     "ic_set_rx_policy",
     "ic_set_rx_policy_ubssid_check",
     // Direct leaves used by the one-frame strict event-16 continuation.
-    "pp_coex_tx_release",
     "esp_wifi_internal_free_rx_buffer",
     // Direct leaves used by the bounded Rust event-17 receive pump. The stock
     // `ppRxPkt` outer drain is not a strict root.
@@ -63,6 +61,8 @@ const ROOTS: &[&str] = &[
 ];
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
+    "pp_default_event_handler",
+    "pp_coex_tx_release",
     "ppProcessTxQ",
     "lmacProcessTxTimeout",
     "lmacDiscardFrameExchangeSequence",
@@ -256,8 +256,12 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 // `ppProcessTxQ` export.
 const REQUIRED_SRAM_CODE: &[&str] =
     &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
-const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] =
-    &["ppProcessTxQ", "pm_set_beacon_duration"];
+const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
+    "ppProcessTxQ",
+    "pp_default_event_handler",
+    "pp_coex_tx_release",
+    "pm_set_beacon_duration",
+];
 const INTERNAL_SRAM_START: u64 = 0x2f00_0000;
 const INTERNAL_SRAM_END: u64 = 0x3000_0000;
 

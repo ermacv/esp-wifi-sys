@@ -32,6 +32,7 @@ unsafe extern "C" {
     #[cfg(feature = "strict-no-wait")]
     fn ieee80211_ioctl_process(argument: *mut c_void) -> i32;
     fn pp_timer_do_process(argument: *mut c_void);
+    #[cfg(not(feature = "strict-no-wait"))]
     fn pp_default_event_handler(kind: u32, argument: *mut c_void);
     #[cfg(not(feature = "strict-no-wait"))]
     fn ppProcessRxPktHdr(argument: *mut c_void);
@@ -386,7 +387,14 @@ impl PpDispatcher for VendorPpDispatcher {
                     Self::optional_event(ptr::addr_of!(g_timer_func), event.argument)
                 }
                 PpAction::PpTimer => pp_timer_do_process(event.argument),
-                PpAction::Default => pp_default_event_handler(event.kind, event.argument),
+                PpAction::Default => {
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::Default,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    pp_default_event_handler(event.kind, event.argument)
+                }
                 PpAction::ProcessRxHeader => {
                     #[cfg(feature = "strict-no-wait")]
                     return Err(VendorDispatchError::PromiscuousRxUnsupported);

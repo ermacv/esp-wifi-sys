@@ -184,6 +184,12 @@ callback. Wi-Fi configuration, start, stop, and mode changes must complete
 before `prepare_strict_runtime`; a later event 6 is rejected without invoking
 or freeing the envelope.
 
+Events 9 through 12, 28, and out-of-range values select
+`pp_default_event_handler`, whose entire body is a log followed by an infinite
+loop. Strict dispatch now reports the unsupported action immediately and never
+enters that terminal body. The full WPA2/network stress workload produces none
+of these events.
+
 Stock net80211 output event 5 is rejected as well: its handler repeatedly
 drains a shared list, whereas all strict application/EAPOL/association paths
 submit one static frame directly. For timers, the original producer allocates
@@ -423,9 +429,12 @@ linked list, iterates callback bitmaps, and ends in power management. The Rust
 state machine performs one dequeue, one classified mode-0 callback, or one
 fixed-pool recycle per continuation. It verifies the callback-table pointer before
 the direct call and fails closed on unknown bits, user TX callbacks,
-fragment/trace descriptors, and frame types outside the strict fixed pools. The pinned leaves are
-`pp_coex_tx_release` (`0x74`), `esf_buf_recycle` (`0x156`), and the four basic
-STA/AP mode-0 callback sizes.
+fragment/trace descriptors, and frame types outside the strict fixed pools.
+The Wi-Fi-only build has the compile-time coexistence feature disabled, making
+the registered `_coex_wifi_release` target an exact no-op; strict recycle omits
+the `pp_coex_tx_release` classifier and its indirect OSI-table tail. The
+remaining pinned recycle leaf is `esf_buf_recycle` (`0x156`), together with the
+four basic STA/AP mode-0 callback sizes.
 
 The strict timeout/discard path also replaces the `lmacTxDone` mode-1 bitmap
 loop with one classified callback bit per executor event before it appends the

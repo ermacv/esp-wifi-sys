@@ -152,6 +152,7 @@ unsafe extern "C" {
     fn vendor_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
     fn ic_get_next_tbtt() -> u32;
+    #[cfg(not(feature = "strict-no-wait"))]
     fn pp_coex_tx_release(frame: *mut c_void);
     fn esf_buf_recycle(frame: *mut c_void);
     fn rcUpdateTxDone(rate_control: *mut c_void, descriptor: *mut c_void);
@@ -755,6 +756,10 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
         return Err(TxDoneError::NonStaticFrameType(frame_type));
     }
 
+    // With the compile-time `coex` feature disabled, the registered adapter
+    // target is an exact no-op returning zero. Avoid its frame classifier and
+    // indirect OSI-table tail in the strict Wi-Fi-only profile.
+    #[cfg(not(feature = "strict-no-wait"))]
     pp_coex_tx_release(frame.cast());
     // The strict ESF wrapper accepts only its fixed Rust management pool or
     // initialized vendor static free lists; dynamic/cache branches remain
