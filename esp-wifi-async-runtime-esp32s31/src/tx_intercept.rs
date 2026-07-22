@@ -28,6 +28,7 @@ const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const BUFFER_DATA_OFFSET: usize = 0x04;
 const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
 const DESCRIPTOR_UNSUPPORTED_MASK: u32 = 0x8060_0000;
+const MIN_HIL_MPDU_LENGTH: u32 = 1_200;
 
 unsafe extern "C" {
     fn __real_ppMapTxQueue(frame: *mut u8) -> i32;
@@ -79,6 +80,7 @@ static MAPPED_ONE: AtomicU32 = AtomicU32::new(0);
 static MAPPED_TWO: AtomicU32 = AtomicU32::new(0);
 static MAPPED_OTHER: AtomicU32 = AtomicU32::new(0);
 static ELIGIBLE: AtomicU32 = AtomicU32::new(0);
+static BELOW_MIN_LENGTH: AtomicU32 = AtomicU32::new(0);
 static LAST_MAPPED: AtomicU32 = AtomicU32::new(u32::MAX);
 static LAST_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
 static LAST_RATE: AtomicU32 = AtomicU32::new(0);
@@ -98,6 +100,7 @@ pub struct HilAmpduInterceptSnapshot {
     pub mapped_two: u32,
     pub mapped_other: u32,
     pub eligible: u32,
+    pub below_min_length: u32,
     pub last_mapped: u32,
     pub last_descriptor: u32,
     pub last_rate: u8,
@@ -120,6 +123,7 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         mapped_two: MAPPED_TWO.load(Ordering::Acquire),
         mapped_other: MAPPED_OTHER.load(Ordering::Acquire),
         eligible: ELIGIBLE.load(Ordering::Acquire),
+        below_min_length: BELOW_MIN_LENGTH.load(Ordering::Acquire),
         last_mapped: LAST_MAPPED.load(Ordering::Acquire),
         last_descriptor: LAST_DESCRIPTOR.load(Ordering::Acquire),
         last_rate: LAST_RATE.load(Ordering::Acquire) as u8,
@@ -329,9 +333,19 @@ unsafe fn eligible_qos_data(frame: *mut u8) -> bool {
     }
     let layout = frame.add(FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read();
     LAST_LAYOUT.store(u32::from(layout), Ordering::Release);
-    if layout & 0x2000 != 0 {
-        header = header.add(8);
+    // The qualified oracle is the strict CCMP layout with an eight-byte PP
+    // prefix and MPDUs large enough to form the captured >=2500-byte
+    // aggregate. Leave short control-plane traffic on the proven one-frame
+    // path until its A-MPDU hardware format is independently qualified.
+    if layout & 0x2000 == 0 {
+        return false;
     }
+    let mpdu_length = header.cast::<u32>().read() & 0x3fff;
+    if mpdu_length < MIN_HIL_MPDU_LENGTH {
+        BELOW_MIN_LENGTH.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    header = header.add(8);
     let frame_control = header.cast::<u16>().read_unaligned();
     LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Release);
     frame_control & 0x008c == 0x0088
