@@ -376,6 +376,18 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     }
 
     let fallback_pre = read_mapper_state(frame);
+    if CLASSIFICATION_REJECT_REASON.load(Ordering::Relaxed) == 4
+        && (fallback_pre == [0x0200_2009, 0x0000_0007, 0x0000_0304, 0x0000_0081, 0]
+            || fallback_pre == [0, 0x0000_0007, 0, 0x0000_0081, 0])
+    {
+        // The recovered rate-zero oracle is an identity operation for these
+        // two exact post-ADDBA states and returns logical queue zero. Preserve
+        // that result without entering ppProcessWaitingQueue or PM branches.
+        MAPPER_BYPASSED.fetch_add(1, Ordering::Relaxed);
+        LAST_MAPPED.store(0, Ordering::Release);
+        MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
+        return 0;
+    }
     let mapped = __real_ppMapTxQueue(frame);
     let fallback_post = read_mapper_state(frame);
     MAPPER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
