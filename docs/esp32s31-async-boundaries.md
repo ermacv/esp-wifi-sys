@@ -561,12 +561,15 @@ tree depends only on two MAC-header bytes and two existing descriptor words,
 and host tests cover every branch. The final ELF aliases `ppTxProtoProc`
 directly to the Rust entry because applying GNU `--wrap` to this ECO0 ROM
 export would otherwise replace the wrapper symbol itself with the ROM address.
-The reachable plaintext branch of `ppProcTxSecFrame` is likewise replaced by
-an SRAM-resident Rust leaf. It accepts only the exact observed management,
-EAPOL and Action layouts, validates the complete transformation before its
-first write, and then preserves the vendor write order while reserving the
-eight-byte security prefix and four-byte trailer. Protected-data/CCMP states
-are not inferred: any such unqualified input traps before mutation. The
+The reachable plaintext and WPA2-CCMP branches of `ppProcTxSecFrame` are
+likewise replaced by an SRAM-resident Rust leaf. It accepts only the exact
+observed management, EAPOL, Action and protected-QoS layouts, validates the
+complete transformation before its first write, and then preserves the vendor
+write order. The pinned CCMP branch is stateless: selector `3` contributes an
+eight-byte MIC plus four-byte FCS trailer, while the common path reserves the
+eight-byte metadata prefix. It does not encrypt, allocate, wait, or access a
+global; hardware encryption remains selected by the unchanged `0x304`
+descriptor word. Any unqualified security state traps before mutation. The
 remaining stateful prefix is therefore `rcGetSched` (rate-control state), which
 is why this feature remains a qualification boundary rather than the final
 runtime.

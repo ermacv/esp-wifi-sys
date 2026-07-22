@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PlaintextSecurityLayoutInput {
+pub struct TxSecurityLayoutInput {
     pub header_len: u16,
     pub remaining_len: u16,
     pub layout: u16,
@@ -13,7 +13,7 @@ pub struct PlaintextSecurityLayoutInput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PlaintextSecurityLayoutOutput {
+pub struct TxSecurityLayoutOutput {
     pub header_len: u16,
     pub remaining_len: u16,
     pub layout: u16,
@@ -21,28 +21,40 @@ pub struct PlaintextSecurityLayoutOutput {
     pub metadata_len: u32,
 }
 
-/// Recover the complete plaintext-headroom transformation observed at the
-/// `ppProcTxSecFrame` boundary. This is deliberately a closed set: protected
-/// QoS traffic does not reach this leaf in the strict STA path, and any new
-/// descriptor state must be measured before it is admitted.
-pub const fn strict_plaintext_security_layout(
-    input: PlaintextSecurityLayoutInput,
-) -> Option<PlaintextSecurityLayoutOutput> {
+/// Recover the complete headroom/trailer transformation observed at the
+/// `ppProcTxSecFrame` boundary. This is deliberately a closed set: plaintext
+/// management/EAPOL/Action frames and the measured WPA2-CCMP QoS descriptor
+/// states are admitted; any new descriptor state must be measured first.
+pub const fn strict_tx_security_layout(
+    input: TxSecurityLayoutInput,
+) -> Option<TxSecurityLayoutOutput> {
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const BUFFER_TERMINAL: u32 = 0x4000_0000;
 
-    let observed_frame = (matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
-        && input.descriptor_flags == 0)
-        || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c);
-    if !observed_frame
-        || input.layout & !0x0007 != 0
+    if input.layout & !0x0007 != 0
         || input.descriptor_word_1 != 7
-        || input.descriptor_security != 0
         || input.descriptor_word_12 != 0
         || input.rate != 0
     {
         return None;
     }
+
+    let trailer_len = if input.descriptor_security == 0
+        && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
+            && input.descriptor_flags == 0)
+            || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c))
+    {
+        4_u16
+    } else if input.frame_control == 0x4188
+        && matches!(input.descriptor_flags, 0x0000_2009 | 0x0200_2009)
+        && input.descriptor_security == 0x0000_0304
+    {
+        // The security selector in bits 8..11 is 3. The pinned vendor table
+        // maps that selector to the eight-byte CCMP MIC plus four-byte FCS.
+        12_u16
+    } else {
+        return None;
+    };
 
     let payload_len = match input.header_len.checked_add(input.remaining_len) {
         Some(value) => value,
@@ -57,17 +69,20 @@ pub const fn strict_plaintext_security_layout(
         Some(value) => value,
         None => return None,
     };
-    let remaining_len = match input.remaining_len.checked_add(4) {
+    let remaining_len = match input.remaining_len.checked_add(trailer_len) {
         Some(value) => value,
         None => return None,
     };
-    let buffer_len = match encoded_len.checked_add(12) {
-        Some(value) if value <= 0x3fff => value,
-        _ => return None,
+    let buffer_len = match encoded_len.checked_add(8) {
+        Some(value) => match value.checked_add(trailer_len) {
+            Some(value) if value <= 0x3fff => value,
+            _ => return None,
+        },
+        None => return None,
     };
-    let metadata_len = payload_len as u32 + 4;
+    let metadata_len = payload_len as u32 + trailer_len as u32;
 
-    Some(PlaintextSecurityLayoutOutput {
+    Some(TxSecurityLayoutOutput {
         header_len,
         remaining_len,
         layout: input.layout | 0x2000,
@@ -78,8 +93,8 @@ pub const fn strict_plaintext_security_layout(
     })
 }
 
-/// SRAM-resident, allocation-free replacement for the reachable plaintext
-/// branch of the vendor `ppProcTxSecFrame` leaf.
+/// SRAM-resident, allocation-free replacement for the measured plaintext and
+/// WPA2-CCMP branches of the vendor `ppProcTxSecFrame` leaf.
 ///
 /// # Safety
 ///
@@ -129,7 +144,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
         .add(FRAME_LENGTHS_OFFSET)
         .cast::<u32>()
         .read_unaligned();
-    let input = PlaintextSecurityLayoutInput {
+    let input = TxSecurityLayoutInput {
         header_len: lengths as u16,
         remaining_len: (lengths >> 16) as u16,
         layout: frame
@@ -150,7 +165,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
         rate: descriptor.add(DESCRIPTOR_RATE_OFFSET).read(),
         frame_control: data.cast::<u16>().read_unaligned(),
     };
-    let output = match strict_plaintext_security_layout(input) {
+    let output = match strict_tx_security_layout(input) {
         Some(value) => value,
         None => trap_invalid_tx_security(),
     };
@@ -162,7 +177,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     const BUFFER_LENGTH_MASK: u32 = 0x0fff_c000;
     const BUFFER_TERMINAL: u32 = 0x4000_0000;
     let encoded_len = ((input.buffer_flags & BUFFER_LENGTH_MASK) >> 14) as u16;
-    let security_len = encoded_len + 4;
+    let security_len = output.remaining_len - input.remaining_len + encoded_len;
     let security_flags =
         (input.buffer_flags & !BUFFER_LENGTH_MASK) | (u32::from(security_len) << 14);
 
@@ -206,10 +221,7 @@ unsafe fn trap_invalid_tx_security() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        strict_plaintext_security_layout, PlaintextSecurityLayoutInput,
-        PlaintextSecurityLayoutOutput,
-    };
+    use super::{strict_tx_security_layout, TxSecurityLayoutInput, TxSecurityLayoutOutput};
 
     const fn input(
         lengths: u32,
@@ -217,8 +229,8 @@ mod tests {
         buffer_flags: u32,
         descriptor_flags: u32,
         frame_control: u16,
-    ) -> PlaintextSecurityLayoutInput {
-        PlaintextSecurityLayoutInput {
+    ) -> TxSecurityLayoutInput {
+        TxSecurityLayoutInput {
             header_len: lengths as u16,
             remaining_len: (lengths >> 16) as u16,
             layout,
@@ -237,7 +249,7 @@ mod tests {
         let cases = [
             (
                 input(0x0062_0018, 0, 0xc01e_8084, 0, 0x00b0),
-                PlaintextSecurityLayoutOutput {
+                TxSecurityLayoutOutput {
                     header_len: 0x20,
                     remaining_len: 0x66,
                     layout: 0x2000,
@@ -247,7 +259,7 @@ mod tests {
             ),
             (
                 input(0x006b_001a, 1, 0xc021_4099, 0x0200_200c, 0x0188),
-                PlaintextSecurityLayoutOutput {
+                TxSecurityLayoutOutput {
                     header_len: 0x22,
                     remaining_len: 0x6f,
                     layout: 0x2001,
@@ -257,7 +269,7 @@ mod tests {
             ),
             (
                 input(0x0009_0018, 2, 0xc008_402c, 0, 0x00d0),
-                PlaintextSecurityLayoutOutput {
+                TxSecurityLayoutOutput {
                     header_len: 0x20,
                     remaining_len: 0x0d,
                     layout: 0x2002,
@@ -268,33 +280,68 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            assert_eq!(strict_plaintext_security_layout(input), Some(expected));
+            assert_eq!(strict_tx_security_layout(input), Some(expected));
         }
+    }
+
+    #[test]
+    fn reproduces_hardware_observed_wpa2_ccmp_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0304,
+            ..input(0x0048_001a, 2, 0xc018_806e, 0x0000_2009, 0x4188)
+        };
+        let expected = TxSecurityLayoutOutput {
+            header_len: 0x22,
+            remaining_len: 0x54,
+            layout: 0x2002,
+            buffer_flags: 0xc01d_806e,
+            metadata_len: 0x6e,
+        };
+        assert_eq!(strict_tx_security_layout(measured), Some(expected));
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                descriptor_flags: 0x0200_2009,
+                ..measured
+            }),
+            Some(expected),
+        );
     }
 
     #[test]
     fn rejects_unmeasured_security_rate_layout_and_length_states() {
         let base = input(0x0062_0018, 0, 0xc01e_8084, 0, 0x00b0);
         for rejected in [
-            PlaintextSecurityLayoutInput {
+            TxSecurityLayoutInput {
                 descriptor_security: 1,
                 ..base
             },
-            PlaintextSecurityLayoutInput { rate: 1, ..base },
-            PlaintextSecurityLayoutInput {
+            TxSecurityLayoutInput { rate: 1, ..base },
+            TxSecurityLayoutInput {
                 layout: 0x2000,
                 ..base
             },
-            PlaintextSecurityLayoutInput {
+            TxSecurityLayoutInput {
                 buffer_flags: 0xc01e_4084,
                 ..base
             },
-            PlaintextSecurityLayoutInput {
+            TxSecurityLayoutInput {
+                frame_control: 0x4188,
+                ..base
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0304,
+                descriptor_flags: 0x2009,
+                frame_control: 0x0188,
+                ..base
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0404,
+                descriptor_flags: 0x2009,
                 frame_control: 0x4188,
                 ..base
             },
         ] {
-            assert_eq!(strict_plaintext_security_layout(rejected), None);
+            assert_eq!(strict_tx_security_layout(rejected), None);
         }
     }
 }

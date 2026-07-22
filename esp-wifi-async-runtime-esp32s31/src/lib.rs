@@ -222,9 +222,7 @@ pub use tx_intercept::{
 pub use tx_proto::strict_pp_tx_proto_proc;
 #[cfg(target_arch = "riscv32")]
 pub use tx_security::strict_pp_proc_tx_sec_frame;
-pub use tx_security::{
-    strict_plaintext_security_layout, PlaintextSecurityLayoutInput, PlaintextSecurityLayoutOutput,
-};
+pub use tx_security::{strict_tx_security_layout, TxSecurityLayoutInput, TxSecurityLayoutOutput};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
