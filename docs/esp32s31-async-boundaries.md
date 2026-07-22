@@ -543,17 +543,27 @@ is made. The remaining boundary is to connect that retry handoff and the
 ordinary prepared-frame stream to a Rust aggregation scheduler.
 
 The opt-in `hil-ampdu-intercept` feature now provides that connection for
-hardware qualification only. Its final-link `ppMapTxQueue` wrapper first calls
-the real mapper, retains only successfully mapped basic-HT QoS data in a fixed
-32-pointer SRAM queue, and returns `3`, which makes `ppTxPkt` skip every vendor
-queue insertion. A private executor event moves at most one retained retry or
-assembles/submits one aggregate of at most 20 MPDUs; completion schedules the
-next event rather than recursing. The 20-frame laboratory cap guarantees the
-S31 `0x7fff` aggregate-length limit for 1600-byte static TX slots. This feature
-does not qualify as the final runtime because the real `ppMapTxQueue` still
-enters `ppProcessWaitingQueue`, PM/coexistence callbacks, and other vendor
-state. It exists to measure the Rust hardware submit/BlockAck/retry tract before
-those preparation leaves are reproduced individually, and may only be run in
+hardware qualification only. Its final-link `ppMapTxQueue` wrapper no longer
+calls the real mapper. Before ADDBA it admits only the complete hardware-
+observed management, EAPOL, Action and fixed-rate QoS state table and applies
+the recovered descriptor-byte treatment directly. After ADDBA it retains only
+guarded basic-HT QoS data in a fixed 32-pointer SRAM queue and returns `3`,
+which makes `ppTxPkt` skip every vendor queue insertion. Unknown mapper states
+trap; there is no vendor fallback. A private executor event moves at most one
+retained retry or assembles/submits one aggregate of at most 20 MPDUs;
+completion schedules the next event rather than recursing. The 20-frame
+laboratory cap guarantees the S31 `0x7fff` aggregate-length limit for 1600-byte
+static TX slots.
+
+The first `ppTxPkt` preparation leaf, `ppTxProtoProc`, is also replaced by an
+SRAM-resident stateless Rust transformation. Its complete recovered decision
+tree depends only on two MAC-header bytes and two existing descriptor words,
+and host tests cover every branch. The final ELF aliases `ppTxProtoProc`
+directly to the Rust entry because applying GNU `--wrap` to this ECO0 ROM
+export would otherwise replace the wrapper symbol itself with the ROM address.
+The remaining stateful prefix is `ppProcTxSecFrame` (CCMP/security layout) and
+`rcGetSched` (rate-control state); those two calls are why this feature remains
+a qualification boundary rather than the final runtime. It may only be run in
 the current Wi-Fi-only image where Bluetooth/802.15.4 coexistence is not
 started.
 

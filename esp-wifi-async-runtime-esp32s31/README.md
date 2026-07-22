@@ -205,6 +205,11 @@ assignments, and LLD would rewrite the Rust `__wrap_*` definition itself to a
 ROM address. Load `esp32s31-rom-wrap-overrides.x` after all `esp-rom-sys` ROM
 fragments instead. It pins each original address under `__real_*` and aliases
 the public entry to Rust without modifying ROM or a vendor archive.
+`ppTxProtoProc` uses the same late fragment but is a complete replacement, not
+a delegating probe: the fragment retains the unique
+`wifi_strict_pp_tx_proto_proc` Rust symbol and aliases the public ROM name
+directly to it. This avoids LLD creating an absolute `__wrap_ppTxProtoProc`
+symbol at the ROM address.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.
