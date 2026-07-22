@@ -500,11 +500,12 @@ as either one direct per-peer selection or at most four cumulative fallback
 table entries. It then performs the status-three descriptor transition,
 long-frame classification, lifetime timeout, bounded contention backoff, EDCA
 configuration, and basic queue enable in Rust/MMIO before calling
-the finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, `mac_tx_set_htsig`,
-`mac_tx_get_rts_rate`, and `hal_set_tx_pti` leaves directly. Rust reproduces
-the bounded RTS/data power-table reads, queue PPDU-control write, and the
-`coex_pti_tab[1]` priority clamp. This removes `hal_mac_tx_set_ppdu` and its
-indirect `mac_tx_set_pti` OSI callback in addition to `lmacTxFrame`, ROM
+the finite `mac_tx_set_plcp0`, `mac_tx_set_plcp1`, `mac_tx_set_htsig`, and
+`mac_tx_get_rts_rate` leaves directly. Rust reproduces the bounded RTS/data
+power-table reads, queue PPDU-control write, `coex_pti_tab[1]` priority clamp,
+and both PTI-register updates. This removes `hal_mac_tx_set_ppdu`, its indirect
+`mac_tx_set_pti` OSI callback, and `hal_set_tx_pti` in addition to
+`lmacTxFrame`, ROM
 `lmacSetTxFrame`, `ppProcessLifeTime`, the OSI random callback, the common EDCA
 helper, and the common TXQ-enable helper from the retry path. In particular,
 the unsupported-type `wifi_log` plus infinite loop in `ppProcessLifeTime` is no
@@ -527,8 +528,15 @@ and 225 same-frame retries. WPA2/DHCP/DNS/TCP/HTTP plus 4,096/4,096 UDP
 datagrams passed at 28.670 Mbit/s. All application and PP queues had zero
 rejects, the allocation snapshot remained unchanged, and every blocking,
 task-delay, and direct-delay probe remained zero. A separate graph audit of
-the five remaining formatting leaves found no indirect call or control-flow
+the then-five remaining formatting leaves found no indirect call or control-flow
 cycle.
+
+After moving the terminal PTI register programming into Rust, another run
+passed at 29.932 Mbit/s over 5,024 completions. Its 232 ACK timeouts and three
+CTS timeouts exercised 235 same-frame retries; 4,096/4,096 UDP datagrams and
+4/4 HTTP transfers completed with zero queue rejection, allocation change,
+blocking callback, task delay, or direct delay. Four binary leaves remain in
+the basic-HT formatting branch.
 
 The `hil-vendor-tx` build records allocation-free before/after snapshots for
 success and retry outcomes, including queue kind, status, retry counters,
