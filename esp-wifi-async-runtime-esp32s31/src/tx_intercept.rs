@@ -16,6 +16,16 @@ use core::{
 
 use crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY;
 
+unsafe extern "C" {
+    fn wifi_strict_tx_intercept_trap_report(
+        reason: u32,
+        classification: u32,
+        ready: u32,
+        internal_queued: u32,
+        internal_rejected: u32,
+    ) -> !;
+}
+
 pub(crate) const HIL_AMPDU_INTERCEPT_EVENT: u32 = u32::MAX - 5;
 
 const HIL_HARDWARE_QUEUE: u8 = 2;
@@ -492,7 +502,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
             || mapper_pre[3] & 0x80 == 0
             || mapper_pre[4] != 0
         {
-            fail_and_trap();
+            fail_and_trap(1);
         }
         if mapper_pre[1] == 0x0000_0007 {
             MAPPER_ALREADY_PREPARED.fetch_add(1, Ordering::Relaxed);
@@ -506,11 +516,14 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         LAST_MAPPED.store(0, Ordering::Release);
         MAPPED_ZERO.fetch_add(1, Ordering::Relaxed);
         if !aggregate_eligible {
-            if push_ready(state, frame).is_err()
-                || reconcile_coalesce_deadline(state).is_err()
-                || schedule(state).is_err()
-            {
-                fail_and_trap();
+            if push_ready(state, frame).is_err() {
+                fail_and_trap(2);
+            }
+            if reconcile_coalesce_deadline(state).is_err() {
+                fail_and_trap(3);
+            }
+            if schedule(state).is_err() {
+                fail_and_trap(4);
             }
             RETAINED.fetch_add(1, Ordering::Relaxed);
             // Ownership is now in the Rust queue. The executor submits this
@@ -519,14 +532,14 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         }
         ELIGIBLE.fetch_add(1, Ordering::Relaxed);
         if push_ready(state, frame).is_err() {
-            fail_and_trap();
+            fail_and_trap(5);
         }
         RETAINED.fetch_add(1, Ordering::Relaxed);
         if reconcile_coalesce_deadline(state).is_err() {
-            fail_and_trap();
+            fail_and_trap(6);
         }
         if state.count >= 2 && schedule(state).is_err() {
-            fail_and_trap();
+            fail_and_trap(7);
         }
         // `ppTxPkt` treats all values except 0, 1 and 2 as already consumed.
         return 3;
@@ -583,11 +596,14 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
             && length < MIN_HIL_MPDU_LENGTH
             && frame_control & 0x00fc == 0x00d0;
         if qos_data || action {
-            if push_ready(state, frame).is_err()
-                || reconcile_coalesce_deadline(state).is_err()
-                || schedule(state).is_err()
-            {
-                fail_and_trap();
+            if push_ready(state, frame).is_err() {
+                fail_and_trap(8);
+            }
+            if reconcile_coalesce_deadline(state).is_err() {
+                fail_and_trap(9);
+            }
+            if schedule(state).is_err() {
+                fail_and_trap(10);
             }
             RETAINED.fetch_add(1, Ordering::Relaxed);
             return 3;
@@ -613,7 +629,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         record_mapper_state(&LAST_NONZERO_FALLBACK_PRE, &fallback_pre);
         record_mapper_state(&LAST_NONZERO_FALLBACK_POST, &fallback_pre);
     }
-    fail_and_trap()
+    fail_and_trap(11)
 }
 
 #[inline(always)]
@@ -623,7 +639,7 @@ unsafe fn bypass_pre_enable_mapper(frame: *mut u8) -> i32 {
     let Some(treatment) =
         crate::tx_mapper::strict_pre_addba_treatment(rate, layout, frame_control, pre)
     else {
-        fail_and_trap();
+        fail_and_trap(12);
     };
     let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
     descriptor.add(4).write(treatment);
@@ -920,7 +936,7 @@ unsafe extern "C" fn coalesce_timeout(_argument: *mut c_void) {
     state.coalesce_due = true;
     COALESCE_EXPIRED.fetch_add(1, Ordering::Relaxed);
     if schedule(state).is_err() {
-        fail_and_trap();
+        fail_and_trap(13);
     }
 }
 
@@ -1169,7 +1185,14 @@ fn fail<T>(error: TxInterceptError) -> Result<T, TxInterceptError> {
 }
 
 #[inline(always)]
-unsafe fn fail_and_trap() -> ! {
+unsafe fn fail_and_trap(reason: u32) -> ! {
     FAILED.store(true, Ordering::Release);
-    core::arch::asm!("ebreak", options(noreturn))
+    let internal = crate::adapter::internal_event_queue_snapshot();
+    wifi_strict_tx_intercept_trap_report(
+        reason,
+        CLASSIFICATION_REJECT_REASON.load(Ordering::Acquire),
+        READY.load(Ordering::Acquire),
+        internal.queued as u32,
+        internal.rejected as u32,
+    )
 }
