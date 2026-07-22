@@ -81,6 +81,7 @@ static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_FALLBACKS: AtomicU32 = AtomicU32::new(0);
+static CLASSIFICATION_REJECT_REASON: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_REASON: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_DESCRIPTOR: AtomicU32 = AtomicU32::new(0);
 static LAST_FALLBACK_RATE: AtomicU32 = AtomicU32::new(0);
@@ -364,6 +365,10 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     let mapped = __real_ppMapTxQueue(frame);
     let fallback_post = read_mapper_state(frame);
     MAPPER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+    LAST_FALLBACK_REASON.store(
+        CLASSIFICATION_REJECT_REASON.load(Ordering::Relaxed),
+        Ordering::Release,
+    );
     LAST_FALLBACK_DESCRIPTOR.store(LAST_DESCRIPTOR.load(Ordering::Relaxed), Ordering::Release);
     LAST_FALLBACK_RATE.store(LAST_RATE.load(Ordering::Relaxed), Ordering::Release);
     LAST_FALLBACK_LAYOUT.store(LAST_LAYOUT.load(Ordering::Relaxed), Ordering::Release);
@@ -427,7 +432,7 @@ unsafe fn load_enabled_from_callback_context() -> bool {
 /// Return whether a strict QoS data frame is large enough for the qualified
 /// A-MPDU path. `Some(false)` remains a valid mapper-bypass candidate.
 unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
-    LAST_FALLBACK_REASON.store(0, Ordering::Relaxed);
+    CLASSIFICATION_REJECT_REASON.store(0, Ordering::Relaxed);
     LAST_DESCRIPTOR.store(u32::MAX, Ordering::Relaxed);
     LAST_RATE.store(u32::MAX, Ordering::Relaxed);
     LAST_LAYOUT.store(u32::MAX, Ordering::Relaxed);
@@ -488,7 +493,7 @@ unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
 
 #[inline(always)]
 fn reject_qos(reason: u32) -> Option<bool> {
-    LAST_FALLBACK_REASON.store(reason, Ordering::Release);
+    CLASSIFICATION_REJECT_REASON.store(reason, Ordering::Release);
     None
 }
 
