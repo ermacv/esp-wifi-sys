@@ -190,6 +190,7 @@ struct TxDoneState {
     resume_timeout: bool,
     resume_queue: bool,
     resume_ampdu: bool,
+    resume_intercept: bool,
 }
 
 impl TxDoneState {
@@ -203,6 +204,7 @@ impl TxDoneState {
             resume_timeout: false,
             resume_queue: false,
             resume_ampdu: false,
+            resume_intercept: false,
         }
     }
 }
@@ -337,7 +339,7 @@ pub(crate) const fn is_lmac_continuation(kind: u32) -> bool {
 /// timeout/discard path. Mode-1 callbacks are split into separate executor
 /// events before the frame is appended to the vendor TX-done list.
 pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> {
-    begin_lmac(frame, true, false, false)
+    begin_lmac(frame, true, false, false, false)
 }
 
 /// Continue a Rust-owned successful LMAC completion. This is the recovered
@@ -345,7 +347,7 @@ pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> 
 /// remain separate bounded executor events.
 pub(crate) unsafe fn begin_from_tx_success(frame: *mut u8) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, true, false)
+    begin_lmac(frame, false, true, false, false)
 }
 
 /// Complete one acknowledged MPDU from a Rust-owned A-MPDU. Queue resumption
@@ -353,7 +355,15 @@ pub(crate) unsafe fn begin_from_tx_success(frame: *mut u8) -> Result<(), TxDoneE
 /// returns to the aggregate continuation instead of posting the PP queue.
 pub(crate) unsafe fn begin_from_ampdu_success(frame: *mut u8) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, false, true)
+    begin_lmac(frame, false, false, true, false)
+}
+
+/// Complete one Rust-owned directly submitted MPDU and resume its fixed
+/// executor queue only after TX-done ownership has been transferred.
+#[cfg(feature = "hil-ampdu-intercept")]
+pub(crate) unsafe fn begin_from_intercept_success(frame: *mut u8) -> Result<(), TxDoneError> {
+    crate::channel_switch::tx_done_edge();
+    begin_lmac(frame, false, false, false, true)
 }
 
 unsafe fn begin_lmac(
@@ -361,6 +371,7 @@ unsafe fn begin_lmac(
     resume_timeout: bool,
     resume_queue: bool,
     resume_ampdu: bool,
+    resume_intercept: bool,
 ) -> Result<(), TxDoneError> {
     let state = &mut *LMAC_STATE.0.get();
     if state.failed {
@@ -388,6 +399,7 @@ unsafe fn begin_lmac(
     state.resume_timeout = resume_timeout;
     state.resume_queue = resume_queue;
     state.resume_ampdu = resume_ampdu;
+    state.resume_intercept = resume_intercept;
     state.phase = if callbacks == 0 {
         PHASE_RECYCLE
     } else {
@@ -510,6 +522,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     let resume_timeout = state.resume_timeout;
     let resume_queue = state.resume_queue;
     let resume_ampdu = state.resume_ampdu;
+    let resume_intercept = state.resume_intercept;
     let queue = descriptor_queue(descriptor);
     state.active = false;
     state.phase = PHASE_IDLE;
@@ -517,6 +530,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     state.resume_timeout = false;
     state.resume_queue = false;
     state.resume_ampdu = false;
+    state.resume_intercept = false;
     if resume_timeout {
         return crate::lmac::resume_after_tx_done().map_err(|_| TxDoneError::InternalQueueFull);
     }
@@ -535,13 +549,22 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     if resume_ampdu {
         return crate::lmac::resume_ampdu_completion().map_err(|_| TxDoneError::InternalQueueFull);
     }
+    if resume_intercept {
+        #[cfg(feature = "hil-ampdu-intercept")]
+        {
+            return crate::tx_intercept::on_direct_hardware_completion()
+                .map_err(|_| TxDoneError::InternalQueueFull);
+        }
+        #[cfg(not(feature = "hil-ampdu-intercept"))]
+        return Err(TxDoneError::InvalidPhase);
+    }
     Ok(())
 }
 
 unsafe fn begin_from_wrapped_lmac(frame: *mut u8, mode: u32) -> Result<(), TxDoneError> {
     match mode {
-        0 => begin_lmac(frame, false, false, false),
-        1 => begin_lmac(frame, false, true, false),
+        0 => begin_lmac(frame, false, false, false, false),
+        1 => begin_lmac(frame, false, true, false, false),
         value => Err(TxDoneError::UnsupportedLmacMode(value)),
     }
 }
@@ -566,6 +589,7 @@ pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
         state.resume_timeout = false;
         state.resume_queue = false;
         state.resume_ampdu = false;
+        state.resume_intercept = false;
         // A wrapper cannot return a Rust error through the vendor C ABI. Post
         // a private event so the radio owner observes `PreviousFailure` and
         // terminates instead of continuing with partially completed TX state.

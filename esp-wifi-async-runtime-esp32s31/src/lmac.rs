@@ -1239,6 +1239,91 @@ pub unsafe fn submit_basic_ht_ampdu(
     }
 }
 
+/// Submit one already prepared strict basic-HT MPDU directly to an idle
+/// hardware queue.
+///
+/// This is the non-aggregate sibling of `submit_basic_ht_ampdu`. It performs
+/// only bounded descriptor updates and finite SRAM/MMIO leaves; it does not
+/// insert the frame into a PP list, post an event, allocate, or wait.
+///
+/// # Safety
+///
+/// `queue_state` and every pointer reachable from `frame` must remain valid
+/// writable SRAM under the single radio owner until the completion edge.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_single_submit"]
+pub unsafe fn submit_basic_ht_frame(
+    queue_state: *mut u8,
+    frame: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    if frame.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let queue_status = queue_state.add(TX_QUEUE_STATUS_OFFSET).read();
+    if queue_status != 0 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueueStatus(
+            queue_status,
+        ));
+    }
+    let hardware_queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    if hardware_queue > 3 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueue(hardware_queue));
+    }
+    if !frame
+        .add(TX_FRAME_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+    {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(0));
+    }
+    let descriptor = frame
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if descriptor.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let mut flags = descriptor.cast::<u32>().read();
+    if flags
+        & (TX_FRAME_AMPDU_BIT
+            | TX_FRAME_HE_BIT
+            | TX_FRAME_BAR_BIT
+            | TX_FRAME_OFFCHANNEL_BIT
+            | TX_FRAME_FTM_BIT)
+        != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+    let descriptor_word = descriptor
+        .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .read();
+    if descriptor_word & 0x00c0_0000 == 0x0080_0000 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+
+    if flags & 0x0000_2102 == 0x0000_2000 {
+        flags |= 0x0000_1000;
+    }
+    if basic_frame_is_long(frame, descriptor) && flags & 0x02 == 0 {
+        flags = (flags & !0x0000_1000) | TX_FRAME_LONG_RETRY_BIT;
+    }
+    descriptor.cast::<u32>().write(flags);
+    apply_basic_rate_override(descriptor);
+
+    queue_state.cast::<*mut u8>().write(frame);
+    configure_basic_timeout(queue_state, descriptor);
+    guard_basic_ppdu_inputs(frame, descriptor)?;
+    let txrx = ptr::addr_of_mut!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(LmacAsyncError::TxRxUnavailable);
+    }
+    format_basic_ht_ppdu(queue_state, frame, descriptor, txrx)?;
+    configure_basic_edca(queue_state, descriptor);
+    enable_basic_tx_queue(queue_state, descriptor)
+}
+
 /// Transfer the prepared chain into the fixed owner slot before hardware can
 /// expose a completion edge. The radio executor is the sole writer; no lock,
 /// allocation, compare/retry loop, or scheduler primitive is involved.
@@ -2092,6 +2177,10 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         .cast::<u32>();
     completed.write(completed.read().wrapping_add(1));
     descriptor.add(TX_DESCRIPTOR_REASON_OFFSET).write(1);
+    #[cfg(feature = "hil-ampdu-intercept")]
+    if crate::tx_intercept::owns_direct_hardware_frame(frame) {
+        return crate::txdone::begin_from_intercept_success(frame).map_err(LmacAsyncError::TxDone);
+    }
     crate::txdone::begin_from_tx_success(frame).map_err(LmacAsyncError::TxDone)
 }
 
@@ -2452,6 +2541,21 @@ pub(crate) fn resume_after_tx_done() -> Result<(), LmacAsyncError> {
 unsafe fn finish_discard_frame_step(state: &mut TxTimeoutState) -> Result<(), LmacAsyncError> {
     let frame = state.discard_frame;
     let queue_state = state.queue_state;
+    #[cfg(feature = "hil-ampdu-intercept")]
+    if crate::tx_intercept::owns_direct_hardware_frame(frame) {
+        state.discard_phase = DISCARD_IDLE;
+        state.queue_state = ptr::null_mut();
+        state.discard_frame = ptr::null_mut();
+        state.discard_tail = ptr::null_mut();
+        let finish_timeout_queue = state.finish_timeout_queue;
+        state.finish_timeout_queue = false;
+        crate::tx_intercept::on_direct_hardware_completion()
+            .map_err(|_| LmacAsyncError::InternalQueueFull)?;
+        if finish_timeout_queue {
+            finish_current_queue(state);
+        }
+        return Ok(());
+    }
     let descriptor = descriptor(frame)?;
     let flags = descriptor.cast::<u32>().read();
     let queue = descriptor_queue(descriptor);
