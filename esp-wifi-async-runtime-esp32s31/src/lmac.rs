@@ -42,6 +42,11 @@ const TX_DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
 const TX_DESCRIPTOR_RATE_CONTROL_OFFSET: usize = 0x1c;
 const TX_DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
+const TX_DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
+const TX_DESCRIPTOR_PHY_FLAGS_OFFSET: usize = 0x30;
+const TX_RATE_CONTEXT_MODE_OFFSET: usize = 0x0c;
+const TX_RATE_CONTEXT_ALT_RATE_OFFSET: usize = 0x08;
+const TX_RATE_CONTEXT_DEFAULT_RATE_OFFSET: usize = 0x09;
 const TX_FRAME_ABORTED_BIT: u32 = 0x0002_0000;
 const TX_FRAME_BAR_BIT: u32 = 0x0020_0000;
 const TX_FRAME_AMPDU_BIT: u32 = 0x0040_0000;
@@ -86,7 +91,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn rcGetRate(rate_context: *mut u8, descriptor: *mut u8);
     fn ppCalFrameTimes(frame: *mut u8);
     fn lmacTxFrame(frame: *mut u8, queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
@@ -708,9 +712,9 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     mark_retry_scheduler(frame)?;
     queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
 
-    // Narrow non-aggregate body of `lmacRetryTxFrame`. `rcGetRate` has two
-    // pointer arguments in the pinned ABI: the per-peer rate context in `a0`
-    // and the TX descriptor in `a1`.
+    // Narrow non-aggregate body of `lmacRetryTxFrame`. The bounded basic-HT
+    // rate fallback is Rust-owned; only optional frame-time calculation and
+    // the final hardware submission remain as vendor leaves.
     let rate_context = frame
         .add(TX_FRAME_RATE_CONTEXT_OFFSET)
         .cast::<*mut u8>()
@@ -718,7 +722,7 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     if rate_context.is_null() {
         return Err(LmacAsyncError::InvalidTxRetryRateControl);
     }
-    rcGetRate(rate_context, descriptor);
+    select_basic_retry_rate(rate_context, descriptor)?;
 
     let post_rate_flags = descriptor.cast::<u32>().read();
     if post_rate_flags
@@ -746,6 +750,66 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
         queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
     );
     queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
+    Ok(())
+}
+
+/// Recovered non-HE body of the pinned `rcGetRate` implementation.
+///
+/// Strict mode has already rejected HE and aggregate descriptors. The nested
+/// `rcGetSMPDURate` helper is therefore a no-op, leaving either a direct
+/// per-peer rate choice or a four-entry cumulative retry table. Keeping the
+/// fixed bound explicit also removes the vendor `wifi_assert` failure path.
+unsafe fn select_basic_retry_rate(
+    rate_context: *mut u8,
+    descriptor: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let flags = descriptor.cast::<u32>().read();
+    debug_assert_eq!(flags & (TX_FRAME_HE_BIT | TX_FRAME_AMPDU_BIT), 0);
+
+    let mode = rate_context
+        .add(TX_RATE_CONTEXT_MODE_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    if mode & 0x03 != 0 {
+        let offset = if flags & 0x08 != 0 {
+            TX_RATE_CONTEXT_ALT_RATE_OFFSET
+        } else {
+            TX_RATE_CONTEXT_DEFAULT_RATE_OFFSET
+        };
+        descriptor
+            .add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET)
+            .write(rate_context.add(offset).read());
+        return Ok(());
+    }
+
+    let schedule = descriptor
+        .add(TX_DESCRIPTOR_RATE_CONTROL_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if schedule.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryRateControl);
+    }
+
+    let attempts = descriptor.add(5).read().max(descriptor.add(6).read());
+    let mut cumulative = 0_u8;
+    for index in 0..4 {
+        let entry = schedule.add(index * 2);
+        cumulative = cumulative.wrapping_add(entry.add(1).read());
+        if attempts < cumulative {
+            let mut rate = entry.read();
+            let phy_flags = descriptor
+                .add(TX_DESCRIPTOR_PHY_FLAGS_OFFSET)
+                .cast::<u32>()
+                .read();
+            if phy_flags & 0x0001_0000 != 0 && rate > 35 {
+                rate = 16;
+            }
+            descriptor
+                .add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET)
+                .write(rate);
+            break;
+        }
+    }
     Ok(())
 }
 
