@@ -29,7 +29,7 @@ unsafe extern "C" {
     fn ppDequeueRxq_Locked() -> *mut u8;
     fn ppRxProtoProc(packet: *mut u8, rx_control: *mut u8) -> i32;
     fn ppRecycleRxPkt(packet: *mut u8);
-    fn hostap_input(packet: *mut u8, rssi: i32, signal_length: u32);
+    fn ap_rx_cb(packet: *mut u8, rssi: i32, signal_length: u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,7 +268,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
                 .cast::<Option<RxCallback>>()
                 .read()
         };
-        if registered.map(|callback| callback as usize) != Some(hostap_input as usize) {
+        if registered.map(|callback| callback as usize) != Some(ap_rx_cb as usize) {
             COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
             unsafe { ppRecycleRxPkt(packet) };
             return;
@@ -276,7 +276,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
         COUNTERS.auxiliary_callback.fetch_add(1, Ordering::Relaxed);
         let rssi = unsafe { rx_control.cast::<i8>().read() } as i32;
         let signal_length = unsafe { rx_control.add(20).read() } as u32;
-        unsafe { hostap_input(packet, rssi, signal_length) };
+        unsafe { ap_rx_cb(packet, rssi, signal_length) };
         return;
     }
     if flags & 0x40 != 0 {
