@@ -36,11 +36,15 @@ pub(crate) const fn basic_plcp1_word(
     word
 }
 
-pub(crate) const fn basic_htsig_word(rate: u8, extension: bool, length: u32) -> u32 {
+pub(crate) const fn ht_htsig_word(rate: u8, extension: bool, length: u32, aggregate: bool) -> u32 {
     let mcs = if rate <= 25 { rate - 16 } else { rate - 26 };
     let low = mcs | ((extension as u8) << 7);
-    let high = 0x07 | (((rate >= 26) as u8) << 7);
+    let high = 0x07 | ((aggregate as u8) << 3) | (((rate >= 26) as u8) << 7);
     u32::from_le_bytes([low, length as u8, (length >> 8) as u8, high])
+}
+
+pub(crate) const fn basic_htsig_word(rate: u8, extension: bool, length: u32) -> u32 {
+    ht_htsig_word(rate, extension, length, false)
 }
 
 pub(crate) const fn basic_length_control_word(
@@ -64,7 +68,7 @@ pub(crate) const fn basic_data_length_word(rate: u8, length: u32, entry_flags: u
 mod tests {
     use super::{
         basic_data_length_word, basic_htsig_word, basic_length_control_word, basic_plcp0_word,
-        basic_plcp1_word,
+        basic_plcp1_word, ht_htsig_word,
     };
 
     const ADDRESS: usize = 0x2f12_3456;
@@ -107,6 +111,13 @@ mod tests {
         assert_eq!(basic_htsig_word(25, true, 0x3fff), 0x073f_ff89);
         assert_eq!(basic_htsig_word(26, false, 0x0201), 0x8702_0100);
         assert_eq!(basic_htsig_word(35, true, 0x0001), 0x8700_0189);
+    }
+
+    #[test]
+    fn sets_the_recovered_ht_ampdu_bit_independently_of_length() {
+        assert_eq!(ht_htsig_word(16, false, 0x248e, true), 0x0f24_8e00);
+        assert_eq!(ht_htsig_word(35, true, 0x248e, true), 0x8f24_8e89);
+        assert_eq!(ht_htsig_word(16, false, 0x248e, false), 0x0724_8e00);
     }
 
     #[test]

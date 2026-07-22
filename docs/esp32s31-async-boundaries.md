@@ -496,9 +496,25 @@ two adjacent registers form the 64-bit bitmap.
 
 This still does not enable A-MPDU in strict mode. Frames currently pass from
 `ieee80211_post_hmac_tx` into the vendor PP software scheduler one at a time.
-The next required boundary is to retain the already constructed/CCMP-ready
-ESF frames in Rust-owned fixed slots before `lmacTxFrame`, then submit the
-assembled chain and route each BlockAck bit through one executor continuation.
+The recovered initial hardware-submit branch is now available as
+`submit_basic_ht_ampdu`, but is deliberately not connected to that scheduler.
+It accepts only the validated result of `prepare_basic_ht_ampdu_chain`, writes
+the idle queue state and programs PLCP0, PLCP1, HT-SIG, length, protection,
+power, PTI, EDCA, and queue enable without `GetAccess`, allocation, callback,
+event post, wait, or vendor scheduler traversal. The aggregate HT-SIG differs
+from an ordinary MPDU in two independent ways: it uses the full aggregate
+length and sets bit 3 of the high HT-SIG byte. The two `pTxRx` formatting bytes
+initialized by `ppCalTxAMPDULength` are carried as the recovered constant
+`0x01/0x01`, so this leaf does not depend on live vendor aggregation state.
+The entry point and every Rust helper reachable from it are emitted in
+`.rwtext.wifi_strict.*`; its mutable backoff seed is in critical SRAM.
+
+The leaf cannot be invoked safely yet. The next required boundary is to retain
+the already constructed/CCMP-ready ESF frames and the reversible assembly
+metadata in Rust-owned fixed slots, detach the chain after hardware completion,
+then route each BlockAck bit through one executor continuation. Until that
+completion owner is installed, the existing single-frame success/retry path
+continues to reject every linked or aggregate descriptor.
 
 The strict basic-HT completion path also replaces `hal_mac_get_txq_complete`.
 The original `0x81e`-byte body performs the required fixed MMIO decode first,

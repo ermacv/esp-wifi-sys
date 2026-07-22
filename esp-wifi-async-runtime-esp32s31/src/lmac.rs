@@ -5,6 +5,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
+#[cfg(target_arch = "riscv32")]
+use crate::tx_ampdu::BasicHtAmpduChain;
 use crate::{adapter::schedule_internal_timer, timer::RawOsiTimer};
 
 pub(crate) const TX_DISCARD_CONTINUATION: u32 = u32::MAX - 1;
@@ -143,6 +145,7 @@ pub enum LmacAsyncError {
     UnsupportedTxSubmissionDescriptor(u32),
     UnsupportedTxSubmissionMetadata(u32),
     UnsupportedTxSubmissionPti { priority: u8, count: u16 },
+    UnsupportedTxAmpduChain { subframes: u8, length: u16 },
 }
 
 #[derive(Clone, Copy)]
@@ -201,6 +204,10 @@ unsafe impl Sync for TimerCell {}
 static STATE: StateCell = StateCell(UnsafeCell::new(TxTimeoutState::new()));
 static TIMER: TimerCell = TimerCell::new();
 static TXQ_SPLIT_FAILED: AtomicBool = AtomicBool::new(false);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.data.wifi_strict.tx_backoff"
+)]
 static BACKOFF_SEQUENCE: AtomicU32 = AtomicU32::new(0x6d2b_79f5);
 
 /// HIL-only observations captured immediately before the selected completion
@@ -871,7 +878,7 @@ unsafe fn format_basic_ht_ppdu(
 
     // HE and FTM are rejected before entering this function, so the selected
     // 16..=35 branch is exactly the finite HTSIG path.
-    program_basic_htsig(queue, frame, descriptor, txrx, rate, rts_rate as u8);
+    program_htsig(queue, frame, descriptor, txrx, rate, rts_rate as u8, None);
 
     let data_rate = if rate <= 25 { rate } else { rate - 10 };
     let data_rate = usize::from(data_rate);
@@ -941,16 +948,20 @@ unsafe fn program_basic_plcp1(queue: u8, descriptor: *mut u8, rate: u8) {
 
 /// Recovered non-aggregate body of `mac_tx_set_htsig` and its terminal
 /// `mac_tx_set_len` leaf.
-unsafe fn program_basic_htsig(
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.tx_htsig")]
+unsafe fn program_htsig(
     queue: u8,
     frame: *mut u8,
     descriptor: *mut u8,
     txrx: *mut u8,
     rate: u8,
     rts_rate: u8,
+    aggregate_length: Option<u16>,
 ) {
     let flags = descriptor.cast::<u32>().read();
-    debug_assert_eq!(flags & (TX_FRAME_HE_BIT | TX_FRAME_AMPDU_BIT), 0);
+    let aggregate = aggregate_length.is_some();
+    debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
+    debug_assert_eq!(flags & TX_FRAME_AMPDU_BIT != 0, aggregate);
 
     let peer = frame
         .add(TX_FRAME_RATE_CONTEXT_OFFSET)
@@ -971,9 +982,11 @@ unsafe fn program_basic_htsig(
     debug_assert!(!metadata.is_null());
     let length_source = metadata.add(4).cast::<*const u32>().read();
     debug_assert!(!length_source.is_null());
-    let length = length_source.read() & 0x3fff;
+    let length = aggregate_length
+        .map(u32::from)
+        .unwrap_or_else(|| length_source.read() & 0x3fff);
 
-    let htsig = crate::tx_plcp::basic_htsig_word(rate, extension, length);
+    let htsig = crate::tx_plcp::ht_htsig_word(rate, extension, length, aggregate);
     let htsig_register = (TXQ_HTSIG_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     htsig_register.write_volatile(htsig);
 
@@ -1010,19 +1023,205 @@ unsafe fn program_basic_htsig(
         .read();
     let index = ((queue_word >> 20) & 0x0f) as usize;
     let entry = txrx.add(index * TXRX_QUEUE_SIZE);
+    // `ppCalTxAMPDULength` initializes these adjacent bytes to 0x01/0x01
+    // before assembly. Carry those two values explicitly for the Rust-owned
+    // aggregate instead of making hardware formatting depend on scheduler
+    // state in pTxRx.
+    let length_flags = if aggregate { 1 } else { entry.add(0x40).read() };
+    let data_flags = if aggregate { 1 } else { entry.add(0x41).read() };
     let length_control =
-        crate::tx_plcp::basic_length_control_word(rts_rate, entry.add(0x40).read(), queue_word);
+        crate::tx_plcp::basic_length_control_word(rts_rate, length_flags, queue_word);
     let length_control_register =
         (TXQ_LENGTH_CONTROL_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
     length_control_register.write_volatile(length_control);
 
     if flags & 0x0100_0000 == 0 {
-        let data_length =
-            crate::tx_plcp::basic_data_length_word(rate, length, entry.add(0x41).read());
+        let data_length = crate::tx_plcp::basic_data_length_word(rate, length, data_flags);
         let data_length_register =
             (TXQ_DATA_LENGTH_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
         data_length_register.write_volatile(data_length);
     }
+}
+
+/// Submit one already assembled basic-HT A-MPDU to an idle hardware queue.
+///
+/// This is the finite initial-transmit branch recovered from `lmacTxFrame`,
+/// `lmacSetTxFrame`, `hal_mac_tx_set_ppdu`, and `hal_mac_txq_enable`. It does
+/// not enter `GetAccess`, allocate, wait, post an event, invoke a callback, or
+/// traverse the vendor scheduler. The caller must have acquired coexistence
+/// ownership and installed aggregate-aware completion state before calling.
+///
+/// This leaf is intentionally not wired into the PP dispatcher yet: the
+/// ordinary completion path accepts exactly one descriptor and must never see
+/// the linked chain produced by `prepare_basic_ht_ampdu_chain`.
+///
+/// # Safety
+///
+/// `queue_state` must be the SRAM state of an idle hardware queue exclusively
+/// owned by the radio executor. `chain` must be the unchanged result of
+/// `prepare_basic_ht_ampdu_chain`; all of its frame, descriptor, buffer, peer,
+/// and metadata pointers must remain valid in SRAM through completion.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_submit"]
+pub unsafe fn submit_basic_ht_ampdu(
+    queue_state: *mut u8,
+    chain: BasicHtAmpduChain,
+) -> Result<(), LmacAsyncError> {
+    if chain.subframes < 2 || chain.subframes > 32 || chain.aggregate_length == 0 {
+        return Err(LmacAsyncError::UnsupportedTxAmpduChain {
+            subframes: chain.subframes,
+            length: chain.aggregate_length,
+        });
+    }
+    let queue_status = queue_state.add(TX_QUEUE_STATUS_OFFSET).read();
+    if queue_status != 0 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueueStatus(
+            queue_status,
+        ));
+    }
+    let hardware_queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    if hardware_queue > 3 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionQueue(hardware_queue));
+    }
+    if chain.first.is_null() || chain.last.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+
+    let descriptor = chain
+        .first
+        .add(TX_FRAME_DESCRIPTOR_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if descriptor.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let mut flags = descriptor.cast::<u32>().read();
+    if flags & TX_FRAME_AMPDU_BIT == 0
+        || flags & (TX_FRAME_HE_BIT | TX_FRAME_BAR_BIT | TX_FRAME_OFFCHANNEL_BIT | TX_FRAME_FTM_BIT)
+            != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+    let descriptor_word = descriptor
+        .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
+        .cast::<u32>()
+        .read();
+    if descriptor_word & 0x00c0_0000 == 0x0080_0000 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+
+    // Initial status-zero branch of lmacTxFrame. Aggregate length always
+    // exceeds the long-frame threshold for the admitted two-or-more MPDUs.
+    if flags & 0x0000_2102 == 0x0000_2000 {
+        flags |= 0x0000_1000;
+    }
+    if basic_frame_is_long(chain.first, descriptor) && flags & 0x02 == 0 {
+        flags = (flags & !0x0000_1000) | TX_FRAME_LONG_RETRY_BIT;
+    }
+    descriptor.cast::<u32>().write(flags);
+    apply_basic_rate_override(descriptor);
+
+    queue_state.cast::<*mut u8>().write(chain.first);
+    configure_basic_timeout(queue_state, descriptor);
+    guard_basic_ampdu_ppdu_inputs(chain, descriptor)?;
+    let txrx = ptr::addr_of_mut!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(LmacAsyncError::TxRxUnavailable);
+    }
+    format_basic_ht_ampdu_ppdu(queue_state, chain, descriptor, txrx)?;
+    configure_basic_edca(queue_state, descriptor);
+    enable_basic_tx_queue(queue_state, descriptor)
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_guard"]
+unsafe fn guard_basic_ampdu_ppdu_inputs(
+    chain: BasicHtAmpduChain,
+    descriptor: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    if chain
+        .first
+        .add(TX_FRAME_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read()
+        .is_null()
+        || !chain
+            .last
+            .add(TX_FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+            .is_null()
+    {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let metadata = chain.first.add(4).cast::<*mut u8>().read();
+    if metadata.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let length_source = metadata.add(4).cast::<*mut u8>().read();
+    if length_source.is_null() {
+        return Err(LmacAsyncError::InvalidTxSubmissionPointer);
+    }
+    let metadata_flags = length_source.cast::<u32>().read();
+    if metadata_flags == 0 || metadata_flags & 0x03 != 0x02 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionMetadata(
+            metadata_flags,
+        ));
+    }
+
+    let peer = chain
+        .first
+        .add(TX_FRAME_RATE_CONTEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let flags = descriptor.cast::<u32>().read();
+    if peer.is_null() && flags & 0x0000_4000 == 0 {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.tx_ampdu_format"]
+unsafe fn format_basic_ht_ampdu_ppdu(
+    queue_state: *mut u8,
+    chain: BasicHtAmpduChain,
+    descriptor: *mut u8,
+    txrx: *mut u8,
+) -> Result<(), LmacAsyncError> {
+    let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
+    let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
+    let Some(rts_rate) = crate::tx_rate::basic_ht_rts_rate(rate) else {
+        return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(
+            descriptor.cast::<u32>().read(),
+        ));
+    };
+
+    program_basic_plcp0(queue, chain.first, descriptor);
+    program_basic_plcp1(queue, descriptor, rate);
+    let ppdu_control =
+        (TXQ_PPDU_CONTROL_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    ppdu_control.write_volatile(ppdu_control.read_volatile() & !0x08);
+
+    let power_table = ptr::addr_of!(s_phy_get_max_pwr).cast::<i8>();
+    let rts_index = usize::from(rts_rate);
+    let rts_power = (power_table.add(rts_index * 2).read() as i32 as u32) << 16
+        | (power_table.add(rts_index * 2 + 1).read() as i32 as u32) << 24;
+    program_htsig(
+        queue,
+        chain.first,
+        descriptor,
+        txrx,
+        rate,
+        rts_rate,
+        Some(chain.aggregate_length),
+    );
+    let data_rate = usize::from(if rate <= 25 { rate } else { rate - 10 });
+    let data_power = power_table.add(data_rate * 2).read() as i32 as u32
+        | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8;
+    let power_register = (TXQ_POWER_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+    power_register.write_volatile(data_power | rts_power);
+    program_basic_tx_pti(queue, descriptor)
 }
 
 /// Finite success branch of `mac_tx_set_pti` and `hal_set_tx_pti` without the
@@ -1103,6 +1302,10 @@ unsafe fn apply_basic_rate_override(descriptor: *mut u8) {
     }
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.tx_timeout_format"
+)]
 unsafe fn configure_basic_timeout(queue_state: *mut u8, descriptor: *mut u8) {
     let lifetime = ptr::addr_of!(lmacConfMib)
         .cast::<u8>()
@@ -1170,6 +1373,10 @@ unsafe fn guard_basic_ppdu_inputs(
     Ok(())
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.tx_edca_format"
+)]
 unsafe fn configure_basic_edca(queue_state: *mut u8, descriptor: *mut u8) {
     let contention_window = next_backoff_random();
     let exponent = u32::from(queue_state.add(8).read());

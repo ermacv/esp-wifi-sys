@@ -3,12 +3,17 @@
 /// Rates outside the strict runtime's 16..=35 submission range are rejected
 /// instead of reproducing unused legacy-rate behavior.
 pub(crate) const fn basic_ht_rts_rate(rate: u8) -> Option<u8> {
-    match rate {
-        16 | 26 => Some(11),
-        17 | 18 | 27 | 28 => Some(10),
-        19..=25 | 29..=35 => Some(9),
-        _ => None,
+    if rate < 16 || rate > 35 {
+        return None;
     }
+    let mcs = (rate - 16) % 10;
+    Some(if mcs == 0 {
+        11
+    } else if mcs <= 2 {
+        10
+    } else {
+        9
+    })
 }
 
 #[cfg(test)]

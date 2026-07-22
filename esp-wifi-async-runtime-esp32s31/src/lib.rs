@@ -150,6 +150,8 @@ pub use interrupt::{InterruptSignal, WaitForInterrupt};
 pub use lmac::{
     lmac_retry_snapshot, lmac_tx_complete_snapshot, LmacRetrySnapshot, LmacTxCompleteSnapshot,
 };
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use lmac::{submit_basic_ht_ampdu, LmacAsyncError};
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-mic"))]
 pub use michael::{
     async_michael_callback_installed, install_async_michael_callback,
