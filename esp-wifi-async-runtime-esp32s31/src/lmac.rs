@@ -17,6 +17,8 @@ const MAC_CLOCK_REG: *const u32 = 0x2010_d800 as *const u32;
 const TXQ_CONFIG_BASE_REG: usize = 0x2010_4d6c;
 const TXQ_ENABLE_BASE_REG: usize = 0x2010_4d70;
 const TXQ_PPDU_CONTROL_BASE_REG: usize = 0x2010_4d68;
+const TXQ_PROTECTION_BASE_REG: usize = 0x2010_4d64;
+const TXQ_PROTECTION_DURATION_BASE_REG: usize = 0x2010_54dc;
 const TXQ_PTI_BASE_REG: usize = 0x2010_54e0;
 const TXQ_POWER_BASE_REG: usize = 0x2010_5500;
 const TXQ_REGISTER_STRIDE: usize = 0x10;
@@ -102,7 +104,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn mac_tx_set_plcp0(queue_state: *mut u8) -> i32;
     fn mac_tx_set_plcp1(queue_state: *mut u8) -> i32;
     fn mac_tx_set_htsig(queue_state: *mut u8, txrx: *mut u8) -> i32;
     fn lmacTxDone(frame: *mut c_void, mode: u32);
@@ -853,7 +854,7 @@ unsafe fn format_basic_ht_ppdu(
         ));
     };
 
-    let _ = mac_tx_set_plcp0(queue_state);
+    program_basic_plcp0(queue, frame, descriptor);
     let _ = mac_tx_set_plcp1(queue_state);
 
     let ppdu_control =
@@ -879,6 +880,47 @@ unsafe fn format_basic_ht_ppdu(
     program_basic_tx_pti(queue, descriptor)?;
 
     Ok(())
+}
+
+/// Recovered non-HE hardware-programming branch of `mac_tx_set_plcp0`.
+///
+/// The stock function also contains HE/test diagnostics and four logging
+/// calls. Strict retry submission rejects HE and aggregate descriptors before
+/// this point; the remaining post-protection branches only log or decode the
+/// programmed PPDU and therefore have no hardware effect.
+unsafe fn program_basic_plcp0(queue: u8, frame: *mut u8, descriptor: *mut u8) {
+    let metadata = frame.add(4).cast::<*mut u8>().read();
+    debug_assert!(!metadata.is_null());
+    let flags = descriptor.cast::<u32>().read();
+    debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
+
+    let plcp0 = crate::tx_plcp::basic_plcp0_word(metadata as usize, flags);
+    let plcp0_register =
+        (TXQ_ENABLE_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    plcp0_register.write_volatile(plcp0);
+
+    // Exact finite body of `hal_he_set_tx_protection`. Its third argument is
+    // unused by the pinned implementation.
+    let protection_register =
+        (TXQ_PROTECTION_BASE_REG - usize::from(queue) * TXQ_REGISTER_STRIDE) as *mut u32;
+    let protection = protection_register.read_volatile();
+    let protection = if flags & 0x0000_0100 != 0 {
+        protection | 0x8000_0000
+    } else {
+        protection & 0x7fff_ffff
+    };
+    protection_register.write_volatile(protection);
+
+    let phy_flags = descriptor
+        .add(TX_DESCRIPTOR_PHY_FLAGS_OFFSET)
+        .cast::<u32>()
+        .read();
+    if (phy_flags >> 3) & 0x03ff != 0 {
+        let duration = descriptor.add(0x34).cast::<u32>().read();
+        let duration_register =
+            (TXQ_PROTECTION_DURATION_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
+        duration_register.write_volatile((duration & 0x0000_ffff) | 0x0001_0000);
+    }
 }
 
 /// Finite success branch of `mac_tx_set_pti` and `hal_set_tx_pti` without the

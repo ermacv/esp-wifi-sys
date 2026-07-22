@@ -31,7 +31,6 @@ const ROOTS: &[&str] = &[
     // Finite hardware-formatting leaves used by the Rust-owned basic-HT retry
     // submission. The Rust caller rejects legacy/HE/FTM/aggregate and invalid
     // metadata branches before any of these entries is invoked.
-    "mac_tx_set_plcp0",
     "mac_tx_set_plcp1",
     "mac_tx_set_htsig",
     "hal_mac_is_txq_valid",

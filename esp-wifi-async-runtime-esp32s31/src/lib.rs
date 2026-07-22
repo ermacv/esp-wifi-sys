@@ -57,6 +57,7 @@ pub mod strict;
 pub mod task;
 pub mod timer;
 pub mod tx_ampdu;
+mod tx_plcp;
 mod tx_rate;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod txdone;
