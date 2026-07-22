@@ -17,23 +17,42 @@ const TXQ_INTERRUPT_CLEAR_REG: *mut u32 = 0x2010_4cb0 as *mut u32;
 const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
+const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
+const TX_QUEUE_RATE_OFFSET: usize = 0x08;
+const TX_QUEUE_SAVED_RATE_OFFSET: usize = 0x09;
+const TX_QUEUE_RATE_LIMIT_OFFSET: usize = 0x0a;
+const TX_QUEUE_SHORT_RETRY_OFFSET: usize = 0x0b;
+const TX_QUEUE_LONG_RETRY_OFFSET: usize = 0x0c;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
 const TX_QUEUE_END_STATE_OFFSET: usize = 0x13;
 const TX_QUEUE_TXOP_OUTSTANDING_OFFSET: usize = 0x1c;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
+const TX_QUEUE_SPECIAL_RETRY_OFFSET: usize = 0x2e;
+const TX_QUEUE_TRIGGER_RETRY_OFFSET: usize = 0x30;
+const TX_QUEUE_TRIGGER_STATE_OFFSET: usize = 0x34;
 const TX_QUEUE_COMPLETED_COUNT_OFFSET: usize = 0x20;
 const TX_QUEUE_DROP_COUNT_OFFSET: usize = 0x24;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
+const TX_FRAME_SCHEDULER_OFFSET: usize = 0x04;
+const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
+const TX_FRAME_RATE_CONTEXT_OFFSET: usize = 0x2c;
 const TX_DESCRIPTOR_REASON_OFFSET: usize = 0x13;
 const TX_DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
+const TX_DESCRIPTOR_RATE_CONTROL_OFFSET: usize = 0x1c;
+const TX_DESCRIPTOR_TIMESTAMP_OFFSET: usize = 0x18;
 const TX_FRAME_ABORTED_BIT: u32 = 0x0002_0000;
 const TX_FRAME_BAR_BIT: u32 = 0x0020_0000;
 const TX_FRAME_AMPDU_BIT: u32 = 0x0040_0000;
 const TX_FRAME_HE_BIT: u32 = 0x8000_0000;
 const TX_FRAME_DEQUEUE_MASK: u32 = 0x0000_00c0;
 const TX_FRAME_DEQUEUE_VALUE: u32 = 0x0000_0080;
+const TX_FRAME_LONG_RETRY_BIT: u32 = 0x0000_0100;
+const TX_FRAME_RETRY_SCHEDULER_MASK: u32 = 0x0060_0002;
+const TX_FRAME_RETRY_RATE_TIME_BIT: u32 = 0x0000_0040;
+const TX_FRAME_FORCE_SHORT_DISCARD_BIT: u32 = 0x1000_0000;
+const TX_FRAME_RATE_LIMIT_BIT: u32 = 0x0800_0000;
 const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
 const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
 const TXRX_QUEUE_SIZE: usize = 0x34;
@@ -66,9 +85,9 @@ unsafe extern "C" {
     fn hal_mac_txq_disable(queue: u8);
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
-    fn lmacProcessCtsTimeout(queue: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn lmacProcessAckTimeout(queue: u8, auxiliary: u32);
+    fn rcGetRate(rate_control: *mut u8);
+    fn lmacTxFrame(frame: *mut u8, queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -90,6 +109,13 @@ pub enum LmacAsyncError {
     UnsupportedTxSuccessTxop(u8),
     UnsupportedTxSuccessChain,
     UnsupportedTxSuccessDescriptor(u32),
+    UnsupportedTxRetryQueueKind(u8),
+    UnsupportedTxRetryTxop(u8),
+    UnsupportedTxRetryChain,
+    UnsupportedTxRetryDescriptor(u32),
+    UnsupportedTxRetryState(u32),
+    InvalidTxRetryRateControl,
+    InvalidTxRetryScheduler,
 }
 
 #[derive(Clone, Copy)]
@@ -104,6 +130,7 @@ struct TxTimeoutState {
     queue_state: *mut u8,
     discard_frame: *mut u8,
     discard_tail: *mut u8,
+    finish_timeout_queue: bool,
 }
 
 impl TxTimeoutState {
@@ -119,6 +146,7 @@ impl TxTimeoutState {
             queue_state: ptr::null_mut(),
             discard_frame: ptr::null_mut(),
             discard_tail: ptr::null_mut(),
+            finish_timeout_queue: false,
         }
     }
 }
@@ -564,7 +592,7 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         2 => {
             #[cfg(feature = "hil-vendor-tx")]
             let retry_frame = record_retry_before(queue_state, false);
-            lmacProcessCtsTimeout(queue, 0);
+            process_tx_retry(queue_state, false)?;
             #[cfg(feature = "hil-vendor-tx")]
             record_retry_after(queue_state, retry_frame);
         }
@@ -572,13 +600,217 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
         5 => {
             #[cfg(feature = "hil-vendor-tx")]
             let retry_frame = record_retry_before(queue_state, true);
-            lmacProcessAckTimeout(queue, 0);
+            process_tx_retry(queue_state, true)?;
             #[cfg(feature = "hil-vendor-tx")]
             record_retry_after(queue_state, retry_frame);
         }
         status => return Err(LmacAsyncError::UnsupportedTxCompletionStatus(status)),
     }
     Ok(())
+}
+
+/// Recovered basic-HT ACK/CTS retry path.
+///
+/// The stock timeout bodies combine retry accounting, rate fallback, retry
+/// limit/lifetime decisions, aggregate handling, test hooks, and the next TX
+/// submission. Strict mode admits one unlinked, non-aggregate queue-kind-3
+/// frame. This reproduces the accounting and decisions in Rust, sends at most
+/// one frame, and routes a terminal failure through the existing one-step
+/// discard continuation.
+unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<(), LmacAsyncError> {
+    let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
+    if queue_kind != 3 {
+        return Err(LmacAsyncError::UnsupportedTxRetryQueueKind(queue_kind));
+    }
+    let txop_outstanding = queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read();
+    if txop_outstanding != 0 {
+        return Err(LmacAsyncError::UnsupportedTxRetryTxop(txop_outstanding));
+    }
+
+    let frame = queue_state.cast::<*mut u8>().read();
+    if frame.is_null()
+        || !frame
+            .add(TX_FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read()
+            .is_null()
+    {
+        return Err(LmacAsyncError::UnsupportedTxRetryChain);
+    }
+    let descriptor = descriptor(frame)?;
+    let flags = descriptor.cast::<u32>().read();
+    if flags
+        & (TX_FRAME_HE_BIT
+            | TX_FRAME_BAR_BIT
+            | TX_FRAME_AMPDU_BIT
+            | TX_FRAME_ABORTED_BIT
+            | TX_FRAME_RETRY_SCHEDULER_MASK
+            | TX_FRAME_RETRY_RATE_TIME_BIT)
+        != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxRetryDescriptor(flags));
+    }
+    let retry_state = pack_four_bytes_unconditional(
+        queue_state,
+        0x0d,
+        0x0f,
+        TX_QUEUE_SPECIAL_RETRY_OFFSET,
+        TX_QUEUE_TRIGGER_RETRY_OFFSET,
+    );
+    if retry_state != 0 || queue_state.add(TX_QUEUE_TRIGGER_STATE_OFFSET).read() != 0 {
+        return Err(LmacAsyncError::UnsupportedTxRetryState(retry_state));
+    }
+
+    if ack_timeout && flags & TX_FRAME_LONG_RETRY_BIT != 0 {
+        // `lmacProcessAckTimeout` first accounts for the successful short
+        // exchange and then records a long retry failure.
+        queue_state
+            .add(TX_QUEUE_RATE_OFFSET)
+            .write(queue_state.add(TX_QUEUE_SAVED_RATE_OFFSET).read());
+        queue_state.add(TX_QUEUE_SHORT_RETRY_OFFSET).write(0);
+        update_retry_rate(queue_state, TX_QUEUE_LONG_RETRY_OFFSET, lmacConfMib[0x14]);
+        descriptor
+            .add(7)
+            .write(descriptor.add(7).read().wrapping_add(1));
+        descriptor
+            .add(5)
+            .write(descriptor.add(5).read().wrapping_add(1));
+    } else {
+        update_retry_rate(queue_state, TX_QUEUE_SHORT_RETRY_OFFSET, lmacConfMib[0x15]);
+        descriptor
+            .add(6)
+            .write(descriptor.add(6).read().wrapping_add(1));
+        // CTS timeout is a short retry but does not consume the descriptor's
+        // total ACK retry budget in the pinned implementation.
+        if ack_timeout {
+            descriptor
+                .add(5)
+                .write(descriptor.add(5).read().wrapping_add(1));
+        }
+    }
+
+    let reached_rate_limit = retry_rate_limit_reached(descriptor)?;
+    let reached_mib_limit = if ack_timeout && flags & TX_FRAME_LONG_RETRY_BIT != 0 {
+        descriptor.add(7).read() >= lmacConfMib[0x14]
+    } else {
+        descriptor.add(6).read() >= lmacConfMib[0x15]
+    };
+    let aged = retry_frame_aged(descriptor, flags);
+    let forced_short_discard =
+        flags & TX_FRAME_LONG_RETRY_BIT == 0 && flags & TX_FRAME_FORCE_SHORT_DISCARD_BIT != 0;
+    if reached_rate_limit || reached_mib_limit || aged || forced_short_discard {
+        queue_state.add(TX_QUEUE_STATUS_OFFSET).write(6);
+        queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(9);
+        return begin_retry_discard(queue_state, frame);
+    }
+
+    mark_retry_scheduler(frame)?;
+    queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
+
+    // Narrow non-aggregate body of `lmacRetryTxFrame`: update the selected
+    // rate and submit exactly one frame. HTC removal, frame-time repair,
+    // aggregate recycling, aged logging, and their loops were rejected above.
+    let rate_context = frame
+        .add(TX_FRAME_RATE_CONTEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if rate_context.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryRateControl);
+    }
+    rcGetRate(rate_context);
+    lmacTxFrame(
+        frame,
+        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
+    );
+    queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
+    Ok(())
+}
+
+unsafe fn update_retry_rate(queue_state: *mut u8, retry_offset: usize, limit: u8) {
+    let retry = queue_state.add(retry_offset).read();
+    let retry = if retry < limit {
+        retry.wrapping_add(1)
+    } else {
+        retry
+    };
+    queue_state.add(retry_offset).write(retry);
+
+    if retry >= limit {
+        queue_state
+            .add(TX_QUEUE_RATE_OFFSET)
+            .write(queue_state.add(TX_QUEUE_SAVED_RATE_OFFSET).read());
+        return;
+    }
+    let rate = queue_state.add(TX_QUEUE_RATE_OFFSET).read();
+    let rate_limit = queue_state.add(TX_QUEUE_RATE_LIMIT_OFFSET).read();
+    if rate < rate_limit {
+        queue_state
+            .add(TX_QUEUE_RATE_OFFSET)
+            .write(rate.wrapping_add(1));
+    }
+}
+
+unsafe fn retry_rate_limit_reached(descriptor: *mut u8) -> Result<bool, LmacAsyncError> {
+    let attempts = descriptor.add(5).read();
+    let flags = descriptor.cast::<u32>().read();
+    if attempts > 4 && flags & TX_FRAME_RATE_LIMIT_BIT != 0 {
+        return Ok(true);
+    }
+    let rate_control = descriptor
+        .add(TX_DESCRIPTOR_RATE_CONTROL_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if rate_control.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryRateControl);
+    }
+    // Mesh is disabled by strict configuration. The stock non-mesh branch is
+    // exactly `attempts >= rate_control[8]`.
+    Ok(attempts >= rate_control.add(8).read())
+}
+
+unsafe fn retry_frame_aged(descriptor: *mut u8, flags: u32) -> bool {
+    debug_assert_eq!(flags & TX_FRAME_AMPDU_BIT, 0);
+    let lifetime = ptr::addr_of!(lmacConfMib)
+        .cast::<u8>()
+        .add(8)
+        .cast::<u32>()
+        .read_unaligned()
+        << 10;
+    let now = (0x2010_d800 as *const u32).read_volatile();
+    let timestamp = descriptor
+        .add(TX_DESCRIPTOR_TIMESTAMP_OFFSET)
+        .cast::<u32>()
+        .read();
+    let elapsed = now.wrapping_sub(timestamp);
+    elapsed > lifetime || elapsed > lifetime.wrapping_sub(0x1400)
+}
+
+unsafe fn mark_retry_scheduler(frame: *mut u8) -> Result<(), LmacAsyncError> {
+    let scheduler = frame
+        .add(TX_FRAME_SCHEDULER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if scheduler.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryScheduler);
+    }
+    let mut state = scheduler.add(4).cast::<*mut u8>().read();
+    if state.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryScheduler);
+    }
+    if frame.add(TX_FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read() & 0x2000 != 0 {
+        state = state.add(8);
+    }
+    state.add(1).write(state.add(1).read() | 0x08);
+    Ok(())
+}
+
+unsafe fn begin_retry_discard(queue_state: *mut u8, frame: *mut u8) -> Result<(), LmacAsyncError> {
+    let state = &mut *STATE.0.get();
+    if state.discard_phase != DISCARD_IDLE {
+        return Err(LmacAsyncError::PreviousContinuationFailure);
+    }
+    state.finish_timeout_queue = false;
+    begin_discard(state, queue_state, frame)
 }
 
 #[cfg(feature = "hil-vendor-tx")]
@@ -693,6 +925,16 @@ unsafe fn record_retry_after(queue_state: *mut u8, previous_frame: *mut u8) {
 
 #[cfg(feature = "hil-vendor-tx")]
 unsafe fn pack_four_bytes(pointer: *mut u8, a: usize, b: usize, c: usize, d: usize) -> u32 {
+    pack_four_bytes_unconditional(pointer, a, b, c, d)
+}
+
+unsafe fn pack_four_bytes_unconditional(
+    pointer: *mut u8,
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+) -> u32 {
     u32::from(pointer.add(a).read())
         | (u32::from(pointer.add(b).read()) << 8)
         | (u32::from(pointer.add(c).read()) << 16)
@@ -923,6 +1165,7 @@ unsafe fn fail(state: &mut TxTimeoutState) {
     state.failed = true;
     state.active = false;
     state.discard_phase = DISCARD_IDLE;
+    state.finish_timeout_queue = false;
 }
 
 unsafe fn finish_queue(state: &mut TxTimeoutState, queue: u8) -> Result<bool, LmacAsyncError> {
@@ -945,6 +1188,7 @@ unsafe fn finish_queue(state: &mut TxTimeoutState, queue: u8) -> Result<bool, Lm
             // MPLEN is an aggregation-only hardware field. The strict basic
             // profile disables AMPDU/AMSDU before init and checks descriptor
             // aggregation bits again in `begin_discard`.
+            state.finish_timeout_queue = true;
             begin_discard(state, queue_state, frame)?;
             return Ok(false);
         }
@@ -1125,7 +1369,11 @@ unsafe fn finish_discard_frame_step(state: &mut TxTimeoutState) -> Result<(), Lm
     state.queue_state = ptr::null_mut();
     state.discard_frame = ptr::null_mut();
     state.discard_tail = ptr::null_mut();
-    finish_current_queue(state);
+    let finish_timeout_queue = state.finish_timeout_queue;
+    state.finish_timeout_queue = false;
+    if finish_timeout_queue {
+        finish_current_queue(state);
+    }
     Ok(())
 }
 
