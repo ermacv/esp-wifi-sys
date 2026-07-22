@@ -17,6 +17,7 @@ const TXQ_INTERRUPT_CLEAR_REG: *mut u32 = 0x2010_4cb0 as *mut u32;
 const TXQ_INTERRUPT_STATE_REG: *const u32 = 0x2010_4cb4 as *const u32;
 const TXQ_COMPLETE_STATE_REG: *const u32 = 0x2010_4cbc as *const u32;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
+const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_RATE_OFFSET: usize = 0x08;
 const TX_QUEUE_SAVED_RATE_OFFSET: usize = 0x09;
 const TX_QUEUE_RATE_LIMIT_OFFSET: usize = 0x0a;
@@ -35,6 +36,7 @@ const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_FRAME_SCHEDULER_OFFSET: usize = 0x04;
 const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
+const TX_FRAME_RATE_CONTEXT_OFFSET: usize = 0x2c;
 const TX_DESCRIPTOR_REASON_OFFSET: usize = 0x13;
 const TX_DESCRIPTOR_RESPONSE_OFFSET: usize = 0x0d;
 const TX_DESCRIPTOR_QUEUE_WORD_OFFSET: usize = 0x10;
@@ -84,7 +86,9 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacProcessTxRtsError(queue: u8, retry: u8, response: u8, auxiliary: u32);
     fn lmacProcessTxError(queue: u8, response: u8, auxiliary: u32);
-    fn lmacRetryTxFrame(queue_state: *mut u8, mode: u32);
+    fn rcGetRate(rate_context: *mut u8, descriptor: *mut u8);
+    fn ppCalFrameTimes(frame: *mut u8);
+    fn lmacTxFrame(frame: *mut u8, queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn ppDequeueTxQ(queue: u8) -> *mut u8;
@@ -704,12 +708,43 @@ unsafe fn process_tx_retry(queue_state: *mut u8, ack_timeout: bool) -> Result<()
     mark_retry_scheduler(frame)?;
     queue_state.add(TX_QUEUE_STATUS_OFFSET).write(3);
 
-    // Keep the final one-frame submission leaf intact for now. The guards
-    // above make its aged, aggregate, HTC-removal, frame-time-repair, and
-    // logging branches unreachable. Splitting its `rcGetRate + lmacTxFrame`
-    // tail directly caused a hardware-queue stall in HIL and therefore needs
-    // a separate before/after register audit.
-    lmacRetryTxFrame(queue_state, 0);
+    // Narrow non-aggregate body of `lmacRetryTxFrame`. `rcGetRate` has two
+    // pointer arguments in the pinned ABI: the per-peer rate context in `a0`
+    // and the TX descriptor in `a1`.
+    let rate_context = frame
+        .add(TX_FRAME_RATE_CONTEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if rate_context.is_null() {
+        return Err(LmacAsyncError::InvalidTxRetryRateControl);
+    }
+    rcGetRate(rate_context, descriptor);
+
+    let post_rate_flags = descriptor.cast::<u32>().read();
+    if post_rate_flags
+        & (TX_FRAME_HE_BIT
+            | TX_FRAME_BAR_BIT
+            | TX_FRAME_AMPDU_BIT
+            | TX_FRAME_ABORTED_BIT
+            | TX_FRAME_RETRY_SCHEDULER_MASK)
+        != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxRetryDescriptor(
+            post_rate_flags,
+        ));
+    }
+    if post_rate_flags & TX_FRAME_RETRY_RATE_TIME_BIT != 0 {
+        ppCalFrameTimes(frame);
+        let scheduler_state = retry_scheduler_state(frame)?;
+        scheduler_state
+            .add(2)
+            .cast::<u16>()
+            .write(descriptor.add(10).cast::<u16>().read());
+    }
+    lmacTxFrame(
+        frame,
+        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
+    );
     queue_state.add(TX_QUEUE_END_STATE_OFFSET).write(7);
     Ok(())
 }
@@ -774,6 +809,12 @@ unsafe fn retry_frame_aged(descriptor: *mut u8, flags: u32) -> bool {
 }
 
 unsafe fn mark_retry_scheduler(frame: *mut u8) -> Result<(), LmacAsyncError> {
+    let state = retry_scheduler_state(frame)?;
+    state.add(1).write(state.add(1).read() | 0x08);
+    Ok(())
+}
+
+unsafe fn retry_scheduler_state(frame: *mut u8) -> Result<*mut u8, LmacAsyncError> {
     let scheduler = frame
         .add(TX_FRAME_SCHEDULER_OFFSET)
         .cast::<*mut u8>()
@@ -788,8 +829,7 @@ unsafe fn mark_retry_scheduler(frame: *mut u8) -> Result<(), LmacAsyncError> {
     if frame.add(TX_FRAME_LAYOUT_FLAGS_OFFSET).cast::<u16>().read() & 0x2000 != 0 {
         state = state.add(8);
     }
-    state.add(1).write(state.add(1).read() | 0x08);
-    Ok(())
+    Ok(state)
 }
 
 unsafe fn begin_retry_discard(queue_state: *mut u8, frame: *mut u8) -> Result<(), LmacAsyncError> {
