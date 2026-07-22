@@ -431,6 +431,10 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
 #[link_section = ".rwtext.wifi_strict.ap_beacon_success"]
 pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), TxDoneError> {
     let descriptor = descriptor(frame)?;
+    let descriptor_flags = descriptor.cast::<u32>().read();
+    if descriptor_flags != 0x0080_0412 {
+        return Err(TxDoneError::UnsupportedDescriptorFlags(descriptor_flags));
+    }
     let txrx = txrx()?;
     let registered_mask = txrx.add(TX_CALLBACK_MODE0_MASK_OFFSET).cast::<u32>().read();
     let callbacks = descriptor
@@ -449,6 +453,13 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     if registered != __wrap_ieee80211_hostapd_beacon_txcb as usize {
         return Err(TxDoneError::CallbackRegistryMismatch(CALLBACK_AP_BEACON));
     }
+    // `ieee80211_hostap_send_beacon_process` sets this ownership bit before
+    // handing the persistent buffer to PP and refuses to reuse either beacon
+    // buffer while it remains set. Hardware is complete at this boundary, so
+    // publish the buffer as reusable before the callback arms the next TBTT.
+    descriptor
+        .cast::<u32>()
+        .write(descriptor_flags & !DESCRIPTOR_FRAGMENT_BIT);
     __wrap_ieee80211_hostapd_beacon_txcb(frame.cast());
     if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
         return Err(TxDoneError::StrictCallbackFailed);
