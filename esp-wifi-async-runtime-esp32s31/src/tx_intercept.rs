@@ -502,9 +502,6 @@ unsafe fn strict_qos_data(frame: *mut u8) -> Option<bool> {
         .cast::<*mut u8>()
         .read();
     if first_buffer.is_null() {
-        return false;
-    }
-    if first_buffer.is_null() {
         return reject_qos(5);
     }
     let mut header = first_buffer
