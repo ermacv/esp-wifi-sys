@@ -232,9 +232,6 @@ static STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 )]
 static LMAC_STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 static STRICT_CALLBACK_FAILED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_arch = "riscv32")]
-static INITIAL_AP_START_SIGNAL: crate::interrupt::InterruptSignal =
-    crate::interrupt::InterruptSignal::new();
 
 #[cfg(target_arch = "riscv32")]
 unsafe fn initial_ap_is_active() -> bool {
@@ -251,13 +248,22 @@ pub enum InitialApStartError {
     CompletionDidNotStartAp,
 }
 
-/// Await the one initialization beacon completion that finishes a deferred
-/// softAP start.
+/// Complete the taskless initialization transition that normally follows the
+/// first beacon TX callback.
 ///
-/// This is an interrupt-driven edge: it does not poll AP state, delay, allocate,
-/// or wait on an RTOS primitive.
+/// The pinned blob can publish `beacon_send_start_flag == 0b11` while the AP
+/// interface is still disabled, so no physical TX completion can arrive. The
+/// original completion leaf does not inspect its frame argument; invoking it
+/// once consumes the deferred bit and calls the already-registered softAP
+/// start leaf. This function does not poll, delay, allocate, or wait on an RTOS
+/// primitive.
+///
+/// # Safety
+/// Call exactly once from the serialized composition-root context after
+/// `WifiController` start and before strict takeover. No radio callback may run
+/// concurrently.
 #[cfg(target_arch = "riscv32")]
-pub async fn wait_for_initial_ap_start() -> Result<(), InitialApStartError> {
+pub unsafe fn complete_initial_ap_start() -> Result<(), InitialApStartError> {
     if unsafe { initial_ap_is_active() } {
         return Ok(());
     }
@@ -265,15 +271,11 @@ pub async fn wait_for_initial_ap_start() -> Result<(), InitialApStartError> {
         return Err(InitialApStartError::StrictRuntimeAlreadyArmed);
     }
 
-    let observed = INITIAL_AP_START_SIGNAL.generation();
-    if unsafe { initial_ap_is_active() } {
-        return Ok(());
-    }
-    if unsafe { BEACON_SEND_START_FLAG } & 2 == 0 {
+    if unsafe { BEACON_SEND_START_FLAG } & 3 != 3 || unsafe { TmpSTAAPCloseAP } == 0 {
         return Err(InitialApStartError::DeferredTransitionMissing);
     }
 
-    INITIAL_AP_START_SIGNAL.wait_after(observed).await;
+    unsafe { initialization_hostapd_beacon_txcb(ptr::null_mut()) };
     if unsafe { initial_ap_is_active() } {
         Ok(())
     } else {
@@ -409,9 +411,6 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
         // takeover; replacing it too early leaves beacon_send_start_flag at
         // 0b11 and the AP interface permanently disabled.
         initialization_hostapd_beacon_txcb(frame);
-        if initial_ap_is_active() {
-            INITIAL_AP_START_SIGNAL.notify_from_isr();
-        }
         return;
     }
     if strict_ap_beacon_txdone().is_err() {
