@@ -124,11 +124,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // outside LLVM's ordinary call graph. An explicit RISC-V atomic byte load
     // keeps that external edge visible under fat whole-program LTO.
     let enabled = load_enabled_from_callback_context();
-    if !crate::critical::strict_wifi_hart_armed()
-        || !enabled
-        || mapped != 0
-        || !eligible_qos_data(frame)
-    {
+    if !enabled || mapped != 0 || !eligible_qos_data(frame) {
         return mapped;
     }
     if push_ready(state, frame).is_err() {
