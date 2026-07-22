@@ -175,6 +175,7 @@ pub enum TxDoneError {
     MissingDescriptor,
     MissingTxDoneTail,
     UnsupportedCallbackBits(u32),
+    UnexpectedBeaconCallbacks(u32),
     CallbackRegistryMismatch(u8),
     UserCallbackInstalled,
     UnsupportedDescriptorFlags(u32),
@@ -416,6 +417,43 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
     if strict_ap_beacon_txdone().is_err() {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
     }
+}
+
+/// Complete the measured successful AP-beacon transmission without placing
+/// its persistent double-buffer frame on the ordinary recyclable TX-done
+/// list. The callback only advances TBTT state and arms the next async timer.
+///
+/// # Safety
+///
+/// `frame` must be the exact live beacon frame owned by hardware queue zero,
+/// after the completion decoder has made that queue idle.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.ap_beacon_success"]
+pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), TxDoneError> {
+    let descriptor = descriptor(frame)?;
+    let txrx = txrx()?;
+    let registered_mask = txrx.add(TX_CALLBACK_MODE0_MASK_OFFSET).cast::<u32>().read();
+    let callbacks = descriptor
+        .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+        .cast::<u32>()
+        .read()
+        & registered_mask;
+    let expected = 1_u32 << CALLBACK_AP_BEACON;
+    if callbacks != expected {
+        return Err(TxDoneError::UnexpectedBeaconCallbacks(callbacks));
+    }
+    let registered = txrx
+        .add(TX_CALLBACK_TABLE_FIRST_OFFSET + usize::from(CALLBACK_AP_BEACON) * 4)
+        .cast::<usize>()
+        .read();
+    if registered != __wrap_ieee80211_hostapd_beacon_txcb as usize {
+        return Err(TxDoneError::CallbackRegistryMismatch(CALLBACK_AP_BEACON));
+    }
+    __wrap_ieee80211_hostapd_beacon_txcb(frame.cast());
+    if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
+        return Err(TxDoneError::StrictCallbackFailed);
+    }
+    Ok(())
 }
 
 pub(crate) const fn is_continuation(kind: u32) -> bool {

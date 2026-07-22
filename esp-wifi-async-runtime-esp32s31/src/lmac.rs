@@ -79,6 +79,7 @@ const TX_FRAME_OFFCHANNEL_BIT: u32 = 0x0001_0000;
 const TX_FRAME_FTM_BIT: u32 = 0x2000_0000;
 const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
 const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
+const AP_BEACON_SUCCESS_DESCRIPTOR: u32 = 0x0080_0412;
 const TXRX_QUEUE_SIZE: usize = 0x34;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
 const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
@@ -2332,17 +2333,21 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         .cast::<*mut u8>()
         .read();
     let flags = descriptor.cast::<u32>().read();
-    if flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0 {
+    let ap_beacon = flags == AP_BEACON_SUCCESS_DESCRIPTOR;
+    if !ap_beacon && flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0 {
         return Err(LmacAsyncError::UnsupportedTxSuccessDescriptor(flags));
     }
 
-    // Non-HE `lmacProcessShortFrameSuccess`: copy the saved retry/rate byte
-    // and clear the short-frame state. Bit 8 additionally runs the matching
-    // long-frame success leaf, which only clears the adjacent state byte.
-    queue_state.add(8).write(queue_state.add(9).read());
-    queue_state.add(0x0b).write(0);
-    if flags & 0x0000_0100 != 0 {
-        queue_state.add(0x0c).write(0);
+    if !ap_beacon {
+        // Non-HE `lmacProcessShortFrameSuccess`: copy the saved retry/rate
+        // byte and clear the short-frame state. Bit 8 additionally runs the
+        // matching long-frame success leaf, which only clears the adjacent
+        // state byte. Broadcast beacons have no ACK/retry state to update.
+        queue_state.add(8).write(queue_state.add(9).read());
+        queue_state.add(0x0b).write(0);
+        if flags & 0x0000_0100 != 0 {
+            queue_state.add(0x0c).write(0);
+        }
     }
     descriptor
         .add(TX_DESCRIPTOR_RESPONSE_OFFSET)
@@ -2357,6 +2362,9 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         .cast::<u32>();
     completed.write(completed.read().wrapping_add(1));
     descriptor.add(TX_DESCRIPTOR_REASON_OFFSET).write(1);
+    if ap_beacon {
+        return crate::txdone::complete_ap_beacon_success(frame).map_err(LmacAsyncError::TxDone);
+    }
     #[cfg(feature = "hil-ampdu-intercept")]
     if crate::tx_intercept::owns_direct_hardware_frame(frame) {
         return crate::txdone::begin_from_intercept_success(frame).map_err(LmacAsyncError::TxDone);
