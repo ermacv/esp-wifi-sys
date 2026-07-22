@@ -59,6 +59,7 @@ pub mod timer;
 pub mod tx_ampdu;
 #[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
 mod tx_intercept;
+mod tx_mapper;
 mod tx_plcp;
 mod tx_rate;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]

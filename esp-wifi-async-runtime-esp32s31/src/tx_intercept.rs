@@ -3,9 +3,9 @@
 //! This module deliberately remains behind `hil-ampdu-intercept`. Post-ADDBA
 //! QoS MPDUs use the recovered bounded Rust mapper preparation; large MPDUs
 //! continue into Rust A-MPDU while short MPDUs retain the proven one-frame
-//! submit path. Pre-ADDBA frames still call the real `ppMapTxQueue` as a
-//! qualification oracle. That remaining stateful dependency is not acceptable
-//! in the final strict runtime.
+//! submit path. The guarded pre-ADDBA management, EAPOL, Action and QoS states
+//! use the recovered stateless Rust mapper; an unknown state traps instead of
+//! entering the stateful vendor mapper.
 
 use core::{
     cell::UnsafeCell,
@@ -36,7 +36,6 @@ const HIL_COALESCE_DELAY_US: u32 = 250;
 pub const HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY: usize = 16;
 
 unsafe extern "C" {
-    fn __real_ppMapTxQueue(frame: *mut u8) -> i32;
     static mut our_instances_ptr: *mut u8;
 }
 
@@ -225,7 +224,7 @@ pub struct HilAmpduInterceptSnapshot {
     pub last_layout: u16,
     pub last_frame_control: u16,
     /// Descriptor flags/word1/queue word followed by peer flags/queue selector
-    /// immediately before and after the vendor mapper oracle.
+    /// immediately before and after the recovered mapper transformation.
     pub last_mapper_pre: [u32; 5],
     pub last_mapper_post: [u32; 5],
     pub retained: u32,
@@ -250,7 +249,7 @@ pub struct HilPreEnableMapperSnapshot {
     pub records: [HilPreEnableMapperRecord; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
 }
 
-/// The oracle is written only before `ENABLED` is published with Release and
+/// The qualification table is written only before `ENABLED` is published with Release and
 /// read only after its Acquire observation. It is therefore immutable while
 /// this cross-hart snapshot copies its dedicated SRAM cell.
 pub fn hil_pre_enable_mapper_snapshot() -> HilPreEnableMapperSnapshot {
@@ -469,7 +468,7 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
     // keeps that external edge visible under fat whole-program LTO.
     let enabled = load_enabled_from_callback_context();
     if !enabled {
-        return record_pre_enable_mapper_oracle(frame);
+        return bypass_pre_enable_mapper(frame);
     }
     let state = &mut *STATE.0.get();
     ENABLED_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -569,8 +568,6 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         }
         return 0;
     }
-    let mapped = __real_ppMapTxQueue(frame);
-    let fallback_post = read_mapper_state(frame);
     MAPPER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
     LAST_FALLBACK_REASON.store(
         CLASSIFICATION_REJECT_REASON.load(Ordering::Relaxed),
@@ -584,27 +581,27 @@ pub unsafe extern "C" fn hil_ampdu_intercept_pp_map_tx_queue(frame: *mut u8) -> 
         Ordering::Release,
     );
     record_mapper_state(&LAST_FALLBACK_PRE, &fallback_pre);
-    record_mapper_state(&LAST_FALLBACK_POST, &fallback_post);
+    record_mapper_state(&LAST_FALLBACK_POST, &fallback_pre);
     if fallback_pre[0] != 0 {
         NONZERO_FALLBACKS.fetch_add(1, Ordering::Relaxed);
         record_mapper_state(&LAST_NONZERO_FALLBACK_PRE, &fallback_pre);
-        record_mapper_state(&LAST_NONZERO_FALLBACK_POST, &fallback_post);
+        record_mapper_state(&LAST_NONZERO_FALLBACK_POST, &fallback_pre);
     }
-    LAST_MAPPED.store(mapped as u32, Ordering::Release);
-    match mapped {
-        0 => MAPPED_ZERO.fetch_add(1, Ordering::Relaxed),
-        1 => MAPPED_ONE.fetch_add(1, Ordering::Relaxed),
-        2 => MAPPED_TWO.fetch_add(1, Ordering::Relaxed),
-        _ => MAPPED_OTHER.fetch_add(1, Ordering::Relaxed),
-    };
-    mapped
+    fail_and_trap()
 }
 
 #[inline(always)]
-unsafe fn record_pre_enable_mapper_oracle(frame: *mut u8) -> i32 {
+unsafe fn bypass_pre_enable_mapper(frame: *mut u8) -> i32 {
     let pre = read_mapper_state(frame);
     let (rate, layout, frame_control) = read_mapper_identity(frame);
-    let mapped = __real_ppMapTxQueue(frame);
+    let Some(treatment) =
+        crate::tx_mapper::strict_pre_addba_treatment(rate, layout, frame_control, pre)
+    else {
+        fail_and_trap();
+    };
+    let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    descriptor.add(4).write(treatment);
+    let mapped = 0;
     let post = read_mapper_state(frame);
     let oracle = &mut *PRE_ENABLE_MAPPER_ORACLE.0.get();
     oracle.calls = oracle.calls.wrapping_add(1);
