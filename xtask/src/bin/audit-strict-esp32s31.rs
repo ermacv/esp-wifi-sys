@@ -8,7 +8,6 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 const ROOTS: &[&str] = &[
-    "pp_timer_do_process",
     // The Rust event-23 dispatcher owns every hardware-completion outcome.
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
@@ -61,6 +60,7 @@ const ROOTS: &[&str] = &[
 ];
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
+    "pp_timer_do_process",
     "pp_default_event_handler",
     "pp_coex_tx_release",
     "ppProcessTxQ",
@@ -257,6 +257,7 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 const REQUIRED_SRAM_CODE: &[&str] =
     &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
+    "pp_timer_do_process",
     "ppProcessTxQ",
     "pp_default_event_handler",
     "pp_coex_tx_release",
@@ -1108,6 +1109,10 @@ mod tests {
         assert!(calls_symbol(
             "40000000: jal ra <pm_set_beacon_duration>\n",
             "pm_set_beacon_duration"
+        ));
+        assert!(calls_symbol(
+            "2f000100: jal ra <pp_timer_do_process>\n",
+            "pp_timer_do_process"
         ));
     }
 

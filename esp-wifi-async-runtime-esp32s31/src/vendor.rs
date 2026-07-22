@@ -31,6 +31,7 @@ unsafe extern "C" {
     fn ieee80211_output_process();
     #[cfg(feature = "strict-no-wait")]
     fn ieee80211_ioctl_process(argument: *mut c_void) -> i32;
+    #[cfg(not(feature = "strict-no-wait"))]
     fn pp_timer_do_process(argument: *mut c_void);
     #[cfg(not(feature = "strict-no-wait"))]
     fn pp_default_event_handler(kind: u32, argument: *mut c_void);
@@ -437,6 +438,11 @@ impl PpDispatcher for VendorPpDispatcher {
                 PpAction::PpTimer => {
                     #[cfg(feature = "hil-vendor-tx")]
                     observe_pp_timer(event.argument);
+                    #[cfg(feature = "strict-no-wait")]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::PpTimer,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
                     pp_timer_do_process(event.argument)
                 }
                 PpAction::Default => {
