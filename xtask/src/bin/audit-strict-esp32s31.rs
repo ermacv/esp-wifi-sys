@@ -5,20 +5,16 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 const ROOTS: &[&str] = &[
     "ppProcessTxQ",
     "pp_timer_do_process",
     "pp_default_event_handler",
-    "ppRxPkt",
-    // The Rust event-23 dispatcher performs the fixed MMIO decode and one
-    // direct error outcome call; the vendor outer loop/jump table and basic
-    // success/recycle path are replaced.
+    // The Rust event-23 dispatcher owns success, CTS timeout and ACK timeout.
+    // Only the two unobserved hardware-error outcomes still call vendor code.
     "lmacProcessTxRtsError",
-    "lmacProcessCtsTimeout",
     "lmacProcessTxError",
-    "lmacProcessAckTimeout",
     "lmacProcessCollisions_task",
     "wdevProcessRxSucDataAll",
     // Targets of callback bits required by basic STA/AP. Strict continuations
@@ -51,6 +47,11 @@ const ROOTS: &[&str] = &[
     // Direct leaves used by the one-frame strict event-16 continuation.
     "pp_coex_tx_release",
     "esp_wifi_internal_free_rx_buffer",
+    // Direct leaves used by the bounded Rust event-17 receive pump. The stock
+    // `ppRxPkt` outer drain is not a strict root.
+    "ppDequeueRxq_Locked",
+    "ppRxProtoProc",
+    "ppRecycleRxPkt",
     // Rust owns WPA2 PTK/MIC/framing and bypasses the stock allocating TX/key
     // wrappers. Only the exact lower leaves called by `S31StaticWpa2Io` remain
     // roots here.
@@ -76,6 +77,9 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "hal_mac_get_txq_complete",
     "lmacProcessTxComplete",
     "lmacProcessTxSuccess",
+    "lmacProcessCtsTimeout",
+    "lmacProcessAckTimeout",
+    "ppRxPkt",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
@@ -103,11 +107,14 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "ieee80211_set_tx_pti",
     "ieee80211_search_node",
     "cnx_node_search",
+    "rcGetSched",
+    "ppTxProtoProc",
+    "ppProcTxSecFrame",
 ];
 
 // Calls to these archive symbols are redirected by mandatory final-link GNU
-// wrappers. Their original bodies are therefore graph boundaries, not strict
-// runtime callees.
+// wrappers or direct linker aliases. Their original bodies are therefore
+// graph boundaries, not strict runtime callees.
 const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "lmacTxDone",
     "hal_mac_get_txq_state",
@@ -138,6 +145,9 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "ieee80211_set_tx_pti",
     "ieee80211_search_node",
     "cnx_node_search",
+    "rcGetSched",
+    "ppTxProtoProc",
+    "ppProcTxSecFrame",
 ];
 
 // These pinned register-indirect sites are excluded only after their live
@@ -197,6 +207,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_ieee80211_set_tx_pti",
     "__wrap_ieee80211_search_node",
     "__wrap_cnx_node_search",
+    "__wrap_rcGetSched",
     "__wrap_ets_delay_us",
     "__wrap_vTaskDelay",
     "__wrap_os_sleep",
@@ -220,6 +231,14 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__esp_wifi_async_wpa2_sta_in_4way",
     "__esp_wifi_async_data_rx_sta",
     "__esp_wifi_async_data_rx_ap",
+];
+
+// These ROM exports cannot use GNU --wrap because the ROM linker script would
+// also assign the generated wrapper name. The late linker fragment aliases the
+// public symbol directly to a uniquely named Rust function instead.
+const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
+    ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
+    ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];
 
 const DIRECT_HEAP_WRAPPERS: [(&str, &str); 4] = [
@@ -770,6 +789,20 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             Some(_) => None,
         };
         violations.extend(violation);
+    }
+    for (public, replacement) in REQUIRED_RUNTIME_ALIASES {
+        let public_address = linked_symbol_addresses.get(*public);
+        let replacement_address = linked_symbol_addresses.get(*replacement);
+        let replacement_is_code = linked_symbol_kinds
+            .get(*replacement)
+            .is_some_and(|kind| is_code_symbol_kind(kind));
+        if public_address.is_none() || public_address != replacement_address || !replacement_is_code
+        {
+            violations.insert(Violation::ElfSymbol {
+                category: "missing or mismatched strict runtime alias",
+                symbol: format!("{public}={replacement}"),
+            });
+        }
     }
     for line in symbols.lines() {
         let Some(symbol) = line.split_whitespace().last() else {
