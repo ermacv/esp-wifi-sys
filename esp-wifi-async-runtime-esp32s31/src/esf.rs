@@ -274,10 +274,7 @@ fn claim_management_slot() -> Option<usize> {
     }
     let index = free.trailing_zeros() as usize;
     let bit = 1_usize << index;
-    CLAIMED_MANAGEMENT_SLOTS
-        .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| index)
+    (CLAIMED_MANAGEMENT_SLOTS.fetch_or(bit, Ordering::AcqRel) & bit == 0).then_some(index)
 }
 
 #[cfg_attr(
@@ -303,10 +300,7 @@ fn claim_large_rx_slot() -> Option<usize> {
         if free != 0 {
             let word_slot = free.trailing_zeros() as usize;
             let bit = 1_usize << word_slot;
-            if claims
-                .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if claims.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
                 return Some(first_slot + word_slot);
             }
         }
