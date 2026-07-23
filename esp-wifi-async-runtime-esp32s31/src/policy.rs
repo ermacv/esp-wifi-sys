@@ -37,6 +37,7 @@ pub enum StrictConfigError {
     MissingStaticTxBuffers,
     MissingStaticManagementBuffers,
     FrameAggregationEnabled,
+    CsiEnabled,
     FtmEnabled,
     DisconnectedPowerSaveEnabled,
     InvalidWifiCore,
@@ -86,7 +87,19 @@ pub enum StrictRuntimeError {
     LoggingStillEnabled(u32),
     DisableUserTxDoneCallback(i32),
     UserTxDoneCallbackStillInstalled,
-    WifiCoreAffinityMismatch { configured: u32, current: u32 },
+    DisablePromiscuous(i32),
+    ReadPromiscuous(i32),
+    PromiscuousStillEnabled,
+    DisablePromiscuousCallback(i32),
+    OptionalRxModesStillEnabled {
+        promiscuous: u8,
+        dump_errors: u8,
+        csi_callback: usize,
+    },
+    WifiCoreAffinityMismatch {
+        configured: u32,
+        current: u32,
+    },
 }
 
 /// Disable all vendor-managed NVS access before `esp_wifi_init`.
@@ -195,6 +208,9 @@ pub fn validate_strict_basic_config(config: &wifi_init_config_t) -> Result<(), S
     {
         return Err(StrictConfigError::FrameAggregationEnabled);
     }
+    if config.csi_enable != 0 {
+        return Err(StrictConfigError::CsiEnabled);
+    }
     let ftm_mask = u64::from(
         esp_wifi_sys_esp32s31::include::CONFIG_FEATURE_FTM_INITIATOR_BIT
             | esp_wifi_sys_esp32s31::include::CONFIG_FEATURE_FTM_RESPONDER_BIT,
@@ -230,7 +246,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     config: &wifi_init_config_t,
 ) -> Result<StrictRuntimePreparation, StrictRuntimeError> {
     use esp_wifi_sys_esp32s31::include::{
-        esp_wifi_get_ps, esp_wifi_internal_get_log, esp_wifi_internal_set_log_level,
+        esp_wifi_get_promiscuous, esp_wifi_get_ps, esp_wifi_internal_get_log,
+        esp_wifi_internal_set_log_level, esp_wifi_set_promiscuous, esp_wifi_set_promiscuous_rx_cb,
         esp_wifi_set_ps, esp_wifi_set_tx_done_cb, wifi_log_level_t_WIFI_LOG_NONE,
         wifi_ps_type_t_WIFI_PS_NONE,
     };
@@ -283,6 +300,31 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     }
     if core::ptr::addr_of!(g_tx_done_cb_func).read() != 0 {
         return Err(StrictRuntimeError::UserTxDoneCallbackStillInstalled);
+    }
+
+    let result = esp_wifi_set_promiscuous(false);
+    if result != 0 {
+        return Err(StrictRuntimeError::DisablePromiscuous(result));
+    }
+    let mut promiscuous = true;
+    let result = esp_wifi_get_promiscuous(&mut promiscuous);
+    if result != 0 {
+        return Err(StrictRuntimeError::ReadPromiscuous(result));
+    }
+    if promiscuous {
+        return Err(StrictRuntimeError::PromiscuousStillEnabled);
+    }
+    let result = esp_wifi_set_promiscuous_rx_cb(None);
+    if result != 0 {
+        return Err(StrictRuntimeError::DisablePromiscuousCallback(result));
+    }
+    let (promiscuous, dump_errors, csi_callback) = crate::wdev::strict_optional_rx_mode_state();
+    if promiscuous != 0 || dump_errors != 0 || csi_callback != 0 {
+        return Err(StrictRuntimeError::OptionalRxModesStillEnabled {
+            promiscuous,
+            dump_errors,
+            csi_callback,
+        });
     }
     let configured_hart = config.wifi_task_core_id as u32;
     let current_hart = crate::critical::current_hart().min(u32::MAX as usize) as u32;

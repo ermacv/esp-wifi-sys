@@ -42,6 +42,10 @@ unsafe extern "C" {
     fn vendor_ftm_set_t1t4(frame: *mut c_void);
     #[link_name = "wDev_isNANPktInValidSlot"]
     fn vendor_is_nan_packet_in_valid_slot(frame: *mut u8) -> i32;
+    #[link_name = "wDev_SnifferRxData"]
+    fn vendor_sniffer_rx_data();
+    #[link_name = "wdev_csi_rx_process"]
+    fn vendor_csi_rx_process();
     fn __real_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32;
 }
 
@@ -52,6 +56,7 @@ const MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT: usize = 64;
 unsafe extern "C" {
     static mut wDevCtrl: u8;
     static mut g_wdev_last_desc_reset_ptr: *mut u8;
+    static mut g_wdev_csi_rx: usize;
     fn hal_mac_rx_get_last_dscr() -> *mut u8;
     fn wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
 }
@@ -160,6 +165,16 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
     Ok(())
 }
 
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn strict_optional_rx_mode_state() -> (u8, u8, usize) {
+    let control = ptr::addr_of!(wDevCtrl);
+    (
+        control.add(0x30).read(),
+        control.add(0x46).read(),
+        ptr::addr_of!(g_wdev_csi_rx).read(),
+    )
+}
+
 pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     core::ptr::eq(
         vendor_record_ftm_data as *const (),
@@ -182,6 +197,12 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_is_nan_packet_in_valid_slot as *const (),
         __wrap_wDev_isNANPktInValidSlot as *const (),
+    ) && core::ptr::eq(
+        vendor_sniffer_rx_data as *const (),
+        __wrap_wDev_SnifferRxData as *const (),
+    ) && core::ptr::eq(
+        vendor_csi_rx_process as *const (),
+        __wrap_wdev_csi_rx_process as *const (),
     )
 }
 
@@ -225,6 +246,22 @@ pub unsafe extern "C" fn __wrap_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32 
     let packet_kind = descriptor.add(0x10).cast::<u32>().read() & 0x00c0_0000;
     i32::from(packet_kind != 0x0080_0000)
 }
+
+/// Remove promiscuous delivery from the strict basic AP/STA receive profile.
+///
+/// Preparation disables promiscuous mode through the public control API,
+/// verifies its readback and the pinned `wDevCtrl` state, and unregisters the
+/// callback before the RTOS handoff.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wDev_SnifferRxData() {}
+
+/// Remove CSI capture from the strict basic AP/STA receive profile.
+///
+/// The pinned vendor implementation allocates a 100-byte callback envelope.
+/// Strict configuration rejects CSI and preparation verifies that the callback
+/// pointer remains null before this boundary can be armed.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wdev_csi_rx_process() {}
 
 /// Remove the vendor power-save/mesh beacon tail under `WIFI_PS_NONE`.
 ///
