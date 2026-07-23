@@ -37,6 +37,9 @@ pub struct PersistentFrameCompletionLayout {
 
 const AP_GROUP_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 18;
 const AP_PAIRWISE_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 20;
+// Must match the fixed strict management slot in `esf.rs`. Persistent
+// management/beacon completion never accepts a transmitted object beyond it.
+const MANAGEMENT_PAYLOAD_CAPACITY: u16 = 1600;
 
 const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control & !0x2000 != 0x4208
@@ -157,8 +160,7 @@ pub const fn strict_persistent_frame_completion_layout(
     let beacon = input.frame_control == 0x0080
         && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
         && matches!(input.descriptor_security, 0x0114_0000 | 0x0414_0000)
-        && input.header_len == 0x20
-        && input.remaining_len == 0x78;
+        && input.header_len == 0x20;
     if input.frame_control & 0x000c != 0
         || !(management_reply || beacon)
         || input.header_len < 8
@@ -172,7 +174,7 @@ pub const fn strict_persistent_frame_completion_layout(
         Some(value) => value,
         None => return None,
     };
-    if encoded_len != transmitted_len {
+    if encoded_len != transmitted_len || transmitted_len > MANAGEMENT_PAYLOAD_CAPACITY {
         return None;
     }
     let restored_len = match encoded_len.checked_sub(12) {
@@ -627,7 +629,7 @@ mod tests {
         strict_ap_eapol_power_save_completion_llc_offset,
         strict_persistent_frame_completion_layout, strict_tx_security_layout,
         ApBeaconCompletionLayout, PersistentFrameCompletionLayout, TxSecurityLayoutInput,
-        TxSecurityLayoutOutput,
+        TxSecurityLayoutOutput, MANAGEMENT_PAYLOAD_CAPACITY,
     };
 
     const fn input(
@@ -972,10 +974,6 @@ mod tests {
                 ..completed
             },
             TxSecurityLayoutInput {
-                frame_control: 0x0080,
-                ..completed
-            },
-            TxSecurityLayoutInput {
                 descriptor_flags: 0x0080_0410,
                 ..completed
             },
@@ -1012,6 +1010,36 @@ mod tests {
                 descriptor_flags: 0x0000_0412,
                 descriptor_security: 0x0004_0000,
             }),
+        );
+
+        // WPA2 + HT/HE capability IEs make the strict bgnax beacon longer
+        // than the original legacy oracle. The reversible descriptor and
+        // fixed-pool bounds, rather than one SSID/profile-specific length,
+        // define the safe persistent completion.
+        let extended_beacon = TxSecurityLayoutInput {
+            remaining_len: 0x00da,
+            buffer_flags: 0xc03e_82f8,
+            ..beacon
+        };
+        assert_eq!(
+            strict_persistent_frame_completion_layout(extended_beacon),
+            Some(PersistentFrameCompletionLayout {
+                header_len: 0x18,
+                remaining_len: 0x00d6,
+                layout: 0,
+                buffer_flags: 0xc03b_82f8,
+                descriptor_flags: 0x0000_0412,
+                descriptor_security: 0x0004_0000,
+            }),
+        );
+        assert_eq!(
+            strict_persistent_frame_completion_layout(TxSecurityLayoutInput {
+                remaining_len: MANAGEMENT_PAYLOAD_CAPACITY as u16,
+                buffer_flags: 0xc000_0000
+                    | ((MANAGEMENT_PAYLOAD_CAPACITY as u32 + 0x20) << 14),
+                ..beacon
+            }),
+            None,
         );
     }
 
