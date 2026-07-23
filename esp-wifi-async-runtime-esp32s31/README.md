@@ -417,7 +417,7 @@ walks four-byte frame records with a counter narrowed to `u8`; including the
 zero/wrap case, it executes at most 256 times and never polls hardware or
 external state. Its logging call is still consumed by the mandatory
 `wifi_log` wrapper.
-The flash-resident `wDev_IndicateFrame` is called directly from ROM and cannot
+The ROM-resident `wDev_IndicateFrame` is called directly from ROM and cannot
 be truthfully interposed with GNU `--wrap`. Its precondition instead lives in
 the SRAM Rust caller: the event-25 continuation follows the completed segment
 under a short local interrupt mask, checks every payload, and admits only a

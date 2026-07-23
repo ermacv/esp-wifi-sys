@@ -215,7 +215,7 @@ const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
 // followed the completed descriptor segment, checked every payload and found
 // the final marker within 64 links. That exact tail and count are passed into
 // `wDev_IndicateFrame`; its two backedges only copy the already-owned segment.
-// The ROM-to-flash call is not GNU-wrap interposable, so this proof belongs at
+// The ROM-to-ROM call is not GNU-wrap interposable, so this proof belongs at
 // the real Rust caller rather than behind a link-only wrapper.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
     ("phy_set_tx_gain_mem_new", 0xaa),
