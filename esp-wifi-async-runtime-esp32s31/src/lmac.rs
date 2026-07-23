@@ -2803,11 +2803,17 @@ unsafe fn finish_discard_frame_step(state: &mut TxTimeoutState) -> Result<(), Lm
     } else {
         // The strict TX-done prefix has already posted event 16. Release TXOP
         // and queue TX processing behind that event instead of tail-calling
-        // the vendor dispatcher synchronously.
+        // the vendor dispatcher synchronously. The stock path posts the
+        // descriptor's logical queue number here because its `ppProcessTxQ`
+        // dispatcher owns the complete logical mapping. Our recovered async
+        // dispatcher accepts hardware events 0..=3 and performs that mapping
+        // in `tx_queue::select_logical_queue`, so posting logical WMM queue 10
+        // would enter the fatal/default `ppTask` arm. Resume the hardware queue
+        // which raised this timeout instead.
         if queue_state.add(TX_QUEUE_KIND_OFFSET).read() <= 2 {
             lmacReleaseTxopQueue(queue);
         }
-        if pp_post(u32::from(queue), ptr::null_mut()) != 0 {
+        if pp_post(u32::from(state.current_queue), ptr::null_mut()) != 0 {
             return Err(LmacAsyncError::InternalQueueFull);
         }
     }
