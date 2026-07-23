@@ -1051,6 +1051,9 @@ mod target {
                 let result = unsafe {
                     ieee80211_output_do(interface, frame.as_ptr(), length, 0, ptr::null_mut())
                 };
+                unsafe {
+                    ets_printf(c"HIL vendor data result=%d\r\n".as_ptr().cast(), result);
+                }
                 return if result == 0 {
                     Ok(())
                 } else {
