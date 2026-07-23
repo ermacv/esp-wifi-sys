@@ -56,7 +56,7 @@ pub const fn strict_persistent_frame_completion_layout(
         && matches!(input.descriptor_security, 0 | 0x0114_0000);
     let beacon = input.frame_control == 0x0080
         && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
-        && input.descriptor_security == 0x0114_0000
+        && matches!(input.descriptor_security, 0x0114_0000 | 0x0414_0000)
         && input.header_len == 0x20
         && input.remaining_len == 0x78;
     if input.frame_control & 0x000c != 0
@@ -557,6 +557,20 @@ mod tests {
                 buffer_flags: 0xc023_00f8,
                 descriptor_flags: 0x0000_0412,
             })
+        );
+        assert_eq!(
+            strict_persistent_frame_completion_layout(TxSecurityLayoutInput {
+                descriptor_security: 0x0414_0000,
+                layout: 0x22db,
+                ..beacon
+            }),
+            Some(PersistentFrameCompletionLayout {
+                header_len: 0x18,
+                remaining_len: 0x74,
+                layout: 0x02db,
+                buffer_flags: 0xc023_00f8,
+                descriptor_flags: 0x0000_0412,
+            }),
         );
     }
 
