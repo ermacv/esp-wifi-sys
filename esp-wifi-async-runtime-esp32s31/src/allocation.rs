@@ -647,10 +647,11 @@ mod target {
     /// Final-link guard for direct C `free` references.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_free(ptr: *mut c_void) {
+        let caller = caller_address();
         if release_strict_allocation(ptr) {
             return;
         }
-        PROBE.record_free_at(caller_address());
+        PROBE.record_free_at(caller);
         if !heap_forbidden() {
             __real_free(ptr);
         }
@@ -744,10 +745,11 @@ mod target {
         call_malloc(&MALLOC, size, AllocationSource::OsiMalloc, caller_address())
     }
     unsafe extern "C" fn free(ptr: *mut c_void) {
+        let caller = caller_address();
         if release_strict_allocation(ptr) {
             return;
         }
-        PROBE.record_free_at(caller_address());
+        PROBE.record_free_at(caller);
         if heap_forbidden() {
             return;
         }
