@@ -430,7 +430,7 @@ pub enum Wpa2ApPhase {
     AwaitingMessage2,
     DerivingPtk,
     VerifyingMessage2,
-    InstallingPairwiseKey,
+    PreparingMessage3,
     AwaitingMessage4,
     VerifyingMessage4,
     Authorized,
@@ -449,7 +449,7 @@ pub enum Wpa2ApAction<const N: usize = DEFAULT_EAPOL_FRAME_CAPACITY> {
         ticket: Wpa2Ticket,
         message2: OwnedEapolFrame<N>,
     },
-    InstallPairwiseKey {
+    PrepareMessage3 {
         ticket: Wpa2Ticket,
     },
     VerifyMessage4Mic {
@@ -573,7 +573,7 @@ impl Wpa2ApState {
             }
             Wpa2ApPhase::DerivingPtk
             | Wpa2ApPhase::VerifyingMessage2
-            | Wpa2ApPhase::InstallingPairwiseKey => Ok(Wpa2ApAction::None),
+            | Wpa2ApPhase::PreparingMessage3 => Ok(Wpa2ApAction::None),
             Wpa2ApPhase::AwaitingMessage4 | Wpa2ApPhase::VerifyingMessage4 => {
                 if nonce == self.supplicant_nonce {
                     Ok(Wpa2ApAction::Transmit(Wpa2Transmit {
@@ -641,18 +641,18 @@ impl Wpa2ApState {
             self.phase = Wpa2ApPhase::Failed;
             return Ok(Wpa2ApAction::DeauthenticatePeer);
         }
-        self.phase = Wpa2ApPhase::InstallingPairwiseKey;
+        self.phase = Wpa2ApPhase::PreparingMessage3;
         let ticket = self.issue_ticket();
-        Ok(Wpa2ApAction::InstallPairwiseKey { ticket })
+        Ok(Wpa2ApAction::PrepareMessage3 { ticket })
     }
 
-    pub fn complete_pairwise_key_install<const N: usize>(
+    pub fn complete_message3_preparation<const N: usize>(
         &mut self,
         ticket: Wpa2Ticket,
-        installed: bool,
+        prepared: bool,
     ) -> Result<Wpa2ApAction<N>, Wpa2StateError> {
-        self.check_completion(ticket, Wpa2ApPhase::InstallingPairwiseKey)?;
-        if !installed {
+        self.check_completion(ticket, Wpa2ApPhase::PreparingMessage3)?;
+        if !prepared {
             self.phase = Wpa2ApPhase::Failed;
             return Ok(Wpa2ApAction::DeauthenticatePeer);
         }
@@ -1012,12 +1012,12 @@ mod tests {
             action => panic!("unexpected action: {action:?}"),
         };
         let ticket = match state.complete_message2_mic(ticket, retained, true).unwrap() {
-            Wpa2ApAction::InstallPairwiseKey { ticket } => ticket,
+            Wpa2ApAction::PrepareMessage3 { ticket } => ticket,
             action => panic!("unexpected action: {action:?}"),
         };
         assert_eq!(
             state
-                .complete_pairwise_key_install::<EAPOL_KEY_PACKET_LEN>(ticket, true)
+                .complete_message3_preparation::<EAPOL_KEY_PACKET_LEN>(ticket, true)
                 .unwrap(),
             Wpa2ApAction::Transmit(Wpa2Transmit {
                 message: Wpa2TxMessage::PairwiseMessage3,

@@ -97,6 +97,7 @@ pub fn hil_eapol_tx_done_snapshot() -> HilEapolTxDoneSnapshot {
 pub struct HilDataTxDoneSnapshot {
     pub count: usize,
     pub frame_control: u16,
+    pub qos_control: u16,
     pub hardware_status: u8,
     pub descriptor_status: u32,
     pub transmitter: [u8; 6],
@@ -110,6 +111,7 @@ pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
     HilDataTxDoneSnapshot {
         count,
         frame_control: HIL_DATA_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+        qos_control: HIL_DATA_QOS_CONTROL.load(Ordering::Acquire) as u16,
         hardware_status: HIL_DATA_HW_STATUS.load(Ordering::Acquire) as u8,
         descriptor_status: HIL_DATA_DESCRIPTOR_STATUS.load(Ordering::Acquire) as u32,
         transmitter: load_hil_bytes(&HIL_DATA_TRANSMITTER),
@@ -117,6 +119,9 @@ pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
         payload_prefix: load_hil_bytes(&HIL_DATA_PAYLOAD_PREFIX),
     }
 }
+
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_QOS_CONTROL: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "hil-vendor-tx")]
 fn load_hil_bytes<const N: usize>(source: &[AtomicU8; N]) -> [u8; N] {
@@ -1153,14 +1158,30 @@ unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Resul
     if frame_control & 0x000c != 0x0008 {
         return Ok(());
     }
-    if frame_control & 0x4000 != 0 {
-        store_hil_bytes(&HIL_DATA_TRANSMITTER, payload.add(10));
-        store_hil_bytes(&HIL_DATA_CCMP_HEADER, payload.add(24));
-        // CCMP is applied while hardware consumes the DMA buffer. RAM keeps
-        // the plaintext LLC/SNAP prefix after the inserted CCMP header.
-        store_hil_bytes(&HIL_DATA_PAYLOAD_PREFIX, payload.add(32));
+    let header_len = ieee80211_data_header_len(frame_control);
+    let protected = frame_control & 0x4000 != 0;
+    let security_len = if protected { 8 } else { 0 };
+    store_hil_bytes(&HIL_DATA_TRANSMITTER, payload.add(10));
+    if protected {
+        store_hil_bytes(&HIL_DATA_CCMP_HEADER, payload.add(header_len));
+    } else {
+        clear_hil_bytes(&HIL_DATA_CCMP_HEADER);
     }
+    // CCMP is applied while hardware consumes the DMA buffer. RAM keeps the
+    // plaintext LLC/SNAP prefix after the inserted CCMP header.
+    store_hil_bytes(
+        &HIL_DATA_PAYLOAD_PREFIX,
+        payload.add(header_len + security_len),
+    );
     HIL_DATA_FRAME_CONTROL.store(usize::from(frame_control), Ordering::Release);
+    HIL_DATA_QOS_CONTROL.store(
+        if frame_control & 0x0080 != 0 {
+            usize::from(payload.add(header_len - 2).cast::<u16>().read_unaligned())
+        } else {
+            0
+        },
+        Ordering::Release,
+    );
     HIL_DATA_HW_STATUS.store(usize::from(descriptor.add(19).read()), Ordering::Release);
     HIL_DATA_DESCRIPTOR_STATUS.store(
         descriptor.add(0x10).cast::<u32>().read() as usize,
@@ -1171,10 +1192,35 @@ unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Resul
 }
 
 #[cfg(feature = "hil-vendor-tx")]
+const fn ieee80211_data_header_len(frame_control: u16) -> usize {
+    let mut len = if frame_control & 0x0300 == 0x0300 {
+        30
+    } else {
+        24
+    };
+    if frame_control & 0x0080 != 0 {
+        len += 2;
+        if frame_control & 0x8000 != 0 {
+            len += 4;
+        }
+    }
+    len
+}
+
+#[cfg(feature = "hil-vendor-tx")]
 unsafe fn store_hil_bytes<const N: usize>(destination: &[AtomicU8; N], source: *const u8) {
     let mut index = 0;
     while index < N {
         destination[index].store(source.add(index).read(), Ordering::Release);
+        index += 1;
+    }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+fn clear_hil_bytes<const N: usize>(destination: &[AtomicU8; N]) {
+    let mut index = 0;
+    while index < N {
+        destination[index].store(0, Ordering::Release);
         index += 1;
     }
 }
@@ -1232,6 +1278,8 @@ fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
 #[cfg(test)]
 mod tests {
     use super::is_ap_deauthentication_completion;
+    #[cfg(feature = "hil-vendor-tx")]
+    use super::ieee80211_data_header_len;
 
     #[test]
     fn only_ap_direction_deauthentication_is_completion_only() {
@@ -1239,5 +1287,14 @@ mod tests {
         assert!(is_ap_deauthentication_completion(0x00c0, 0x0414_0000));
         assert!(!is_ap_deauthentication_completion(0x00c0, 0x0004_0000));
         assert!(!is_ap_deauthentication_completion(0x00a0, 0x0114_0000));
+    }
+
+    #[cfg(feature = "hil-vendor-tx")]
+    #[test]
+    fn locates_payload_after_optional_qos_and_ccmp_headers() {
+        assert_eq!(ieee80211_data_header_len(0x0208), 24);
+        assert_eq!(ieee80211_data_header_len(0x0288), 26);
+        assert_eq!(ieee80211_data_header_len(0x0388), 32);
+        assert_eq!(ieee80211_data_header_len(0x8388), 36);
     }
 }

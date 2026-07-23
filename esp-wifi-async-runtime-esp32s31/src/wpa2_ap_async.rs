@@ -35,20 +35,20 @@ pub enum Wpa2ApMessage2Error<E> {
     UnexpectedAction,
 }
 
-/// PTK and pairwise install produced after a valid message 2.
+/// PTK and M3-preparation ticket produced after a valid message 2.
 ///
-/// Submit `pairwise_key` to the single radio owner before advancing the state
-/// with [`complete_wpa2_ap_pairwise_key_install`]. FIFO ownership then makes
-/// transmission of M3 unable to overtake the key installation.
+/// The temporal key is deliberately not installed into hardware here. M3 is
+/// an unprotected 802.11 frame whose GTK key data is protected inside EAPOL;
+/// installing the PTK before M3 would make the generic AP TX path encrypt a
+/// frame that the supplicant cannot yet receive.
 pub struct Wpa2ApMessage2 {
     ticket: Wpa2Ticket,
     ptk: Wpa2Ptk,
-    pairwise_key: Wpa2KeyInstall,
 }
 
 impl Wpa2ApMessage2 {
-    pub fn into_parts(self) -> (Wpa2Ticket, Wpa2Ptk, Wpa2KeyInstall) {
-        (self.ticket, self.ptk, self.pairwise_key)
+    pub fn into_parts(self) -> (Wpa2Ticket, Wpa2Ptk) {
+        (self.ticket, self.ptk)
     }
 }
 
@@ -58,7 +58,7 @@ pub enum Wpa2ApMessage3Error<S, A> {
     Frame(Wpa2FrameError),
     Sha1(S),
     KeyWrap(A),
-    PairwiseKeyInstallFailed,
+    Message3PreparationFailed,
     UnexpectedAction,
 }
 
@@ -66,6 +66,19 @@ pub enum Wpa2ApMessage3Error<S, A> {
 pub struct Wpa2ApMessage3 {
     ptk: Wpa2Ptk,
     frame: Wpa2EthernetFrame<WPA2_TX_ETHERNET_CAPACITY>,
+}
+
+/// Pairwise-key installation and controlled-port commands released only
+/// after M4 has proved that the supplicant accepted M3.
+pub struct Wpa2ApMessage4 {
+    pairwise_key: Wpa2KeyInstall,
+    authorize: Wpa2IoCommand,
+}
+
+impl Wpa2ApMessage4 {
+    pub fn into_commands(self) -> (Wpa2IoCommand, Wpa2IoCommand) {
+        (Wpa2IoCommand::InstallKey(self.pairwise_key), self.authorize)
+    }
 }
 
 impl Wpa2ApMessage3 {
@@ -151,27 +164,23 @@ where
         .complete_message2_mic(mic_ticket, retained, valid_mic)
         .map_err(Wpa2ApMessage2Error::State)?
     {
-        Wpa2ApAction::InstallPairwiseKey { ticket } if valid_mic => ticket,
+        Wpa2ApAction::PrepareMessage3 { ticket } if valid_mic => ticket,
         Wpa2ApAction::DeauthenticatePeer if !valid_mic => {
             return Err(Wpa2ApMessage2Error::Message2MicMismatch)
         }
         _ => return Err(Wpa2ApMessage2Error::UnexpectedAction),
     };
-    let pairwise_key =
-        Wpa2KeyInstall::pairwise(Wpa2Interface::AccessPoint, *state.peer(), [0; 8], &ptk);
     Ok(Wpa2ApMessage2 {
         ticket: install_ticket,
         ptk,
-        pairwise_key,
     })
 }
 
-/// Advance an accepted pairwise-key command and build MIC-protected M3.
-pub async fn complete_wpa2_ap_pairwise_key_install<S, A, const R: usize>(
+/// Build MIC-protected EAPOL M3 while leaving its 802.11 carrier plaintext.
+pub async fn complete_wpa2_ap_message3<S, A, const R: usize>(
     state: &mut Wpa2ApState,
     ticket: Wpa2Ticket,
     ptk: Wpa2Ptk,
-    installed: bool,
     rsn_ie: &OwnedRsnIe<R>,
     gtk: &Wpa2Gtk,
     key_rsc: [u8; 8],
@@ -183,12 +192,12 @@ where
     A: AsyncWpa2KeyWrap,
 {
     let transmit = match state
-        .complete_pairwise_key_install::<WPA2_TX_EAPOL_CAPACITY>(ticket, installed)
+        .complete_message3_preparation::<WPA2_TX_EAPOL_CAPACITY>(ticket, true)
         .map_err(Wpa2ApMessage3Error::State)?
     {
-        Wpa2ApAction::Transmit(transmit) if installed => transmit,
-        Wpa2ApAction::DeauthenticatePeer if !installed => {
-            return Err(Wpa2ApMessage3Error::PairwiseKeyInstallFailed)
+        Wpa2ApAction::Transmit(transmit) => transmit,
+        Wpa2ApAction::DeauthenticatePeer => {
+            return Err(Wpa2ApMessage3Error::Message3PreparationFailed)
         }
         _ => return Err(Wpa2ApMessage3Error::UnexpectedAction),
     };
@@ -225,7 +234,7 @@ pub async fn complete_wpa2_ap_message4<C, const N: usize>(
     message4: OwnedEapolFrame<N>,
     ptk: &Wpa2Ptk,
     crypto: &mut C,
-) -> Result<Wpa2IoCommand, Wpa2ApMessage4Error<C::Error>>
+) -> Result<Wpa2ApMessage4, Wpa2ApMessage4Error<C::Error>>
 where
     C: AsyncWpa2StaCrypto,
 {
@@ -247,10 +256,18 @@ where
         .complete_message4_mic(ticket, retained, valid_mic)
         .map_err(Wpa2ApMessage4Error::State)?
     {
-        Wpa2ApAction::AuthorizePeer if valid_mic => Ok(Wpa2IoCommand::SetPeerAuthorized {
-            interface: Wpa2Interface::AccessPoint,
-            peer: *state.peer(),
-            authorized: true,
+        Wpa2ApAction::AuthorizePeer if valid_mic => Ok(Wpa2ApMessage4 {
+            pairwise_key: Wpa2KeyInstall::pairwise(
+                Wpa2Interface::AccessPoint,
+                *state.peer(),
+                [0; 8],
+                ptk,
+            ),
+            authorize: Wpa2IoCommand::SetPeerAuthorized {
+                interface: Wpa2Interface::AccessPoint,
+                peer: *state.peer(),
+                authorized: true,
+            },
         }),
         Wpa2ApAction::DeauthenticatePeer if !valid_mic => {
             Err(Wpa2ApMessage4Error::Message4MicMismatch)
@@ -334,17 +351,14 @@ mod tests {
             &mut crypto,
         ))
         .unwrap();
-        let (ticket, ptk, key) = completion.into_parts();
-        assert_eq!(key.interface(), Wpa2Interface::AccessPoint);
-        assert_eq!(key.peer(), &peer);
+        let (ticket, ptk) = completion.into_parts();
 
         let gtk = Wpa2Gtk::new(1, true, [0x77; 16]).unwrap();
         let mut aes = Wpa2SoftwareAes::new();
-        let m3 = run_ready(complete_wpa2_ap_pairwise_key_install(
+        let m3 = run_ready(complete_wpa2_ap_message3(
             &mut state,
             ticket,
             ptk,
-            true,
             &rsn(),
             &gtk,
             [0; 8],
@@ -363,15 +377,20 @@ mod tests {
         m4.set_mic(&[0xa5; 16]);
         let m4: OwnedEapolFrame<128> =
             OwnedEapolFrame::try_copy(Wpa2Interface::AccessPoint, peer, m4.as_bytes()).unwrap();
-        let command = run_ready(complete_wpa2_ap_message4(
+        let completion = run_ready(complete_wpa2_ap_message4(
             &mut state,
             m4,
             m3.ptk(),
             &mut crypto,
         ))
         .unwrap();
+        let (install, authorize) = completion.into_commands();
         assert!(matches!(
-            command,
+            install,
+            Wpa2IoCommand::InstallKey(_)
+        ));
+        assert!(matches!(
+            authorize,
             Wpa2IoCommand::SetPeerAuthorized {
                 interface: Wpa2Interface::AccessPoint,
                 peer: actual,

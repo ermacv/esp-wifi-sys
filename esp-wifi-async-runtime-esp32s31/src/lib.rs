@@ -286,9 +286,9 @@ pub use wpa2_ap::{
     Wpa2ApRsnError, WPA2_AP_ASSOC_CAPACITY,
 };
 pub use wpa2_ap_async::{
-    complete_wpa2_ap_message2, complete_wpa2_ap_message4, complete_wpa2_ap_pairwise_key_install,
+    complete_wpa2_ap_message2, complete_wpa2_ap_message3, complete_wpa2_ap_message4,
     start_wpa2_ap_handshake, Wpa2ApMessage2, Wpa2ApMessage2Error, Wpa2ApMessage3,
-    Wpa2ApMessage3Error, Wpa2ApMessage4Error, Wpa2ApStartError,
+    Wpa2ApMessage3Error, Wpa2ApMessage4, Wpa2ApMessage4Error, Wpa2ApStartError,
 };
 pub use wpa2_crypto::{
     new_key_data_job, new_key_data_wrap_job, new_mic_job, new_ptk_job, new_tx_mic_job, verify_mic,
