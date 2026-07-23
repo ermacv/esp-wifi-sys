@@ -40,11 +40,13 @@ const CALLBACK_STA_EAPOL: u8 = 3;
 const CALLBACK_AP_BEACON: u8 = 4;
 const CALLBACK_AP_DATA: u8 = 11;
 const CALLBACK_AP_POWER_SAVE: u8 = 12;
+const CALLBACK_ADDBA_RESPONSE: u8 = 13;
 const BASIC_MODE0_CALLBACKS: u32 = (1 << CALLBACK_MGMT)
     | (1 << CALLBACK_AP_BEACON)
     | (1 << CALLBACK_AP_DATA)
     | (1 << CALLBACK_AP_POWER_SAVE);
-const BASIC_MODE1_CALLBACKS: u32 = 1 << CALLBACK_STA_EAPOL;
+const BASIC_MODE1_CALLBACKS: u32 =
+    (1 << CALLBACK_STA_EAPOL) | (1 << CALLBACK_ADDBA_RESPONSE);
 
 const PHASE_IDLE: u8 = 0;
 const PHASE_LOAD: u8 = 1;
@@ -202,6 +204,7 @@ unsafe extern "C" {
     fn initialization_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_ps_txcb(frame: *mut c_void);
+    fn addba_response_txcb(frame: *mut c_void);
     #[link_name = "ic_get_next_tbtt"]
     fn vendor_ic_get_next_tbtt() -> u32;
     #[cfg(not(feature = "strict-no-wait"))]
@@ -317,6 +320,66 @@ pub fn strict_management_tx_done_snapshot() -> StrictManagementTxDoneSnapshot {
 
 const fn is_ap_deauthentication_completion(frame_control: u16, descriptor_security: u32) -> bool {
     frame_control & 0x00fc == 0x00c0 && descriptor_security & 0x0500_0000 != 0
+}
+
+const fn is_ap_addba_response_completion_layout(
+    frame_control: u16,
+    header_len: u16,
+    remaining_len: u16,
+    layout: u16,
+    buffer_flags: u32,
+    descriptor_flags: u32,
+    descriptor_security: u32,
+    descriptor_callbacks: u32,
+    hardware_status: u8,
+) -> bool {
+    frame_control == 0x00d0
+        && header_len == 0x0020
+        && remaining_len == 0x000d
+        && layout == 0x2732
+        && buffer_flags == 0xc00b_402c
+        && descriptor_flags == 0
+        && descriptor_security == 0x0114_0000
+        && descriptor_callbacks == (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE)
+        && hardware_status == 1
+}
+
+unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneError> {
+    if frame.is_null() || !crate::esf::is_strict_recyclable_frame(frame) {
+        return Err(TxDoneError::NonStaticFrameType(if frame.is_null() {
+            u8::MAX
+        } else {
+            frame.add(FRAME_TYPE_OFFSET).read()
+        }));
+    }
+    let descriptor = descriptor(frame)?;
+    let buffer = frame.add(4).cast::<*mut u8>().read();
+    if buffer.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let layout = frame.add(0x24).cast::<u16>().read_unaligned();
+    if is_ap_addba_response_completion_layout(
+        tx_trace_frame_control(frame),
+        lengths as u16,
+        (lengths >> 16) as u16,
+        layout,
+        buffer.cast::<u32>().read_unaligned(),
+        descriptor.cast::<u32>().read_unaligned(),
+        descriptor.add(0x10).cast::<u32>().read_unaligned(),
+        descriptor
+            .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+            .cast::<u32>()
+            .read_unaligned(),
+        descriptor.add(19).read(),
+    ) {
+        // The pinned vendor callback returns immediately when hardware status
+        // is one. Failure paths search the node and stop an RX BA session;
+        // those stateful mutations remain fail-closed in the Rust runtime.
+        Ok(())
+    } else {
+        Err(TxDoneError::StrictCallbackFailed)
+    }
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -439,7 +502,12 @@ unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
         // Disconnect and off-channel action completions enter node/key/channel
         // state machines in the stock callback. They require explicit async
         // commands and are not allowed to run implicitly from TX completion.
-        0xd0 if crate::sta_link::complete_owned_action_management() => Ok(()),
+        0xd0
+            if crate::sta_link::complete_owned_action_management()
+                || strict_ap_addba_response_txdone(frame).is_ok() =>
+        {
+            Ok(())
+        }
         // AP deauthentication carries the direction bit recovered from the
         // pinned callback. The static AP node remains Rust-owned until an
         // explicit peer-removal command; TX completion itself has no required
@@ -810,9 +878,13 @@ unsafe fn dispatch_one_lmac_callback(state: &mut TxDoneState) -> Result<(), TxDo
         capture_hil_eapol_tx_done(state.frame)?;
     }
 
-    callback(state.frame.cast());
-    if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
-        return Err(TxDoneError::StrictCallbackFailed);
+    if bit == CALLBACK_ADDBA_RESPONSE {
+        strict_ap_addba_response_txdone(state.frame)?;
+    } else {
+        callback(state.frame.cast());
+        if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
+            return Err(TxDoneError::StrictCallbackFailed);
+        }
     }
     state.callbacks &= !(1 << bit);
     if state.callbacks == 0 {
@@ -1591,13 +1663,17 @@ fn callback_for_bit(bit: u8) -> Option<TxCallback> {
 fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
     match bit {
         CALLBACK_STA_EAPOL => Some(sta_eapol_txdone_cb),
+        CALLBACK_ADDBA_RESPONSE => Some(addba_response_txcb),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_ap_deauthentication_completion;
+    use super::{
+        is_ap_addba_response_completion_layout, is_ap_deauthentication_completion, CALLBACK_MGMT,
+    };
+    use super::CALLBACK_ADDBA_RESPONSE;
     #[cfg(feature = "hil-vendor-tx")]
     use super::ieee80211_data_header_len;
 
@@ -1607,6 +1683,44 @@ mod tests {
         assert!(is_ap_deauthentication_completion(0x00c0, 0x0414_0000));
         assert!(!is_ap_deauthentication_completion(0x00c0, 0x0004_0000));
         assert!(!is_ap_deauthentication_completion(0x00a0, 0x0114_0000));
+    }
+
+    #[test]
+    fn only_successful_measured_ap_addba_completion_is_a_noop() {
+        let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
+        assert!(is_ap_addba_response_completion_layout(
+            0x00d0,
+            0x20,
+            0x0d,
+            0x2732,
+            0xc00b_402c,
+            0,
+            0x0114_0000,
+            callbacks,
+            1,
+        ));
+        assert!(!is_ap_addba_response_completion_layout(
+            0x00d0,
+            0x20,
+            0x0d,
+            0x2732,
+            0xc00b_402c,
+            0,
+            0x0114_0000,
+            callbacks,
+            0,
+        ));
+        assert!(!is_ap_addba_response_completion_layout(
+            0x00d0,
+            0x20,
+            0x0d,
+            0x2732,
+            0xc00b_402c,
+            0,
+            0x0114_0000,
+            1 << CALLBACK_MGMT,
+            1,
+        ));
     }
 
     #[cfg(feature = "hil-vendor-tx")]
