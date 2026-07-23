@@ -422,6 +422,20 @@ fn record_hil_rejected_tx_security(input: TxSecurityLayoutInput) {
     HIL_REJECTED_LAYOUT.store(u32::from(input.layout), Ordering::Release);
     HIL_REJECTED_BUFFER_FLAGS.store(input.buffer_flags, Ordering::Release);
     HIL_REJECTED_COUNT.fetch_add(1, Ordering::AcqRel);
+    unsafe {
+        ets_printf(
+            c"HIL TX security reject: df=%08x ds=%08x fc=%04x len=%04x:%04x layout=%04x buffer=%08x\r\n"
+                .as_ptr()
+                .cast(),
+            input.descriptor_flags,
+            input.descriptor_security,
+            u32::from(input.frame_control),
+            u32::from(input.remaining_len),
+            u32::from(input.header_len),
+            u32::from(input.layout),
+            input.buffer_flags,
+        );
+    }
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1079,6 +1093,11 @@ mod tests {
 }
 #[cfg(feature = "hil-vendor-tx")]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+unsafe extern "C" {
+    fn ets_printf(format: *const u8, ...) -> i32;
+}
 
 #[cfg(feature = "hil-vendor-tx")]
 static HIL_REJECTED_COUNT: AtomicUsize = AtomicUsize::new(0);
