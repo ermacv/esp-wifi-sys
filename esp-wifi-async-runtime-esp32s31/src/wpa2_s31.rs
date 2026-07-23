@@ -907,6 +907,7 @@ mod target {
         ap_active_epoch: usize,
         ap_ps_poll_epoch: usize,
         ap_waiting_peer: [u8; 6],
+        ap_retry_armed: bool,
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -939,6 +940,7 @@ mod target {
                 ap_active_epoch: 0,
                 ap_ps_poll_epoch: 0,
                 ap_waiting_peer: [0; 6],
+                ap_retry_armed: false,
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_tx_diagnostic: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -1321,10 +1323,15 @@ mod target {
                 let sleeping = unsafe { node.add(0x2fe).read() != 0 };
                 let flags = unsafe { node.add(0x0c).cast::<u32>().read() };
                 let peer = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
-                let ps_poll_credit = crate::ap_power_save::ps_poll_credit_after(
-                    self.ap_ps_poll_epoch,
-                    &peer,
-                );
+                // A PS-Poll is a credit only for a command that was already
+                // deferred for this peer. An unsolicited/stale PS-Poll must
+                // never authorize a later frame.
+                let retry_armed = self.ap_retry_armed && self.ap_waiting_peer == peer;
+                let ps_poll_credit = retry_armed
+                    .then(|| {
+                        crate::ap_power_save::ps_poll_credit_after(self.ap_ps_poll_epoch, &peer)
+                    })
+                    .flatten();
                 if (sleeping || flags & 0x10 != 0) && ps_poll_credit.is_none() {
                     // `ieee80211_set_tim` is a measured finite leaf in the
                     // pinned archive. The owned command remains with the Rust
@@ -1341,6 +1348,7 @@ mod target {
                     self.ap_ps_poll_epoch = epoch;
                     unsafe { ieee80211_set_tim(node, 0) };
                 }
+                self.ap_retry_armed = false;
             }
             if unsafe { core::ptr::addr_of_mut!(g_ic).add(0x258).read() } != 0 {
                 return Err(S31Wpa2IoError::CachedTxRuntimeEnabled);
@@ -1619,9 +1627,10 @@ mod target {
             let S31Wpa2IoError::TxPeerPowerSaveUnsupported(peer) = *error else {
                 return false;
             };
-            self.ap_active_epoch = crate::ap_power_save::active_epoch();
-            self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch();
             self.ap_waiting_peer = peer;
+            self.ap_active_epoch = crate::ap_power_save::active_epoch(&peer);
+            self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
+            self.ap_retry_armed = true;
             true
         }
 

@@ -2,9 +2,10 @@
 //!
 //! The vendor hostap output wrapper owns a dynamically linked power-save
 //! queue. Strict mode does not enter that queue. Instead, the radio owner
-//! retains the original owned command and is woken only when the peer sends an
-//! active-mode data frame. TIM mutation remains a small, measured vendor leaf;
-//! it has no calls, loops, allocation, lock, or OS wait in the pinned archive.
+//! retains the original owned command and is woken only when that peer sends an
+//! active-mode data frame or a PS-Poll. TIM mutation remains a small, measured
+//! vendor leaf; it has no calls, loops, allocation, lock, or OS wait in the
+//! pinned archive.
 
 use core::{
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -14,12 +15,116 @@ use core::{
 use crate::queue::WakerCell;
 
 static ACTIVE_EDGE: WakerCell = WakerCell::new();
-static ACTIVE_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static PS_POLL_EPOCH: AtomicUsize = AtomicUsize::new(0);
-static PS_POLL_PEER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+static PEER_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static SLEEP_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEFERRED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
+
+// This matches the fixed WPA2 AP association capacity. The table is written
+// only by the serialized radio-owner RX pump. Atomic fields keep diagnostic
+// readers and waker publication well-defined without a critical section.
+const PEER_EVENT_CAPACITY: usize = crate::wpa2_ap::WPA2_AP_ASSOC_CAPACITY;
+
+struct PeerEventSlot {
+    peer: [AtomicU8; 6],
+    active_epoch: AtomicUsize,
+    ps_poll_epoch: AtomicUsize,
+}
+
+impl PeerEventSlot {
+    const fn new() -> Self {
+        Self {
+            peer: [const { AtomicU8::new(0) }; 6],
+            active_epoch: AtomicUsize::new(0),
+            ps_poll_epoch: AtomicUsize::new(0),
+        }
+    }
+
+    fn matches(&self, peer: &[u8; 6]) -> bool {
+        self.peer
+            .iter()
+            .zip(peer)
+            .all(|(stored, expected)| stored.load(Ordering::Relaxed) == *expected)
+    }
+
+    fn last_epoch(&self) -> usize {
+        self.active_epoch
+            .load(Ordering::Acquire)
+            .max(self.ps_poll_epoch.load(Ordering::Acquire))
+    }
+
+    fn replace_peer(&self, peer: &[u8; 6]) {
+        // Zero is never a published event. Invalidate the slot before changing
+        // its key so a reader cannot attach an old credit to the new peer.
+        self.active_epoch.store(0, Ordering::Release);
+        self.ps_poll_epoch.store(0, Ordering::Release);
+        for (stored, value) in self.peer.iter().zip(peer) {
+            stored.store(*value, Ordering::Relaxed);
+        }
+    }
+}
+
+static PEER_EVENTS: [PeerEventSlot; PEER_EVENT_CAPACITY] =
+    [const { PeerEventSlot::new() }; PEER_EVENT_CAPACITY];
+
+#[derive(Clone, Copy)]
+enum PeerEvent {
+    Active(usize),
+    PsPoll(usize),
+}
+
+fn publish_peer_event(peer: &[u8; 6], event: PeerEvent) {
+    let mut replacement = 0;
+    let mut replacement_epoch = usize::MAX;
+    for (index, slot) in PEER_EVENTS.iter().enumerate() {
+        if slot.matches(peer) && slot.last_epoch() != 0 {
+            publish_in_slot(slot, event);
+            return;
+        }
+        let epoch = slot.last_epoch();
+        if epoch < replacement_epoch {
+            replacement = index;
+            replacement_epoch = epoch;
+        }
+    }
+
+    let slot = &PEER_EVENTS[replacement];
+    slot.replace_peer(peer);
+    publish_in_slot(slot, event);
+}
+
+fn publish_in_slot(slot: &PeerEventSlot, event: PeerEvent) {
+    match event {
+        PeerEvent::Active(epoch) => slot.active_epoch.store(epoch, Ordering::Release),
+        PeerEvent::PsPoll(epoch) => slot.ps_poll_epoch.store(epoch, Ordering::Release),
+    }
+}
+
+fn next_peer_event_epoch() -> usize {
+    let epoch = PEER_EVENT_EPOCH
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    if epoch == 0 {
+        PEER_EVENT_EPOCH
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    } else {
+        epoch
+    }
+}
+
+fn peer_epochs(peer: &[u8; 6]) -> (usize, usize) {
+    for slot in &PEER_EVENTS {
+        if slot.matches(peer) {
+            return (
+                slot.active_epoch.load(Ordering::Acquire),
+                slot.ps_poll_epoch.load(Ordering::Acquire),
+            );
+        }
+    }
+    (0, 0)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ApPowerSaveSnapshot {
@@ -55,10 +160,12 @@ pub(crate) fn observe_frame(frame: &[u8]) {
     // Legacy PS-Poll is a 16-byte control frame. Address 2 is the station
     // transmitter and binds the one-frame delivery credit to one peer.
     if frame_type == 1 && subtype == 10 && frame.len() >= 16 {
-        for (slot, byte) in PS_POLL_PEER.iter().zip(&frame[10..16]) {
-            slot.store(*byte, Ordering::Relaxed);
-        }
-        PS_POLL_EPOCH.fetch_add(1, Ordering::Release);
+        let peer = [
+            frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+        ];
+        PS_POLL_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let epoch = next_peer_event_epoch();
+        publish_peer_event(&peer, PeerEvent::PsPoll(epoch));
         ACTIVE_EDGE.wake();
         return;
     }
@@ -77,7 +184,11 @@ pub(crate) fn observe_frame(frame: &[u8]) {
         SLEEP_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
     } else {
         ACTIVE_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
-        ACTIVE_EPOCH.fetch_add(1, Ordering::Release);
+        let peer = [
+            frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
+        ];
+        let epoch = next_peer_event_epoch();
+        publish_peer_event(&peer, PeerEvent::Active(epoch));
         ACTIVE_EDGE.wake();
     }
 }
@@ -90,21 +201,17 @@ pub(crate) fn record_deferred_transmit() {
 ///
 /// Readiness is never produced by inspecting node state, avoiding a status or
 /// node polling loop.
-pub(crate) fn active_epoch() -> usize {
-    ACTIVE_EPOCH.load(Ordering::Acquire)
+pub(crate) fn active_epoch(peer: &[u8; 6]) -> usize {
+    peer_epochs(peer).0
 }
 
-pub(crate) fn ps_poll_epoch() -> usize {
-    PS_POLL_EPOCH.load(Ordering::Acquire)
-}
-
-fn ps_poll_peer() -> [u8; 6] {
-    core::array::from_fn(|index| PS_POLL_PEER[index].load(Ordering::Relaxed))
+pub(crate) fn ps_poll_epoch(peer: &[u8; 6]) -> usize {
+    peer_epochs(peer).1
 }
 
 pub(crate) fn ps_poll_credit_after(after: usize, peer: &[u8; 6]) -> Option<usize> {
-    let epoch = PS_POLL_EPOCH.load(Ordering::Acquire);
-    (epoch != after && ps_poll_peer() == *peer).then_some(epoch)
+    let epoch = ps_poll_epoch(peer);
+    (epoch != 0 && epoch != after).then_some(epoch)
 }
 
 pub(crate) fn poll_peer_edge(
@@ -114,9 +221,7 @@ pub(crate) fn poll_peer_edge(
     cx: &mut Context<'_>,
 ) -> Poll<()> {
     ACTIVE_EDGE.register(cx.waker());
-    if ACTIVE_EPOCH.load(Ordering::Acquire) != active_after
-        || ps_poll_credit_after(ps_poll_after, peer).is_some()
-    {
+    if active_epoch(peer) != active_after || ps_poll_credit_after(ps_poll_after, peer).is_some() {
         Poll::Ready(())
     } else {
         Poll::Pending
@@ -125,7 +230,9 @@ pub(crate) fn poll_peer_edge(
 
 #[cfg(test)]
 mod tests {
-    use super::{ap_power_save_snapshot, observe_frame, ps_poll_credit_after, ps_poll_epoch};
+    use super::{
+        active_epoch, ap_power_save_snapshot, observe_frame, ps_poll_credit_after, ps_poll_epoch,
+    };
 
     #[test]
     fn only_to_ds_data_publishes_power_state() {
@@ -144,13 +251,44 @@ mod tests {
 
     #[test]
     fn ps_poll_credit_is_bound_to_transmitter() {
-        let before = ps_poll_epoch();
         let peer = [1, 2, 3, 4, 5, 6];
+        let before = ps_poll_epoch(&peer);
         let mut frame = [0_u8; 16];
         frame[..2].copy_from_slice(&0x00a4_u16.to_le_bytes());
         frame[10..16].copy_from_slice(&peer);
         observe_frame(&frame);
-        assert!(ps_poll_credit_after(before, &peer).is_some());
+        let published = ps_poll_credit_after(before, &peer).unwrap();
+        assert_eq!(ps_poll_credit_after(published, &peer), None);
         assert_eq!(ps_poll_credit_after(before, &[9; 6]), None);
+    }
+
+    #[test]
+    fn ps_poll_events_for_two_peers_remain_independent() {
+        let first = [20, 2, 3, 4, 5, 6];
+        let second = [21, 2, 3, 4, 5, 6];
+        let first_before = ps_poll_epoch(&first);
+        let second_before = ps_poll_epoch(&second);
+        let mut frame = [0_u8; 16];
+        frame[..2].copy_from_slice(&0x00a4_u16.to_le_bytes());
+        frame[10..16].copy_from_slice(&first);
+        observe_frame(&frame);
+        frame[10..16].copy_from_slice(&second);
+        observe_frame(&frame);
+        assert!(ps_poll_credit_after(first_before, &first).is_some());
+        assert!(ps_poll_credit_after(second_before, &second).is_some());
+    }
+
+    #[test]
+    fn peer_active_edges_do_not_wake_a_different_peer() {
+        let peer = [7, 2, 3, 4, 5, 6];
+        let other = [8, 2, 3, 4, 5, 6];
+        let before = active_epoch(&peer);
+        let other_before = active_epoch(&other);
+        let mut frame = [0_u8; 24];
+        frame[..2].copy_from_slice(&0x0108_u16.to_le_bytes());
+        frame[10..16].copy_from_slice(&peer);
+        observe_frame(&frame);
+        assert_ne!(active_epoch(&peer), before);
+        assert_eq!(active_epoch(&other), other_before);
     }
 }
