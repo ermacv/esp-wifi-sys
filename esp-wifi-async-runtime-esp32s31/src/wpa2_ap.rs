@@ -154,6 +154,22 @@ pub struct ApAssociationResponseSnapshot {
     pub body: [u8; AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY],
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ApAssociationRejectionSnapshot {
+    pub count: usize,
+    pub reason: u32,
+    pub node: usize,
+    pub interface: usize,
+    pub node_flags: u32,
+    pub node_state: u8,
+    pub association_id: u16,
+    pub interface_mode: u32,
+    pub interface_state: u8,
+    pub interface_flags: u32,
+    pub interface_capabilities: u32,
+    pub interface_options: u32,
+}
+
 impl ApAssociationResponseSnapshot {
     const fn empty() -> Self {
         Self {
@@ -601,6 +617,67 @@ mod target {
     static AP_ASSOCIATION_RESPONSE_CAPTURE: ApAssociationResponseCapture =
         ApAssociationResponseCapture::new();
 
+    #[repr(u32)]
+    enum AssociationRejectionReason {
+        UnsupportedSubtype = 1,
+        UnsupportedStatus = 2,
+        NodeUnavailable = 3,
+        InterfaceUnavailable = 4,
+        InterfaceMode = 5,
+        InterfaceState = 6,
+        InterfaceFlags = 7,
+        InterfaceCapabilities = 8,
+        InterfaceOptions = 9,
+        NodeState = 10,
+        NodeFlags = 11,
+        NodePowerSaveFlags = 12,
+        RateCount = 13,
+        RateValue = 14,
+        ChannelUnavailable = 15,
+        SecondaryChannel = 16,
+        FrameAllocation = 17,
+        ResponseParameters = 18,
+        ManagementOutput = 19,
+    }
+
+    struct AssociationRejectionDiagnostics {
+        count: AtomicUsize,
+        reason: AtomicUsize,
+        node: AtomicUsize,
+        interface: AtomicUsize,
+        node_flags: AtomicUsize,
+        node_state: AtomicU8,
+        association_id: AtomicUsize,
+        interface_mode: AtomicUsize,
+        interface_state: AtomicU8,
+        interface_flags: AtomicUsize,
+        interface_capabilities: AtomicUsize,
+        interface_options: AtomicUsize,
+    }
+
+    impl AssociationRejectionDiagnostics {
+        const fn new() -> Self {
+            Self {
+                count: AtomicUsize::new(0),
+                reason: AtomicUsize::new(0),
+                node: AtomicUsize::new(0),
+                interface: AtomicUsize::new(0),
+                node_flags: AtomicUsize::new(0),
+                node_state: AtomicU8::new(0),
+                association_id: AtomicUsize::new(0),
+                interface_mode: AtomicUsize::new(0),
+                interface_state: AtomicU8::new(0),
+                interface_flags: AtomicUsize::new(0),
+                interface_capabilities: AtomicUsize::new(0),
+                interface_options: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[link_section = ".critical.bss.wifi_strict.ap_assoc_rejection"]
+    static AP_ASSOCIATION_REJECTION: AssociationRejectionDiagnostics =
+        AssociationRejectionDiagnostics::new();
+
     unsafe extern "C" {
         static mut g_ic: u8;
         static mut wpa_cb: *mut c_void;
@@ -747,13 +824,22 @@ mod target {
 
     unsafe fn send_association_response(peer: [u8; 6], subtype: i32, status: u16) -> bool {
         let Ok(subtype @ (0x10 | 0x30)) = u8::try_from(subtype) else {
+            record_association_rejection(
+                AssociationRejectionReason::UnsupportedSubtype,
+                ptr::null_mut(),
+            );
             return false;
         };
         if u8::try_from(status).is_err() {
+            record_association_rejection(
+                AssociationRejectionReason::UnsupportedStatus,
+                ptr::null_mut(),
+            );
             return false;
         }
         let node = cnx_node_search(peer.as_ptr());
         if node.is_null() || node.cast::<*mut u8>().read().is_null() {
+            record_association_rejection(AssociationRejectionReason::NodeUnavailable, node);
             return false;
         }
         let Some(buffer) = construct_strict_ap_association_response(node, status) else {
@@ -768,7 +854,73 @@ mod target {
         }
         ieee80211_set_tx_desc(node, buffer, 7, 0, 0);
         linked_ieee80211_set_tx_pti(buffer, 6);
-        linked_ieee80211_mgmt_output(node, buffer, subtype) == 0
+        if linked_ieee80211_mgmt_output(node, buffer, subtype) != 0 {
+            record_association_rejection(AssociationRejectionReason::ManagementOutput, node);
+            return false;
+        }
+        true
+    }
+
+    unsafe fn record_association_rejection(reason: AssociationRejectionReason, node: *mut u8) {
+        let interface = if node.is_null() {
+            ptr::null_mut()
+        } else {
+            node.cast::<*mut u8>().read()
+        };
+        AP_ASSOCIATION_REJECTION
+            .node
+            .store(node as usize, Ordering::Relaxed);
+        AP_ASSOCIATION_REJECTION
+            .interface
+            .store(interface as usize, Ordering::Relaxed);
+        if !node.is_null() {
+            AP_ASSOCIATION_REJECTION.node_flags.store(
+                node.add(0x0c).cast::<u32>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+            AP_ASSOCIATION_REJECTION
+                .node_state
+                .store(node.add(0x31).read(), Ordering::Relaxed);
+            AP_ASSOCIATION_REJECTION.association_id.store(
+                node.add(0x26).cast::<u16>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+        }
+        if !interface.is_null() {
+            AP_ASSOCIATION_REJECTION.interface_mode.store(
+                interface.add(0x138).cast::<u32>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+            AP_ASSOCIATION_REJECTION
+                .interface_state
+                .store(interface.add(0x154).read(), Ordering::Relaxed);
+            AP_ASSOCIATION_REJECTION.interface_flags.store(
+                interface.add(0x144).cast::<u32>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+            AP_ASSOCIATION_REJECTION.interface_capabilities.store(
+                interface.add(0xa4).cast::<u32>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+            AP_ASSOCIATION_REJECTION.interface_options.store(
+                interface.add(0x228).cast::<u32>().read_unaligned() as usize,
+                Ordering::Relaxed,
+            );
+        }
+        AP_ASSOCIATION_REJECTION
+            .reason
+            .store(reason as usize, Ordering::Release);
+        AP_ASSOCIATION_REJECTION
+            .count
+            .fetch_add(1, Ordering::Release);
+    }
+
+    unsafe fn reject_association_construction(
+        reason: AssociationRejectionReason,
+        node: *mut u8,
+    ) -> Option<*mut u8> {
+        record_association_rejection(reason, node);
+        None
     }
 
     unsafe fn construct_strict_ap_association_response(
@@ -776,26 +928,64 @@ mod target {
         status: u16,
     ) -> Option<*mut u8> {
         let interface = node.cast::<*mut u8>().read();
-        if interface.is_null()
-            || interface.add(0x138).cast::<u32>().read_unaligned() != 1
-            || interface.add(0x154).read().wrapping_sub(2) > 1
-            || interface.add(0x144).cast::<u32>().read_unaligned() & 0x0080_0000 == 0
-            || interface.add(0xa4).cast::<u32>().read_unaligned() & 0x0000_2000 == 0
-            || interface.add(0x228).cast::<u32>().read_unaligned() & 1 != 0
-            || node.add(0x31).read().wrapping_sub(2) > 1
-        {
-            return None;
+        if interface.is_null() {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceUnavailable,
+                node,
+            );
+        }
+        if interface.add(0x138).cast::<u32>().read_unaligned() != 1 {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceMode,
+                node,
+            );
+        }
+        if interface.add(0x154).read().wrapping_sub(2) > 1 {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceState,
+                node,
+            );
+        }
+        if interface.add(0x144).cast::<u32>().read_unaligned() & 0x0080_0000 == 0 {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceFlags,
+                node,
+            );
+        }
+        if interface.add(0xa4).cast::<u32>().read_unaligned() & 0x0000_2000 == 0 {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceCapabilities,
+                node,
+            );
+        }
+        if interface.add(0x228).cast::<u32>().read_unaligned() & 1 != 0 {
+            return reject_association_construction(
+                AssociationRejectionReason::InterfaceOptions,
+                node,
+            );
+        }
+        if node.add(0x31).read().wrapping_sub(2) > 1 {
+            return reject_association_construction(AssociationRejectionReason::NodeState, node);
         }
         let node_flags = node.add(0x0c).cast::<u32>().read_unaligned();
-        if node_flags & 0x42 != 0x42
-            || node_flags & 0xc0 == 0xc0
-            || node.add(0x73).read() != STRICT_AP_BGN_RATES.len() as u8
-        {
-            return None;
+        if node_flags & 0x42 != 0x42 {
+            return reject_association_construction(AssociationRejectionReason::NodeFlags, node);
+        }
+        if node_flags & 0xc0 == 0xc0 {
+            return reject_association_construction(
+                AssociationRejectionReason::NodePowerSaveFlags,
+                node,
+            );
+        }
+        if node.add(0x73).read() != STRICT_AP_BGN_RATES.len() as u8 {
+            return reject_association_construction(AssociationRejectionReason::RateCount, node);
         }
         for (index, expected) in STRICT_AP_BGN_RATES.iter().copied().enumerate() {
             if node.add(0x74 + index).read() != expected {
-                return None;
+                return reject_association_construction(
+                    AssociationRejectionReason::RateValue,
+                    node,
+                );
             }
         }
 
@@ -803,8 +993,17 @@ mod target {
         // zero secondary-channel byte is the live proof that this exact
         // response template describes the configured HT20 profile.
         let channel = chm_get_home_channel();
-        if channel.is_null() || channel.add(1).read() != 0 {
-            return None;
+        if channel.is_null() {
+            return reject_association_construction(
+                AssociationRejectionReason::ChannelUnavailable,
+                node,
+            );
+        }
+        if channel.add(1).read() != 0 {
+            return reject_association_construction(
+                AssociationRejectionReason::SecondaryChannel,
+                node,
+            );
         }
         let primary_channel = channel.read();
         let association_id = node.add(0x26).cast::<u16>().read_unaligned();
@@ -815,7 +1014,10 @@ mod target {
             STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN as u32,
         );
         if buffer.is_null() || body.is_null() {
-            return None;
+            return reject_association_construction(
+                AssociationRejectionReason::FrameAllocation,
+                node,
+            );
         }
         let response = &mut *body.cast::<[u8; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN]>();
         if !write_strict_ap_bgn_ht20_association_response(
@@ -825,7 +1027,10 @@ mod target {
             primary_channel,
         ) {
             esf_buf_recycle(buffer.cast());
-            return None;
+            return reject_association_construction(
+                AssociationRejectionReason::ResponseParameters,
+                node,
+            );
         }
         buffer
             .add(0x14)
@@ -1754,6 +1959,35 @@ mod target {
         }
     }
 
+    pub fn ap_association_rejection_snapshot() -> ApAssociationRejectionSnapshot {
+        ApAssociationRejectionSnapshot {
+            count: AP_ASSOCIATION_REJECTION.count.load(Ordering::Acquire),
+            reason: AP_ASSOCIATION_REJECTION.reason.load(Ordering::Acquire) as u32,
+            node: AP_ASSOCIATION_REJECTION.node.load(Ordering::Acquire),
+            interface: AP_ASSOCIATION_REJECTION.interface.load(Ordering::Acquire),
+            node_flags: AP_ASSOCIATION_REJECTION.node_flags.load(Ordering::Acquire) as u32,
+            node_state: AP_ASSOCIATION_REJECTION.node_state.load(Ordering::Acquire),
+            association_id: AP_ASSOCIATION_REJECTION
+                .association_id
+                .load(Ordering::Acquire) as u16,
+            interface_mode: AP_ASSOCIATION_REJECTION
+                .interface_mode
+                .load(Ordering::Acquire) as u32,
+            interface_state: AP_ASSOCIATION_REJECTION
+                .interface_state
+                .load(Ordering::Acquire),
+            interface_flags: AP_ASSOCIATION_REJECTION
+                .interface_flags
+                .load(Ordering::Acquire) as u32,
+            interface_capabilities: AP_ASSOCIATION_REJECTION
+                .interface_capabilities
+                .load(Ordering::Acquire) as u32,
+            interface_options: AP_ASSOCIATION_REJECTION
+                .interface_options
+                .load(Ordering::Acquire) as u32,
+        }
+    }
+
     pub(crate) fn wpa2_ap_peer_association_epoch(peer: &[u8; 6]) -> Option<usize> {
         PEERS.iter().find_map(|slot| {
             (slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer })
@@ -1764,9 +1998,9 @@ mod target {
 
 #[cfg(target_arch = "riscv32")]
 pub use target::{
-    ap_association_response_snapshot, async_wpa2_ap_callbacks_installed,
-    deferred_ap_management_snapshot, install_async_wpa2_ap_callbacks,
-    management_tx_rejection_snapshot, Wpa2ApInstallError,
+    ap_association_rejection_snapshot, ap_association_response_snapshot,
+    async_wpa2_ap_callbacks_installed, deferred_ap_management_snapshot,
+    install_async_wpa2_ap_callbacks, management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
