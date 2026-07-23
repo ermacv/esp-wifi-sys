@@ -180,6 +180,7 @@ pub enum TxDoneError {
     CallbackRegistryMismatch(u8),
     UserCallbackInstalled,
     UnsupportedDescriptorFlags(u32),
+    UnsupportedPersistentLayout(u32, u32, u16, u16, u16, u16, u16),
     NonStaticFrameType(u8),
     LmacPipelineBusy,
     UnsupportedLmacDescriptorFlags(u32),
@@ -978,8 +979,17 @@ unsafe fn restore_persistent_frame(frame: *mut u8, descriptor: *mut u8) -> Resul
         descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
         frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
     };
-    let output = crate::tx_security::strict_persistent_frame_completion_layout(input)
-        .ok_or(TxDoneError::UnsupportedDescriptorFlags(descriptor_flags))?;
+    let output = crate::tx_security::strict_persistent_frame_completion_layout(input).ok_or(
+        TxDoneError::UnsupportedPersistentLayout(
+            descriptor_flags,
+            input.descriptor_security,
+            input.frame_control,
+            input.header_len,
+            input.remaining_len,
+            input.layout,
+            ((input.buffer_flags & 0x0fff_c000) >> 14) as u16,
+        ),
+    )?;
 
     first_buffer
         .add(4)
