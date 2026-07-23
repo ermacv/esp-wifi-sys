@@ -16,7 +16,6 @@ const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
-#[cfg(feature = "hil-vendor-tx")]
 const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
 #[cfg(feature = "hil-vendor-tx")]
 const TX_DESCRIPTOR_SELECTED_RATE_OFFSET: usize = 0x0c;
@@ -239,12 +238,52 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         return Err(TxQueueProcessError::InvalidFrame);
     }
 
+    if let Err(error) = stamp_ap_beacon(frame) {
+        requeue_front(entry, frame);
+        return Err(error);
+    }
+
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         requeue_front(entry, frame);
         return Err(TxQueueProcessError::Submit(error));
     }
     HIL_COUNTERS.submitted[input].fetch_add(1, Ordering::Relaxed);
     record_submitted(input, queue_state, frame);
+    Ok(())
+}
+
+/// Publish a monotonic TSF directly in a queued AP beacon.
+///
+/// The current S31 ROM `hal_get_tsf_time` export remains zero after both the
+/// reset and set-time leaves.  Scan clients accept the otherwise valid frame,
+/// but associated clients reject the zero-TSF stream as missed beacons.  The
+/// executor clock is already the sole strict-runtime time source, so copying
+/// it into the fixed beacon field keeps this leaf bounded and nonblocking.
+unsafe fn stamp_ap_beacon(frame: *mut u8) -> Result<(), TxQueueProcessError> {
+    let first_buffer = frame.add(4).cast::<*mut u8>().read();
+    if first_buffer.is_null() {
+        return Err(TxQueueProcessError::InvalidFrame);
+    }
+    let metadata = first_buffer.add(4).cast::<*mut u8>().read();
+    if metadata.is_null() {
+        return Err(TxQueueProcessError::InvalidFrame);
+    }
+    let layout = frame
+        .add(TX_FRAME_LAYOUT_FLAGS_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    let header = metadata.add(if layout & 0x2000 != 0 { 8 } else { 0 });
+    let frame_control = header.cast::<u16>().read_unaligned();
+    if frame_control != 0x0080 {
+        return Ok(());
+    }
+    let Some(timestamp) = crate::adapter::runtime_now_us() else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    header
+        .add(24)
+        .cast::<u64>()
+        .write_unaligned(timestamp.to_le());
     Ok(())
 }
 
@@ -299,6 +338,10 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     {
         requeue_front(entry, frame);
         return Err(TxQueueProcessError::InvalidFrame);
+    }
+    if let Err(error) = stamp_ap_beacon(frame) {
+        requeue_front(entry, frame);
+        return Err(error);
     }
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         requeue_front(entry, frame);

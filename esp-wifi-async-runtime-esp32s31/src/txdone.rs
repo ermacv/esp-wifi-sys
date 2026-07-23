@@ -204,7 +204,6 @@ unsafe extern "C" {
     fn ieee80211_hostapd_ps_txcb(frame: *mut c_void);
     #[link_name = "ic_get_next_tbtt"]
     fn vendor_ic_get_next_tbtt() -> u32;
-    fn hal_get_tsf_time(interface: u32) -> u32;
     #[cfg(not(feature = "strict-no-wait"))]
     fn pp_coex_tx_release(frame: *mut c_void);
     fn esf_buf_recycle(frame: *mut c_void);
@@ -390,8 +389,12 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
 pub unsafe extern "C" fn __wrap_ic_get_next_tbtt() -> u32 {
     let interval = ptr::addr_of!(BcnInterval).read_volatile();
     let send_tick = ptr::addr_of!(BcnSendTick).read_volatile();
-    let now = hal_get_tsf_time(1);
-    let Some((next_tick, delay)) = crate::tbtt::next_tbtt_delay(send_tick, interval, now) else {
+    let Some(now) = crate::adapter::runtime_now_us() else {
+        STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+        return 0;
+    };
+    let Some((next_tick, delay)) = crate::tbtt::next_tbtt_delay(send_tick, interval, now as u32)
+    else {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
         return 0;
     };

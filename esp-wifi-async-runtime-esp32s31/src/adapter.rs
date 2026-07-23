@@ -1050,6 +1050,14 @@ fn configured_now() -> Option<fn() -> u64> {
     }
 }
 
+/// Read the monotonic microsecond clock owned by the Rust executor.
+///
+/// Strict radio leaves use this instead of the S31 ROM TSF export, which is
+/// observed returning zero even while the AP MAC is active.
+pub(crate) fn runtime_now_us() -> Option<u64> {
+    configured_now().map(|now| now())
+}
+
 unsafe extern "C" fn wifi_create_queue(queue_len: i32, item_size: i32) -> *mut c_void {
     if queue_len <= 0
         || queue_len as usize > PP_QUEUE_CAPACITY
