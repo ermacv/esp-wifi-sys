@@ -40,7 +40,7 @@ const AP_PAIRWISE_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACIT
 
 const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control != 0x4208
-        || input.descriptor_flags != 0x0000_200b
+        || !matches!(input.descriptor_flags, 0x0000_200b | 0x0200_200b)
         || input.descriptor_security != 0x0004_0342
         || input.header_len != 0x0018
         || input.remaining_len < 8
@@ -1028,6 +1028,45 @@ mod tests {
                 metadata_len: 0x0080,
             }),
         );
+        for (remaining_len, layout, buffer_flags, expected) in [
+            (
+                0x015a,
+                3,
+                0xc05c_8180,
+                TxSecurityLayoutOutput {
+                    header_len: 0x0020,
+                    remaining_len: 0x0166,
+                    layout: 0x2003,
+                    buffer_flags: 0xc061_8180,
+                    metadata_len: 0x017e,
+                },
+            ),
+            (
+                0x0161,
+                4,
+                0xc05e_4187,
+                TxSecurityLayoutOutput {
+                    header_len: 0x0020,
+                    remaining_len: 0x016d,
+                    layout: 0x2004,
+                    buffer_flags: 0xc063_4187,
+                    metadata_len: 0x0185,
+                },
+            ),
+        ] {
+            assert_eq!(
+                strict_tx_security_layout(TxSecurityLayoutInput {
+                    remaining_len,
+                    layout,
+                    buffer_flags,
+                    // Android IPv6 multicast exercised the same group-CCMP
+                    // layout with the rate-control state bit set.
+                    descriptor_flags: 0x0200_200b,
+                    ..measured
+                }),
+                Some(expected),
+            );
+        }
         for layout in [0, 1, 2, 3, 4, 0x1fff] {
             for (remaining_len, buffer_flags, output_remaining, output_buffer, metadata_len) in [
                 (0x002c, 0xc011_0052, 0x0038, 0xc016_0052, 0x0050),
