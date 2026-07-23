@@ -300,16 +300,21 @@ pub const fn strict_tx_security_layout(
         return None;
     };
 
-    // The two hostap beacon buffers are persistent. Their constructor resets
-    // the current MPDU/body length before every TBTT, but deliberately keeps
-    // the PP metadata headroom installed by the first transmission. This is
-    // the only measured path allowed to re-enter with that bit set; ordinary
-    // management, EAPOL and data buffers are single-owner, one-shot objects.
+    // The two hostap beacon buffers are persistent. Their constructor normally
+    // retains both the PP headroom and its length accounting. Peer removal was
+    // also measured resetting the length fields to the base 24-byte header
+    // while retaining the installed-headroom layout bit and physical pointer.
+    // Admit both finite states; ordinary management, EAPOL and data buffers
+    // remain single-owner, one-shot objects.
+    let beacon_lengths_reset = headroom_applied
+        && ap_beacon
+        && input.header_len == 0x18
+        && input.remaining_len == 0x74;
     if headroom_applied
         && (!ap_beacon
             || input.layout & 0xc000 != 0
-            || input.header_len != 0x20
-            || input.remaining_len != 0x74)
+            || (!beacon_lengths_reset
+                && (input.header_len != 0x20 || input.remaining_len != 0x74)))
     {
         return None;
     }
@@ -323,7 +328,7 @@ pub const fn strict_tx_security_layout(
         return None;
     }
 
-    let header_len = if headroom_applied {
+    let header_len = if headroom_applied && !beacon_lengths_reset {
         input.header_len
     } else {
         match input.header_len.checked_add(8) {
@@ -335,7 +340,11 @@ pub const fn strict_tx_security_layout(
         Some(value) => value,
         None => return None,
     };
-    let headroom_len = if headroom_applied { 0 } else { 8 };
+    let headroom_len = if headroom_applied && !beacon_lengths_reset {
+        0
+    } else {
+        8
+    };
     let buffer_len = match encoded_len.checked_add(headroom_len) {
         Some(value) => match value.checked_add(trailer_len) {
             Some(value) if value <= 0x3fff => value,
@@ -1277,6 +1286,23 @@ mod tests {
                 remaining_len: 0x78,
                 layout: 0x2001,
                 buffer_flags: 0xc026_00f8,
+                metadata_len: 0x90,
+            })
+        );
+
+        let peer_removed_refresh = TxSecurityLayoutInput {
+            header_len: 0x18,
+            layout: 0x2240,
+            buffer_flags: 0xc023_02f8,
+            ..refreshed
+        };
+        assert_eq!(
+            strict_tx_security_layout(peer_removed_refresh),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x78,
+                layout: 0x2240,
+                buffer_flags: 0xc026_02f8,
                 metadata_len: 0x90,
             })
         );
