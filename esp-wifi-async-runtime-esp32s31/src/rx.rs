@@ -198,14 +198,20 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
         raw_frame = unsafe { raw_frame.add(8) };
         raw_length -= 8;
     }
-    if raw_length >= 24 {
+    if raw_length >= 2 {
         let raw_bytes = unsafe { core::slice::from_raw_parts(raw_frame, raw_length) };
         crate::ap_power_save::observe_frame(raw_bytes);
-        if raw_bytes[0] & 0x0c == 0 && crate::sta_link::ingest_management_action(raw_bytes) {
+        if raw_length >= 24
+            && raw_bytes[0] & 0x0c == 0
+            && crate::sta_link::ingest_management_action(raw_bytes)
+        {
             unsafe { ppRecycleRxPkt(packet) };
             return;
         }
-        if is_frame_to_local_address(raw_bytes) && crate::wpa2_rx::ingest_sta_80211(raw_bytes) {
+        if raw_length >= 24
+            && is_frame_to_local_address(raw_bytes)
+            && crate::wpa2_rx::ingest_sta_80211(raw_bytes)
+        {
             unsafe { ppRecycleRxPkt(packet) };
             return;
         }

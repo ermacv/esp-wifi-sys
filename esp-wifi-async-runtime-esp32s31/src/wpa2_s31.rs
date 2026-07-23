@@ -267,7 +267,7 @@ pub enum S31Wpa2IoError {
     StaTxDoneCallbackMissing,
     TxLengthOverflow,
     TxPeerNotFound(u32),
-    TxPeerPowerSaveUnsupported,
+    TxPeerPowerSaveUnsupported([u8; 6]),
     CachedTxRuntimeEnabled,
     StaticTxPoolExhausted,
     InvalidTxDescriptor,
@@ -904,7 +904,9 @@ mod target {
         sta_authorized_peer: Option<[u8; 6]>,
         authorized_peers: StaticAuthorizedPeers<K>,
         tx_poisoned: bool,
-        ap_power_save_epoch: usize,
+        ap_active_epoch: usize,
+        ap_ps_poll_epoch: usize,
+        ap_waiting_peer: [u8; 6],
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -934,7 +936,9 @@ mod target {
                 sta_authorized_peer: None,
                 authorized_peers: StaticAuthorizedPeers::new(),
                 tx_poisoned: false,
-                ap_power_save_epoch: 0,
+                ap_active_epoch: 0,
+                ap_ps_poll_epoch: 0,
+                ap_waiting_peer: [0; 6],
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_tx_diagnostic: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -1316,14 +1320,26 @@ mod target {
                 // branch instead of entering its separate scheduling graph.
                 let sleeping = unsafe { node.add(0x2fe).read() != 0 };
                 let flags = unsafe { node.add(0x0c).cast::<u32>().read() };
-                if sleeping || flags & 0x10 != 0 {
+                let peer = [frame[0], frame[1], frame[2], frame[3], frame[4], frame[5]];
+                let ps_poll_credit = crate::ap_power_save::ps_poll_credit_after(
+                    self.ap_ps_poll_epoch,
+                    &peer,
+                );
+                if (sleeping || flags & 0x10 != 0) && ps_poll_credit.is_none() {
                     // `ieee80211_set_tim` is a measured finite leaf in the
                     // pinned archive. The owned command remains with the Rust
                     // radio owner; no vendor PS queue or OSI primitive is
                     // entered.
                     unsafe { ieee80211_set_tim(node, 1) };
                     crate::ap_power_save::record_deferred_transmit();
-                    return Err(S31Wpa2IoError::TxPeerPowerSaveUnsupported);
+                    return Err(S31Wpa2IoError::TxPeerPowerSaveUnsupported(peer));
+                }
+                if let Some(epoch) = ps_poll_credit {
+                    // Consume one peer-bound PS-Poll edge. This bypasses only
+                    // the vendor dynamic PS queue; the ordinary fixed TX path
+                    // below still owns, encrypts, and completes the frame.
+                    self.ap_ps_poll_epoch = epoch;
+                    unsafe { ieee80211_set_tim(node, 0) };
                 }
             }
             if unsafe { core::ptr::addr_of_mut!(g_ic).add(0x258).read() } != 0 {
@@ -1600,15 +1616,22 @@ mod target {
         }
 
         fn prepare_retry(&mut self, error: &Self::Error) -> bool {
-            if *error != S31Wpa2IoError::TxPeerPowerSaveUnsupported {
+            let S31Wpa2IoError::TxPeerPowerSaveUnsupported(peer) = *error else {
                 return false;
-            }
-            self.ap_power_save_epoch = crate::ap_power_save::active_epoch();
+            };
+            self.ap_active_epoch = crate::ap_power_save::active_epoch();
+            self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch();
+            self.ap_waiting_peer = peer;
             true
         }
 
         fn poll_retry_ready(&mut self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
-            crate::ap_power_save::poll_active_edge(self.ap_power_save_epoch, cx)
+            crate::ap_power_save::poll_peer_edge(
+                self.ap_active_epoch,
+                self.ap_ps_poll_epoch,
+                &self.ap_waiting_peer,
+                cx,
+            )
         }
     }
 }
