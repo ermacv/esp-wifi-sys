@@ -148,7 +148,14 @@ fn supported_suite(suite: [u8; 4], selector: u8) -> bool {
 
 /// Validate the allocation-free WPA2-PSK/CCMP subset implemented by the Rust
 /// state machine and return an owned association IE.
-pub fn validate_wpa2_ap_rsn(bytes: &[u8]) -> Result<OwnedRsnIe, Wpa2ApRsnError> {
+struct ValidatedWpa2Rsn {
+    owned: OwnedRsnIe,
+    capabilities: u16,
+}
+
+fn validate_wpa2_ap_rsn_with_capabilities(
+    bytes: &[u8],
+) -> Result<ValidatedWpa2Rsn, Wpa2ApRsnError> {
     let owned = OwnedRsnIe::try_copy(bytes).map_err(|error| match error {
         crate::wpa2_frames::Wpa2FrameError::CapacityExceeded => Wpa2ApRsnError::CapacityExceeded,
         _ => Wpa2ApRsnError::Malformed,
@@ -190,24 +197,34 @@ pub fn validate_wpa2_ap_rsn(bytes: &[u8]) -> Result<OwnedRsnIe, Wpa2ApRsnError> 
         return Err(Wpa2ApRsnError::UnsupportedAkm);
     }
 
-    if offset < body.len() {
+    let capabilities = if offset < body.len() {
         let capabilities = read_u16(body, &mut offset)?;
-        if capabilities & (RSN_CAPABILITY_MFPR | RSN_CAPABILITY_MFPC) != 0 {
+        if capabilities & RSN_CAPABILITY_MFPR != 0 {
             return Err(Wpa2ApRsnError::ManagementFrameProtectionUnsupported);
         }
-    }
+        capabilities
+    } else {
+        0
+    };
     // A zero PMKID count is a standard optional suffix and does not request
     // PMKSA caching. Nonzero lists cannot be honored by this fixed-state
     // authenticator and are rejected before association succeeds.
     if offset < body.len() && read_u16(body, &mut offset)? != 0 {
         return Err(Wpa2ApRsnError::PmkidCachingUnsupported);
     }
-    // A group-management cipher follows only for an MFPC station. PMF was
-    // rejected above because the strict AP has no BIP/IGTK implementation.
+    // A group-management cipher is rejected here. It is unnecessary when the
+    // AP does not advertise MFPC, even if the station reports that capability.
     if offset != body.len() {
         return Err(Wpa2ApRsnError::Malformed);
     }
-    Ok(owned)
+    Ok(ValidatedWpa2Rsn {
+        owned,
+        capabilities,
+    })
+}
+
+pub fn validate_wpa2_ap_rsn(bytes: &[u8]) -> Result<OwnedRsnIe, Wpa2ApRsnError> {
+    validate_wpa2_ap_rsn_with_capabilities(bytes).map(|validated| validated.owned)
 }
 
 pub fn try_receive_wpa2_ap_event() -> Option<Wpa2ApPeerEvent> {
@@ -351,6 +368,7 @@ mod target {
     pub enum Wpa2ApInstallError {
         SupplicantNotInitialized,
         InvalidRsn(Wpa2ApRsnError),
+        ManagementFrameProtectionUnsupported,
         UnexpectedJoinSize(usize),
         UnexpectedInitCallback(usize),
         UnexpectedDeinitCallback(usize),
@@ -741,7 +759,12 @@ mod target {
     pub unsafe fn install_async_wpa2_ap_callbacks(rsn_ie: &[u8]) -> Result<(), Wpa2ApInstallError> {
         const _: () = assert!(mem::size_of::<WpaStationJoinParam>() == 0x28);
 
-        let owned_rsn = validate_wpa2_ap_rsn(rsn_ie).map_err(Wpa2ApInstallError::InvalidRsn)?;
+        let validated_rsn = validate_wpa2_ap_rsn_with_capabilities(rsn_ie)
+            .map_err(Wpa2ApInstallError::InvalidRsn)?;
+        if validated_rsn.capabilities & RSN_CAPABILITY_MFPC != 0 {
+            return Err(Wpa2ApInstallError::ManagementFrameProtectionUnsupported);
+        }
+        let owned_rsn = validated_rsn.owned;
 
         let join_size = (__esp_hostap_sta_join_end as *const () as usize)
             .wrapping_sub(__esp_hostap_sta_join as *const () as usize);
@@ -847,6 +870,12 @@ mod tests {
     #[test]
     fn accepts_wpa2_psk_ccmp() {
         let ie = rsn(4, 2, 0);
+        assert_eq!(validate_wpa2_ap_rsn(&ie).unwrap().as_bytes(), &ie);
+    }
+
+    #[test]
+    fn accepts_optional_station_mfp_capability() {
+        let ie = rsn(4, 2, RSN_CAPABILITY_MFPC);
         assert_eq!(validate_wpa2_ap_rsn(&ie).unwrap().as_bytes(), &ie);
     }
 
