@@ -268,6 +268,10 @@ pub fn strict_management_tx_done_snapshot() -> StrictManagementTxDoneSnapshot {
     }
 }
 
+const fn is_ap_deauthentication_completion(frame_control: u16, descriptor_security: u32) -> bool {
+    frame_control & 0x00fc == 0x00c0 && descriptor_security & 0x00c0_0000 == 0x0040_0000
+}
+
 #[cfg(target_arch = "riscv32")]
 unsafe fn initial_ap_is_active() -> bool {
     let ic = ptr::addr_of!(g_ic).cast::<u8>();
@@ -385,6 +389,11 @@ unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
         // state machines in the stock callback. They require explicit async
         // commands and are not allowed to run implicitly from TX completion.
         0xd0 if crate::sta_link::complete_owned_action_management() => Ok(()),
+        // AP deauthentication carries the direction bit recovered from the
+        // pinned callback. The static AP node remains Rust-owned until an
+        // explicit peer-removal command; TX completion itself has no required
+        // hardware side effect and must not terminate the radio owner.
+        0xc0 if is_ap_deauthentication_completion(frame_control, descriptor_security) => Ok(()),
         0xa0 | 0xc0 | 0xd0 => Err(()),
         _ => {
             crate::sta_link::management_tx_done(
@@ -1148,5 +1157,18 @@ fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
     match bit {
         CALLBACK_STA_EAPOL => Some(sta_eapol_txdone_cb),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_ap_deauthentication_completion;
+
+    #[test]
+    fn only_ap_direction_deauthentication_is_completion_only() {
+        assert!(is_ap_deauthentication_completion(0x00c0, 0x0114_0000));
+        assert!(is_ap_deauthentication_completion(0x00c0, 0x0414_0000));
+        assert!(!is_ap_deauthentication_completion(0x00c0, 0x0004_0000));
+        assert!(!is_ap_deauthentication_completion(0x00a0, 0x0114_0000));
     }
 }

@@ -286,6 +286,9 @@ mod target {
         );
 
         fn cnx_node_search(peer: *const u8) -> *mut u8;
+        #[link_name = "__real_cnx_node_alloc"]
+        fn initialization_cnx_node_alloc(peer: *const u8) -> *mut u8;
+        fn cnx_bss_init(node: *mut u8, interface: *mut u8);
         fn ieee80211_search_node(interface: u32, frame: *const u8, error: *mut u32) -> *mut u8;
         fn ieee80211_is_tx_allowed(node: *mut u8, authentication_frame: bool) -> bool;
         fn esf_buf_alloc(frame: *const u8, kind: u32, length: u32) -> *mut u8;
@@ -335,6 +338,36 @@ mod target {
     const NODE_ASSOCIATION_ID_OFFSET: usize = 0x26;
     const TX_CACHE_ENABLED_OFFSET: usize = 0x258;
     const MAX_CONNECTION_INDEX_OFFSET: usize = 0x3f6;
+    const AP_NODE_LEN: usize = 0x510;
+    const AP_NODE_HARDWARE_INDEX_OFFSET: usize = 0x134;
+    const AP_NODE_BITMAP_OFFSET: usize = 0x118;
+
+    #[repr(C, align(4))]
+    struct StaticApNode {
+        bytes: [u8; AP_NODE_LEN],
+    }
+
+    struct StaticApNodeSlot {
+        claimed: AtomicBool,
+        node: UnsafeCell<StaticApNode>,
+    }
+
+    impl StaticApNodeSlot {
+        const fn new() -> Self {
+            Self {
+                claimed: AtomicBool::new(false),
+                node: UnsafeCell::new(StaticApNode {
+                    bytes: [0; AP_NODE_LEN],
+                }),
+            }
+        }
+    }
+
+    unsafe impl Sync for StaticApNodeSlot {}
+
+    #[link_section = ".critical.bss.wifi_strict.ap_nodes"]
+    static AP_NODES: [StaticApNodeSlot; WPA2_AP_ASSOC_CAPACITY] =
+        [const { StaticApNodeSlot::new() }; WPA2_AP_ASSOC_CAPACITY];
 
     unsafe fn set_search_error(error: *mut u32, value: u32) {
         if !error.is_null() {
@@ -396,6 +429,64 @@ mod target {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_cnx_node_search(peer: *const u8) -> *mut u8 {
         strict_ap_node_search(peer)
+    }
+
+    /// Allocate an AP connection node from the fixed SRAM pool.
+    ///
+    /// The pinned allocator requests `0x510` bytes through the OSI heap on the
+    /// first Open System Authentication frame. Strict mode instead claims the
+    /// node corresponding to the bounded vendor table index, initializes it
+    /// with the same finite constructor, and publishes the pointer only after
+    /// initialization is complete.
+    #[no_mangle]
+    pub unsafe extern "C" fn __wrap_cnx_node_alloc(peer: *const u8) -> *mut u8 {
+        if !crate::critical::strict_wifi_hart_armed() {
+            return initialization_cnx_node_alloc(peer);
+        }
+        if peer.is_null()
+            || peer.read() & 1 != 0
+            || !crate::critical::on_strict_wifi_hart()
+            || !crate::context::in_radio_context()
+        {
+            return ptr::null_mut();
+        }
+        let interface = ptr::addr_of_mut!(g_ic)
+            .add(AP_INTERFACE_OFFSET)
+            .cast::<*mut u8>()
+            .read_volatile();
+        let config = ptr::addr_of_mut!(g_wifi_nvs).read_volatile();
+        if interface.is_null() || config.is_null() {
+            return ptr::null_mut();
+        }
+
+        let configured_limit = usize::from(config.add(MAX_CONNECTION_INDEX_OFFSET).read_volatile());
+        let mut index = 1_usize;
+        while index <= WPA2_AP_ASSOC_CAPACITY && index <= configured_limit {
+            let table_entry = interface
+                .add(INTERFACE_PRIMARY_NODE_OFFSET + index * size_of::<*mut u8>())
+                .cast::<*mut u8>();
+            if table_entry.read_volatile().is_null() {
+                let slot = &AP_NODES[index - 1];
+                if slot
+                    .claimed
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    return ptr::null_mut();
+                }
+                let node = slot.node.get().cast::<u8>();
+                cnx_bss_init(node, interface);
+                node.add(AP_NODE_HARDWARE_INDEX_OFFSET)
+                    .write((index + 7) as u8);
+                ptr::copy_nonoverlapping(peer, node.add(4), 6);
+                table_entry.write_volatile(node);
+                let bitmap = interface.add(AP_NODE_BITMAP_OFFSET).cast::<u32>();
+                bitmap.write_volatile(bitmap.read_volatile() | (1_u32 << index));
+                return node;
+            }
+            index += 1;
+        }
+        ptr::null_mut()
     }
 
     /// STA/AP-only replacement for the path-insensitive vendor node lookup.
