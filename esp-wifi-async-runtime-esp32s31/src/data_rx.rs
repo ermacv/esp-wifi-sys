@@ -18,6 +18,11 @@ const WIFI_DATA_RX_COPY_CAPACITY: usize = 8;
 const WIFI_DATA_RX_COPY_CAPACITY: usize = WIFI_DATA_RX_CAPACITY;
 #[cfg(target_arch = "riscv32")]
 const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = 512;
+// Reserve one kind-7 object beyond the complete 16-frame reorder window:
+// 15 network owners + 16 retained MPDUs + 1 gap-closing input = 32.
+#[cfg(target_arch = "riscv32")]
+const WIFI_DATA_RX_ZERO_COPY_LIMIT: usize =
+    crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY - crate::rx_ampdu::RX_AMPDU_SLOT_CAPACITY - 1;
 #[cfg(not(target_arch = "riscv32"))]
 const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = WIFI_DATA_RX_FRAME_CAPACITY;
 
@@ -272,6 +277,17 @@ fn enqueue_token(token: RxSlotToken) -> bool {
 }
 
 #[cfg(target_arch = "riscv32")]
+fn reject_owned_token_at_capacity(token: RxSlotToken) -> bool {
+    RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
+    let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
+    record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
+    REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+    RX_REJECTED_SLOTS_FULL.fetch_add(1, Ordering::Relaxed);
+    drop(token);
+    false
+}
+
+#[cfg(target_arch = "riscv32")]
 mod target {
     use core::ffi::c_void;
 
@@ -338,14 +354,19 @@ mod target {
             // Transfer the live kind-7 object into the bounded safe channel.
             // Its token releases the one Rust pool bit directly on Drop, so
             // no vendor mutex or task identity crosses into embassy-net.
-            enqueue_token(RxSlotToken {
+            let token = RxSlotToken {
                 interface,
                 storage: RxStorage::LargeEsf {
                     buffer: buffer.cast(),
                     length,
                     frame: vendor_buffer.cast(),
                 },
-            })
+            };
+            if RX_CHANNEL.len() >= WIFI_DATA_RX_ZERO_COPY_LIMIT {
+                reject_owned_token_at_capacity(token)
+            } else {
+                enqueue_token(token)
+            }
         } else {
             // Small vendor-static frames cannot be returned to their intrusive
             // free list from an arbitrary network task. Copy them into the
