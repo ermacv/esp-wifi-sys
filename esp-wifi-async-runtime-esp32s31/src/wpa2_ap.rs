@@ -112,6 +112,31 @@ pub struct DeferredApManagementSnapshot {
     pub capacity: usize,
 }
 
+pub const AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApAssociationResponseSnapshot {
+    pub captured: bool,
+    pub subtype: u8,
+    pub status: u16,
+    pub body_len: usize,
+    pub truncated: bool,
+    pub body: [u8; AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY],
+}
+
+impl ApAssociationResponseSnapshot {
+    const fn empty() -> Self {
+        Self {
+            captured: false,
+            subtype: 0,
+            status: 0,
+            body_len: 0,
+            truncated: false,
+            body: [0; AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY],
+        }
+    }
+}
+
 fn rsn_error_code(error: Wpa2ApRsnError) -> u8 {
     match error {
         Wpa2ApRsnError::Malformed => 1,
@@ -523,6 +548,29 @@ mod target {
     static DEFERRED_AP_MANAGEMENT_CANCELLED: AtomicUsize = AtomicUsize::new(0);
     static DEFERRED_AP_MANAGEMENT_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
+    struct ApAssociationResponseCapture {
+        state: AtomicU8,
+        value: UnsafeCell<ApAssociationResponseSnapshot>,
+    }
+
+    impl ApAssociationResponseCapture {
+        const fn new() -> Self {
+            Self {
+                state: AtomicU8::new(0),
+                value: UnsafeCell::new(ApAssociationResponseSnapshot::empty()),
+            }
+        }
+    }
+
+    // The serialized radio owner writes the first complete response, then
+    // publishes state=2 with Release. Diagnostic readers only copy after an
+    // Acquire load observes that state.
+    unsafe impl Sync for ApAssociationResponseCapture {}
+
+    #[link_section = ".critical.bss.wifi_strict.ap_assoc_response_capture"]
+    static AP_ASSOCIATION_RESPONSE_CAPTURE: ApAssociationResponseCapture =
+        ApAssociationResponseCapture::new();
+
     unsafe extern "C" {
         static mut g_ic: u8;
         static mut wpa_cb: *mut c_void;
@@ -688,6 +736,7 @@ mod target {
         if buffer.is_null() {
             return false;
         }
+        capture_ap_association_response(buffer, subtype, u16::from(status));
         if status != 0 {
             // Exact side effect of the pinned `ieee80211_send_mgmt` response
             // branch: clear the association-pending bit after an error.
@@ -697,6 +746,48 @@ mod target {
         ieee80211_set_tx_desc(node, buffer, 7, 0, 0);
         linked_ieee80211_set_tx_pti(buffer, 6);
         linked_ieee80211_mgmt_output(node, buffer, subtype) == 0
+    }
+
+    unsafe fn capture_ap_association_response(buffer: *mut u8, subtype: u8, status: u16) {
+        if AP_ASSOCIATION_RESPONSE_CAPTURE
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let mut snapshot = ApAssociationResponseSnapshot {
+            captured: true,
+            subtype,
+            status,
+            ..ApAssociationResponseSnapshot::empty()
+        };
+        let header_len = usize::from(buffer.add(0x14).cast::<u16>().read_unaligned());
+        let body_len = usize::from(buffer.add(0x16).cast::<u16>().read_unaligned());
+        let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
+        let header = if first_buffer.is_null() {
+            ptr::null_mut()
+        } else {
+            first_buffer.add(4).cast::<*mut u8>().read_unaligned()
+        };
+        if header_len == 24 && !header.is_null() {
+            snapshot.body_len = body_len;
+            snapshot.truncated = body_len > snapshot.body.len();
+            let copy_len = body_len.min(snapshot.body.len());
+            ptr::copy_nonoverlapping(
+                header.add(header_len),
+                snapshot.body.as_mut_ptr(),
+                copy_len,
+            );
+        }
+        AP_ASSOCIATION_RESPONSE_CAPTURE
+            .value
+            .get()
+            .write(snapshot);
+        AP_ASSOCIATION_RESPONSE_CAPTURE
+            .state
+            .store(2, Ordering::Release);
     }
 
     pub(crate) fn management_link_wrappers_active() -> bool {
@@ -1569,6 +1660,14 @@ mod target {
         }
     }
 
+    pub fn ap_association_response_snapshot() -> ApAssociationResponseSnapshot {
+        if AP_ASSOCIATION_RESPONSE_CAPTURE.state.load(Ordering::Acquire) != 2 {
+            ApAssociationResponseSnapshot::empty()
+        } else {
+            unsafe { *AP_ASSOCIATION_RESPONSE_CAPTURE.value.get() }
+        }
+    }
+
     pub(crate) fn wpa2_ap_peer_association_epoch(peer: &[u8; 6]) -> Option<usize> {
         PEERS.iter().find_map(|slot| {
             (slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer })
@@ -1579,8 +1678,9 @@ mod target {
 
 #[cfg(target_arch = "riscv32")]
 pub use target::{
-    async_wpa2_ap_callbacks_installed, deferred_ap_management_snapshot,
-    install_async_wpa2_ap_callbacks, management_tx_rejection_snapshot, Wpa2ApInstallError,
+    ap_association_response_snapshot, async_wpa2_ap_callbacks_installed,
+    deferred_ap_management_snapshot, install_async_wpa2_ap_callbacks,
+    management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{

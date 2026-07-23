@@ -292,13 +292,15 @@ pub use wpa2_aes::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_ap::{
-    async_wpa2_ap_callbacks_installed, deferred_ap_management_snapshot,
-    install_async_wpa2_ap_callbacks, management_tx_rejection_snapshot, Wpa2ApInstallError,
+    ap_association_response_snapshot, async_wpa2_ap_callbacks_installed,
+    deferred_ap_management_snapshot, install_async_wpa2_ap_callbacks,
+    management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 pub use wpa2_ap::{
     receive_wpa2_ap_event, rejected_wpa2_ap_events, try_receive_wpa2_ap_event,
-    validate_wpa2_ap_rsn, wpa2_ap_join_snapshot, DeferredApManagementSnapshot,
-    ManagementTxRejectionSnapshot, Wpa2ApJoinSnapshot, Wpa2ApPeerEvent, Wpa2ApRsnError,
+    validate_wpa2_ap_rsn, wpa2_ap_join_snapshot, ApAssociationResponseSnapshot,
+    DeferredApManagementSnapshot, ManagementTxRejectionSnapshot, Wpa2ApJoinSnapshot,
+    Wpa2ApPeerEvent, Wpa2ApRsnError, AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY,
     WPA2_AP_ASSOC_CAPACITY,
 };
 pub use wpa2_ap_async::{
