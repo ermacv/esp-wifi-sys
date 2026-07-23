@@ -573,7 +573,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
         return Err(TxDoneError::InvalidBeaconFrame);
     }
     let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
-    let layout = crate::tx_security::strict_ap_beacon_completion_layout(
+    let layout = crate::tx_security::strict_persistent_frame_completion_layout(
         crate::tx_security::TxSecurityLayoutInput {
             header_len: lengths as u16,
             remaining_len: (lengths >> 16) as u16,
@@ -586,9 +586,17 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     )
     .ok_or(TxDoneError::InvalidBeaconFrame)?;
     frame
-        .add(0x16)
+        .add(0x14)
+        .cast::<u32>()
+        .write_unaligned(u32::from(layout.header_len) | (u32::from(layout.remaining_len) << 16));
+    frame
+        .add(0x24)
         .cast::<u16>()
-        .write_unaligned(layout.remaining_len);
+        .write_unaligned(layout.layout);
+    first_buffer
+        .add(4)
+        .cast::<*mut u8>()
+        .write_unaligned(metadata.add(8));
     first_buffer
         .cast::<u32>()
         .write_unaligned(layout.buffer_flags);
@@ -600,9 +608,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     // handing the persistent buffer to PP and refuses to reuse either beacon
     // buffer while it remains set. Hardware is complete at this boundary, so
     // publish the buffer as reusable before the callback arms the next TBTT.
-    descriptor
-        .cast::<u32>()
-        .write(descriptor_flags & !DESCRIPTOR_PERSISTENT_BIT);
+    descriptor.cast::<u32>().write(layout.descriptor_flags);
     __wrap_ieee80211_hostapd_beacon_txcb(frame.cast());
     if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
         return Err(TxDoneError::StrictCallbackFailed);
