@@ -12,6 +12,7 @@ pub const WPA2_AP_ASSOC_CAPACITY: usize = 8;
 const RSN_ELEMENT_ID: u8 = 0x30;
 const RSN_VERSION: u16 = 1;
 const RSN_CAPABILITY_MFPR: u16 = 1 << 6;
+const RSN_CAPABILITY_MFPC: u16 = 1 << 7;
 const RSN_OUI: [u8; 3] = [0x00, 0x0f, 0xac];
 const RSN_CIPHER_CCMP: u8 = 4;
 const RSN_AKM_PSK: u8 = 2;
@@ -24,7 +25,8 @@ pub enum Wpa2ApRsnError {
     UnsupportedGroupCipher,
     UnsupportedPairwiseCipher,
     UnsupportedAkm,
-    ManagementFrameProtectionRequired,
+    ManagementFrameProtectionUnsupported,
+    PmkidCachingUnsupported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,7 +86,8 @@ fn rsn_error_code(error: Wpa2ApRsnError) -> u8 {
         Wpa2ApRsnError::UnsupportedGroupCipher => 4,
         Wpa2ApRsnError::UnsupportedPairwiseCipher => 5,
         Wpa2ApRsnError::UnsupportedAkm => 6,
-        Wpa2ApRsnError::ManagementFrameProtectionRequired => 7,
+        Wpa2ApRsnError::ManagementFrameProtectionUnsupported => 7,
+        Wpa2ApRsnError::PmkidCachingUnsupported => 8,
     }
 }
 
@@ -96,7 +99,8 @@ fn rsn_error_from_code(code: u8) -> Option<Wpa2ApRsnError> {
         4 => Some(Wpa2ApRsnError::UnsupportedGroupCipher),
         5 => Some(Wpa2ApRsnError::UnsupportedPairwiseCipher),
         6 => Some(Wpa2ApRsnError::UnsupportedAkm),
-        7 => Some(Wpa2ApRsnError::ManagementFrameProtectionRequired),
+        7 => Some(Wpa2ApRsnError::ManagementFrameProtectionUnsupported),
+        8 => Some(Wpa2ApRsnError::PmkidCachingUnsupported),
         _ => None,
     }
 }
@@ -188,13 +192,18 @@ pub fn validate_wpa2_ap_rsn(bytes: &[u8]) -> Result<OwnedRsnIe, Wpa2ApRsnError> 
 
     if offset < body.len() {
         let capabilities = read_u16(body, &mut offset)?;
-        if capabilities & RSN_CAPABILITY_MFPR != 0 {
-            return Err(Wpa2ApRsnError::ManagementFrameProtectionRequired);
+        if capabilities & (RSN_CAPABILITY_MFPR | RSN_CAPABILITY_MFPC) != 0 {
+            return Err(Wpa2ApRsnError::ManagementFrameProtectionUnsupported);
         }
     }
-    // PMKSA caching and group-management ciphers are outside this fixed
-    // WPA2-only profile. Do not silently accept data the state machine will
-    // not consume.
+    // A zero PMKID count is a standard optional suffix and does not request
+    // PMKSA caching. Nonzero lists cannot be honored by this fixed-state
+    // authenticator and are rejected before association succeeds.
+    if offset < body.len() && read_u16(body, &mut offset)? != 0 {
+        return Err(Wpa2ApRsnError::PmkidCachingUnsupported);
+    }
+    // A group-management cipher follows only for an MFPC station. PMF was
+    // rejected above because the strict AP has no BIP/IGTK implementation.
     if offset != body.len() {
         return Err(Wpa2ApRsnError::Malformed);
     }
@@ -853,7 +862,26 @@ mod tests {
         );
         assert_eq!(
             validate_wpa2_ap_rsn(&rsn(4, 2, RSN_CAPABILITY_MFPR)),
-            Err(Wpa2ApRsnError::ManagementFrameProtectionRequired)
+            Err(Wpa2ApRsnError::ManagementFrameProtectionUnsupported)
+        );
+    }
+
+    #[test]
+    fn accepts_explicit_zero_pmkid_count_and_rejects_nonzero_lists() {
+        let mut zero_pmkid = [0_u8; 24];
+        zero_pmkid[..22].copy_from_slice(&rsn(4, 2, 0));
+        zero_pmkid[1] = 22;
+        assert_eq!(
+            validate_wpa2_ap_rsn(&zero_pmkid)
+                .unwrap()
+                .as_bytes(),
+            &zero_pmkid
+        );
+
+        zero_pmkid[22..24].copy_from_slice(&1_u16.to_le_bytes());
+        assert_eq!(
+            validate_wpa2_ap_rsn(&zero_pmkid),
+            Err(Wpa2ApRsnError::PmkidCachingUnsupported)
         );
     }
 
