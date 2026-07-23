@@ -820,7 +820,8 @@ node power-save bit nor re-enters `ieee80211_mgmt_output`. Repeated requests for
 one peer update the owned dialog body instead of growing a linked queue. TIM
 publication is another finite Rust leaf: the AID at node offset `0x26` selects
 a bit in the virtual bitmap at `g_ic + 0x1b7`, while `g_ic + 0x1b6` bit zero
-mirrors the BSS/self-node state.
+mirrors the BSS/self-node state. The same leaf is shared by deferred AP data;
+no strict Rust TX path calls the vendor `ieee80211_set_tim`.
 The neighboring `ieee80211_set_tx_pti` wrapper replaces its OSI-table call with
 the exact bounded success operation from the pinned coexistence archive: one
 volatile byte read from exported `coex_pti_tab[48]` and two descriptor stores.

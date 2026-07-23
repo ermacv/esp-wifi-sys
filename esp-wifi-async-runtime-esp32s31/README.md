@@ -571,8 +571,9 @@ fixed-pool frame, reproduces the bounded AP/action header and descriptor tail,
 runs the recovered finite TIM bitmap update in Rust, and enters `ic_tx_pkt`
 directly. It never calls `ieee80211_set_tim`, links into
 `ieee80211_pwrsave` or `pwrsave_flushq`, re-enters
-`ieee80211_mgmt_output`, or changes the peer's live power-save flag. A failed
-data post poisons the backend until Wi-Fi deinit
+`ieee80211_mgmt_output`, or changes the peer's live power-save flag. Deferred
+AP data uses the same finite Rust TIM leaf. A failed data post poisons the
+backend until Wi-Fi deinit
 rather than retrying an ambiguously owned buffer. A STA transmission is
 rejected until the async EAPOL TX-done callback is active.
 Pairwise and group CCMP installation bypass both stock allocating wrappers: the

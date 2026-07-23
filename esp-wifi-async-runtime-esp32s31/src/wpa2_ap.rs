@@ -820,7 +820,7 @@ mod target {
         slot.state.store(DEFERRED_SLOT_EMPTY, Ordering::Release);
     }
 
-    unsafe fn strict_update_ap_tim(node: *mut u8, set: bool) -> bool {
+    pub(crate) unsafe fn strict_update_ap_tim(node: *mut u8, set: bool) -> bool {
         if node.is_null() {
             return false;
         }
@@ -1584,7 +1584,8 @@ pub use target::{
 };
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
-    management_link_wrappers_active, poll_deferred_ap_management, wpa2_ap_peer_association_epoch,
+    management_link_wrappers_active, poll_deferred_ap_management, strict_update_ap_tim,
+    wpa2_ap_peer_association_epoch,
 };
 
 #[cfg(test)]

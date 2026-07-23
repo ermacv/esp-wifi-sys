@@ -419,7 +419,6 @@ mod target {
         fn initialization_cnx_node_alloc(peer: *const u8) -> *mut u8;
         fn cnx_bss_init(node: *mut u8, interface: *mut u8);
         fn ieee80211_search_node(interface: u32, frame: *const u8, error: *mut u32) -> *mut u8;
-        fn ieee80211_set_tim(node: *mut u8, set: u32) -> i32;
         fn ieee80211_is_tx_allowed(node: *mut u8, authentication_frame: bool) -> bool;
         fn esf_buf_alloc(frame: *const u8, kind: u32, length: u32) -> *mut u8;
         fn ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
@@ -1420,11 +1419,10 @@ mod target {
                     })
                     .flatten();
                 if (sleeping || flags & 0x10 != 0) && ps_poll_credit.is_none() {
-                    // `ieee80211_set_tim` is a measured finite leaf in the
-                    // pinned archive. The owned command remains with the Rust
-                    // radio owner; no vendor PS queue or OSI primitive is
-                    // entered.
-                    unsafe { ieee80211_set_tim(node, 1) };
+                    // Publish the exact recovered AID bit through the finite
+                    // Rust leaf. The owned command remains with the Rust radio
+                    // owner; no vendor PS queue or OSI primitive is entered.
+                    unsafe { crate::wpa2_ap::strict_update_ap_tim(node, true) };
                     crate::ap_power_save::record_deferred_transmit();
                     return Err(S31Wpa2IoError::TxPeerPowerSaveUnsupported(peer));
                 }
@@ -1433,7 +1431,7 @@ mod target {
                     // the vendor dynamic PS queue; the ordinary fixed TX path
                     // below still owns, encrypts, and completes the frame.
                     self.ap_ps_poll_epoch = epoch;
-                    unsafe { ieee80211_set_tim(node, 0) };
+                    unsafe { crate::wpa2_ap::strict_update_ap_tim(node, false) };
                 }
                 self.ap_retry_armed = false;
             }
