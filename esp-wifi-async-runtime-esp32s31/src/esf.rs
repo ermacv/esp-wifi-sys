@@ -28,9 +28,9 @@ const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
 // profiles can spend more internal SRAM here and use two independent native
 // words. This deliberately avoids emulated 64-bit atomics and critical
 // sections in the interrupt-facing allocator.
-#[cfg(feature = "large-rx-pool-49")]
-const LARGE_RX_SLOT_CAPACITY: usize = 49;
-#[cfg(not(feature = "large-rx-pool-49"))]
+#[cfg(feature = "large-rx-pool-48")]
+const LARGE_RX_SLOT_CAPACITY: usize = 48;
+#[cfg(not(feature = "large-rx-pool-48"))]
 const LARGE_RX_SLOT_CAPACITY: usize = 32;
 const LARGE_RX_CLAIM_WORD_BITS: usize = usize::BITS as usize;
 const LARGE_RX_CLAIM_WORDS: usize =

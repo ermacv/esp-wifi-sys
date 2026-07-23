@@ -9,9 +9,9 @@
 // enables a deeper kind-7 pool for the async network channel.
 pub const RX_BLOCK_ACK_MAX_WINDOW: u16 = 16;
 pub const RX_AMPDU_SLOT_CAPACITY: usize = RX_BLOCK_ACK_MAX_WINDOW as usize;
-#[cfg(feature = "large-rx-pool-49")]
-pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 49;
-#[cfg(not(feature = "large-rx-pool-49"))]
+#[cfg(feature = "large-rx-pool-48")]
+pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 48;
+#[cfg(not(feature = "large-rx-pool-48"))]
 pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 32;
 const SEQUENCE_MASK: u16 = 0x0fff;
 const SEQUENCE_HALF_RANGE: u16 = 0x0800;
