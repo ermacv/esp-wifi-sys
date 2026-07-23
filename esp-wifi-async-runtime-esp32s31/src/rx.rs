@@ -58,9 +58,17 @@ pub struct StrictRxSnapshot {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BlockAckRxSnapshot {
     pub requests: usize,
+    pub request_tids: [usize; 16],
     pub responses: usize,
     pub delba: usize,
     pub to_local: usize,
+    pub last_request_dialog_token: usize,
+    pub last_request_tid: usize,
+    pub last_request_immediate: bool,
+    pub last_request_amsdu: bool,
+    pub last_request_window: usize,
+    pub last_request_timeout_tu: usize,
+    pub last_request_starting_sequence: usize,
     pub last_action: usize,
     pub last_dialog_token: usize,
     pub last_tid: usize,
@@ -91,9 +99,17 @@ struct Counters {
 
 struct BlockAckCounters {
     requests: AtomicUsize,
+    request_tids: [AtomicUsize; 16],
     responses: AtomicUsize,
     delba: AtomicUsize,
     to_local: AtomicUsize,
+    last_request_dialog_token: AtomicUsize,
+    last_request_tid: AtomicUsize,
+    last_request_immediate: AtomicUsize,
+    last_request_amsdu: AtomicUsize,
+    last_request_window: AtomicUsize,
+    last_request_timeout_tu: AtomicUsize,
+    last_request_starting_sequence: AtomicUsize,
     last_action: AtomicUsize,
     last_dialog_token: AtomicUsize,
     last_tid: AtomicUsize,
@@ -150,9 +166,17 @@ impl BlockAckCounters {
     const fn new() -> Self {
         Self {
             requests: AtomicUsize::new(0),
+            request_tids: [const { AtomicUsize::new(0) }; 16],
             responses: AtomicUsize::new(0),
             delba: AtomicUsize::new(0),
             to_local: AtomicUsize::new(0),
+            last_request_dialog_token: AtomicUsize::new(0),
+            last_request_tid: AtomicUsize::new(0),
+            last_request_immediate: AtomicUsize::new(0),
+            last_request_amsdu: AtomicUsize::new(0),
+            last_request_window: AtomicUsize::new(0),
+            last_request_timeout_tu: AtomicUsize::new(0),
+            last_request_starting_sequence: AtomicUsize::new(0),
             last_action: AtomicUsize::new(0),
             last_dialog_token: AtomicUsize::new(0),
             last_tid: AtomicUsize::new(0),
@@ -169,9 +193,21 @@ impl BlockAckCounters {
     fn snapshot(&self) -> BlockAckRxSnapshot {
         BlockAckRxSnapshot {
             requests: self.requests.load(Ordering::Acquire),
+            request_tids: core::array::from_fn(|index| {
+                self.request_tids[index].load(Ordering::Acquire)
+            }),
             responses: self.responses.load(Ordering::Acquire),
             delba: self.delba.load(Ordering::Acquire),
             to_local: self.to_local.load(Ordering::Acquire),
+            last_request_dialog_token: self.last_request_dialog_token.load(Ordering::Acquire),
+            last_request_tid: self.last_request_tid.load(Ordering::Acquire),
+            last_request_immediate: self.last_request_immediate.load(Ordering::Acquire) != 0,
+            last_request_amsdu: self.last_request_amsdu.load(Ordering::Acquire) != 0,
+            last_request_window: self.last_request_window.load(Ordering::Acquire),
+            last_request_timeout_tu: self.last_request_timeout_tu.load(Ordering::Acquire),
+            last_request_starting_sequence: self
+                .last_request_starting_sequence
+                .load(Ordering::Acquire),
             last_action: self.last_action.load(Ordering::Acquire),
             last_dialog_token: self.last_dialog_token.load(Ordering::Acquire),
             last_tid: self.last_tid.load(Ordering::Acquire),
@@ -473,6 +509,27 @@ fn observe_block_ack_action(frame: &[u8]) {
             starting_sequence,
         } => {
             BLOCK_ACK_COUNTERS
+                .last_request_dialog_token
+                .store(usize::from(dialog_token), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_tid
+                .store(usize::from(tid), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_immediate
+                .store(usize::from(immediate), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_amsdu
+                .store(usize::from(amsdu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_window
+                .store(usize::from(window), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_timeout_tu
+                .store(usize::from(timeout_tu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_request_starting_sequence
+                .store(usize::from(starting_sequence), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
                 .last_dialog_token
                 .store(usize::from(dialog_token), Ordering::Relaxed);
             BLOCK_ACK_COUNTERS
@@ -500,6 +557,7 @@ fn observe_block_ack_action(frame: &[u8]) {
                 .last_initiator
                 .store(0, Ordering::Relaxed);
             BLOCK_ACK_COUNTERS.last_action.store(1, Ordering::Release);
+            BLOCK_ACK_COUNTERS.request_tids[usize::from(tid)].fetch_add(1, Ordering::Relaxed);
             BLOCK_ACK_COUNTERS.requests.fetch_add(1, Ordering::Relaxed);
         }
         crate::tx_ampdu::BlockAckAction::AddbaResponse {

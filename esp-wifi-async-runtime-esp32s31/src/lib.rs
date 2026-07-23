@@ -53,6 +53,7 @@ pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;
 mod rx_descriptor;
+pub mod rx_ampdu;
 pub mod scan;
 mod sta_link;
 pub mod strict;
@@ -197,6 +198,10 @@ pub use policy::{
 pub use queue::{PushError, RadioQueue, RadioQueueSnapshot};
 pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
 pub use runtime::WifiRuntimeFuture;
+pub use rx_ampdu::{
+    RxAmpduError, RxAmpduMpdu, RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY,
+    RX_BLOCK_ACK_MAX_WINDOW,
+};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{
     block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
