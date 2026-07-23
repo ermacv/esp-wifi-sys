@@ -634,10 +634,11 @@ mod target {
         RateCount = 13,
         RateValue = 14,
         ChannelUnavailable = 15,
-        SecondaryChannel = 16,
         FrameAllocation = 17,
         ResponseParameters = 18,
         ManagementOutput = 19,
+        BandwidthStateUnavailable = 20,
+        UnsupportedBandwidth = 21,
     }
 
     struct AssociationRejectionDiagnostics {
@@ -680,6 +681,7 @@ mod target {
 
     unsafe extern "C" {
         static mut g_ic: u8;
+        static mut g_wifi_nvs: *mut u8;
         static mut wpa_cb: *mut c_void;
         fn hostap_init() -> *mut c_void;
         fn hostap_deinit(context: *mut c_void) -> bool;
@@ -989,9 +991,11 @@ mod target {
             }
         }
 
-        // The pinned channel-manager getters are finite pointer leaves. A
-        // zero secondary-channel byte is the live proof that this exact
-        // response template describes the configured HT20 profile.
+        // The pinned channel-manager getter is a finite pointer leaf. The
+        // second byte is only a secondary-channel candidate: net80211 can
+        // recompute it after a station leaves even while the configured AP
+        // bandwidth remains 20 MHz. The authoritative AP bandwidth returned
+        // by `wifi_get_bw_process` is the byte at g_wifi_nvs+0x3fb.
         let channel = chm_get_home_channel();
         if channel.is_null() {
             return reject_association_construction(
@@ -999,9 +1003,16 @@ mod target {
                 node,
             );
         }
-        if channel.add(1).read() != 0 {
+        let wifi_nvs = ptr::addr_of!(g_wifi_nvs).read();
+        if wifi_nvs.is_null() {
             return reject_association_construction(
-                AssociationRejectionReason::SecondaryChannel,
+                AssociationRejectionReason::BandwidthStateUnavailable,
+                node,
+            );
+        }
+        if wifi_nvs.add(0x3fb).read() != 0 {
+            return reject_association_construction(
+                AssociationRejectionReason::UnsupportedBandwidth,
                 node,
             );
         }
