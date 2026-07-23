@@ -5,11 +5,11 @@
 //! protocol ownership in a fixed array of slot indices. Raw packet pointers
 //! stay outside the state machine.
 
-// The strict kind-7 ESF pool currently owns sixteen internal-SRAM slots.
-// Never advertise a receive window larger than the storage that can remain
-// outstanding while a sequence gap is open.
+// Keep half of the 32-object strict kind-7 pool available to frames already
+// transferred into the network channel while a sequence gap remains open.
 pub const RX_BLOCK_ACK_MAX_WINDOW: u16 = 16;
 pub const RX_AMPDU_SLOT_CAPACITY: usize = RX_BLOCK_ACK_MAX_WINDOW as usize;
+pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 32;
 const SEQUENCE_MASK: u16 = 0x0fff;
 const SEQUENCE_HALF_RANGE: u16 = 0x0800;
 
@@ -141,7 +141,7 @@ impl RxBlockAckReorder {
         if frame.sequence > SEQUENCE_MASK {
             return Err(RxAmpduError::InvalidSequence(frame.sequence));
         }
-        if usize::from(frame.slot) >= RX_AMPDU_SLOT_CAPACITY {
+        if usize::from(frame.slot) >= RX_ESF_SLOT_ID_CAPACITY {
             return Err(RxAmpduError::InvalidSlot(frame.slot));
         }
         if self
@@ -345,6 +345,19 @@ mod tests {
         assert_eq!(
             reorder.ingest(frame(3, 4)),
             Err(RxAmpduError::SlotAlreadyOwned(4))
+        );
+    }
+
+    #[test]
+    fn esf_slot_id_is_independent_of_reorder_window_index() {
+        let mut reorder = RxBlockAckReorder::new(1, 16).unwrap();
+        assert_eq!(
+            reorder.ingest(frame(1, 31)).unwrap().iter().collect::<std::vec::Vec<_>>(),
+            [frame(1, 31)]
+        );
+        assert_eq!(
+            reorder.ingest(frame(2, 32)),
+            Err(RxAmpduError::InvalidSlot(32))
         );
     }
 

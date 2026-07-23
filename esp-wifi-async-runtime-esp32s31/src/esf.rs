@@ -707,3 +707,4 @@ const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
 const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= usize::BITS as usize);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= u8::MAX as usize);
+const _: () = assert!(LARGE_RX_SLOT_CAPACITY == crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY);
