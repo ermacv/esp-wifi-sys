@@ -87,10 +87,14 @@ pub struct ManagementTxRejectionSnapshot {
     pub node: usize,
     pub buffer: usize,
     pub layout: u16,
+    pub header_len: u16,
+    pub body_len: u16,
     pub raw_frame_control: u16,
     pub frame_control: u16,
     pub raw_word0: u32,
     pub raw_word1: u32,
+    pub body_word0: u32,
+    pub body_word1: u32,
     pub category: u8,
     pub action: u8,
     pub interface_mode: u32,
@@ -379,10 +383,14 @@ mod target {
         node: AtomicUsize,
         buffer: AtomicUsize,
         layout: AtomicUsize,
+        header_len: AtomicUsize,
+        body_len: AtomicUsize,
         raw_frame_control: AtomicUsize,
         frame_control: AtomicUsize,
         raw_word0: AtomicUsize,
         raw_word1: AtomicUsize,
+        body_word0: AtomicUsize,
+        body_word1: AtomicUsize,
         category: AtomicU8,
         action: AtomicU8,
         interface_mode: AtomicUsize,
@@ -399,10 +407,14 @@ mod target {
                 node: AtomicUsize::new(0),
                 buffer: AtomicUsize::new(0),
                 layout: AtomicUsize::new(0),
+                header_len: AtomicUsize::new(0),
+                body_len: AtomicUsize::new(0),
                 raw_frame_control: AtomicUsize::new(0),
                 frame_control: AtomicUsize::new(0),
                 raw_word0: AtomicUsize::new(0),
                 raw_word1: AtomicUsize::new(0),
+                body_word0: AtomicUsize::new(0),
+                body_word1: AtomicUsize::new(0),
                 category: AtomicU8::new(0),
                 action: AtomicU8::new(0),
                 interface_mode: AtomicUsize::new(u32::MAX as usize),
@@ -620,14 +632,20 @@ mod target {
             return;
         }
         let mut layout = 0_u16;
+        let mut header_len = 0_u16;
+        let mut body_len = 0_u16;
         let mut raw_frame_control = 0_u16;
         let mut frame_control = 0_u16;
         let mut raw_word0 = 0_u32;
         let mut raw_word1 = 0_u32;
+        let mut body_word0 = 0_u32;
+        let mut body_word1 = 0_u32;
         let mut category = 0_u8;
         let mut action = 0_u8;
         if !buffer.is_null() {
             layout = buffer.add(0x24).cast::<u16>().read_unaligned();
+            header_len = buffer.add(0x14).cast::<u16>().read_unaligned();
+            body_len = buffer.add(0x16).cast::<u16>().read_unaligned();
             let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
             if !first_buffer.is_null() {
                 let mut header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
@@ -645,8 +663,18 @@ mod target {
                     // buffer can therefore still expose the previous frame
                     // control while the action body at the fixed 24-byte
                     // management-header offset is already authoritative.
-                    category = header.add(24).read();
-                    action = header.add(25).read();
+                    if body_len >= 1 {
+                        category = header.add(24).read();
+                    }
+                    if body_len >= 2 {
+                        action = header.add(25).read();
+                    }
+                    if body_len >= 4 {
+                        body_word0 = header.add(24).cast::<u32>().read_unaligned();
+                    }
+                    if body_len >= 8 {
+                        body_word1 = header.add(28).cast::<u32>().read_unaligned();
+                    }
                 }
             }
         }
@@ -679,6 +707,12 @@ mod target {
             .layout
             .store(usize::from(layout), Ordering::Relaxed);
         MANAGEMENT_TX_REJECTION
+            .header_len
+            .store(usize::from(header_len), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .body_len
+            .store(usize::from(body_len), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
             .raw_frame_control
             .store(usize::from(raw_frame_control), Ordering::Relaxed);
         MANAGEMENT_TX_REJECTION
@@ -690,6 +724,12 @@ mod target {
         MANAGEMENT_TX_REJECTION
             .raw_word1
             .store(raw_word1 as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .body_word0
+            .store(body_word0 as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .body_word1
+            .store(body_word1 as usize, Ordering::Relaxed);
         MANAGEMENT_TX_REJECTION
             .category
             .store(category, Ordering::Relaxed);
@@ -1093,6 +1133,8 @@ mod target {
             node: MANAGEMENT_TX_REJECTION.node.load(Ordering::Acquire),
             buffer: MANAGEMENT_TX_REJECTION.buffer.load(Ordering::Acquire),
             layout: MANAGEMENT_TX_REJECTION.layout.load(Ordering::Acquire) as u16,
+            header_len: MANAGEMENT_TX_REJECTION.header_len.load(Ordering::Acquire) as u16,
+            body_len: MANAGEMENT_TX_REJECTION.body_len.load(Ordering::Acquire) as u16,
             raw_frame_control: MANAGEMENT_TX_REJECTION
                 .raw_frame_control
                 .load(Ordering::Acquire) as u16,
@@ -1101,6 +1143,8 @@ mod target {
                 .load(Ordering::Acquire) as u16,
             raw_word0: MANAGEMENT_TX_REJECTION.raw_word0.load(Ordering::Acquire) as u32,
             raw_word1: MANAGEMENT_TX_REJECTION.raw_word1.load(Ordering::Acquire) as u32,
+            body_word0: MANAGEMENT_TX_REJECTION.body_word0.load(Ordering::Acquire) as u32,
+            body_word1: MANAGEMENT_TX_REJECTION.body_word1.load(Ordering::Acquire) as u32,
             category: MANAGEMENT_TX_REJECTION.category.load(Ordering::Acquire),
             action: MANAGEMENT_TX_REJECTION.action.load(Ordering::Acquire),
             interface_mode: MANAGEMENT_TX_REJECTION
