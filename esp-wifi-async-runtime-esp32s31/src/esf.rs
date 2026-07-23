@@ -7,8 +7,6 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use crate::diagnostics::BlockingCall;
-
 const DESCRIPTOR_COUNT: usize = 11;
 const DESCRIPTOR_SIZE: usize = 0x14;
 const ESF_HEADER_SIZE: usize = 0x90;
@@ -60,14 +58,38 @@ impl LargeRxSlot {
 
 unsafe impl Sync for LargeRxSlot {}
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_management_slots"
+)]
 static MANAGEMENT_SLOTS: [ManagementSlot; MANAGEMENT_SLOT_CAPACITY] =
     [const { ManagementSlot::new() }; MANAGEMENT_SLOT_CAPACITY];
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_management_claims"
+)]
 static CLAIMED_MANAGEMENT_SLOTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_large_rx_slots"
+)]
 static LARGE_RX_SLOTS: [LargeRxSlot; LARGE_RX_SLOT_CAPACITY] =
     [const { LargeRxSlot::new() }; LARGE_RX_SLOT_CAPACITY];
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_large_rx_claims"
+)]
 static CLAIMED_LARGE_RX_SLOTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_rejections"
+)]
 static REJECTED_ESF_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
 const NO_PREARM_HART: usize = usize::MAX;
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.data.wifi_strict.esf_prearm_hart"
+)]
 static PREARM_MANAGEMENT_HART: AtomicUsize = AtomicUsize::new(NO_PREARM_HART);
 
 unsafe extern "C" {
@@ -119,9 +141,16 @@ fn on_prearm_management_hart() -> bool {
     crate::critical::current_hart() == PREARM_MANAGEMENT_HART.load(Ordering::Acquire)
 }
 
-fn reject(kind: u32, argument: usize) {
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+#[inline(always)]
+fn reject(_kind: u32, _argument: usize) {
     REJECTED_ESF_OPERATIONS.fetch_add(1, Ordering::Relaxed);
-    crate::adapter::blocking_probe().record(BlockingCall::EsfBufferRejected, kind, argument);
+    // The strict allocator is reached directly from the RX interrupt path.
+    // Do not extend a bounded pool-exhaustion return into the general
+    // diagnostic call graph: that graph is ordinary PSRAM/PSRAM code.
 }
 
 const fn is_vendor_static_kind(kind: u32) -> bool {
@@ -132,10 +161,19 @@ const fn is_management_kind(kind: u32) -> bool {
     matches!(kind, 2..=4)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+#[inline(always)]
 unsafe fn descriptor(kind: u32) -> *mut u8 {
     ptr::addr_of_mut!(g_eb_list_desc).add(kind as usize * DESCRIPTOR_SIZE)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 unsafe fn initialize_frame(
     frame: *mut u8,
     kind: u32,
@@ -202,6 +240,10 @@ unsafe fn initialize_frame(
     Some(frame)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 fn claim_management_slot() -> Option<usize> {
     let claimed = CLAIMED_MANAGEMENT_SLOTS.load(Ordering::Acquire);
     let free = !claimed & MANAGEMENT_SLOT_MASK;
@@ -216,6 +258,10 @@ fn claim_management_slot() -> Option<usize> {
         .map(|_| index)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 fn claim_large_rx_slot() -> Option<usize> {
     let claimed = CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire);
     let free = !claimed & LARGE_RX_SLOT_MASK;
@@ -230,6 +276,10 @@ fn claim_large_rx_slot() -> Option<usize> {
         .map(|_| index)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 fn management_slot_index(frame: *mut u8) -> Option<usize> {
     let base = ptr::addr_of!(MANAGEMENT_SLOTS) as usize;
     let address = frame as usize;
@@ -242,6 +292,10 @@ fn management_slot_index(frame: *mut u8) -> Option<usize> {
     (index < MANAGEMENT_SLOT_CAPACITY).then_some(index)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
     let base = ptr::addr_of!(LARGE_RX_SLOTS) as usize;
     let address = frame as usize;
@@ -256,12 +310,20 @@ fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
 
 /// Return whether `frame` belongs to one of the fixed pools handled by the
 /// strict recycler. The caller must hold a live ESF object.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 pub(crate) unsafe fn is_strict_recyclable_frame(frame: *mut u8) -> bool {
     management_slot_index(frame).is_some()
         || large_rx_slot_index(frame).is_some()
         || is_vendor_static_kind(frame.add(ESF_TYPE_OFFSET).read() as u32)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     let index = claim_management_slot()?;
     let frame = MANAGEMENT_SLOTS[index].0.get().cast::<u8>();
@@ -272,6 +334,10 @@ unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Op
     Some(frame)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8> {
     let index = claim_large_rx_slot()?;
     let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
@@ -282,6 +348,10 @@ unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8>
     Some(frame)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     if length > u16::MAX as usize {
         return None;
@@ -349,6 +419,10 @@ unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) ->
     Some(frame)
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 unsafe fn recycle_vendor_static(frame: *mut u8, kind: u32) {
     let tx_descriptor = frame
         .add(ESF_TX_DESCRIPTOR_POINTER_OFFSET)
@@ -385,6 +459,10 @@ unsafe fn recycle_vendor_static(frame: *mut u8, kind: u32) {
 /// `source`, when non-null, must be valid for `length` readable bytes and must
 /// not overlap the selected ESF payload. `kind` must follow the vendor ABI.
 #[no_mangle]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 pub unsafe extern "C" fn __wrap_esf_buf_alloc(
     source: *const u8,
     kind: u32,
@@ -430,6 +508,10 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
 /// `frame` must be null or an outstanding ESF object returned by the matching
 /// allocator. Recycling transfers the object back to its fixed pool.
 #[no_mangle]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
 pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
     if !crate::critical::strict_wifi_hart_armed() {
         if !frame.is_null() {

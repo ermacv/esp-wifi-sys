@@ -54,6 +54,7 @@ pub mod runtime;
 mod rx;
 mod rx_descriptor;
 pub mod rx_ampdu;
+pub mod rx_ampdu_hw;
 pub mod scan;
 mod sta_link;
 pub mod strict;
@@ -202,6 +203,7 @@ pub use rx_ampdu::{
     RxAmpduError, RxAmpduMpdu, RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY,
     RX_BLOCK_ACK_MAX_WINDOW,
 };
+pub use rx_ampdu_hw::{S31RxBlockAckAgreement, S31RxBlockAckAgreementError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{
     block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,

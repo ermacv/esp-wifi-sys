@@ -37,6 +37,7 @@ impl CriticalSectionProbe {
         }
     }
 
+    #[inline(always)]
     fn enter_interrupt(&self) {
         self.interrupt_entries.fetch_add(1, Ordering::Relaxed);
         let depth = self
@@ -47,6 +48,7 @@ impl CriticalSectionProbe {
             .fetch_max(depth, Ordering::Relaxed);
     }
 
+    #[inline(always)]
     fn exit_interrupt(&self) {
         let depth = self.active_interrupt_sections.load(Ordering::Acquire);
         if depth == 0
@@ -61,10 +63,12 @@ impl CriticalSectionProbe {
         }
     }
 
+    #[inline(always)]
     fn enter_other_core_stall(&self) {
         self.other_core_stalls.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline(always)]
     fn enter_wrong_hart(&self) {
         self.wrong_hart_entries.fetch_add(1, Ordering::Relaxed);
     }
@@ -95,6 +99,10 @@ impl Default for CriticalSectionProbe {
     }
 }
 
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.critical_probe"
+)]
 static PROBE: CriticalSectionProbe = CriticalSectionProbe::new();
 
 pub fn critical_section_probe() -> &'static CriticalSectionProbe {
@@ -117,13 +125,20 @@ mod target {
     type IntRestore = unsafe extern "C" fn(*mut c_void, u32);
     type Stall = unsafe extern "C" fn();
 
+    #[link_section = ".critical.bss.wifi_strict.critical_callbacks"]
     static INT_DISABLE: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.critical_callbacks"]
     static INT_RESTORE: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.critical_callbacks"]
     static STALL_START: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.critical_callbacks"]
     static STALL_END: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.critical_state"]
     static CALLBACKS_PATCHED: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.critical_state"]
     static RUNTIME_CORE_STALL_FORBIDDEN: AtomicUsize = AtomicUsize::new(0);
     const NO_STRICT_HART: usize = usize::MAX;
+    #[link_section = ".critical.data.wifi_strict.critical_hart"]
     static STRICT_WIFI_HART: AtomicUsize = AtomicUsize::new(NO_STRICT_HART);
 
     unsafe extern "C" {
@@ -204,19 +219,23 @@ mod target {
         STRICT_WIFI_HART.store(NO_STRICT_HART, Ordering::Release);
     }
 
+    #[inline(always)]
     fn runtime_core_stall_forbidden() -> bool {
         RUNTIME_CORE_STALL_FORBIDDEN.load(Ordering::Acquire) != 0
     }
 
+    #[inline(always)]
     pub(crate) fn strict_wifi_hart_armed() -> bool {
         STRICT_WIFI_HART.load(Ordering::Acquire) != NO_STRICT_HART
     }
 
+    #[inline(always)]
     pub(crate) fn on_strict_wifi_hart() -> bool {
         let expected = STRICT_WIFI_HART.load(Ordering::Acquire);
         expected != NO_STRICT_HART && current_hart() == expected
     }
 
+    #[inline(always)]
     pub(crate) fn current_hart() -> usize {
         let hart: usize;
         unsafe {
@@ -229,6 +248,7 @@ mod target {
         hart
     }
 
+    #[inline(always)]
     unsafe fn disable_local_interrupts() -> u32 {
         let previous: usize;
         core::arch::asm!(
@@ -239,12 +259,14 @@ mod target {
         previous as u32
     }
 
+    #[inline(always)]
     unsafe fn restore_local_interrupts(previous: u32) {
         if previous & 8 != 0 {
             core::arch::asm!("csrsi mstatus, 8", options(nomem, nostack, preserves_flags));
         }
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     pub(crate) unsafe fn strict_wifi_int_disable() -> u32 {
         if current_hart() != STRICT_WIFI_HART.load(Ordering::Acquire) {
             PROBE.enter_wrong_hart();
@@ -254,11 +276,13 @@ mod target {
         state
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     pub(crate) unsafe fn strict_wifi_int_restore(state: u32) {
         restore_local_interrupts(state);
         PROBE.exit_interrupt();
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     unsafe extern "C" fn wifi_int_disable(mux: *mut c_void) -> u32 {
         if strict_wifi_hart_armed() {
             return strict_wifi_int_disable();
@@ -269,6 +293,7 @@ mod target {
         state
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     unsafe extern "C" fn wifi_int_restore(mux: *mut c_void, state: u32) {
         if strict_wifi_hart_armed() {
             strict_wifi_int_restore(state);
@@ -279,6 +304,7 @@ mod target {
         PROBE.exit_interrupt();
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     unsafe extern "C" fn stall_other_cpu_start() {
         PROBE.enter_other_core_stall();
         if runtime_core_stall_forbidden() {
@@ -288,6 +314,7 @@ mod target {
         original();
     }
 
+    #[link_section = ".rwtext.wifi_strict.critical"]
     unsafe extern "C" fn stall_other_cpu_end() {
         if runtime_core_stall_forbidden() {
             return;
