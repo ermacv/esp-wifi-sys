@@ -42,6 +42,7 @@ pub enum RxPumpError {
 pub struct StrictRxSnapshot {
     pub processed: usize,
     pub raw_management: usize,
+    pub management_subtypes: [usize; 16],
     pub raw_control: usize,
     pub raw_data: usize,
     pub raw_eapol: usize,
@@ -57,6 +58,7 @@ pub struct StrictRxSnapshot {
 struct Counters {
     processed: AtomicUsize,
     raw_management: AtomicUsize,
+    management_subtypes: [AtomicUsize; 16],
     raw_control: AtomicUsize,
     raw_data: AtomicUsize,
     raw_eapol: AtomicUsize,
@@ -74,6 +76,7 @@ impl Counters {
         Self {
             processed: AtomicUsize::new(0),
             raw_management: AtomicUsize::new(0),
+            management_subtypes: [const { AtomicUsize::new(0) }; 16],
             raw_control: AtomicUsize::new(0),
             raw_data: AtomicUsize::new(0),
             raw_eapol: AtomicUsize::new(0),
@@ -91,6 +94,9 @@ impl Counters {
         StrictRxSnapshot {
             processed: self.processed.load(Ordering::Acquire),
             raw_management: self.raw_management.load(Ordering::Acquire),
+            management_subtypes: core::array::from_fn(|index| {
+                self.management_subtypes[index].load(Ordering::Acquire)
+            }),
             raw_control: self.raw_control.load(Ordering::Acquire),
             raw_data: self.raw_data.load(Ordering::Acquire),
             raw_eapol: self.raw_eapol.load(Ordering::Acquire),
@@ -323,6 +329,8 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
     match (frame_control >> 2) & 3 {
         0 => {
             COUNTERS.raw_management.fetch_add(1, Ordering::Relaxed);
+            COUNTERS.management_subtypes[usize::from((frame_control >> 4) & 0x0f)]
+                .fetch_add(1, Ordering::Relaxed);
             let rssi = unsafe { rx_control.cast::<i8>().read() };
             crate::scan::observe_management(
                 unsafe { core::slice::from_raw_parts(frame, length) },

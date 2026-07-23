@@ -2,11 +2,11 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 
 #[cfg(feature = "hil-vendor-tx")]
-use core::sync::atomic::{AtomicU8, AtomicUsize};
+use core::sync::atomic::AtomicU8;
 
 use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
@@ -235,6 +235,38 @@ static STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 )]
 static LMAC_STATE: StateCell = StateCell(UnsafeCell::new(TxDoneState::new()));
 static STRICT_CALLBACK_FAILED: AtomicBool = AtomicBool::new(false);
+static STRICT_MANAGEMENT_TX_DONE_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+static STRICT_MANAGEMENT_TX_DONE_REJECTED: AtomicUsize = AtomicUsize::new(0);
+static STRICT_MANAGEMENT_TX_DONE_SUBTYPES: [AtomicUsize; 16] = [const { AtomicUsize::new(0) }; 16];
+static STRICT_MANAGEMENT_TX_DONE_LAST_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+static STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_FLAGS: AtomicU32 = AtomicU32::new(0);
+static STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_SECURITY: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StrictManagementTxDoneSnapshot {
+    pub accepted: usize,
+    pub rejected: usize,
+    pub subtypes: [usize; 16],
+    pub last_frame_control: u16,
+    pub last_descriptor_flags: u32,
+    pub last_descriptor_security: u32,
+}
+
+pub fn strict_management_tx_done_snapshot() -> StrictManagementTxDoneSnapshot {
+    StrictManagementTxDoneSnapshot {
+        accepted: STRICT_MANAGEMENT_TX_DONE_ACCEPTED.load(Ordering::Acquire),
+        rejected: STRICT_MANAGEMENT_TX_DONE_REJECTED.load(Ordering::Acquire),
+        subtypes: core::array::from_fn(|index| {
+            STRICT_MANAGEMENT_TX_DONE_SUBTYPES[index].load(Ordering::Acquire)
+        }),
+        last_frame_control: STRICT_MANAGEMENT_TX_DONE_LAST_FRAME_CONTROL.load(Ordering::Acquire)
+            as u16,
+        last_descriptor_flags: STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_FLAGS
+            .load(Ordering::Acquire),
+        last_descriptor_security: STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_SECURITY
+            .load(Ordering::Acquire),
+    }
+}
 
 #[cfg(target_arch = "riscv32")]
 unsafe fn initial_ap_is_active() -> bool {
@@ -332,29 +364,43 @@ unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
     if frame.add(0x24).cast::<u16>().read() & 0x2000 != 0 {
         header = header.add(8);
     }
-    let frame_control = header.read();
-    if frame_control & 0x0c != 0 {
+    let frame_control = u16::from_le_bytes([header.read(), header.add(1).read()]);
+    let descriptor = frame.add(0x34).cast::<*mut u8>().read();
+    if descriptor.is_null() {
         return Err(());
     }
-    match frame_control & 0xf0 {
+    let descriptor_flags = descriptor.cast::<u32>().read();
+    let descriptor_security = descriptor.add(0x10).cast::<u32>().read();
+    STRICT_MANAGEMENT_TX_DONE_SUBTYPES[usize::from((frame_control >> 4) & 0x0f)]
+        .fetch_add(1, Ordering::Relaxed);
+    STRICT_MANAGEMENT_TX_DONE_LAST_FRAME_CONTROL.store(u32::from(frame_control), Ordering::Release);
+    STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_FLAGS.store(descriptor_flags, Ordering::Release);
+    STRICT_MANAGEMENT_TX_DONE_LAST_DESCRIPTOR_SECURITY
+        .store(descriptor_security, Ordering::Release);
+    if frame_control & 0x000c != 0 {
+        return Err(());
+    }
+    let result = match frame_control & 0x00f0 {
         // Disconnect and off-channel action completions enter node/key/channel
         // state machines in the stock callback. They require explicit async
         // commands and are not allowed to run implicitly from TX completion.
         0xd0 if crate::sta_link::complete_owned_action_management() => Ok(()),
         0xa0 | 0xc0 | 0xd0 => Err(()),
         _ => {
-            let descriptor = frame.add(0x34).cast::<*mut u8>().read();
-            if descriptor.is_null() {
-                return Err(());
-            }
             crate::sta_link::management_tx_done(
-                u16::from_le_bytes([frame_control, header.add(1).read()]),
+                frame_control,
                 descriptor.add(19).read(),
-                descriptor.add(0x10).cast::<u32>().read(),
+                descriptor_security,
             );
             Ok(())
         }
+    };
+    if result.is_ok() {
+        STRICT_MANAGEMENT_TX_DONE_ACCEPTED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        STRICT_MANAGEMENT_TX_DONE_REJECTED.fetch_add(1, Ordering::Relaxed);
     }
+    result
 }
 
 /// Strict fixed-channel management completion. Authentication, association,
