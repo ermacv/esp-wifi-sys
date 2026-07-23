@@ -85,6 +85,16 @@ static CLAIMED_LARGE_RX_SLOTS: AtomicUsize = AtomicUsize::new(0);
     link_section = ".critical.bss.wifi_strict.esf_rejections"
 )]
 static REJECTED_ESF_OPERATIONS: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_rejections"
+)]
+static LAST_REJECTED_ESF_KIND: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_rejections"
+)]
+static LAST_REJECTED_ESF_ARGUMENT: AtomicUsize = AtomicUsize::new(0);
 const NO_PREARM_HART: usize = usize::MAX;
 #[cfg_attr(
     target_arch = "riscv32",
@@ -146,7 +156,9 @@ fn on_prearm_management_hart() -> bool {
     link_section = ".rwtext.wifi_strict.esf"
 )]
 #[inline(always)]
-fn reject(_kind: u32, _argument: usize) {
+fn reject(kind: u32, argument: usize) {
+    LAST_REJECTED_ESF_KIND.store(kind as usize, Ordering::Relaxed);
+    LAST_REJECTED_ESF_ARGUMENT.store(argument, Ordering::Relaxed);
     REJECTED_ESF_OPERATIONS.fetch_add(1, Ordering::Relaxed);
     // The strict allocator is reached directly from the RX interrupt path.
     // Do not extend a bounded pool-exhaustion return into the general
@@ -605,6 +617,8 @@ pub struct FixedEsfPoolSnapshot {
     pub large_rx_claimed: usize,
     pub large_rx_capacity: usize,
     pub rejected_operations: usize,
+    pub last_rejected_kind: u32,
+    pub last_rejected_argument: usize,
 }
 
 pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
@@ -618,6 +632,8 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
             .count_ones() as usize,
         large_rx_capacity: LARGE_RX_SLOT_CAPACITY,
         rejected_operations: rejected_esf_operations(),
+        last_rejected_kind: LAST_REJECTED_ESF_KIND.load(Ordering::Acquire) as u32,
+        last_rejected_argument: LAST_REJECTED_ESF_ARGUMENT.load(Ordering::Acquire),
     }
 }
 

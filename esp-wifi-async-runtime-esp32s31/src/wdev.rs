@@ -34,6 +34,10 @@ const RX_DESCRIPTOR_NEXT_OFFSET: usize = 8;
 const RX_DESCRIPTOR_BUFFER_OFFSET: usize = 4;
 #[cfg(target_arch = "riscv32")]
 const RX_DESCRIPTOR_SENTINEL: u32 = 0xdead_beef;
+#[cfg(target_arch = "riscv32")]
+const WIFI_MAC_RX_CONTROL_REGISTER: *const u32 = 0x2010_4080 as *const u32;
+#[cfg(target_arch = "riscv32")]
+const WIFI_MAC_RX_BASE_REGISTER: *const u32 = 0x2010_4084 as *const u32;
 
 #[cfg(target_arch = "riscv32")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +124,14 @@ pub struct WdevRxRecycleSnapshot {
     pub completions: usize,
     pub reload_active: bool,
     pub pending_chains: usize,
+    pub software_head: usize,
+    pub software_tail: usize,
+    pub hardware_control: u32,
+    pub hardware_base: usize,
+    pub hardware_next: usize,
+    pub hardware_last_raw: usize,
+    pub hardware_last: usize,
+    pub hardware_end_state: u32,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -218,7 +230,9 @@ unsafe extern "C" {
     fn vendor_append_rx_blocks(head: *mut u8, tail: *mut u8, count: u32);
     fn __real_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8, count: u32);
     fn hal_mac_rx_get_last_dscr() -> *mut u8;
+    fn hal_mac_rx_get_end_state() -> u32;
     fn hal_mac_rx_is_dscr_reload() -> u32;
+    fn hal_mac_rx_read_rxdscrlast() -> *mut u8;
     fn hal_mac_rx_read_rxdscrnext() -> *mut u8;
     fn hal_mac_rx_set_base(descriptor: *mut u8);
     fn hal_mac_rx_set_dscr_reload();
@@ -494,6 +508,7 @@ pub unsafe extern "C" fn __wrap_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8
 
 #[cfg(target_arch = "riscv32")]
 pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
+    let control = ptr::addr_of!(wDevCtrl);
     WdevRxRecycleSnapshot {
         calls: RX_RECYCLE_PROBE.calls.load(Ordering::Acquire),
         immediate: RX_RECYCLE_PROBE.immediate.load(Ordering::Acquire),
@@ -502,6 +517,14 @@ pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
         completions: RX_RECYCLE_PROBE.completions.load(Ordering::Acquire),
         reload_active: RX_RECYCLE_PROBE.reload_active.load(Ordering::Acquire) != 0,
         pending_chains: RX_RECYCLE_PROBE.pending_chains.load(Ordering::Acquire),
+        software_head: unsafe { control.cast::<*mut u8>().read_unaligned() as usize },
+        software_tail: unsafe { control.add(4).cast::<*mut u8>().read_unaligned() as usize },
+        hardware_control: unsafe { WIFI_MAC_RX_CONTROL_REGISTER.read_volatile() },
+        hardware_base: unsafe { WIFI_MAC_RX_BASE_REGISTER.read_volatile() as usize },
+        hardware_next: unsafe { hal_mac_rx_read_rxdscrnext() as usize },
+        hardware_last_raw: unsafe { hal_mac_rx_read_rxdscrlast() as usize },
+        hardware_last: unsafe { hal_mac_rx_get_last_dscr() as usize },
+        hardware_end_state: unsafe { hal_mac_rx_get_end_state() },
     }
 }
 
