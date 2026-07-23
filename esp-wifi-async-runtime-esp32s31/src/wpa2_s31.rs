@@ -915,6 +915,7 @@ mod target {
         ap_removal_epoch: usize,
         ap_waiting_peer: [u8; 6],
         ap_retry_armed: bool,
+        ap_cancelled_peer: Option<[u8; 6]>,
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -949,6 +950,7 @@ mod target {
                 ap_removal_epoch: 0,
                 ap_waiting_peer: [0; 6],
                 ap_retry_armed: false,
+                ap_cancelled_peer: None,
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_tx_diagnostic: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -1063,7 +1065,8 @@ mod target {
         fn cancel_if_ap_peer_removed(&mut self, interface: Wpa2Interface, peer: &[u8; 6]) -> bool {
             if interface != Wpa2Interface::AccessPoint
                 || peer[0] & 1 != 0
-                || crate::wpa2_ap::is_wpa2_ap_peer_associated(peer)
+                || (self.ap_cancelled_peer != Some(*peer)
+                    && crate::wpa2_ap::is_wpa2_ap_peer_associated(peer))
             {
                 return false;
             }
@@ -1181,9 +1184,14 @@ mod target {
                             node.add(0x24).write(0);
                         }
                     }
-                    self.authorized_peers
+                    let result = self
+                        .authorized_peers
                         .set(peer, authorized)
-                        .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull)
+                        .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull);
+                    if result.is_ok() && authorized && self.ap_cancelled_peer == Some(peer) {
+                        self.ap_cancelled_peer = None;
+                    }
+                    result
                 }
             }
         }
@@ -1724,6 +1732,7 @@ mod target {
             if matches_waiting_peer {
                 let _ = self.authorized_peers.set(self.ap_waiting_peer, false);
                 self.ap_retry_armed = false;
+                self.ap_cancelled_peer = Some(self.ap_waiting_peer);
                 crate::ap_power_save::record_cancelled_transmit();
             }
         }
