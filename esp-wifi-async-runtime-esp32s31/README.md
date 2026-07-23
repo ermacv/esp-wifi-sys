@@ -196,6 +196,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=sleep
 -Wl,--wrap=usleep
 -Wl,--wrap=wifi_log
+-Wl,--wrap=wifi_assert
 ```
 
 The other ten entries (`esf_buf_alloc`, `esf_buf_recycle`,

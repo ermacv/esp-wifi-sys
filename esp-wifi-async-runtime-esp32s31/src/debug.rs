@@ -23,6 +23,8 @@ unsafe extern "C" {
         subframe_count: u32,
         error: u32,
     );
+    #[link_name = "wifi_assert"]
+    fn vendor_wifi_assert(expression: bool, file: *const u8, function: *const u8, line: i32);
 }
 
 pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
@@ -51,6 +53,10 @@ pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
         && core::ptr::eq(
             vendor_test_rx_process_complete as *const (),
             __wrap_esp_test_rx_process_complete as *const (),
+        )
+        && core::ptr::eq(
+            vendor_wifi_assert as *const (),
+            __wrap_wifi_assert as *const (),
         )
 }
 
@@ -111,4 +117,18 @@ pub unsafe extern "C" fn __wrap_esp_test_rx_process_complete(
     _subframe_count: u32,
     _error: u32,
 ) {
+}
+
+/// Preserve successful vendor assertions and turn failure into an immediate
+/// machine trap instead of the pinned infinite logging loop.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wifi_assert(
+    expression: bool,
+    _file: *const u8,
+    _function: *const u8,
+    _line: i32,
+) {
+    if !expression {
+        core::arch::asm!("ebreak", options(noreturn));
+    }
 }
