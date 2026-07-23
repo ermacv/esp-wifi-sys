@@ -39,7 +39,7 @@ const AP_GROUP_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY a
 const AP_PAIRWISE_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 20;
 
 const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
-    if input.frame_control != 0x4208
+    if input.frame_control & !0x2000 != 0x4208
         || !crate::tx_proto::is_ap_group_ccmp_descriptor(input.descriptor_flags)
         || input.descriptor_security != 0x0004_0342
         || input.header_len != 0x0018
@@ -83,7 +83,7 @@ pub(crate) const fn strict_ap_group_power_save_completion(
     descriptor_flags: u32,
     descriptor_security: u32,
 ) -> bool {
-    if frame_control != 0x4208
+    if frame_control & !(0x0800 | 0x2000) != 0x4208
         || !crate::tx_proto::is_ap_group_ccmp_descriptor(descriptor_flags)
         || !matches!(descriptor_security, 0x0114_0342 | 0x0414_0342)
         || header_len != 0x0020
@@ -1028,6 +1028,31 @@ mod tests {
                 metadata_len: 0x0080,
             }),
         );
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                frame_control: 0x6208,
+                remaining_len: 0x0058,
+                layout: 1,
+                buffer_flags: 0xc01c_007e,
+                ..measured
+            }),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x0020,
+                remaining_len: 0x0064,
+                layout: 0x2001,
+                buffer_flags: 0xc021_007e,
+                metadata_len: 0x007c,
+            }),
+        );
+        assert!(strict_ap_group_power_save_completion(
+            0x6208,
+            0x0020,
+            0x0064,
+            0x2001,
+            0xc021_007e,
+            0x0000_200b,
+            0x0414_0342,
+        ));
         for (remaining_len, layout, buffer_flags, expected) in [
             (
                 0x015a,
