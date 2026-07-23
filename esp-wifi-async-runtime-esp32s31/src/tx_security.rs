@@ -191,9 +191,16 @@ pub const fn strict_tx_security_layout(
         // the 802.11 Protected bit is clear. The first strict AP bring-up
         // trapped this exact descriptor tuple before any state was mutated.
         4_u16
-    } else if input.frame_control == 0x4188
+    } else if (input.frame_control == 0x4188
         && matches!(input.descriptor_flags, 0x0000_2009 | 0x0200_2009)
-        && input.descriptor_security == 0x0000_0304
+        && input.descriptor_security == 0x0000_0304)
+        || (input.frame_control == 0x4208
+            && input.descriptor_flags == 0x0000_200b
+            && input.descriptor_security == 0x0004_0342
+            && input.header_len == 0x0018
+            && input.remaining_len == 0x005c
+            && input.layout == 0
+            && input.buffer_flags == 0xc01d_0082)
     {
         // The security selector in bits 8..11 is 3. The pinned vendor table
         // maps that selector to the eight-byte CCMP MIC plus four-byte FCS.
@@ -909,6 +916,49 @@ mod tests {
                 ..expected
             }),
         );
+    }
+
+    #[test]
+    fn reproduces_hardware_observed_wpa2_ap_group_ccmp_layout() {
+        let measured = TxSecurityLayoutInput {
+            header_len: 0x0018,
+            remaining_len: 0x005c,
+            layout: 0,
+            buffer_flags: 0xc01d_0082,
+            descriptor_flags: 0x0000_200b,
+            descriptor_security: 0x0004_0342,
+            frame_control: 0x4208,
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x0020,
+                remaining_len: 0x0068,
+                layout: 0x2000,
+                buffer_flags: 0xc022_0082,
+                metadata_len: 0x0080,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                descriptor_flags: 0x0000_200a,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0304,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                remaining_len: 0x005d,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                buffer_flags: 0xc01d_0083,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
     }
 
     #[test]
