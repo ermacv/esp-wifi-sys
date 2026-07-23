@@ -522,21 +522,6 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     metadata.cast::<u32>().write_unaligned(0);
     metadata.add(4).cast::<u32>().write_unaligned(0);
     metadata.cast::<u32>().write_unaligned(output.metadata_len);
-    #[cfg(feature = "hil-vendor-tx")]
-    if input.frame_control & 0x000c == 0x0008 {
-        ets_printf(
-            c"HIL TX security pass: df=%08x ds=%08x fc=%04x len=%04x:%04x layout=%04x buffer=%08x\r\n"
-                .as_ptr()
-                .cast(),
-            input.descriptor_flags,
-            input.descriptor_security,
-            u32::from(input.frame_control),
-            u32::from(input.remaining_len),
-            u32::from(input.header_len),
-            u32::from(input.layout),
-            input.buffer_flags,
-        );
-    }
     0
 }
 

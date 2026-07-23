@@ -27,11 +27,6 @@ pub(crate) const fn strict_tx_proto_flags(
     flags
 }
 
-#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
-unsafe extern "C" {
-    fn ets_printf(format: *const core::ffi::c_char, ...) -> i32;
-}
-
 /// Stateless SRAM-resident replacement for the vendor `ppTxProtoProc` leaf.
 ///
 /// # Safety
@@ -79,18 +74,6 @@ pub unsafe extern "C" fn strict_pp_tx_proto_proc(frame: *mut u8) {
         .add(DESCRIPTOR_WORD_12_OFFSET)
         .cast::<u32>()
         .read_unaligned();
-    #[cfg(feature = "hil-vendor-tx")]
-    if header.read() & 0x0c == 0x08 {
-        ets_printf(
-            c"HIL TX proto: fc=%04x flags=%08x word12=%08x layout=%04x\r\n"
-                .as_ptr()
-                .cast(),
-            u32::from(header.cast::<u16>().read_unaligned()),
-            flags,
-            word_12,
-            u32::from(layout),
-        );
-    }
     descriptor
         .cast::<u32>()
         .write_unaligned(strict_tx_proto_flags(
