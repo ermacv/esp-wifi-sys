@@ -1,7 +1,9 @@
 //! Strict TX-queue processing boundary.
 //!
 //! Hardware observation first narrowed the pinned `ppProcessTxQ` state machine
-//! to admitted logical queues zero and one and one basic MPDU. The pinned
+//! to admitted logical queues zero and one and one basic MPDU. Both logical
+//! queues can be non-empty on the same AP event when a management response is
+//! published at a beacon edge. The pinned
 //! `lmacTxFrame` body maps each event to a 0x38-byte hardware-queue state; the
 //! active strict path reproduces that subset as one Rust executor action.
 
@@ -37,7 +39,6 @@ pub enum TxQueueProcessError {
     TxRxUnavailable,
     UnsupportedQueueKind(u8),
     UnsupportedLogicalQueue(u8),
-    AmbiguousLogicalQueues,
     InvalidFrame,
     Submit(crate::lmac::LmacAsyncError),
 }
@@ -161,7 +162,7 @@ fn load_array(counters: &[AtomicU32; 5]) -> [u32; 5] {
 /// Hardware qualification observed the admitted logical queues, queue kind
 /// three, and one basic non-HE MPDU. The pinned binary supplies the matching
 /// hardware queue as the event number. This leaf removes at most
-/// one unambiguous head and submits it through the already qualified finite
+/// one bounded-priority head and submits it through the already qualified finite
 /// Rust LMAC path. Busy and empty states complete without retrying; their
 /// completion/enqueue edges will post a later executor event.
 ///
@@ -375,9 +376,12 @@ const fn measured_logical_queue(head_mask: u16) -> Result<Option<u8>, TxQueuePro
     if head_mask == 0 {
         return Ok(None);
     }
-    if head_mask.count_ones() != 1 {
-        return Err(TxQueueProcessError::AmbiguousLogicalQueues);
-    }
+    // Queue zero carries the latency-sensitive management edge and queue one
+    // the ordinary AP/beacon edge. They share the same recovered hardware
+    // queue, so a station association can make both non-empty before one PP
+    // event is dispatched. Consume exactly one queue-zero frame first; TX
+    // completion posts the next executor edge for the retained queue-one
+    // frame. This is finite priority selection, not a drain loop.
     let logical_queue = head_mask.trailing_zeros() as u8;
     if logical_queue > 1 {
         return Err(TxQueueProcessError::UnsupportedLogicalQueue(logical_queue));
@@ -517,7 +521,7 @@ mod tests {
         );
         assert_eq!(
             measured_logical_queue(3),
-            Err(TxQueueProcessError::AmbiguousLogicalQueues)
+            Ok(Some(0))
         );
     }
 }
