@@ -978,6 +978,17 @@ mod target {
                             // already-installed fixed hardware slot without
                             // entering its allocator-backed wrapper.
                             node.add(0x135).write(hardware_index);
+
+                            // Finite state tail of
+                            // `esp_wifi_wpa_ptk_init_done_internal`: publish
+                            // the installed PTK to the ordinary data path and
+                            // clear its pre-authorization marker. The omitted
+                            // remainder only constructs and posts a vendor
+                            // event; controlled-port publication is owned by
+                            // the bounded Rust table below.
+                            let flags = node.add(0x0c).cast::<u32>();
+                            flags.write((flags.read() & 0xfdff_ffff) | 1);
+                            node.add(0x24).write(0);
                         }
                     }
                     #[cfg(feature = "hil-vendor-tx")]
