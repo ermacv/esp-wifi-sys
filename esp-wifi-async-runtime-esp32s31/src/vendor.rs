@@ -81,6 +81,8 @@ pub enum VendorDispatchError {
     #[cfg(feature = "strict-no-wait")]
     UnsupportedStrictAction(PpAction),
     #[cfg(feature = "strict-no-wait")]
+    UnsupportedStrictEvent(u32),
+    #[cfg(feature = "strict-no-wait")]
     TxDoneContinuation(crate::txdone::TxDoneError),
     #[cfg(feature = "strict-no-wait")]
     FtmUnsupported,
@@ -447,9 +449,7 @@ impl PpDispatcher for VendorPpDispatcher {
                 }
                 PpAction::Default => {
                     #[cfg(feature = "strict-no-wait")]
-                    return Err(VendorDispatchError::UnsupportedStrictAction(
-                        PpAction::Default,
-                    ));
+                    return Err(VendorDispatchError::UnsupportedStrictEvent(event.kind));
                     #[cfg(not(feature = "strict-no-wait"))]
                     pp_default_event_handler(event.kind, event.argument)
                 }
