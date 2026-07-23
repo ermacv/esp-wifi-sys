@@ -475,7 +475,10 @@ mod target {
     }
 
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
-        release_blacklist_node(ptr) || release_ipc_envelope(ptr) || release_wpa_ie_slot(ptr)
+        release_blacklist_node(ptr)
+            || release_ipc_envelope(ptr)
+            || release_wpa_ie_slot(ptr)
+            || unsafe { crate::wpa2_s31::release_static_ap_node(ptr) }
     }
 
     #[inline(always)]

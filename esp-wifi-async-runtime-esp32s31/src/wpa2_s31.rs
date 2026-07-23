@@ -503,6 +503,29 @@ mod target {
         ptr::null_mut()
     }
 
+    /// Return a vendor-released AP connection node to the fixed SRAM pool.
+    ///
+    /// The pinned node teardown clears the interface table before calling the
+    /// OSI `free` callback. Strict mode must consume that `free` locally: the
+    /// object was never heap-backed, but its bounded pool slot must become
+    /// available for a later association.
+    ///
+    /// # Safety
+    /// The caller must have received `node` from the vendor teardown after all
+    /// table and hardware references to it were removed.
+    pub(crate) unsafe fn release_static_ap_node(node: *mut c_void) -> bool {
+        for slot in &AP_NODES {
+            if ptr::eq(slot.node.get().cast::<c_void>(), node)
+                && slot.claimed.load(Ordering::Acquire)
+            {
+                ptr::write_bytes(slot.node.get().cast::<u8>(), 0, AP_NODE_LEN);
+                slot.claimed.store(false, Ordering::Release);
+                return true;
+            }
+        }
+        false
+    }
+
     /// STA/AP-only replacement for the path-insensitive vendor node lookup.
     ///
     /// NAN is unsupported by the strict runtime and is rejected without
@@ -1561,7 +1584,7 @@ mod target {
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use target::hil_sta_pairwise_key_snapshot;
 #[cfg(target_arch = "riscv32")]
-pub(crate) use target::runtime_key_link_wrapper_active;
+pub(crate) use target::{release_static_ap_node, runtime_key_link_wrapper_active};
 #[cfg(target_arch = "riscv32")]
 pub use target::S31StaticWpa2Io;
 
