@@ -217,7 +217,7 @@ pub use rx_ampdu_hw::{S31RxBlockAckAgreement, S31RxBlockAckAgreementError};
 ))]
 pub use rx_ampdu_ap::{
     remove_peer as remove_rx_ampdu_peer, wait_for_gap as wait_for_rx_ampdu_gap,
-    RxAmpduGapFuture,
+    snapshot as rx_ampdu_ap_snapshot, RxAmpduApSnapshot, RxAmpduGapFuture,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{

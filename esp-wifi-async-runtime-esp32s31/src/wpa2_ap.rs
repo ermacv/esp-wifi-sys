@@ -1643,16 +1643,27 @@ mod target {
             );
         }
         #[cfg(feature = "hil-rx-ampdu")]
+        let mut rx_ampdu_accepted_peer = None;
+        #[cfg(feature = "hil-rx-ampdu")]
         if ap_addba_response {
             if let Some(body) = ap_addba_response_body(buffer) {
                 let mut peer = [0_u8; 6];
                 ptr::copy_nonoverlapping(node.add(4), peer.as_mut_ptr(), peer.len());
                 let body =
                     core::slice::from_raw_parts_mut(body, DEFERRED_AP_ACTION_BODY_LEN);
-                let _ = crate::rx_ampdu_ap::try_accept_response(peer, body);
+                if crate::rx_ampdu_ap::try_accept_response(peer, body) {
+                    rx_ampdu_accepted_peer = Some(peer);
+                }
             }
         }
-        __real_ieee80211_mgmt_output(node, buffer, subtype)
+        let result = __real_ieee80211_mgmt_output(node, buffer, subtype);
+        #[cfg(feature = "hil-rx-ampdu")]
+        if result != 0 {
+            if let Some(peer) = rx_ampdu_accepted_peer {
+                crate::rx_ampdu_ap::rollback_failed_response(peer);
+            }
+        }
+        result
     }
 
     /// Replace the OSI-table coexistence PTI call with its exact finite leaf.

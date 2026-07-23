@@ -73,6 +73,54 @@ unsafe impl Sync for RadioOwnerState {}
 static STATE: RadioOwnerState = RadioOwnerState::new();
 static GAP_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static GAP_EDGE: WakerCell = WakerCell::new();
+static PENDING_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+static ACCEPTED_RESPONSES: AtomicUsize = AtomicUsize::new(0);
+static HARDWARE_PROGRAM_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static OUTPUT_ROLLBACKS: AtomicUsize = AtomicUsize::new(0);
+static RETAINED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static RELEASED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static GAP_EDGES: AtomicUsize = AtomicUsize::new(0);
+static GAP_EXPIRIES: AtomicUsize = AtomicUsize::new(0);
+static STALE_EXPIRIES: AtomicUsize = AtomicUsize::new(0);
+static STOPS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static OCCUPIED: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RxAmpduApSnapshot {
+    pub pending_requests: usize,
+    pub accepted_responses: usize,
+    pub hardware_program_failures: usize,
+    pub output_rollbacks: usize,
+    pub retained_frames: usize,
+    pub released_frames: usize,
+    pub rejected_frames: usize,
+    pub gap_edges: usize,
+    pub gap_expiries: usize,
+    pub stale_expiries: usize,
+    pub stops: usize,
+    pub active: bool,
+    pub occupied: usize,
+}
+
+pub fn snapshot() -> RxAmpduApSnapshot {
+    RxAmpduApSnapshot {
+        pending_requests: PENDING_REQUESTS.load(Ordering::Relaxed),
+        accepted_responses: ACCEPTED_RESPONSES.load(Ordering::Relaxed),
+        hardware_program_failures: HARDWARE_PROGRAM_FAILURES.load(Ordering::Relaxed),
+        output_rollbacks: OUTPUT_ROLLBACKS.load(Ordering::Relaxed),
+        retained_frames: RETAINED_FRAMES.load(Ordering::Relaxed),
+        released_frames: RELEASED_FRAMES.load(Ordering::Relaxed),
+        rejected_frames: REJECTED_FRAMES.load(Ordering::Relaxed),
+        gap_edges: GAP_EDGES.load(Ordering::Relaxed),
+        gap_expiries: GAP_EXPIRIES.load(Ordering::Relaxed),
+        stale_expiries: STALE_EXPIRIES.load(Ordering::Relaxed),
+        stops: STOPS.load(Ordering::Relaxed),
+        active: ACTIVE.load(Ordering::Acquire) != 0,
+        occupied: OCCUPIED.load(Ordering::Acquire),
+    }
+}
 
 pub struct RxAmpduGapFuture {
     after: usize,
@@ -141,6 +189,7 @@ pub(crate) fn observe_action(frame: &[u8], action: BlockAckAction) {
                 tid,
                 starting_sequence,
             });
+            PENDING_REQUESTS.fetch_add(1, Ordering::Relaxed);
         }
         BlockAckAction::Delba { tid, .. } => stop_peer(peer, tid),
         _ => {}
@@ -186,20 +235,43 @@ pub(crate) fn try_accept_response(peer: [u8; 6], body: &mut [u8]) -> bool {
     };
     if unsafe { crate::rx_ampdu_hw::program(agreement) }.is_err() {
         state.active = None;
+        HARDWARE_PROGRAM_FAILURES.fetch_add(1, Ordering::Relaxed);
         return false;
     }
 
-    crate::rx_ampdu::write_successful_addba_response(
+    let accepted = crate::rx_ampdu::write_successful_addba_response(
         body,
         pending.dialog_token,
         pending.tid,
         RX_BLOCK_ACK_MAX_WINDOW,
     )
-    .is_ok()
+    .is_ok();
+    if accepted {
+        ACTIVE.store(1, Ordering::Release);
+        OCCUPIED.store(0, Ordering::Release);
+        ACCEPTED_RESPONSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        state.active = None;
+        let _ = unsafe { crate::rx_ampdu_hw::clear(HARDWARE_INDEX) };
+    }
+    accepted
+}
+
+/// Undo an agreement when the finite management TX leaf rejects its response.
+pub(crate) fn rollback_failed_response(peer: [u8; 6]) {
+    let tid = state()
+        .and_then(|state| state.active.as_ref())
+        .filter(|active| active.peer == peer)
+        .map(|active| active.tid);
+    if let Some(tid) = tid {
+        OUTPUT_ROLLBACKS.fetch_add(1, Ordering::Relaxed);
+        stop_peer(peer, tid);
+    }
 }
 
 pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
     let Some(slot) = crate::esf::large_rx_slot_id(packet) else {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     };
     if frame.len() < 26
@@ -207,6 +279,7 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
         || frame[0] & 0x80 == 0
         || frame[1] & 0x03 != 0x01
     {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     }
     let sequence = u16::from_le_bytes([frame[22], frame[23]]) >> 4;
@@ -214,24 +287,32 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
     let mut peer = [0_u8; 6];
     peer.copy_from_slice(&frame[10..16]);
     let Some(state) = state() else {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     };
     let Some(active) = state.active.as_mut() else {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     };
     if active.peer != peer || active.tid != tid {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     }
     let Ok(release) = active.reorder.ingest(RxAmpduMpdu { sequence, slot }) else {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     };
     if release.rejected.is_some() {
+        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     }
+    OCCUPIED.store(active.reorder.occupied(), Ordering::Release);
     update_gap_edge(active);
     if release.count == 0 {
+        RETAINED_FRAMES.fetch_add(1, Ordering::Relaxed);
         Ingress::Retained
     } else {
+        RELEASED_FRAMES.fetch_add(release.count, Ordering::Relaxed);
         Ingress::Release(release)
     }
 }
@@ -262,13 +343,23 @@ pub fn remove_peer(peer: [u8; 6]) {
 }
 
 pub(crate) fn expire_gap(generation: usize) -> Option<RxAmpduRelease> {
-    let state = state()?;
-    let active = state.active.as_mut()?;
+    let Some(state) = state() else {
+        STALE_EXPIRIES.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    let Some(active) = state.active.as_mut() else {
+        STALE_EXPIRIES.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
     if active.gap_generation != Some(generation) {
+        STALE_EXPIRIES.fetch_add(1, Ordering::Relaxed);
         return None;
     }
     active.gap_generation = None;
     let release = active.reorder.expire_gap();
+    GAP_EXPIRIES.fetch_add(1, Ordering::Relaxed);
+    RELEASED_FRAMES.fetch_add(release.count, Ordering::Relaxed);
+    OCCUPIED.store(active.reorder.occupied(), Ordering::Release);
     update_gap_edge(active);
     Some(release)
 }
@@ -285,6 +376,7 @@ fn update_gap_edge(active: &mut ActiveAgreement) {
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1);
     active.gap_generation = Some(generation);
+    GAP_EDGES.fetch_add(1, Ordering::Relaxed);
     GAP_EDGE.wake();
 }
 
@@ -314,4 +406,7 @@ fn stop_peer(peer: [u8; 6], tid: u8) {
         }
     }
     let _ = unsafe { crate::rx_ampdu_hw::clear(HARDWARE_INDEX) };
+    STOPS.fetch_add(1, Ordering::Relaxed);
+    ACTIVE.store(0, Ordering::Release);
+    OCCUPIED.store(0, Ordering::Release);
 }
