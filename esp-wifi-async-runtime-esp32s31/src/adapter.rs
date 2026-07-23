@@ -43,6 +43,14 @@ static TIME_SOURCE: AtomicUsize = AtomicUsize::new(0);
 static TASK_DELAY_CALLER: AtomicUsize = AtomicUsize::new(0);
 static TASK_DELAY_TICKS: AtomicU32 = AtomicU32::new(0);
 static TASK_DELAY_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "riscv32")]
+static INVALID_PP_POST_CALLER: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "riscv32")]
+static INVALID_PP_POST_ARGUMENT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "riscv32")]
+static INVALID_PP_POST_KIND: AtomicU32 = AtomicU32::new(u32::MAX);
+#[cfg(target_arch = "riscv32")]
+static INVALID_PP_POST_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
@@ -100,6 +108,18 @@ pub struct ShutdownQueueFull;
 pub struct TaskDelaySnapshot {
     pub calls: usize,
     pub ticks: u32,
+    pub caller: usize,
+}
+
+/// Last producer that submitted an event routed to the vendor's fatal/default
+/// `ppTask` arm. This is observation-only BSS state; recording it never changes
+/// queue ownership or retries a producer.
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidPpPostSnapshot {
+    pub calls: usize,
+    pub kind: u32,
+    pub argument: usize,
     pub caller: usize,
 }
 
@@ -476,6 +496,16 @@ pub fn task_delay_snapshot() -> TaskDelaySnapshot {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
+pub fn invalid_pp_post_snapshot() -> InvalidPpPostSnapshot {
+    InvalidPpPostSnapshot {
+        calls: INVALID_PP_POST_CALLS.load(Ordering::Acquire),
+        kind: INVALID_PP_POST_KIND.load(Ordering::Relaxed),
+        argument: INVALID_PP_POST_ARGUMENT.load(Ordering::Relaxed),
+        caller: INVALID_PP_POST_CALLER.load(Ordering::Relaxed),
+    }
+}
+
 pub(crate) fn clear_task_delay_snapshot() {
     TASK_DELAY_CALLER.store(0, Ordering::Relaxed);
     TASK_DELAY_TICKS.store(0, Ordering::Relaxed);
@@ -832,7 +862,21 @@ pub(crate) fn pp_post_link_wrapper_active() -> bool {
 /// one-action event handler.
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
+#[inline(never)]
 pub unsafe extern "C" fn __wrap_pp_post(kind: u32, argument: *mut c_void) -> i32 {
+    // Read `ra` before the wrapper makes any call. Events 9..=12 and 28 are
+    // deliberately routed to the stock fatal/default arm, so retaining their
+    // producer is the only safe way to distinguish a malformed TX queue ID
+    // from a timer or power-management producer after async dispatch.
+    let caller: usize;
+    core::arch::asm!("mv {caller}, ra", caller = out(reg) caller, options(nomem, nostack));
+    if matches!(kind, 9..=12 | 28 | 34..=u32::MAX) {
+        INVALID_PP_POST_CALLER.store(caller, Ordering::Relaxed);
+        INVALID_PP_POST_ARGUMENT.store(argument as usize, Ordering::Relaxed);
+        INVALID_PP_POST_KIND.store(kind, Ordering::Relaxed);
+        INVALID_PP_POST_CALLS.fetch_add(1, Ordering::Release);
+    }
+
     let strict = crate::critical::strict_wifi_hart_armed();
     let draining = crate::handoff::pp_task_handoff_draining();
     if !strict && !draining {

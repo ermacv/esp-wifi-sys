@@ -89,6 +89,8 @@ pub mod wpa2_sta_async;
 pub mod wpa2_state;
 pub mod wpa2_txdone;
 
+#[cfg(target_arch = "riscv32")]
+pub use adapter::invalid_pp_post_snapshot;
 pub use adapter::{
     blocking_probe, internal_event_queue_snapshot, next_timer_deadline_us, radio_queue,
     task_delay_snapshot, timer_alarm_interrupt, timer_snapshot, ShutdownQueueFull,
@@ -99,6 +101,7 @@ pub use adapter::{
 pub use adapter::{
     configure_wifi_runtime_clock, drain_wifi_initialization_events, patch_pp_runtime_callbacks,
     request_shutdown, take_radio_future, take_wifi_runtime, InitializationDrainError,
+    InvalidPpPostSnapshot,
 };
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
