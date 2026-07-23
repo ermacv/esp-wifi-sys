@@ -344,9 +344,11 @@ const fn is_ap_addba_response_completion_layout(
         && layout & 0xf000 == 0x2000
         && buffer_flags == 0xc00b_402c
         && descriptor_flags == 0
-        && descriptor_security == 0x0114_0000
         && descriptor_callbacks == (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE)
-        && hardware_status == 1
+        && matches!(
+            (descriptor_security, hardware_status),
+            (0x0114_0000, 1) | (0x0214_0000, 2)
+        )
 }
 
 unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneError> {
@@ -364,7 +366,7 @@ unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneEr
     }
     let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
     let layout = frame.add(0x24).cast::<u16>().read_unaligned();
-    if is_ap_addba_response_completion_layout(
+    if !is_ap_addba_response_completion_layout(
         tx_trace_frame_control(frame),
         lengths as u16,
         (lengths >> 16) as u16,
@@ -378,13 +380,28 @@ unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneEr
             .read_unaligned(),
         descriptor.add(19).read(),
     ) {
-        // The pinned vendor callback returns immediately when hardware status
-        // is one. Failure paths search the node and stop an RX BA session;
-        // those stateful mutations remain fail-closed in the Rust runtime.
-        Ok(())
-    } else {
-        Err(TxDoneError::StrictCallbackFailed)
+        return Err(TxDoneError::StrictCallbackFailed);
     }
+    let mut header = buffer.add(4).cast::<*mut u8>().read_unaligned();
+    if header.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    if layout & 0x2000 != 0 {
+        header = header.add(8);
+    }
+    if header.add(24).read() != 3
+        || header.add(25).read() != 1
+        || header.add(27).read() != 1
+        || header.add(28).read() != 0
+    {
+        return Err(TxDoneError::StrictCallbackFailed);
+    }
+    // The pinned vendor callback returns immediately on status one. On
+    // status two it searches the node and stops an RX BA session. This
+    // response carries status code one (declined), so the strict runtime
+    // completes both measured terminal TX outcomes without importing that
+    // vendor BA-state mutation.
+    Ok(())
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1691,21 +1708,25 @@ mod tests {
     }
 
     #[test]
-    fn only_successful_measured_ap_addba_completion_is_a_noop() {
+    fn only_measured_terminal_ap_addba_completions_are_noops() {
         let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
-        for frame_control in [0x00d0, 0x08d0] {
-            for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
-                assert!(is_ap_addba_response_completion_layout(
-                    frame_control,
-                    0x20,
-                    0x0d,
-                    layout,
-                    0xc00b_402c,
-                    0,
-                    0x0114_0000,
-                    callbacks,
-                    1,
-                ));
+        for (descriptor_security, hardware_status) in
+            [(0x0114_0000, 1), (0x0214_0000, 2)]
+        {
+            for frame_control in [0x00d0, 0x08d0] {
+                for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
+                    assert!(is_ap_addba_response_completion_layout(
+                        frame_control,
+                        0x20,
+                        0x0d,
+                        layout,
+                        0xc00b_402c,
+                        0,
+                        descriptor_security,
+                        callbacks,
+                        hardware_status,
+                    ));
+                }
             }
         }
         assert!(!is_ap_addba_response_completion_layout(
@@ -1739,7 +1760,7 @@ mod tests {
             0,
             0x0114_0000,
             callbacks,
-            0,
+            2,
         ));
         assert!(!is_ap_addba_response_completion_layout(
             0x00d0,
