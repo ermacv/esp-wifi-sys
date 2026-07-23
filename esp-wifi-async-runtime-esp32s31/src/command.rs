@@ -158,6 +158,15 @@ pub trait RadioCommandHandler<C> {
 
     fn handle(&mut self, command: C) -> Result<(), Self::Error>;
 
+    /// Advance one fixed-capacity batch of event-driven internal continuations.
+    ///
+    /// Implementations may register `cx.waker()` and return without work. They
+    /// must not inspect a device status in a retry loop or manufacture their
+    /// own wakeups merely to poll again.
+    fn poll_internal(&mut self, _cx: &mut Context<'_>) -> bool {
+        false
+    }
+
     /// Recover an owned command from a transient handler failure.
     ///
     /// The default keeps the existing fail-fast contract. Specialized
@@ -231,6 +240,11 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut received = 0;
         let mut retry_blocked = false;
+
+        {
+            let _radio_context = RadioContextGuard::enter(RADIO_COMMAND_CONTEXT_EVENT);
+            self.handler.poll_internal(cx);
+        }
 
         if self.pending_command.is_some() {
             match self.handler.poll_retry_ready(cx) {
@@ -307,7 +321,6 @@ where
         if received == self.command_budget && !self.commands.is_empty() {
             cx.waker().wake_by_ref();
         }
-
         match Pin::new(&mut self.wifi).poll(cx) {
             Poll::Ready(output) => Poll::Ready(Ok(output)),
             Poll::Pending => Poll::Pending,

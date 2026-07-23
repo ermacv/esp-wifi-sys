@@ -808,6 +808,15 @@ called. A final-link management-output gate admits only ordinary association,
 authentication, and probe subtypes on the home channel. It rechecks live
 non-mesh/non-NAN and AP no-power-save invariants before the stock body; a
 rejected frame is returned to the fixed ESF pool.
+The measured AP ADDBA-response exception no longer enters
+`ieee80211_pwrsave`: when its peer is asleep, the gate copies only the peer,
+association generation, and nine-byte action body into an eight-slot
+Rust-owned table, recycles the original ESF immediately, and registers the
+radio owner on that peer's RX-derived Active/PS-Poll/removal edge. A ready
+continuation reconstructs a fresh fixed-pool management frame, restores the
+pinned callback bit 13, and submits the ordinary home-channel output branch
+under local MIE masking. Repeated requests for one peer update the owned dialog
+body instead of growing a linked queue.
 The neighboring `ieee80211_set_tx_pti` wrapper replaces its OSI-table call with
 the exact bounded success operation from the pinned coexistence archive: one
 volatile byte read from exported `coex_pti_tab[48]` and two descriptor stores.

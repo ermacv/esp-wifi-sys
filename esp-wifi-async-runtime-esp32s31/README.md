@@ -561,10 +561,16 @@ catch-up loop.
 On the target, `S31StaticWpa2Io<K>` bypasses `esp_wifi_internal_tx`, because
 that wrapper always acquires `g_wifi_global_lock` through an OSI callback. The
 strict path instead performs bounded peer lookup, one fixed-pool buffer claim,
-descriptor setup, and `ieee80211_post_hmac_tx` directly. Pool exhaustion and AP
-power-save peers are rejected immediately. A failed post poisons the backend
-until Wi-Fi deinit rather than retrying an ambiguously owned buffer. A STA
-transmission is rejected until the async EAPOL TX-done callback is active.
+descriptor setup, and `ieee80211_post_hmac_tx` directly. Pool exhaustion and
+ordinary AP power-save transmissions fail without entering the vendor queue.
+Bufferable AP ADDBA responses use a bounded management exception: a sleeping
+peer transfers the nine-byte action body into one of eight Rust-owned slots,
+the original ESF is recycled, and the same `RadioOwnerFuture` resumes only on a
+peer-bound Active/PS-Poll/removal edge. The continuation reconstructs a fresh
+fixed-pool frame and never links it into `ieee80211_pwrsave` or
+`pwrsave_flushq`. A failed data post poisons the backend until Wi-Fi deinit
+rather than retrying an ambiguously owned buffer. A STA transmission is
+rejected until the async EAPOL TX-done callback is active.
 Pairwise and group CCMP installation bypass both stock allocating wrappers: the
 hardware leaf receives an aligned key and net80211 receives a pinned `0xb8`
 software-key object from `S31StaticKeyStorage<K>`. Before registration the

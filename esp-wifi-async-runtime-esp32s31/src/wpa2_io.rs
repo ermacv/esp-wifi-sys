@@ -221,6 +221,10 @@ pub trait TryWpa2Io<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
         command: Wpa2IoCommand<N>,
     ) -> Result<(), Wpa2IoFailure<Self::Error, N>>;
 
+    fn poll_internal(&mut self, _cx: &mut Context<'_>) -> bool {
+        false
+    }
+
     fn prepare_retry(&mut self, _error: &Self::Error) -> bool {
         false
     }
@@ -258,6 +262,10 @@ where
 
     fn handle(&mut self, command: Wpa2IoCommand<N>) -> Result<(), Self::Error> {
         self.backend.try_execute(command)
+    }
+
+    fn poll_internal(&mut self, cx: &mut Context<'_>) -> bool {
+        self.backend.poll_internal(cx)
     }
 
     fn recover_retry(&mut self, failure: Self::Error) -> Result<Wpa2IoCommand<N>, Self::Error> {

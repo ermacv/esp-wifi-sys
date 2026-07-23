@@ -101,6 +101,17 @@ pub struct ManagementTxRejectionSnapshot {
     pub node_flags: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeferredApManagementSnapshot {
+    pub captured: usize,
+    pub coalesced: usize,
+    pub submitted: usize,
+    pub cancelled: usize,
+    pub dropped: usize,
+    pub occupied: usize,
+    pub capacity: usize,
+}
+
 fn rsn_error_code(error: Wpa2ApRsnError) -> u8 {
     match error {
         Wpa2ApRsnError::Malformed => 1,
@@ -284,10 +295,12 @@ mod target {
         cell::UnsafeCell,
         ffi::c_void,
         mem, ptr,
-        sync::atomic::{AtomicBool, Ordering},
+        sync::atomic::{AtomicBool, AtomicU8, Ordering},
+        task::{Context, Poll},
     };
 
     use super::*;
+    use crate::queue::WakerCell;
 
     const WPA_AP_JOIN_OFFSET: usize = 0x24;
     const WPA_AP_REMOVE_OFFSET: usize = 0x28;
@@ -301,6 +314,10 @@ mod target {
     const WLAN_STATUS_SUCCESS: u16 = 0;
     const WLAN_STATUS_AP_UNABLE_TO_HANDLE_NEW_STA: u16 = 17;
     const WLAN_STATUS_INVALID_IE: u16 = 40;
+    const DEFERRED_AP_ACTION_BODY_LEN: usize = 9;
+    const DEFERRED_SLOT_EMPTY: u8 = 0;
+    const DEFERRED_SLOT_WRITING: u8 = 1;
+    const DEFERRED_SLOT_READY: u8 = 2;
 
     type InitCallback = unsafe extern "C" fn() -> *mut c_void;
     type DeinitCallback = unsafe extern "C" fn(*mut c_void) -> bool;
@@ -444,6 +461,61 @@ mod target {
         ManagementTxRejectionDiagnostics::new();
     static PTI_REJECTED_BUFFER: AtomicUsize = AtomicUsize::new(0);
 
+    #[derive(Clone, Copy)]
+    struct DeferredApManagement {
+        peer: [u8; 6],
+        body: [u8; DEFERRED_AP_ACTION_BODY_LEN],
+        association_epoch: usize,
+        active_epoch: usize,
+        ps_poll_epoch: usize,
+        removal_epoch: usize,
+    }
+
+    impl DeferredApManagement {
+        const fn empty() -> Self {
+            Self {
+                peer: [0; 6],
+                body: [0; DEFERRED_AP_ACTION_BODY_LEN],
+                association_epoch: 0,
+                active_epoch: 0,
+                ps_poll_epoch: 0,
+                removal_epoch: 0,
+            }
+        }
+    }
+
+    struct DeferredApManagementSlot {
+        state: AtomicU8,
+        value: UnsafeCell<DeferredApManagement>,
+    }
+
+    impl DeferredApManagementSlot {
+        const fn new() -> Self {
+            Self {
+                state: AtomicU8::new(DEFERRED_SLOT_EMPTY),
+                value: UnsafeCell::new(DeferredApManagement::empty()),
+            }
+        }
+    }
+
+    // Capture and consumption both run on the serialized radio-owner stack.
+    // The atomic state still makes publication order explicit and prevents a
+    // future non-radio diagnostic reader from observing a partially written
+    // command.
+    unsafe impl Sync for DeferredApManagementSlot {}
+
+    #[link_section = ".critical.bss.wifi_strict.deferred_ap_management"]
+    static DEFERRED_AP_MANAGEMENT: [DeferredApManagementSlot; WPA2_AP_ASSOC_CAPACITY] =
+        [const { DeferredApManagementSlot::new() }; WPA2_AP_ASSOC_CAPACITY];
+    static DEFERRED_AP_MANAGEMENT_READY: WakerCell = WakerCell::new();
+    static DEFERRED_AP_MANAGEMENT_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    static DEFERRED_AP_MANAGEMENT_RETRY_EDGE: AtomicBool = AtomicBool::new(false);
+    static DEFERRED_AP_MANAGEMENT_CAPTURED: AtomicUsize = AtomicUsize::new(0);
+    static DEFERRED_AP_MANAGEMENT_COALESCED: AtomicUsize = AtomicUsize::new(0);
+    static DEFERRED_AP_MANAGEMENT_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
+    static DEFERRED_AP_MANAGEMENT_CANCELLED: AtomicUsize = AtomicUsize::new(0);
+    static DEFERRED_AP_MANAGEMENT_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
     unsafe extern "C" {
         static mut g_ic: u8;
         static mut wpa_cb: *mut c_void;
@@ -456,6 +528,11 @@ mod target {
         fn __esp_hostap_sta_join_end();
         fn cnx_node_search(peer: *const u8) -> *mut u8;
         fn ieee80211_assoc_resp_construct(node: *mut u8, status: u8) -> *mut u8;
+        fn ieee80211_getmgtframe(
+            body: *mut *mut u8,
+            header_length: u32,
+            body_length: u32,
+        ) -> *mut u8;
         fn ieee80211_set_tx_desc(
             node: *mut u8,
             buffer: *mut u8,
@@ -463,6 +540,7 @@ mod target {
             tid: u32,
             flags: u32,
         );
+        fn ieee80211_set_tim(node: *mut u8, set: u32) -> i32;
         #[link_name = "ieee80211_set_tx_pti"]
         fn linked_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
         fn __real_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
@@ -660,6 +738,191 @@ mod target {
         )
     }
 
+    unsafe fn ap_addba_response_body(buffer: *mut u8) -> Option<*mut u8> {
+        if !is_bounded_ap_addba_response(buffer, 0xd0) {
+            return None;
+        }
+        let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
+        let header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
+        let body = header.add(24);
+        (body.add(3).read() == 1 && body.add(4).read() == 0).then_some(body)
+    }
+
+    unsafe fn try_defer_ap_addba_response(node: *mut u8, buffer: *mut u8) -> bool {
+        let Some(body) = ap_addba_response_body(buffer) else {
+            return false;
+        };
+        let mut peer = [0_u8; 6];
+        ptr::copy_nonoverlapping(node.add(4), peer.as_mut_ptr(), peer.len());
+        if peer[0] & 1 != 0 {
+            return false;
+        }
+        let Some(association_epoch) = wpa2_ap_peer_association_epoch(&peer) else {
+            return false;
+        };
+        let mut owned_body = [0_u8; DEFERRED_AP_ACTION_BODY_LEN];
+        ptr::copy_nonoverlapping(body, owned_body.as_mut_ptr(), owned_body.len());
+
+        for slot in &DEFERRED_AP_MANAGEMENT {
+            if slot.state.load(Ordering::Acquire) == DEFERRED_SLOT_READY
+                && (*slot.value.get()).peer == peer
+            {
+                // Keep one command per peer, but refresh its dialog token and
+                // parameters from the newest request. The original readiness
+                // baseline remains authoritative: repeated sleeping traffic
+                // must not turn into a synthetic retry edge.
+                (*slot.value.get()).body = owned_body;
+                (*slot.value.get()).association_epoch = association_epoch;
+                DEFERRED_AP_MANAGEMENT_COALESCED.fetch_add(1, Ordering::Relaxed);
+                esf_buf_recycle(buffer.cast());
+                return true;
+            }
+        }
+
+        let Some(slot) = DEFERRED_AP_MANAGEMENT.iter().find(|slot| {
+            slot.state
+                .compare_exchange(
+                    DEFERRED_SLOT_EMPTY,
+                    DEFERRED_SLOT_WRITING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        }) else {
+            return false;
+        };
+        slot.value.get().write(DeferredApManagement {
+            peer,
+            body: owned_body,
+            association_epoch,
+            active_epoch: crate::ap_power_save::active_epoch(&peer),
+            ps_poll_epoch: crate::ap_power_save::ps_poll_epoch(&peer),
+            removal_epoch: crate::ap_power_save::removal_epoch(&peer),
+        });
+        slot.state.store(DEFERRED_SLOT_READY, Ordering::Release);
+        ieee80211_set_tim(node, 1);
+        crate::ap_power_save::record_deferred_transmit();
+        DEFERRED_AP_MANAGEMENT_CAPTURED.fetch_add(1, Ordering::Relaxed);
+        esf_buf_recycle(buffer.cast());
+        DEFERRED_AP_MANAGEMENT_READY.wake();
+        true
+    }
+
+    fn release_deferred_slot(slot: &DeferredApManagementSlot) {
+        unsafe { slot.value.get().write(DeferredApManagement::empty()) };
+        slot.state.store(DEFERRED_SLOT_EMPTY, Ordering::Release);
+    }
+
+    unsafe fn submit_deferred_ap_management(
+        command: DeferredApManagement,
+        retry_edge: bool,
+    ) -> bool {
+        let node = cnx_node_search(command.peer.as_ptr());
+        if node.is_null() || node.cast::<*mut u8>().read().is_null() || node.add(4).read() & 1 != 0
+        {
+            return false;
+        }
+        let mut body = ptr::null_mut();
+        let buffer = ieee80211_getmgtframe(&mut body, 24, DEFERRED_AP_ACTION_BODY_LEN as u32);
+        if buffer.is_null() || body.is_null() {
+            return false;
+        }
+        ptr::copy_nonoverlapping(command.body.as_ptr(), body, command.body.len());
+        buffer
+            .add(0x14)
+            .cast::<u32>()
+            .write_unaligned(((DEFERRED_AP_ACTION_BODY_LEN as u32) << 16) | 24);
+        ieee80211_set_tx_desc(node, buffer, 7, 0, 0);
+        let descriptor = buffer.add(0x34).cast::<*mut u8>().read_unaligned();
+        if descriptor.is_null() {
+            esf_buf_recycle(buffer.cast());
+            return false;
+        }
+        let callbacks = descriptor.add(0x14).cast::<u32>();
+        callbacks.write_unaligned(callbacks.read_unaligned() | (1 << 13));
+
+        DEFERRED_AP_MANAGEMENT_RETRY_EDGE.store(retry_edge, Ordering::Release);
+        DEFERRED_AP_MANAGEMENT_BUFFER.store(buffer as usize, Ordering::Release);
+        let result = linked_ieee80211_mgmt_output(node, buffer, 0xd0);
+        DEFERRED_AP_MANAGEMENT_BUFFER.store(0, Ordering::Release);
+        DEFERRED_AP_MANAGEMENT_RETRY_EDGE.store(false, Ordering::Release);
+        if result == 0 {
+            ieee80211_set_tim(node, 0);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn poll_deferred_ap_management(cx: &mut Context<'_>) -> bool {
+        DEFERRED_AP_MANAGEMENT_READY.register(cx.waker());
+        let mut handled = false;
+        for slot in &DEFERRED_AP_MANAGEMENT {
+            if slot.state.load(Ordering::Acquire) != DEFERRED_SLOT_READY {
+                continue;
+            }
+            let command = unsafe { *slot.value.get() };
+            if wpa2_ap_peer_association_epoch(&command.peer) != Some(command.association_epoch) {
+                release_deferred_slot(slot);
+                DEFERRED_AP_MANAGEMENT_CANCELLED.fetch_add(1, Ordering::Relaxed);
+                handled = true;
+                continue;
+            }
+            match crate::ap_power_save::poll_peer_edge(
+                command.active_epoch,
+                command.ps_poll_epoch,
+                command.removal_epoch,
+                &command.peer,
+                cx,
+            ) {
+                Poll::Pending => continue,
+                Poll::Ready(crate::ap_power_save::PeerEdge::Removed) => {
+                    release_deferred_slot(slot);
+                    DEFERRED_AP_MANAGEMENT_CANCELLED.fetch_add(1, Ordering::Relaxed);
+                    handled = true;
+                }
+                Poll::Ready(crate::ap_power_save::PeerEdge::Retry) => {
+                    let submitted = unsafe { submit_deferred_ap_management(command, true) };
+                    release_deferred_slot(slot);
+                    if submitted {
+                        DEFERRED_AP_MANAGEMENT_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        DEFERRED_AP_MANAGEMENT_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    handled = true;
+                }
+            }
+        }
+        handled
+    }
+
+    fn is_owned_deferred_ap_management(buffer: *mut u8) -> bool {
+        !buffer.is_null()
+            && DEFERRED_AP_MANAGEMENT_BUFFER.load(Ordering::Acquire) == buffer as usize
+    }
+
+    unsafe fn submit_owned_deferred_ap_management(
+        node: *mut u8,
+        buffer: *mut u8,
+        subtype: u8,
+    ) -> i32 {
+        // `ieee80211_mgmt_output` has one measured branch into the vendor
+        // linked PS queue: bufferable AP management plus node flag 0x10.
+        // A Rust-owned continuation already waited for an RX-derived
+        // Active/PS-Poll edge, so suppress only that bit while the finite
+        // ordinary output body runs. Local MIE masking makes the temporary
+        // view indivisible without a spin lock or another-core stall.
+        let interrupt_state = crate::critical::strict_wifi_int_disable();
+        let flags = node.add(0x0c).cast::<u32>();
+        let previous = flags.read();
+        flags.write(previous & !0x10);
+        let result = __real_ieee80211_mgmt_output(node, buffer, subtype);
+        let current = flags.read();
+        flags.write((current & !0x10) | (previous & 0x10));
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+        result
+    }
+
     unsafe fn record_management_tx_rejection(
         reason: ManagementTxRejectionReason,
         subtype: u8,
@@ -843,15 +1106,15 @@ mod target {
         let on_wifi_hart = crate::critical::on_strict_wifi_hart();
         let in_radio_context = crate::context::in_radio_context();
         let owned_action = crate::sta_link::is_owned_action_management(buffer, subtype);
+        let owned_deferred_ap_action = is_owned_deferred_ap_management(buffer);
         let ap_addba_response = if on_wifi_hart && in_radio_context && !buffer.is_null() {
             is_bounded_ap_addba_response(buffer, subtype)
         } else {
             false
         };
-        let subtype_allowed =
-            matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
-                || owned_action
-                || ap_addba_response;
+        let subtype_allowed = matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
+            || owned_action
+            || ap_addba_response;
         let rejection = if !on_wifi_hart {
             Some(ManagementTxRejectionReason::WrongHart)
         } else if !in_radio_context {
@@ -903,6 +1166,19 @@ mod target {
                 || node.add(0x0c).cast::<u32>().read() & 0x10 != 0
                 || node.add(0x2fe).read() != 0)
         {
+            if ap_addba_response
+                && node.add(0x04).read() & 1 == 0
+                && !owned_deferred_ap_action
+                && try_defer_ap_addba_response(node, buffer)
+            {
+                return 0;
+            }
+            if ap_addba_response
+                && owned_deferred_ap_action
+                && DEFERRED_AP_MANAGEMENT_RETRY_EDGE.load(Ordering::Acquire)
+            {
+                return submit_owned_deferred_ap_management(node, buffer, subtype);
+            }
             return reject_management_tx(
                 ManagementTxRejectionReason::ApNodeState,
                 subtype,
@@ -1216,6 +1492,21 @@ mod target {
         }
     }
 
+    pub fn deferred_ap_management_snapshot() -> DeferredApManagementSnapshot {
+        DeferredApManagementSnapshot {
+            captured: DEFERRED_AP_MANAGEMENT_CAPTURED.load(Ordering::Acquire),
+            coalesced: DEFERRED_AP_MANAGEMENT_COALESCED.load(Ordering::Acquire),
+            submitted: DEFERRED_AP_MANAGEMENT_SUBMITTED.load(Ordering::Acquire),
+            cancelled: DEFERRED_AP_MANAGEMENT_CANCELLED.load(Ordering::Acquire),
+            dropped: DEFERRED_AP_MANAGEMENT_DROPPED.load(Ordering::Acquire),
+            occupied: DEFERRED_AP_MANAGEMENT
+                .iter()
+                .filter(|slot| slot.state.load(Ordering::Acquire) == DEFERRED_SLOT_READY)
+                .count(),
+            capacity: WPA2_AP_ASSOC_CAPACITY,
+        }
+    }
+
     pub(crate) fn wpa2_ap_peer_association_epoch(peer: &[u8; 6]) -> Option<usize> {
         PEERS.iter().find_map(|slot| {
             (slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer })
@@ -1226,11 +1517,13 @@ mod target {
 
 #[cfg(target_arch = "riscv32")]
 pub use target::{
-    async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks,
-    management_tx_rejection_snapshot, Wpa2ApInstallError,
+    async_wpa2_ap_callbacks_installed, deferred_ap_management_snapshot,
+    install_async_wpa2_ap_callbacks, management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 #[cfg(target_arch = "riscv32")]
-pub(crate) use target::{management_link_wrappers_active, wpa2_ap_peer_association_epoch};
+pub(crate) use target::{
+    management_link_wrappers_active, poll_deferred_ap_management, wpa2_ap_peer_association_epoch,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1304,20 +1597,12 @@ mod tests {
 
     #[test]
     fn admits_only_the_measured_ap_addba_response_layout() {
-        assert!(is_bounded_ap_addba_response_layout(
-            0xd0, 0, 24, 9, 3, 1
-        ));
-        assert!(!is_bounded_ap_addba_response_layout(
-            0xd0, 0, 24, 9, 3, 0
-        ));
-        assert!(!is_bounded_ap_addba_response_layout(
-            0xd0, 0, 24, 9, 3, 2
-        ));
+        assert!(is_bounded_ap_addba_response_layout(0xd0, 0, 24, 9, 3, 1));
+        assert!(!is_bounded_ap_addba_response_layout(0xd0, 0, 24, 9, 3, 0));
+        assert!(!is_bounded_ap_addba_response_layout(0xd0, 0, 24, 9, 3, 2));
         assert!(!is_bounded_ap_addba_response_layout(
             0xd0, 0x2000, 24, 9, 3, 1
         ));
-        assert!(!is_bounded_ap_addba_response_layout(
-            0xd0, 0, 24, 8, 3, 1
-        ));
+        assert!(!is_bounded_ap_addba_response_layout(0xd0, 0, 24, 8, 3, 1));
     }
 }

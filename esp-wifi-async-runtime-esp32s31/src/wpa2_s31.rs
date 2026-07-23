@@ -1651,6 +1651,10 @@ mod target {
     impl<const K: usize, const N: usize> TryWpa2Io<N> for S31StaticWpa2Io<K> {
         type Error = S31Wpa2IoError;
 
+        fn poll_internal(&mut self, cx: &mut core::task::Context<'_>) -> bool {
+            crate::wpa2_ap::poll_deferred_ap_management(cx)
+        }
+
         fn try_execute(
             &mut self,
             command: Wpa2IoCommand<N>,
