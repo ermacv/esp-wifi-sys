@@ -306,13 +306,13 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
         REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     }
-    OCCUPIED.store(active.reorder.occupied(), Ordering::Release);
+    OCCUPIED.store(active.reorder.occupied() as usize, Ordering::Release);
     update_gap_edge(active);
     if release.count == 0 {
         RETAINED_FRAMES.fetch_add(1, Ordering::Relaxed);
         Ingress::Retained
     } else {
-        RELEASED_FRAMES.fetch_add(release.count, Ordering::Relaxed);
+        RELEASED_FRAMES.fetch_add(release.count as usize, Ordering::Relaxed);
         Ingress::Release(release)
     }
 }
@@ -358,8 +358,8 @@ pub(crate) fn expire_gap(generation: usize) -> Option<RxAmpduRelease> {
     active.gap_generation = None;
     let release = active.reorder.expire_gap();
     GAP_EXPIRIES.fetch_add(1, Ordering::Relaxed);
-    RELEASED_FRAMES.fetch_add(release.count, Ordering::Relaxed);
-    OCCUPIED.store(active.reorder.occupied(), Ordering::Release);
+    RELEASED_FRAMES.fetch_add(release.count as usize, Ordering::Relaxed);
+    OCCUPIED.store(active.reorder.occupied() as usize, Ordering::Release);
     update_gap_edge(active);
     Some(release)
 }
