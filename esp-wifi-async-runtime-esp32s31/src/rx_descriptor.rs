@@ -17,15 +17,9 @@ pub(crate) const fn descriptor_buffer_length(word: u32) -> usize {
     (word & LENGTH_MASK) as usize
 }
 
-pub(crate) const fn descriptor_owned_by_hardware(word: u32) -> bool {
-    word & OWNER_BIT != 0
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        descriptor_buffer_length, descriptor_owned_by_hardware, recycled_descriptor_word,
-    };
+    use super::{descriptor_buffer_length, recycled_descriptor_word};
 
     #[test]
     fn recycle_word_matches_the_pinned_vendor_bit_sequence() {
@@ -38,13 +32,5 @@ mod tests {
             assert_eq!(recycled_descriptor_word(word), expected);
             assert_eq!(descriptor_buffer_length(word), (word & 0x3fff) as usize);
         }
-    }
-
-    #[test]
-    fn owner_bit_is_the_only_terminal_restart_authority() {
-        assert!(!descriptor_owned_by_hardware(0));
-        assert!(!descriptor_owned_by_hardware(0x7fff_ffff));
-        assert!(descriptor_owned_by_hardware(0x8000_0000));
-        assert!(descriptor_owned_by_hardware(u32::MAX));
     }
 }

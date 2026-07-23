@@ -9,9 +9,7 @@ static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_arch = "riscv32")]
 use crate::{
-    rx_descriptor::{
-        descriptor_buffer_length, descriptor_owned_by_hardware, recycled_descriptor_word,
-    },
+    rx_descriptor::{descriptor_buffer_length, recycled_descriptor_word},
     timer::RawOsiTimer,
 };
 
@@ -24,6 +22,7 @@ pub enum WdevRxContinuationError {
     MissingRxMetadata,
     DescriptorCountOverflow,
     DescriptorChainTooLong,
+    ContinuationQueueFull,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -64,6 +63,8 @@ struct RxRecycleState {
     reload_tail: *mut u8,
     pending_head: *mut u8,
     pending_tail: *mut u8,
+    drained_head: *mut u8,
+    drained_last: *mut u8,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -75,6 +76,8 @@ impl RxRecycleState {
             reload_tail: ptr::null_mut(),
             pending_head: ptr::null_mut(),
             pending_tail: ptr::null_mut(),
+            drained_head: ptr::null_mut(),
+            drained_last: ptr::null_mut(),
         }
     }
 }
@@ -242,6 +245,7 @@ unsafe extern "C" {
     fn hal_mac_rx_read_rxdscrnext() -> *mut u8;
     fn hal_mac_rx_set_base(descriptor: *mut u8);
     fn hal_mac_rx_set_dscr_reload();
+    fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
 }
 
@@ -452,27 +456,6 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             if !next.is_null() {
                 hal_mac_rx_set_base(next);
             }
-        } else {
-            // The asynchronous path can observe a state the vendor's inline
-            // spin almost never reaches: MAC consumed exactly through the
-            // accepted tail, software already recycled every received frame,
-            // and no later RX edge exists to restart the engine.  Only the
-            // hardware-owner bit makes the current software head eligible;
-            // a completed but undecoded descriptor has this bit clear and
-            // must never be submitted again.
-            let software_head = ptr::addr_of!(wDevCtrl)
-                .cast::<*mut u8>()
-                .read_unaligned();
-            if !software_head.is_null()
-                && descriptor_owned_by_hardware(
-                    software_head.cast::<u32>().read_unaligned(),
-                )
-            {
-                hal_mac_rx_set_base(software_head);
-                RX_RECYCLE_PROBE
-                    .terminal_restarts
-                    .fetch_add(1, Ordering::Relaxed);
-            }
         }
     }
 
@@ -502,6 +485,68 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             fail_rx_recycle(state, error);
         }
     }
+    try_restart_drained_rx_chain(state);
+}
+
+/// Record the only state from which an exhausted RX engine may be restarted.
+///
+/// The caller has decoded `processed_last`, advanced the vendor software head,
+/// and observed that the hardware last descriptor did not move during that
+/// decode. A concurrently active descriptor reload still owns the MAC base;
+/// the saved pair is therefore consumed only after reload completion.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+unsafe fn mark_drained_rx_chain(processed_last: *mut u8) {
+    let state = &mut *RX_RECYCLE_STATE.0.get();
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let head = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+    if !head.is_null()
+        && head != processed_last
+        && hal_mac_rx_read_rxdscrnext().is_null()
+        && hal_mac_rx_get_last_dscr() == processed_last
+    {
+        state.drained_head = head;
+        state.drained_last = processed_last;
+    } else {
+        state.drained_head = ptr::null_mut();
+        state.drained_last = ptr::null_mut();
+    }
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    try_restart_drained_rx_chain(state);
+}
+
+/// Restart a proven-drained chain only when no descriptor reload owns the MAC.
+///
+/// All evidence is revalidated in one bounded local critical section. A
+/// changed software head, hardware tail, or hardware-next pointer invalidates
+/// the saved proof instead of guessing from descriptor owner bits.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState) {
+    if state.reload_active || state.drained_head.is_null() {
+        return;
+    }
+
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let saved_head = state.drained_head;
+    let saved_last = state.drained_last;
+    let current_head = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+    let hardware_next = hal_mac_rx_read_rxdscrnext();
+    let hardware_last = hal_mac_rx_get_last_dscr();
+    if hardware_next.is_null()
+        && hardware_last == saved_last
+        && current_head == saved_head
+        && saved_head != saved_last
+    {
+        hal_mac_rx_set_base(saved_head);
+        RX_RECYCLE_PROBE
+            .terminal_restarts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    // A proof describes one exact publication state and is never reused.
+    state.drained_head = ptr::null_mut();
+    state.drained_last = ptr::null_mut();
+    crate::critical::strict_wifi_int_restore(interrupt_state);
 }
 
 /// Finish a descriptor reload before decoding the RX event which proves that
@@ -637,7 +682,16 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
     while !descriptor.is_null() {
         if descriptors_seen == MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT {
             crate::critical::strict_wifi_int_restore(interrupt_state);
-            return Err(WdevRxContinuationError::DescriptorChainTooLong);
+            // Yield only between complete RX units. Splitting an aggregate
+            // would lose its prefix count and is therefore still rejected as
+            // a malformed/unsupported chain.
+            if subframe_count != 0 {
+                return Err(WdevRxContinuationError::DescriptorChainTooLong);
+            }
+            if pp_post(25, ptr::null_mut()) != 0 {
+                return Err(WdevRxContinuationError::ContinuationQueueFull);
+            }
+            return Ok(());
         }
         descriptors_seen += 1;
         let next = descriptor.add(8).cast::<*mut u8>().read_unaligned();
@@ -675,13 +729,26 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
             wDev_ProcessRxSucData(descriptor, subframe_count);
             subframe_count = 0;
             if descriptor == last {
-                return Ok(());
+                let latest = hal_mac_rx_get_last_dscr();
+                if latest == descriptor {
+                    mark_drained_rx_chain(descriptor);
+                    return Ok(());
+                }
+                if reset.read() == 0 && latest.is_null() {
+                    return Err(WdevRxContinuationError::MissingLastDescriptor);
+                }
+                last = latest;
+            } else {
+                last = hal_mac_rx_get_last_dscr();
+                if reset.read() == 0 && last.is_null() {
+                    return Err(WdevRxContinuationError::MissingLastDescriptor);
+                }
             }
-            last = hal_mac_rx_get_last_dscr();
-            if reset.read() == 0 && last.is_null() {
-                return Err(WdevRxContinuationError::MissingLastDescriptor);
-            }
-            descriptor = next;
+            // The per-unit decoder advances `wDevCtrl.head` before recycling
+            // the completed descriptor. Reading that publication after the
+            // callback is stronger than the pre-callback `next` snapshot when
+            // MAC advanced while the decoder was running.
+            descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
             if descriptor.is_null() {
                 return Ok(());
             }
