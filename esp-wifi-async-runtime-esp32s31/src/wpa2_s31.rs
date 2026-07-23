@@ -954,10 +954,32 @@ mod target {
                     }
                     Ok(())
                 }
-                Wpa2Interface::AccessPoint => self
-                    .authorized_peers
-                    .set(peer, authorized)
-                    .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull),
+                Wpa2Interface::AccessPoint => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        let node = cnx_node_search(peer.as_ptr());
+                        let interface = if node.is_null() {
+                            ptr::null_mut()
+                        } else {
+                            node.cast::<*mut u8>().read()
+                        };
+                        ets_printf(
+                            c"HIL AP auth state: node=%08x if=%08x nf=%08x n134=%02x n135=%02x n138=%08x priv=%08x\r\n"
+                                .as_ptr()
+                                .cast(),
+                            node as usize as u32,
+                            interface as usize as u32,
+                            if node.is_null() { 0 } else { node.add(0x0c).cast::<u32>().read() },
+                            if node.is_null() { 0xff_u32 } else { u32::from(node.add(0x134).read()) },
+                            if node.is_null() { 0xff_u32 } else { u32::from(node.add(0x135).read()) },
+                            if node.is_null() { 0 } else { node.add(0x138).cast::<u32>().read() },
+                            if interface.is_null() { 0 } else { interface.add(0xa4).cast::<u32>().read() },
+                        );
+                    }
+                    self.authorized_peers
+                        .set(peer, authorized)
+                        .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull)
+                }
             }
         }
 
