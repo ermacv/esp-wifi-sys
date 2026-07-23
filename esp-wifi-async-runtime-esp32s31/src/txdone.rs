@@ -334,7 +334,9 @@ const fn is_ap_addba_response_completion_layout(
     descriptor_callbacks: u32,
     hardware_status: u8,
 ) -> bool {
-    frame_control == 0x00d0
+    // Hardware may set the standard 802.11 Retry bit after an unsuccessful
+    // first attempt. No other frame-control bit is mutable here.
+    frame_control & !0x0800 == 0x00d0
         && header_len == 0x0020
         && remaining_len == 0x000d
         // The low twelve bits mirror Sequence Control >> 4 and therefore
@@ -1691,19 +1693,32 @@ mod tests {
     #[test]
     fn only_successful_measured_ap_addba_completion_is_a_noop() {
         let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
-        for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
-            assert!(is_ap_addba_response_completion_layout(
-                0x00d0,
-                0x20,
-                0x0d,
-                layout,
-                0xc00b_402c,
-                0,
-                0x0114_0000,
-                callbacks,
-                1,
-            ));
+        for frame_control in [0x00d0, 0x08d0] {
+            for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
+                assert!(is_ap_addba_response_completion_layout(
+                    frame_control,
+                    0x20,
+                    0x0d,
+                    layout,
+                    0xc00b_402c,
+                    0,
+                    0x0114_0000,
+                    callbacks,
+                    1,
+                ));
+            }
         }
+        assert!(!is_ap_addba_response_completion_layout(
+            0x18d0,
+            0x20,
+            0x0d,
+            0x2732,
+            0xc00b_402c,
+            0,
+            0x0114_0000,
+            callbacks,
+            1,
+        ));
         assert!(!is_ap_addba_response_completion_layout(
             0x00d0,
             0x20,
