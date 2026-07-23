@@ -367,6 +367,24 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("dport_access_stall_other_cpu_start", "other-core stall"),
 ];
 
+// These symbols remain linked for initialization or stock WPA code which the
+// strict runtime never enters. Do not waive them merely by name: the final ELF
+// is accepted only while every direct call remains in this exact owner set.
+// Empty owner sets require zero call instructions in the final image.
+const PINNED_DORMANT_FINAL_CALLERS: &[(&str, &[&str])] = &[
+    (
+        "esp_event_post",
+        &["sm_WPA_PTK_PTKCALCNEGOTIATING_Enter.constprop.0"],
+    ),
+    ("__assert_func", &["wpa_gen_wpa_ie"]),
+    (
+        "puts",
+        &["wifi_osi_funcs_register", "esp_wifi_init_internal"],
+    ),
+    ("putchar", &[]),
+    ("printf", &[]),
+];
+
 #[derive(Default)]
 struct FunctionInfo {
     direct: BTreeSet<String>,
@@ -883,6 +901,7 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             Some((normalize_symbol(fields.last()?), (kind, address)))
         })
         .collect::<BTreeMap<_, _>>();
+    let linked_code_locations = parse_linked_code_locations(&all_symbols);
     for required in REQUIRED_SRAM_CODE {
         match all_linked_symbols.get(*required) {
             None => {
@@ -983,6 +1002,17 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             {
                 continue;
             }
+            if PINNED_DORMANT_FINAL_CALLERS
+                .iter()
+                .find(|(entry, _)| *entry == symbol)
+                .is_some_and(|(_, allowed)| {
+                    final_call_owners(&disassembly, &symbol, &linked_code_locations).is_some_and(
+                        |owners| owners.iter().all(|owner| allowed.contains(&owner.as_str())),
+                    )
+                })
+            {
+                continue;
+            }
             violations.insert(Violation::ElfSymbol { category, symbol });
         }
         // Do not reject a replaced entry merely because its symbol exists.
@@ -1002,6 +1032,46 @@ fn is_code_symbol_kind(kind: &str) -> bool {
 
 fn is_internal_sram_code(kind: &str, address: u64) -> bool {
     is_code_symbol_kind(kind) && (INTERNAL_SRAM_START..INTERNAL_SRAM_END).contains(&address)
+}
+
+fn parse_linked_code_locations(symbols: &str) -> Vec<(u64, String)> {
+    let mut locations = symbols
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 3 || !is_code_symbol_kind(fields[1]) {
+                return None;
+            }
+            let address = u64::from_str_radix(fields[0], 16).ok()?;
+            let name = fields[2..].join(" ");
+            (!name.starts_with('.')).then_some((address, normalize_symbol(&name)))
+        })
+        .collect::<Vec<_>>();
+    locations.sort_by_key(|(address, _)| *address);
+    locations
+}
+
+fn final_call_owners(
+    disassembly: &str,
+    target: &str,
+    code_locations: &[(u64, String)],
+) -> Option<BTreeSet<String>> {
+    let reference = format!("<{target}>");
+    let mut owners = BTreeSet::new();
+    for line in disassembly.lines().filter(|line| {
+        line.contains(&reference) && !line.trim_end().ends_with(&format!("{reference}:"))
+    }) {
+        let address = line
+            .split_once(':')
+            .and_then(|(address, _)| u64::from_str_radix(address.trim(), 16).ok())?;
+        let owner = code_locations
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= address)
+            .map(|(_, owner)| owner.clone())?;
+        owners.insert(owner);
+    }
+    Some(owners)
 }
 
 fn calls_symbol(disassembly: &str, symbol: &str) -> bool {
@@ -1134,9 +1204,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        calls_symbol, definition_name, direct_relocation_target, indirect_site,
+        calls_symbol, definition_name, direct_relocation_target, final_call_owners, indirect_site,
         is_code_symbol_kind, is_internal_sram_code, is_invariant_excluded_indirect_site,
-        is_pinned_bounded_cycle, parse_object, pinned_indirect_site_target,
+        is_pinned_bounded_cycle, parse_linked_code_locations, parse_object,
+        pinned_indirect_site_target,
     };
 
     #[test]
@@ -1231,6 +1302,30 @@ mod tests {
             "40000000: jal ra <ic_get_next_tbtt>\n",
             "ic_get_next_tbtt"
         ));
+    }
+
+    #[test]
+    fn dormant_final_calls_are_bound_to_exact_owners() {
+        let symbols = "40001000 T init_only\n\
+                       40001100 t dormant_wpa_state\n\
+                       40002000 T next_function\n";
+        let locations = parse_linked_code_locations(symbols);
+        let disassembly = "40001000 <init_only>:\n\
+                           40001020: jal ra <puts>\n\
+                           40001100 <dormant_wpa_state>:\n\
+                           40001140: jal ra <esp_event_post>\n";
+        assert_eq!(
+            final_call_owners(disassembly, "puts", &locations),
+            Some(["init_only".to_owned()].into_iter().collect())
+        );
+        assert_eq!(
+            final_call_owners(disassembly, "esp_event_post", &locations),
+            Some(["dormant_wpa_state".to_owned()].into_iter().collect())
+        );
+        assert_eq!(
+            final_call_owners(disassembly, "printf", &locations),
+            Some(Default::default())
+        );
     }
 
     #[test]

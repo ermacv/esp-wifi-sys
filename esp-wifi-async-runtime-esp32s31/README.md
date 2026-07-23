@@ -411,6 +411,11 @@ only when the corresponding `__wrap_malloc`, `__wrap_calloc`,
 `__wrap_realloc`, or `__wrap_free` symbol is linked. `lmacTxDone` must resolve
 through `__wrap_lmacTxDone`; its callback bitmap, inline `ppProcTxDone`/PM tail,
 and TX-queue resume are then executor continuations.
+Stock initialization and bypassed WPA objects keep a few forbidden symbol
+definitions in the image. The final audit permits them only while every call
+site remains in its pinned pre-handoff or dormant owner: a new caller of
+`esp_event_post`, libc printing, or the vendor assert immediately fails the
+audit.
 The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
 that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
 walks four-byte frame records with a counter narrowed to `u8`; including the
