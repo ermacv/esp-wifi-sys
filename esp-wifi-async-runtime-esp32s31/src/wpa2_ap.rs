@@ -599,15 +599,18 @@ mod target {
         let mut category = 0_u8;
         let mut action = 0_u8;
         if !buffer.is_null() {
-            let mut header = buffer.add(4).cast::<*mut u8>().read_unaligned();
-            if !header.is_null() {
-                if buffer.add(0x24).cast::<u16>().read_unaligned() & 0x2000 != 0 {
-                    header = header.add(8);
-                }
-                frame_control = header.cast::<u16>().read_unaligned();
-                if frame_control & 0x00fc == 0x00d0 {
-                    category = header.add(24).read();
-                    action = header.add(25).read();
+            let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
+            if !first_buffer.is_null() {
+                let mut header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
+                if !header.is_null() {
+                    if buffer.add(0x24).cast::<u16>().read_unaligned() & 0x2000 != 0 {
+                        header = header.add(8);
+                    }
+                    frame_control = header.cast::<u16>().read_unaligned();
+                    if frame_control & 0x00fc == 0x00d0 {
+                        category = header.add(24).read();
+                        action = header.add(25).read();
+                    }
                 }
             }
         }
