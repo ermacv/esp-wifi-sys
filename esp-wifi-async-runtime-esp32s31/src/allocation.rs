@@ -203,6 +203,13 @@ mod target {
     const WPA_IE_SLOT_CAPACITY: usize = 8;
     const WPA_IE_SLOT_MASK: usize = (1 << WPA_IE_SLOT_CAPACITY) - 1;
     const OS_MEMDUP_MALLOC_RETURN_OFFSET: usize = 0x10;
+    const RATE_CONTEXT_SIZE: usize = 152;
+    const RATE_CONTEXT_CAPACITY: usize = 16;
+    const RATE_CONTEXT_MASK: usize = (1 << RATE_CONTEXT_CAPACITY) - 1;
+    // Return address after the pinned S31 `_wifi_zalloc(152)` call in
+    // `rc_enable_trc`. AP peer rate contexts are bounded by the vendor table
+    // indices 1..=16 and are returned through `rc_disable_trc`.
+    const RATE_CONTEXT_ALLOCATION_RETURN_OFFSET: usize = 0x3e;
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -237,6 +244,17 @@ mod target {
 
     unsafe impl Sync for WpaIeSlot {}
 
+    #[repr(C, align(4))]
+    struct RateContext(UnsafeCell<[u8; RATE_CONTEXT_SIZE]>);
+
+    impl RateContext {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; RATE_CONTEXT_SIZE]))
+        }
+    }
+
+    unsafe impl Sync for RateContext {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -246,6 +264,10 @@ mod target {
     static WPA_IE_SLOTS: [WpaIeSlot; WPA_IE_SLOT_CAPACITY] =
         [const { WpaIeSlot::new() }; WPA_IE_SLOT_CAPACITY];
     static CLAIMED_WPA_IE_SLOTS: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.rate_contexts"]
+    static RATE_CONTEXTS: [RateContext; RATE_CONTEXT_CAPACITY] =
+        [const { RateContext::new() }; RATE_CONTEXT_CAPACITY];
+    static CLAIMED_RATE_CONTEXTS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -258,6 +280,7 @@ mod target {
             appie_type: u32,
         ) -> i32;
         fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
+        fn rc_enable_trc(interface: u32, peer: *const u8, index: u32, mode: u32) -> *mut c_void;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -474,10 +497,56 @@ mod target {
         CLAIMED_WPA_IE_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
+    fn claim_rate_context(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller =
+            rc_enable_trc as *const () as usize + RATE_CONTEXT_ALLOCATION_RETURN_OFFSET;
+        if size != RATE_CONTEXT_SIZE || caller != expected_caller {
+            return None;
+        }
+        let claimed = CLAIMED_RATE_CONTEXTS.load(Ordering::Acquire);
+        let free = !claimed & RATE_CONTEXT_MASK;
+        if free == 0 {
+            return None;
+        }
+        let index = free.trailing_zeros() as usize;
+        let bit = 1_usize << index;
+        CLAIMED_RATE_CONTEXTS
+            .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let context = RATE_CONTEXTS[index].0.get();
+        unsafe { context.write([0; RATE_CONTEXT_SIZE]) };
+        Some(context.cast())
+    }
+
+    fn rate_context_index(context: *mut c_void) -> Option<usize> {
+        let base = core::ptr::addr_of!(RATE_CONTEXTS) as usize;
+        let address = context as usize;
+        let stride = mem::size_of::<RateContext>();
+        let offset = address.checked_sub(base)?;
+        if offset % stride != 0 {
+            return None;
+        }
+        let index = offset / stride;
+        (index < RATE_CONTEXT_CAPACITY).then_some(index)
+    }
+
+    fn release_rate_context(context: *mut c_void) -> bool {
+        let Some(index) = rate_context_index(context) else {
+            return false;
+        };
+        let bit = 1_usize << index;
+        if CLAIMED_RATE_CONTEXTS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+            return false;
+        }
+        unsafe { RATE_CONTEXTS[index].0.get().write([0; RATE_CONTEXT_SIZE]) };
+        true
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
         release_blacklist_node(ptr)
             || release_ipc_envelope(ptr)
             || release_wpa_ie_slot(ptr)
+            || release_rate_context(ptr)
             || unsafe { crate::wpa2_s31::release_static_ap_node(ptr) }
     }
 
@@ -615,6 +684,9 @@ mod target {
                 if let Some(envelope) = claim_ipc_envelope(size, caller) {
                     return envelope;
                 }
+                if let Some(context) = claim_rate_context(size, caller) {
+                    return context;
+                }
             }
             PROBE.record_request_at(size, true, false, source, caller);
             return core::ptr::null_mut();
@@ -748,6 +820,8 @@ mod target {
     const _: () = assert!(IPC_ENVELOPE_CAPACITY < usize::BITS as usize);
     const _: () = assert!(mem::size_of::<WpaIeSlot>() == WPA_IE_CAPACITY);
     const _: () = assert!(WPA_IE_SLOT_CAPACITY < usize::BITS as usize);
+    const _: () = assert!(mem::size_of::<RateContext>() == RATE_CONTEXT_SIZE);
+    const _: () = assert!(RATE_CONTEXT_CAPACITY < usize::BITS as usize);
 }
 
 #[cfg(target_arch = "riscv32")]
