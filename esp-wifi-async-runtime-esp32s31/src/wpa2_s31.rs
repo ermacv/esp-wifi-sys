@@ -1106,6 +1106,50 @@ mod target {
 
             #[cfg(feature = "hil-vendor-tx")]
             if self.vendor_tx_diagnostic && data_owner.is_some() {
+                let mut peer_error = 0_u32;
+                let diagnostic_node = unsafe {
+                    ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error)
+                };
+                let diagnostic_interface = unsafe {
+                    ptr::addr_of_mut!(g_ic)
+                        .add(0x10 + usize::try_from(interface).unwrap_or(0) * 4)
+                        .cast::<*mut u8>()
+                        .read()
+                };
+                unsafe {
+                    ets_printf(
+                        c"HIL data node: node=%08x err=%08x nf=%08x n24=%02x n134=%02x n135=%02x if138=%08x\r\n"
+                            .as_ptr()
+                            .cast(),
+                        diagnostic_node.addr(),
+                        peer_error,
+                        if diagnostic_node.is_null() {
+                            0
+                        } else {
+                            diagnostic_node.add(0x0c).cast::<u32>().read()
+                        },
+                        if diagnostic_node.is_null() {
+                            0xff_u32
+                        } else {
+                            u32::from(diagnostic_node.add(0x24).read())
+                        },
+                        if diagnostic_node.is_null() {
+                            0xff_u32
+                        } else {
+                            u32::from(diagnostic_node.add(0x134).read())
+                        },
+                        if diagnostic_node.is_null() {
+                            0xff_u32
+                        } else {
+                            u32::from(diagnostic_node.add(0x135).read())
+                        },
+                        if diagnostic_interface.is_null() {
+                            0
+                        } else {
+                            diagnostic_interface.add(0x138).cast::<u32>().read()
+                        },
+                    );
+                }
                 let result = unsafe {
                     ieee80211_output_do(interface, frame.as_ptr(), length, 0, ptr::null_mut())
                 };
