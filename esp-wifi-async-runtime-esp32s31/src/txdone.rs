@@ -1015,7 +1015,7 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
     }
     let frame_control = header.cast::<u16>().read_unaligned();
     let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
-    let Some(header_len) = crate::tx_security::strict_ap_eapol_power_save_completion_header_len(
+    let Some(llc_offset) = crate::tx_security::strict_ap_eapol_power_save_completion_llc_offset(
         frame_control,
         lengths as u16,
         (lengths >> 16) as u16,
@@ -1024,7 +1024,7 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
         return Err(TxDoneError::StrictCallbackFailed);
     };
     const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
-    if core::slice::from_raw_parts(header.add(header_len), LLC_EAPOL.len()) != LLC_EAPOL {
+    if core::slice::from_raw_parts(header.add(llc_offset), LLC_EAPOL.len()) != LLC_EAPOL {
         return Err(TxDoneError::StrictCallbackFailed);
     }
     Ok(())
