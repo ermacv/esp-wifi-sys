@@ -322,7 +322,9 @@ pub use wpa2_rx::{wpa2_rx_diagnostic_snapshot, Wpa2RxDiagnosticSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_s31::S31StaticWpa2Io;
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
-pub use wpa2_s31::{hil_sta_pairwise_key_snapshot, HilStaPairwiseKeySnapshot};
+pub use wpa2_s31::{
+    hil_cancel_deferred_ap_transmit, hil_sta_pairwise_key_snapshot, HilStaPairwiseKeySnapshot,
+};
 pub use wpa2_s31::{S31StaticKeyStorage, S31Wpa2IoError};
 pub use wpa2_sha1::{
     AsyncSha1, SoftwareSha1Error, Wpa2Sha1Crypto, Wpa2SoftwareSha1,

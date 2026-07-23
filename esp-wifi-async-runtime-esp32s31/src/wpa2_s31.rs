@@ -33,6 +33,11 @@ const MAX_VENDOR_KEY_INDEX: u8 = 24;
 static STATIC_VENDOR_KEY_SLOTS: [AtomicUsize; MAX_VENDOR_KEY_INDEX as usize + 1] =
     [const { AtomicUsize::new(0) }; MAX_VENDOR_KEY_INDEX as usize + 1];
 
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+static HIL_AP_WAITING_PEER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+static HIL_AP_WAITING_PEER_VALID: AtomicBool = AtomicBool::new(false);
+
 const fn hardware_key_direction(cipher: u32, hardware_index: u32) -> u32 {
     if cipher & 0x001c_0000 == 0x0004_0000 {
         7
@@ -1669,6 +1674,13 @@ mod target {
             self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
             self.ap_removal_epoch = crate::ap_power_save::removal_epoch(&peer);
             self.ap_retry_armed = true;
+            #[cfg(feature = "hil-vendor-tx")]
+            {
+                for (destination, byte) in HIL_AP_WAITING_PEER.iter().zip(peer) {
+                    destination.store(byte, Ordering::Relaxed);
+                }
+                HIL_AP_WAITING_PEER_VALID.store(true, Ordering::Release);
+            }
             true
         }
 
@@ -1684,9 +1696,13 @@ mod target {
                 cx,
             ) {
                 core::task::Poll::Ready(crate::ap_power_save::PeerEdge::Retry) => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    HIL_AP_WAITING_PEER_VALID.store(false, Ordering::Release);
                     core::task::Poll::Ready(PendingCommandAction::Retry)
                 }
                 core::task::Poll::Ready(crate::ap_power_save::PeerEdge::Removed) => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    HIL_AP_WAITING_PEER_VALID.store(false, Ordering::Release);
                     core::task::Poll::Ready(PendingCommandAction::Cancel)
                 }
                 core::task::Poll::Pending => core::task::Poll::Pending,
@@ -1712,8 +1728,35 @@ mod target {
             }
         }
     }
+
+    /// Publish the real peer-removal readiness edge for the AP command that is
+    /// currently deferred on a sleeping peer.
+    ///
+    /// This is a deterministic HIL trigger for the async owner's cancellation
+    /// path. It is deliberately unavailable without `hil-vendor-tx` and does
+    /// not mutate the vendor association table or disconnect a station.
+    #[cfg(feature = "hil-vendor-tx")]
+    pub fn hil_cancel_deferred_ap_transmit() -> bool {
+        if !HIL_AP_WAITING_PEER_VALID.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut peer = [0; 6];
+        for (byte, source) in peer.iter_mut().zip(HIL_AP_WAITING_PEER.iter()) {
+            *byte = source.load(Ordering::Acquire);
+        }
+        if HIL_AP_WAITING_PEER_VALID
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        crate::ap_power_save::observe_peer_removed(&peer);
+        true
+    }
 }
 
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+pub use target::hil_cancel_deferred_ap_transmit;
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use target::hil_sta_pairwise_key_snapshot;
 #[cfg(target_arch = "riscv32")]
