@@ -458,6 +458,11 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             }
         }
     }
+    // The vendor repair writes RX base after observing the cleared reload bit
+    // but before publishing the accepted software tail. Preserve that exact
+    // ordering for the pointer-ABA case where a just-recycled descriptor is
+    // both the old hardware last and the new reload tail.
+    try_restart_drained_rx_chain(state, true);
 
     // Match the terminal store in `wDev_AppendRxBlocks`: the new tail becomes
     // globally visible only after the reload bit cleared and any base repair
@@ -485,7 +490,6 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             fail_rx_recycle(state, error);
         }
     }
-    try_restart_drained_rx_chain(state);
 }
 
 /// Record the only state from which an exhausted RX engine may be restarted.
@@ -512,7 +516,7 @@ unsafe fn mark_drained_rx_chain(processed_last: *mut u8) {
         state.drained_last = ptr::null_mut();
     }
     crate::critical::strict_wifi_int_restore(interrupt_state);
-    try_restart_drained_rx_chain(state);
+    try_restart_drained_rx_chain(state, false);
 }
 
 /// Restart a proven-drained chain only when no descriptor reload owns the MAC.
@@ -522,8 +526,8 @@ unsafe fn mark_drained_rx_chain(processed_last: *mut u8) {
 /// the saved proof instead of guessing from descriptor owner bits.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
-unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState) {
-    if state.reload_active || state.drained_head.is_null() {
+unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState, reload_settled: bool) {
+    if (state.reload_active && !reload_settled) || state.drained_head.is_null() {
         return;
     }
 
