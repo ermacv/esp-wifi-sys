@@ -981,9 +981,9 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
 /// `cnx_node_search`, counter updates and a possible `ieee80211_set_tim` call.
 /// Strict AP deliberately has no sleeping-client queues, while WPA2 EAPOL
 /// retransmission is owned by the Rust async state machine. Consequently the
-/// only valid use of callback slot 12 is the measured AP-to-station EAPOL
-/// frame. Ordinary data using this callback would require an explicit Rust
-/// power-save implementation and remains rejected.
+/// only valid uses of callback slot 12 are the measured AP-to-station WPA2
+/// messages one and three. Ordinary data using this callback would require an
+/// explicit Rust power-save implementation and remains rejected.
 unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError> {
     if frame.is_null() || !crate::esf::is_strict_recyclable_frame(frame) {
         return Err(TxDoneError::NonStaticFrameType(if frame.is_null() {

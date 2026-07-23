@@ -257,20 +257,24 @@ pub const fn strict_tx_security_layout(
 /// Return the 802.11 header length for the one measured AP EAPOL completion
 /// carrying the stock hostap power-save callback bit.
 ///
-/// These are the exact post-security-layout values produced for WPA2 message
-/// one. Keeping this leaf closed prevents callback slot 12 from silently
-/// admitting ordinary power-save data, whose TIM/queue state is not owned by
-/// the strict Rust runtime.
+/// These are the exact post-security-layout values produced for WPA2 messages
+/// one and three. Keeping this leaf closed prevents callback slot 12 from
+/// silently admitting ordinary power-save data, whose TIM/queue state is not
+/// owned by the strict Rust runtime.
 pub(crate) const fn strict_ap_eapol_power_save_completion_header_len(
     frame_control: u16,
     header_len: u16,
     remaining_len: u16,
     layout: u16,
 ) -> Option<usize> {
-    if frame_control == 0x0288
+    if (frame_control == 0x0288
         && header_len == 0x22
         && remaining_len == 0x6f
-        && layout == 0x2000
+        && layout == 0x2000)
+        || (frame_control == 0x4288
+            && header_len == 0x22
+            && remaining_len == 0xb7
+            && layout == 0x2001)
     {
         Some(0x1a)
     } else {
@@ -1032,11 +1036,17 @@ mod tests {
             strict_ap_eapol_power_save_completion_header_len(0x0288, 0x22, 0x6f, 0x2000),
             Some(0x1a)
         );
+        assert_eq!(
+            strict_ap_eapol_power_save_completion_header_len(0x4288, 0x22, 0xb7, 0x2001),
+            Some(0x1a)
+        );
         for rejected in [
             (0x0188, 0x22, 0x6f, 0x2000),
             (0x0288, 0x1a, 0x6f, 0x2000),
             (0x0288, 0x22, 0x6e, 0x2000),
             (0x0288, 0x22, 0x6f, 0),
+            (0x4288, 0x22, 0xb6, 0x2001),
+            (0x4288, 0x22, 0xb7, 0x2000),
         ] {
             assert_eq!(
                 strict_ap_eapol_power_save_completion_header_len(
