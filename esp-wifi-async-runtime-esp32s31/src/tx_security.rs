@@ -164,9 +164,9 @@ pub const fn strict_tx_security_layout(
         && ((input.remaining_len == 0x006b
             && input.layout == 0
             && input.buffer_flags == 0xc021_4099)
-            || (input.remaining_len == 0x00ab
+            || (input.remaining_len == 0x00a3
                 && input.layout == 1
-                && input.buffer_flags == 0xc031_40d1));
+                && input.buffer_flags == 0xc02f_40d1));
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
@@ -271,7 +271,7 @@ pub(crate) const fn strict_ap_eapol_power_save_completion_llc_offset(
         Some(0x1a)
     } else if frame_control == 0x0288
         && header_len == 0x22
-        && remaining_len == 0xaf
+        && remaining_len == 0xa7
         && layout == 0x2001
     {
         Some(0x1a)
@@ -856,16 +856,16 @@ mod tests {
     fn keeps_transient_ap_message3_carrier_plaintext() {
         let measured = TxSecurityLayoutInput {
             descriptor_security: 0x0004_0000,
-            ..input(0x00ab_001a, 1, 0xc031_40d1, 0x0200_200c, 0x0288)
+            ..input(0x00a3_001a, 1, 0xc02f_40d1, 0x0200_200c, 0x0288)
         };
         assert_eq!(
             strict_tx_security_layout(measured),
             Some(TxSecurityLayoutOutput {
                 header_len: 0x22,
-                remaining_len: 0xaf,
+                remaining_len: 0xa7,
                 layout: 0x2001,
-                buffer_flags: 0xc034_40d1,
-                metadata_len: 0xc9,
+                buffer_flags: 0xc032_40d1,
+                metadata_len: 0xc1,
             }),
         );
         for rejected in [
@@ -878,7 +878,7 @@ mod tests {
                 ..measured
             },
             TxSecurityLayoutInput {
-                remaining_len: 0xaa,
+                remaining_len: 0xa2,
                 ..measured
             },
         ] {
@@ -1035,7 +1035,7 @@ mod tests {
             Some(0x1a)
         );
         assert_eq!(
-            strict_ap_eapol_power_save_completion_llc_offset(0x0288, 0x22, 0xaf, 0x2001),
+            strict_ap_eapol_power_save_completion_llc_offset(0x0288, 0x22, 0xa7, 0x2001),
             Some(0x1a)
         );
         for rejected in [
@@ -1043,8 +1043,8 @@ mod tests {
             (0x0288, 0x1a, 0x6f, 0x2000),
             (0x0288, 0x22, 0x6e, 0x2000),
             (0x0288, 0x22, 0x6f, 0),
-            (0x0288, 0x22, 0xae, 0x2001),
-            (0x0288, 0x22, 0xaf, 0x2000),
+            (0x0288, 0x22, 0xa6, 0x2001),
+            (0x0288, 0x22, 0xa7, 0x2000),
         ] {
             assert_eq!(
                 strict_ap_eapol_power_save_completion_llc_offset(
