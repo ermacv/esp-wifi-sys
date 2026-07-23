@@ -297,7 +297,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     };
     let output = match strict_tx_security_layout(input) {
         Some(value) => value,
-        None => trap_invalid_tx_security(),
+        None => trap_invalid_tx_security_layout(input),
     };
 
     // No packet state is mutated until every pointer and recovered invariant
@@ -351,6 +351,22 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
 #[inline(always)]
 unsafe fn trap_invalid_tx_security() -> ! {
     core::arch::asm!("ebreak", options(noreturn))
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn trap_invalid_tx_security_layout(input: TxSecurityLayoutInput) -> ! {
+    let lengths = u32::from(input.header_len) | (u32::from(input.remaining_len) << 16);
+    core::arch::asm!(
+        "ebreak",
+        in("a0") input.descriptor_flags,
+        in("a1") input.descriptor_security,
+        in("a2") u32::from(input.frame_control),
+        in("a3") lengths,
+        in("a4") u32::from(input.layout),
+        in("a5") input.buffer_flags,
+        options(noreturn)
+    )
 }
 
 #[cfg(test)]
