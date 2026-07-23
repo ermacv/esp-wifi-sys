@@ -27,6 +27,30 @@ pub(crate) const fn strict_tx_proto_flags(
     flags
 }
 
+/// Reject vendor packet-kind two while preserving the ordinary queues whose
+/// high logical-queue bits alias that discriminator.
+pub(crate) const fn admitted_basic_packet_kind(
+    hardware_queue: u8,
+    descriptor_word: u32,
+    descriptor_flags: u32,
+) -> bool {
+    let packet_kind = descriptor_word & 0x00c0_0000;
+    if packet_kind != 0x0080_0000 {
+        return true;
+    }
+    let logical_queue = ((descriptor_word >> 20) & 0x0f) as u8;
+    // With a second AP peer, the pinned net80211 scheduler maps its plaintext
+    // EAPOL handshake descriptor onto HW0/Q8. Bits 22..23 used by the vendor
+    // packet-kind discriminator overlap the upper logical-queue bits, so Q8
+    // aliases packet kind two even though this exact descriptor is ordinary
+    // WPA2 EAPOL, not NAN. Keep the exception bound to the measured descriptor.
+    if hardware_queue == 0 && logical_queue == 8 && descriptor_flags == 0x0200_200c {
+        return true;
+    }
+    // AP pairwise data was measured on the initialized WMM mapping HW2/Q10.
+    hardware_queue == 2 && logical_queue == 10
+}
+
 /// Stateless SRAM-resident replacement for the vendor `ppTxProtoProc` leaf.
 ///
 /// # Safety
@@ -92,7 +116,7 @@ unsafe fn trap_invalid_tx_proto() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::strict_tx_proto_flags;
+    use super::{admitted_basic_packet_kind, strict_tx_proto_flags};
 
     #[test]
     fn propagates_header_flag_and_data_class() {
@@ -118,5 +142,13 @@ mod tests {
     fn leaves_other_management_and_control_classes_unchanged() {
         assert_eq!(strict_tx_proto_flags(0x1234, 0, 0xb0, 0), 0x1234);
         assert_eq!(strict_tx_proto_flags(0x1234, 0, 0xd4, 0), 0x1234);
+    }
+
+    #[test]
+    fn admits_only_the_measured_second_ap_peer_eapol_alias() {
+        let q8_word = 8_u32 << 20;
+        assert!(admitted_basic_packet_kind(0, q8_word, 0x0200_200c));
+        assert!(!admitted_basic_packet_kind(0, q8_word, 0x0200_200b));
+        assert!(!admitted_basic_packet_kind(1, q8_word, 0x0200_200c));
     }
 }
