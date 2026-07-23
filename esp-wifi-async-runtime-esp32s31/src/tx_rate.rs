@@ -57,10 +57,11 @@ pub fn fixed_rate_schedule_snapshot() -> FixedRateScheduleSnapshot {
     }
 }
 
-/// Record a temporary HIL delegation to the pinned adaptive-rate body.
+/// Record use of the bounded snapshot of an adaptive-rate schedule.
 ///
-/// This counter exists only to prove that enabling both fixed-rate modes
-/// closes every active STA submission branch before the fallback is removed.
+/// The schedule itself remains vendor-initialized fixed SRAM. Strict runtime
+/// deliberately omits the stateful `rcUpdateRate` mutation and consumes the
+/// current schedule head in one finite action.
 #[cfg(target_arch = "riscv32")]
 fn record_dynamic_rate_schedule_fallback() {
     DYNAMIC_RATE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
@@ -107,11 +108,11 @@ const fn stateless_schedule_source(
     }
 }
 
-/// Recovered fixed-rate branches of the pinned `rcGetSched` implementation.
+/// Recovered bounded branches of the pinned `rcGetSched` implementation.
 ///
-/// Returns `false` without modifying the descriptor if the selected branch is
-/// still configured for adaptive rate control. The HIL wrapper may then call
-/// the vendor oracle while measuring whether that branch remains reachable.
+/// Fixed-rate branches use their configured rate. An adaptive branch uses the
+/// already initialized SRAM schedule without calling stateful `rcUpdateRate`;
+/// ACK/CTS retry accounting remains owned by the Rust LMAC state machine.
 ///
 /// # Safety
 ///
@@ -171,6 +172,22 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
             let schedule = BASIC_SECONDARY_SCHEDULE.0.get().cast::<u8>();
             (schedule, schedule.read())
         }
+        0 => {
+            let schedule_offset = if primary {
+                RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET
+            } else {
+                RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET
+            };
+            let schedule = rate_context
+                .add(schedule_offset)
+                .cast::<*mut u8>()
+                .read_unaligned();
+            if schedule.is_null() {
+                return false;
+            }
+            record_dynamic_rate_schedule_fallback();
+            (schedule, schedule.read())
+        }
         _ => return false,
     };
     if schedule.is_null() {
@@ -198,8 +215,8 @@ pub unsafe fn try_fixed_rate_schedule(rate_context: *mut u8, descriptor: *mut u8
 /// Fail-closed final-link replacement for the measured `rcGetSched` domain.
 ///
 /// Every admitted branch is a finite SRAM-resident load/store sequence. An
-/// unmeasured adaptive/PHY override records the violation and traps before the
-/// descriptor can enter hardware; it never delegates to vendor rate control.
+/// A missing/invalid schedule traps before the descriptor can enter hardware;
+/// the leaf never delegates to vendor rate control.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.tx_rate_schedule"]
 pub unsafe fn strict_rate_schedule(rate_context: *mut u8, descriptor: *mut u8) {
