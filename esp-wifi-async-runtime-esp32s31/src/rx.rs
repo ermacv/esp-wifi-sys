@@ -55,6 +55,24 @@ pub struct StrictRxSnapshot {
     pub auxiliary_callback: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BlockAckRxSnapshot {
+    pub requests: usize,
+    pub responses: usize,
+    pub delba: usize,
+    pub to_local: usize,
+    pub last_action: usize,
+    pub last_dialog_token: usize,
+    pub last_tid: usize,
+    pub last_immediate: bool,
+    pub last_amsdu: bool,
+    pub last_window: usize,
+    pub last_timeout_tu: usize,
+    pub last_starting_sequence: usize,
+    pub last_status_or_reason: usize,
+    pub last_initiator: bool,
+}
+
 struct Counters {
     processed: AtomicUsize,
     raw_management: AtomicUsize,
@@ -69,6 +87,23 @@ struct Counters {
     michael_mic_failure: AtomicUsize,
     callback_missing: AtomicUsize,
     auxiliary_callback: AtomicUsize,
+}
+
+struct BlockAckCounters {
+    requests: AtomicUsize,
+    responses: AtomicUsize,
+    delba: AtomicUsize,
+    to_local: AtomicUsize,
+    last_action: AtomicUsize,
+    last_dialog_token: AtomicUsize,
+    last_tid: AtomicUsize,
+    last_immediate: AtomicUsize,
+    last_amsdu: AtomicUsize,
+    last_window: AtomicUsize,
+    last_timeout_tu: AtomicUsize,
+    last_starting_sequence: AtomicUsize,
+    last_status_or_reason: AtomicUsize,
+    last_initiator: AtomicUsize,
 }
 
 impl Counters {
@@ -111,10 +146,55 @@ impl Counters {
     }
 }
 
+impl BlockAckCounters {
+    const fn new() -> Self {
+        Self {
+            requests: AtomicUsize::new(0),
+            responses: AtomicUsize::new(0),
+            delba: AtomicUsize::new(0),
+            to_local: AtomicUsize::new(0),
+            last_action: AtomicUsize::new(0),
+            last_dialog_token: AtomicUsize::new(0),
+            last_tid: AtomicUsize::new(0),
+            last_immediate: AtomicUsize::new(0),
+            last_amsdu: AtomicUsize::new(0),
+            last_window: AtomicUsize::new(0),
+            last_timeout_tu: AtomicUsize::new(0),
+            last_starting_sequence: AtomicUsize::new(0),
+            last_status_or_reason: AtomicUsize::new(0),
+            last_initiator: AtomicUsize::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> BlockAckRxSnapshot {
+        BlockAckRxSnapshot {
+            requests: self.requests.load(Ordering::Acquire),
+            responses: self.responses.load(Ordering::Acquire),
+            delba: self.delba.load(Ordering::Acquire),
+            to_local: self.to_local.load(Ordering::Acquire),
+            last_action: self.last_action.load(Ordering::Acquire),
+            last_dialog_token: self.last_dialog_token.load(Ordering::Acquire),
+            last_tid: self.last_tid.load(Ordering::Acquire),
+            last_immediate: self.last_immediate.load(Ordering::Acquire) != 0,
+            last_amsdu: self.last_amsdu.load(Ordering::Acquire) != 0,
+            last_window: self.last_window.load(Ordering::Acquire),
+            last_timeout_tu: self.last_timeout_tu.load(Ordering::Acquire),
+            last_starting_sequence: self.last_starting_sequence.load(Ordering::Acquire),
+            last_status_or_reason: self.last_status_or_reason.load(Ordering::Acquire),
+            last_initiator: self.last_initiator.load(Ordering::Acquire) != 0,
+        }
+    }
+}
+
 static COUNTERS: Counters = Counters::new();
+static BLOCK_ACK_COUNTERS: BlockAckCounters = BlockAckCounters::new();
 
 pub fn strict_rx_snapshot() -> StrictRxSnapshot {
     COUNTERS.snapshot()
+}
+
+pub fn block_ack_rx_snapshot() -> BlockAckRxSnapshot {
+    BLOCK_ACK_COUNTERS.snapshot()
 }
 
 pub(crate) const fn is_continuation(kind: u32) -> bool {
@@ -339,13 +419,10 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
             COUNTERS.management_subtypes[usize::from((frame_control >> 4) & 0x0f)]
                 .fetch_add(1, Ordering::Relaxed);
             let rssi = unsafe { rx_control.cast::<i8>().read() };
-            crate::scan::observe_management(
-                unsafe { core::slice::from_raw_parts(frame, length) },
-                rssi,
-            );
-            crate::sta_link::observe_management(unsafe {
-                core::slice::from_raw_parts(frame, length)
-            });
+            let frame = unsafe { core::slice::from_raw_parts(frame, length) };
+            observe_block_ack_action(frame);
+            crate::scan::observe_management(frame, rssi);
+            crate::sta_link::observe_management(frame);
         }
         1 => {
             COUNTERS.raw_control.fetch_add(1, Ordering::Relaxed);
@@ -372,6 +449,129 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
             }
         }
         _ => {}
+    }
+}
+
+fn observe_block_ack_action(frame: &[u8]) {
+    if frame.len() < 26 || frame[0] & 0xfc != 0xd0 {
+        return;
+    }
+    let Some(action) = crate::tx_ampdu::parse_block_ack_action(&frame[24..]) else {
+        return;
+    };
+    if is_frame_to_local_address(frame) {
+        BLOCK_ACK_COUNTERS.to_local.fetch_add(1, Ordering::Relaxed);
+    }
+    match action {
+        crate::tx_ampdu::BlockAckAction::AddbaRequest {
+            dialog_token,
+            tid,
+            immediate,
+            amsdu,
+            window,
+            timeout_tu,
+            starting_sequence,
+        } => {
+            BLOCK_ACK_COUNTERS
+                .last_dialog_token
+                .store(usize::from(dialog_token), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_tid
+                .store(usize::from(tid), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_immediate
+                .store(usize::from(immediate), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_amsdu
+                .store(usize::from(amsdu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_window
+                .store(usize::from(window), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_timeout_tu
+                .store(usize::from(timeout_tu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_starting_sequence
+                .store(usize::from(starting_sequence), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_status_or_reason
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_initiator
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS.last_action.store(1, Ordering::Release);
+            BLOCK_ACK_COUNTERS.requests.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::tx_ampdu::BlockAckAction::AddbaResponse {
+            dialog_token,
+            status,
+            tid,
+            immediate,
+            amsdu,
+            window,
+            timeout_tu,
+        } => {
+            BLOCK_ACK_COUNTERS
+                .last_dialog_token
+                .store(usize::from(dialog_token), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_tid
+                .store(usize::from(tid), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_immediate
+                .store(usize::from(immediate), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_amsdu
+                .store(usize::from(amsdu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_window
+                .store(usize::from(window), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_timeout_tu
+                .store(usize::from(timeout_tu), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_starting_sequence
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_status_or_reason
+                .store(usize::from(status), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_initiator
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS.last_action.store(2, Ordering::Release);
+            BLOCK_ACK_COUNTERS.responses.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::tx_ampdu::BlockAckAction::Delba {
+            tid,
+            initiator,
+            reason,
+        } => {
+            BLOCK_ACK_COUNTERS
+                .last_dialog_token
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_tid
+                .store(usize::from(tid), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_immediate
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS.last_amsdu.store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS.last_window.store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_timeout_tu
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_starting_sequence
+                .store(0, Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_status_or_reason
+                .store(usize::from(reason), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS
+                .last_initiator
+                .store(usize::from(initiator), Ordering::Relaxed);
+            BLOCK_ACK_COUNTERS.last_action.store(3, Ordering::Release);
+            BLOCK_ACK_COUNTERS.delba.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 

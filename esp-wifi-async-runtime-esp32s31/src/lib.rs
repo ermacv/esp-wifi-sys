@@ -198,7 +198,9 @@ pub use queue::{PushError, RadioQueue, RadioQueueSnapshot};
 pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
 pub use runtime::WifiRuntimeFuture;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use rx::{strict_rx_snapshot, RxPumpError, StrictRxSnapshot};
+pub use rx::{
+    block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
+};
 pub use scan::{
     best_matching_ssid, StrictScanError, StrictScanRecord, StrictScanSummary,
     STRICT_SCAN_EXTENDED_RATES_CAPACITY, STRICT_SCAN_RECORD_CAPACITY, STRICT_SCAN_RSNXE_CAPACITY,
@@ -225,14 +227,15 @@ pub use tx_ampdu::{
 };
 pub use tx_ampdu::{
     basic_ht_ampdu_assembly, basic_ht_ampdu_completion, decode_ht_block_ack_registers,
-    AddbaRequest, BasicHtAmpduAssemblyError, BasicHtAmpduAssemblyInput, BasicHtAmpduAssemblyOutput,
-    BasicHtAmpduChain, BasicHtAmpduChainError, BasicHtAmpduCompletionInput,
-    BasicHtAmpduCompletionOutput, BasicHtAmpduFrameCompletionError, BasicHtAmpduRestoreError,
-    HtAmpduLength, HtAmpduLengthAccumulator, HtAmpduLengthError, HtBlockAckReadError,
-    HtBlockAckRegisters, OperationalTxBlockAck, TxAmpduBatch, TxAmpduBatchError, TxAmpduCompletion,
-    TxAmpduDisposition, TxAmpduMpdu, TxAmpduSlot, TxBlockAckAlarm, TxBlockAckBitmap,
-    TxBlockAckConfig, TxBlockAckError, TxBlockAckResponse, TxBlockAckSession,
-    ADDBA_ACTION_BODY_LEN, TX_AMPDU_SLOT_CAPACITY, TX_BLOCK_ACK_MAX_WINDOW,
+    parse_block_ack_action, AddbaRequest, BasicHtAmpduAssemblyError, BasicHtAmpduAssemblyInput,
+    BasicHtAmpduAssemblyOutput, BasicHtAmpduChain, BasicHtAmpduChainError,
+    BasicHtAmpduCompletionInput, BasicHtAmpduCompletionOutput, BasicHtAmpduFrameCompletionError,
+    BasicHtAmpduRestoreError, BlockAckAction, HtAmpduLength, HtAmpduLengthAccumulator,
+    HtAmpduLengthError, HtBlockAckReadError, HtBlockAckRegisters, OperationalTxBlockAck,
+    TxAmpduBatch, TxAmpduBatchError, TxAmpduCompletion, TxAmpduDisposition, TxAmpduMpdu,
+    TxAmpduSlot, TxBlockAckAlarm, TxBlockAckBitmap, TxBlockAckConfig, TxBlockAckError,
+    TxBlockAckResponse, TxBlockAckSession, ADDBA_ACTION_BODY_LEN, DELBA_ACTION,
+    TX_AMPDU_SLOT_CAPACITY, TX_BLOCK_ACK_MAX_WINDOW,
 };
 #[cfg(all(target_arch = "riscv32", feature = "hil-ampdu-intercept"))]
 pub use tx_intercept::{

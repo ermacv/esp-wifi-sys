@@ -9,6 +9,7 @@
 pub const BLOCK_ACK_CATEGORY: u8 = 3;
 pub const ADDBA_REQUEST_ACTION: u8 = 0;
 pub const ADDBA_RESPONSE_ACTION: u8 = 1;
+pub const DELBA_ACTION: u8 = 2;
 pub const ADDBA_ACTION_BODY_LEN: usize = 9;
 pub const TX_BLOCK_ACK_MAX_WINDOW: u16 = 32;
 pub const TX_AMPDU_SLOT_CAPACITY: usize = TX_BLOCK_ACK_MAX_WINDOW as usize;
@@ -21,6 +22,79 @@ const TX_DESCRIPTOR_AMPDU_FIRST_BITS: u32 = 0x0048_0000;
 const TX_BUFFER_END_BIT: u32 = 0x4000_0000;
 const FIRST_MPDU_RETRY_HEADER_BIT: u32 = 0x0100_0000;
 const HT_MPDU_LENGTH_MASK: u32 = 0x3fff;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockAckAction {
+    AddbaRequest {
+        dialog_token: u8,
+        tid: u8,
+        immediate: bool,
+        amsdu: bool,
+        window: u16,
+        timeout_tu: u16,
+        starting_sequence: u16,
+    },
+    AddbaResponse {
+        dialog_token: u8,
+        status: u16,
+        tid: u8,
+        immediate: bool,
+        amsdu: bool,
+        window: u16,
+        timeout_tu: u16,
+    },
+    Delba {
+        tid: u8,
+        initiator: bool,
+        reason: u16,
+    },
+}
+
+/// Parse the body of one IEEE 802.11 Block Ack Action frame.
+///
+/// This is a stateless leaf: it only reads the supplied bytes and does not
+/// allocate, wait, access global state or call into the vendor library.
+pub fn parse_block_ack_action(body: &[u8]) -> Option<BlockAckAction> {
+    if body.len() < 2 || body[0] != BLOCK_ACK_CATEGORY {
+        return None;
+    }
+    match body[1] {
+        ADDBA_REQUEST_ACTION if body.len() >= ADDBA_ACTION_BODY_LEN => {
+            let parameters = u16::from_le_bytes([body[3], body[4]]);
+            let starting_sequence = u16::from_le_bytes([body[7], body[8]]) >> 4;
+            Some(BlockAckAction::AddbaRequest {
+                dialog_token: body[2],
+                tid: ((parameters >> 2) & 0x0f) as u8,
+                immediate: parameters & 0x0002 != 0,
+                amsdu: parameters & 0x0001 != 0,
+                window: (parameters >> 6) & 0x03ff,
+                timeout_tu: u16::from_le_bytes([body[5], body[6]]),
+                starting_sequence,
+            })
+        }
+        ADDBA_RESPONSE_ACTION if body.len() >= ADDBA_ACTION_BODY_LEN => {
+            let parameters = u16::from_le_bytes([body[5], body[6]]);
+            Some(BlockAckAction::AddbaResponse {
+                dialog_token: body[2],
+                status: u16::from_le_bytes([body[3], body[4]]),
+                tid: ((parameters >> 2) & 0x0f) as u8,
+                immediate: parameters & 0x0002 != 0,
+                amsdu: parameters & 0x0001 != 0,
+                window: (parameters >> 6) & 0x03ff,
+                timeout_tu: u16::from_le_bytes([body[7], body[8]]),
+            })
+        }
+        DELBA_ACTION if body.len() >= 6 => {
+            let parameters = u16::from_le_bytes([body[2], body[3]]);
+            Some(BlockAckAction::Delba {
+                tid: ((parameters >> 12) & 0x0f) as u8,
+                initiator: parameters & 0x0800 != 0,
+                reason: u16::from_le_bytes([body[4], body[5]]),
+            })
+        }
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HtAmpduLengthError {
@@ -1581,6 +1655,43 @@ mod tests {
         negotiation_timeout_us: 100_000,
         amsdu: true,
     };
+
+    #[test]
+    fn parses_block_ack_action_bodies_without_state() {
+        assert_eq!(
+            parse_block_ack_action(&[3, 0, 7, 0x87, 0x07, 0, 0, 0x30, 0x12]),
+            Some(BlockAckAction::AddbaRequest {
+                dialog_token: 7,
+                tid: 1,
+                immediate: true,
+                amsdu: true,
+                window: 30,
+                timeout_tu: 0,
+                starting_sequence: 0x123,
+            })
+        );
+        assert_eq!(
+            parse_block_ack_action(&[3, 1, 7, 0, 0, 0x86, 0x07, 5, 0]),
+            Some(BlockAckAction::AddbaResponse {
+                dialog_token: 7,
+                status: 0,
+                tid: 1,
+                immediate: true,
+                amsdu: false,
+                window: 30,
+                timeout_tu: 5,
+            })
+        );
+        assert_eq!(
+            parse_block_ack_action(&[3, 2, 0, 0x58, 39, 0]),
+            Some(BlockAckAction::Delba {
+                tid: 5,
+                initiator: true,
+                reason: 39,
+            })
+        );
+        assert_eq!(parse_block_ack_action(&[4, 0, 0]), None);
+    }
 
     #[test]
     fn ht_ampdu_length_matches_the_s31_six_mpdu_oracle() {
