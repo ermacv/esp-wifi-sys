@@ -2,7 +2,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
@@ -85,6 +85,38 @@ struct RxRecycleTimerCell(UnsafeCell<RawOsiTimer>);
 unsafe impl Sync for RxRecycleTimerCell {}
 
 #[cfg(target_arch = "riscv32")]
+struct RxRecycleProbe {
+    calls: AtomicUsize,
+    immediate: AtomicUsize,
+    deferred: AtomicUsize,
+    timers_armed: AtomicUsize,
+    completions: AtomicUsize,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl RxRecycleProbe {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            immediate: AtomicUsize::new(0),
+            deferred: AtomicUsize::new(0),
+            timers_armed: AtomicUsize::new(0),
+            completions: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WdevRxRecycleSnapshot {
+    pub calls: usize,
+    pub immediate: usize,
+    pub deferred: usize,
+    pub timers_armed: usize,
+    pub completions: usize,
+}
+
+#[cfg(target_arch = "riscv32")]
 #[link_section = ".critical.bss.wifi_strict.rx_recycle_state"]
 static RX_RECYCLE_STATE: RxRecycleStateCell =
     RxRecycleStateCell(UnsafeCell::new(RxRecycleState::new()));
@@ -98,6 +130,10 @@ static RX_RECYCLE_TIMER: RxRecycleTimerCell = RxRecycleTimerCell(UnsafeCell::new
     callback: None,
     argument: ptr::null_mut(),
 }));
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.rx_recycle_probe"]
+static RX_RECYCLE_PROBE: RxRecycleProbe = RxRecycleProbe::new();
 
 unsafe extern "C" {
     #[link_name = "wDev_record_ftm_data"]
@@ -238,6 +274,9 @@ unsafe fn arm_rx_reload_settle_timer() -> Result<(), RxRecycleError> {
         ptr::null_mut(),
         RX_RELOAD_SETTLE_US,
     ) {
+        RX_RECYCLE_PROBE
+            .timers_armed
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     } else {
         Err(RxRecycleError::TimerUnavailable)
@@ -291,6 +330,7 @@ unsafe fn publish_or_defer_rx_recycle_chain(
     tail: *mut u8,
 ) -> Result<(), RxRecycleError> {
     if state.reload_active {
+        RX_RECYCLE_PROBE.deferred.fetch_add(1, Ordering::Relaxed);
         let interrupt_state = crate::critical::strict_wifi_int_disable();
         let result = append_pending_rx_recycle_chain(state, head, tail);
         crate::critical::strict_wifi_int_restore(interrupt_state);
@@ -298,6 +338,8 @@ unsafe fn publish_or_defer_rx_recycle_chain(
     }
     if publish_rx_recycle_chain(state, head, tail)? {
         arm_rx_reload_settle_timer()?;
+    } else {
+        RX_RECYCLE_PROBE.immediate.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
 }
@@ -318,6 +360,7 @@ unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
     if hal_mac_rx_is_dscr_reload() != 0 {
         fail_rx_recycle(state, RxRecycleError::ReloadStillActive);
     }
+    RX_RECYCLE_PROBE.completions.fetch_add(1, Ordering::Relaxed);
 
     let reload_tail = state.reload_tail;
     if hal_mac_rx_read_rxdscrnext().is_null() {
@@ -376,10 +419,22 @@ pub unsafe extern "C" fn __wrap_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8
     if state.failed || !crate::critical::on_strict_wifi_hart() {
         fail_rx_recycle(state, RxRecycleError::WrongHart);
     }
+    RX_RECYCLE_PROBE.calls.fetch_add(1, Ordering::Relaxed);
     if let Err(error) = prepare_rx_recycle_chain(head, tail)
         .and_then(|()| publish_or_defer_rx_recycle_chain(state, head, tail))
     {
         fail_rx_recycle(state, error);
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
+    WdevRxRecycleSnapshot {
+        calls: RX_RECYCLE_PROBE.calls.load(Ordering::Acquire),
+        immediate: RX_RECYCLE_PROBE.immediate.load(Ordering::Acquire),
+        deferred: RX_RECYCLE_PROBE.deferred.load(Ordering::Acquire),
+        timers_armed: RX_RECYCLE_PROBE.timers_armed.load(Ordering::Acquire),
+        completions: RX_RECYCLE_PROBE.completions.load(Ordering::Acquire),
     }
 }
 

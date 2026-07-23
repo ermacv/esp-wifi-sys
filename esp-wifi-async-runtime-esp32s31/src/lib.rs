@@ -77,6 +77,8 @@ mod txdone;
 pub mod vendor;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod wdev;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use wdev::{rx_recycle_snapshot, WdevRxRecycleSnapshot};
 pub mod wpa2;
 pub mod wpa2_aes;
 pub mod wpa2_ap;
