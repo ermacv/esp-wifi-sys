@@ -18,12 +18,22 @@ const WIFI_DATA_RX_COPY_CAPACITY: usize = 8;
 const WIFI_DATA_RX_COPY_CAPACITY: usize = WIFI_DATA_RX_CAPACITY;
 #[cfg(target_arch = "riscv32")]
 const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = 512;
-// Reserve one kind-7 object beyond the complete 16-frame reorder window. The
-// default pool therefore admits 15 network owners; the deep pool admits 31:
-// 31 network + 16 reorder + 1 input = the 48-entry hardware RX budget.
+// The default profile keeps one kind-7 object beyond the complete 16-frame
+// reorder window. The deeper profile also reserves eight objects for frames
+// concurrently traversing the lower-MAC receive/recycle pipeline. That
+// pipeline completes asynchronously after the input callback returns, so a
+// single incoming-frame reserve can still exhaust the hardware descriptor
+// chain during a reconnect burst.
 #[cfg(target_arch = "riscv32")]
-const WIFI_DATA_RX_ZERO_COPY_LIMIT: usize =
-    crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY - crate::rx_ampdu::RX_AMPDU_SLOT_CAPACITY - 1;
+const WIFI_DATA_RX_PIPELINE_RESERVE: usize = if crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY > 32 {
+    8
+} else {
+    1
+};
+#[cfg(target_arch = "riscv32")]
+const WIFI_DATA_RX_ZERO_COPY_LIMIT: usize = crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY
+    - crate::rx_ampdu::RX_AMPDU_SLOT_CAPACITY
+    - WIFI_DATA_RX_PIPELINE_RESERVE;
 #[cfg(not(target_arch = "riscv32"))]
 const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = WIFI_DATA_RX_FRAME_CAPACITY;
 
