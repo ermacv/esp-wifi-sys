@@ -214,7 +214,7 @@ struct AmpduCompletionState {
     block_ack: Option<crate::tx_ampdu::TxBlockAckBitmap>,
     response: u8,
     next: u8,
-    logical_queue: u8,
+    resume_event: u8,
     retry_count: u8,
     retry_take: u8,
     retries: [*mut u8; crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
@@ -231,7 +231,7 @@ impl AmpduCompletionState {
             block_ack: None,
             response: 0,
             next: 0,
-            logical_queue: 0,
+            resume_event: 0,
             retry_count: 0,
             retry_take: 0,
             retries: [ptr::null_mut(); crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY],
@@ -1573,7 +1573,7 @@ unsafe fn begin_basic_ht_ampdu_completion(
     if descriptor.is_null() {
         return Err(LmacAsyncError::InvalidTxSubmissionPointer);
     }
-    let logical_queue = descriptor_queue(descriptor);
+    let resume_event = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
     crate::tx_ampdu::restore_basic_ht_ampdu_chain(&chain)
         .map_err(LmacAsyncError::TxAmpduRestore)?;
 
@@ -1589,7 +1589,7 @@ unsafe fn begin_basic_ht_ampdu_completion(
     state.block_ack = block_ack;
     state.response = response;
     state.next = 0;
-    state.logical_queue = logical_queue;
+    state.resume_event = resume_event;
     state.retry_take = 0;
     if let Err(error) = enqueue_ampdu_completion() {
         state.failed = true;
@@ -1644,7 +1644,7 @@ unsafe fn dispatch_ampdu_completion_step(
         .as_ref()
         .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
     if state.next >= chain.subframes {
-        let logical_queue = state.logical_queue;
+        let resume_event = state.resume_event;
         let retry_count = state.retry_count;
         state.chain = None;
         state.block_ack = None;
@@ -1653,7 +1653,7 @@ unsafe fn dispatch_ampdu_completion_step(
         #[cfg(feature = "hil-ampdu-intercept")]
         crate::tx_intercept::on_hardware_completion()
             .map_err(|_| LmacAsyncError::InternalQueueFull)?;
-        if retry_count == 0 && pp_post(u32::from(logical_queue), ptr::null_mut()) != 0 {
+        if retry_count == 0 && pp_post(u32::from(resume_event), ptr::null_mut()) != 0 {
             return Err(LmacAsyncError::InternalQueueFull);
         }
         return Ok(());
@@ -2398,7 +2398,11 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
     if crate::tx_intercept::owns_direct_hardware_frame(frame) {
         return crate::txdone::begin_from_intercept_success(frame).map_err(LmacAsyncError::TxDone);
     }
-    crate::txdone::begin_from_tx_success(frame).map_err(LmacAsyncError::TxDone)
+    crate::txdone::begin_from_tx_success(
+        frame,
+        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
+    )
+    .map_err(LmacAsyncError::TxDone)
 }
 
 #[cfg(feature = "hil-vendor-tx")]

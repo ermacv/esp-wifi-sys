@@ -1,11 +1,10 @@
 //! Strict TX-queue processing boundary.
 //!
 //! Hardware observation first narrowed the pinned `ppProcessTxQ` state machine
-//! to admitted logical queues zero and one and one basic MPDU. Both logical
-//! queues can be non-empty on the same AP event when a management response is
-//! published at a beacon edge. The pinned
-//! `lmacTxFrame` body maps each event to a 0x38-byte hardware-queue state; the
-//! active strict path reproduces that subset as one Rust executor action.
+//! to one basic MPDU. Reverse engineering then established that its event is a
+//! hardware queue while the descriptor contains one of sixteen logical queues.
+//! Per-hardware-queue bitmaps and cursors in `pTxRx` map between the two. The
+//! active strict path reproduces that fixed mapping as one Rust executor action.
 
 use core::ptr;
 #[cfg(feature = "hil-vendor-tx")]
@@ -26,6 +25,9 @@ const TXRX_QUEUE_SIZE: usize = 0x34;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
 const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
 const TXRX_QUEUE_BUSY_OFFSET: usize = 0x29;
+const TXRX_QUEUE_SELECTED_OFFSET: usize = 0x31;
+const TXRX_HARDWARE_MASKS_OFFSET: usize = 0x04;
+const TXRX_HARDWARE_CURSORS_OFFSET: usize = 0x18;
 
 unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
@@ -38,7 +40,6 @@ pub enum TxQueueProcessError {
     InstancesUnavailable,
     TxRxUnavailable,
     UnsupportedQueueKind(u8),
-    UnsupportedLogicalQueue(u8),
     InvalidFrame,
     Submit(crate::lmac::LmacAsyncError),
 }
@@ -176,7 +177,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if input < HIL_COUNTERS.calls.len() {
         HIL_COUNTERS.calls[input].fetch_add(1, Ordering::Relaxed);
     }
-    if queue > 1 {
+    if queue > 3 {
         HIL_COUNTERS
             .unexpected_result
             .fetch_add(1, Ordering::Relaxed);
@@ -201,7 +202,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if txrx.is_null() {
         return Err(TxQueueProcessError::TxRxUnavailable);
     }
-    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx)? else {
+    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx, queue)? else {
         HIL_COUNTERS.no_frame[input].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     };
@@ -291,7 +292,7 @@ unsafe fn stamp_ap_beacon(frame: *mut u8) -> Result<(), TxQueueProcessError> {
 #[cfg(not(feature = "hil-vendor-tx"))]
 #[link_section = ".rwtext.wifi_strict.tx_queue_process"]
 pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessError> {
-    if queue > 1 {
+    if queue > 3 {
         return Err(TxQueueProcessError::UnsupportedEventQueue(queue));
     }
     let instances = ptr::addr_of!(our_instances_ptr).read();
@@ -310,7 +311,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if txrx.is_null() {
         return Err(TxQueueProcessError::TxRxUnavailable);
     }
-    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx)? else {
+    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx, queue)? else {
         return Ok(());
     };
     if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
@@ -353,40 +354,77 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
 
 unsafe fn select_logical_queue(
     txrx: *mut u8,
+    hardware_queue: u8,
 ) -> Result<Option<(*mut u8, u8)>, TxQueueProcessError> {
-    let mut head_mask = 0_u16;
+    if hardware_queue > 3 {
+        return Err(TxQueueProcessError::UnsupportedEventQueue(hardware_queue));
+    }
+    let mut ready_mask = 0_u16;
     let mut logical_queue = 0_u8;
     while logical_queue < 16 {
         let entry = txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE);
         let head = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
-        if !head.is_null() {
-            head_mask |= 1_u16 << logical_queue;
+        if !head.is_null() && entry.add(TXRX_QUEUE_BUSY_OFFSET).read() == 0 {
+            ready_mask |= 1_u16 << logical_queue;
         }
         logical_queue += 1;
     }
-    Ok(measured_logical_queue(head_mask)?.map(|logical_queue| {
-        (
-            txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE),
-            logical_queue,
-        )
+    let cursor = txrx
+        .add(TXRX_HARDWARE_CURSORS_OFFSET + usize::from(hardware_queue))
+        .read();
+    let current_entry = (cursor < 16)
+        .then(|| txrx.add(usize::from(cursor) * TXRX_QUEUE_SIZE));
+    let advance = current_entry.is_some_and(|entry| {
+        let selected = entry.add(TXRX_QUEUE_SELECTED_OFFSET).read() != 0;
+        if selected {
+            entry.add(TXRX_QUEUE_SELECTED_OFFSET).write(0);
+        }
+        selected
+    });
+    let allowed_mask = txrx
+        .add(TXRX_HARDWARE_MASKS_OFFSET + usize::from(hardware_queue) * 4)
+        .cast::<u32>()
+        .read() as u16;
+    let selected =
+        select_ready_logical_queue(hardware_queue, allowed_mask, cursor, ready_mask, advance);
+    Ok(selected.map(|logical_queue| {
+        txrx
+            .add(TXRX_HARDWARE_CURSORS_OFFSET + usize::from(hardware_queue))
+            .write(logical_queue);
+        let entry = txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE);
+        entry.add(TXRX_QUEUE_SELECTED_OFFSET).write(1);
+        (entry, logical_queue)
     }))
 }
 
-const fn measured_logical_queue(head_mask: u16) -> Result<Option<u8>, TxQueueProcessError> {
-    if head_mask == 0 {
-        return Ok(None);
+const fn select_ready_logical_queue(
+    hardware_queue: u8,
+    allowed_mask: u16,
+    cursor: u8,
+    ready_mask: u16,
+    advance: bool,
+) -> Option<u8> {
+    let candidates = allowed_mask & ready_mask;
+    if !advance && cursor < 16 && candidates & (1_u16 << cursor) != 0 {
+        return Some(cursor);
     }
-    // Queue zero carries the latency-sensitive management edge and queue one
-    // the ordinary AP/beacon edge. They share the same recovered hardware
-    // queue, so a station association can make both non-empty before one PP
-    // event is dispatched. Consume exactly one queue-zero frame first; TX
-    // completion posts the next executor edge for the retained queue-one
-    // frame. This is finite priority selection, not a drain loop.
-    let logical_queue = head_mask.trailing_zeros() as u8;
-    if logical_queue > 1 {
-        return Err(TxQueueProcessError::UnsupportedLogicalQueue(logical_queue));
+    let mut offset = 1_u8;
+    while offset <= 16 {
+        let logical_queue = cursor.wrapping_add(offset) & 0x0f;
+        if candidates & (1_u16 << logical_queue) != 0 {
+            return Some(logical_queue);
+        }
+        offset += 1;
     }
-    Ok(Some(logical_queue))
+    // The pinned event-zero selector has an explicit latency fallback over
+    // logical queues 0..=2 when its scheduled bitmap has no ready member.
+    if hardware_queue == 0 {
+        let fallback = ready_mask & 0x0007;
+        if fallback != 0 {
+            return Some(fallback.trailing_zeros() as u8);
+        }
+    }
+    None
 }
 
 unsafe fn dequeue_one(entry: *mut u8) -> *mut u8 {
@@ -508,20 +546,38 @@ fn record_small_mask(counter: &AtomicU32, value: u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{measured_logical_queue, TxQueueProcessError};
+    use super::select_ready_logical_queue;
 
     #[test]
-    fn selects_only_the_measured_sta_and_ap_logical_queues() {
-        assert_eq!(measured_logical_queue(0), Ok(None));
-        assert_eq!(measured_logical_queue(1), Ok(Some(0)));
-        assert_eq!(measured_logical_queue(2), Ok(Some(1)));
+    fn hardware_bitmap_selects_and_rotates_all_logical_queues() {
         assert_eq!(
-            measured_logical_queue(4),
-            Err(TxQueueProcessError::UnsupportedLogicalQueue(2))
+            select_ready_logical_queue(1, 0x0013, 1, 0x0010, false),
+            Some(4)
         );
         assert_eq!(
-            measured_logical_queue(3),
-            Ok(Some(0))
+            select_ready_logical_queue(1, 0x0013, 0, 0x0013, false),
+            Some(0)
         );
+        assert_eq!(
+            select_ready_logical_queue(1, 0x0013, 0, 0x0013, true),
+            Some(1)
+        );
+        assert_eq!(
+            select_ready_logical_queue(1, 0x0013, 4, 0x0013, true),
+            Some(0)
+        );
+        assert_eq!(
+            select_ready_logical_queue(1, 0x0013, 4, 0x0004, true),
+            None
+        );
+    }
+
+    #[test]
+    fn hardware_zero_preserves_the_recovered_latency_fallback() {
+        assert_eq!(
+            select_ready_logical_queue(0, 0, 0, 0x0004, false),
+            Some(2)
+        );
+        assert_eq!(select_ready_logical_queue(1, 0, 0, 0x0004, false), None);
     }
 }
