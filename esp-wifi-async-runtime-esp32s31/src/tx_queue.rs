@@ -41,7 +41,11 @@ pub enum TxQueueProcessError {
     TxRxUnavailable,
     UnsupportedQueueKind(u8),
     InvalidFrame,
-    Submit(crate::lmac::LmacAsyncError),
+    Submit {
+        hardware_queue: u8,
+        logical_queue: u8,
+        error: crate::lmac::LmacAsyncError,
+    },
 }
 
 /// HIL evidence captured immediately after one vendor TX-queue action returns.
@@ -247,7 +251,11 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
 
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         requeue_front(entry, frame);
-        return Err(TxQueueProcessError::Submit(error));
+        return Err(TxQueueProcessError::Submit {
+            hardware_queue: queue,
+            logical_queue: expected_logical_queue,
+            error,
+        });
     }
     HIL_COUNTERS.submitted[input].fetch_add(1, Ordering::Relaxed);
     record_submitted(input, queue_state, frame);
@@ -347,7 +355,11 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     }
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
         requeue_front(entry, frame);
-        return Err(TxQueueProcessError::Submit(error));
+        return Err(TxQueueProcessError::Submit {
+            hardware_queue: queue,
+            logical_queue: expected_logical_queue,
+            error,
+        });
     }
     Ok(())
 }
