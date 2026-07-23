@@ -508,8 +508,6 @@ mod target {
     static DEFERRED_AP_MANAGEMENT: [DeferredApManagementSlot; WPA2_AP_ASSOC_CAPACITY] =
         [const { DeferredApManagementSlot::new() }; WPA2_AP_ASSOC_CAPACITY];
     static DEFERRED_AP_MANAGEMENT_READY: WakerCell = WakerCell::new();
-    static DEFERRED_AP_MANAGEMENT_BUFFER: AtomicUsize = AtomicUsize::new(0);
-    static DEFERRED_AP_MANAGEMENT_RETRY_EDGE: AtomicBool = AtomicBool::new(false);
     static DEFERRED_AP_MANAGEMENT_CAPTURED: AtomicUsize = AtomicUsize::new(0);
     static DEFERRED_AP_MANAGEMENT_COALESCED: AtomicUsize = AtomicUsize::new(0);
     static DEFERRED_AP_MANAGEMENT_SUBMITTED: AtomicUsize = AtomicUsize::new(0);
@@ -549,6 +547,7 @@ mod target {
         fn linked_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
         fn __real_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
         fn chm_is_at_home_channel() -> bool;
+        fn ic_tx_pkt(buffer: *mut u8) -> i32;
         fn esf_buf_recycle(frame: *mut c_void);
     }
 
@@ -813,10 +812,73 @@ mod target {
         slot.state.store(DEFERRED_SLOT_EMPTY, Ordering::Release);
     }
 
-    unsafe fn submit_deferred_ap_management(
-        command: DeferredApManagement,
-        retry_edge: bool,
-    ) -> bool {
+    unsafe fn strict_deferred_ap_action_output(node: *mut u8, buffer: *mut u8) -> i32 {
+        if !crate::critical::on_strict_wifi_hart()
+            || !crate::context::in_radio_context()
+            || node.is_null()
+            || buffer.is_null()
+            || node.add(4).read() & 1 != 0
+            || ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0
+            || !chm_is_at_home_channel()
+        {
+            if !buffer.is_null() {
+                esf_buf_recycle(buffer.cast());
+            }
+            return -1;
+        }
+        let interface = node.cast::<*mut u8>().read();
+        if interface.is_null() || interface.add(0x138).cast::<u32>().read() != 1 {
+            esf_buf_recycle(buffer.cast());
+            return -1;
+        }
+        let Some(body) = ap_addba_response_body(buffer) else {
+            esf_buf_recycle(buffer.cast());
+            return -1;
+        };
+        let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
+        let header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
+        let descriptor = buffer.add(0x34).cast::<*mut u8>().read_unaligned();
+        if descriptor.is_null() {
+            esf_buf_recycle(buffer.cast());
+            return -1;
+        }
+
+        // Exact valid AP/action branch of the pinned `ieee80211_send_setup`.
+        // The management frame has no DS bits. Address 1 is the peer; address
+        // 2 and BSSID are the AP MAC stored by `wifi_get_macaddr(AP)`.
+        header.cast::<u16>().write_unaligned(0x00d0);
+        header.add(2).cast::<u16>().write_unaligned(0);
+        ptr::copy_nonoverlapping(node.add(4), header.add(4), 6);
+        let ap_mac = ptr::addr_of!(g_ic).add(0x214);
+        ptr::copy_nonoverlapping(ap_mac, header.add(10), 6);
+        ptr::copy_nonoverlapping(ap_mac, header.add(16), 6);
+        let sequence = node.add(0xce).cast::<u16>().read_unaligned();
+        node.add(0xce)
+            .cast::<u16>()
+            .write_unaligned(sequence.wrapping_add(1));
+        buffer
+            .add(0x24)
+            .cast::<u16>()
+            .write_unaligned(sequence & 0x0fff);
+        header
+            .add(22)
+            .cast::<u16>()
+            .write_unaligned(sequence << 4);
+
+        // Preserve the nine-byte body across the header stores, then reproduce
+        // the bounded management descriptor/length tail before `ic_tx_pkt`.
+        debug_assert_eq!(body, header.add(24));
+        let callbacks = descriptor.add(0x14).cast::<u32>();
+        callbacks.write_unaligned(callbacks.read_unaligned() | 4 | (1 << 13));
+        let packet_length = 24_u32 + DEFERRED_AP_ACTION_BODY_LEN as u32;
+        let flags = first_buffer.cast::<u32>();
+        flags.write_unaligned(
+            (flags.read_unaligned() & 0xf000_3fff) | 0xc000_0000 | (packet_length << 14),
+        );
+        ic_tx_pkt(buffer)
+    }
+
+    unsafe fn submit_deferred_ap_management(command: DeferredApManagement) -> bool {
         let node = cnx_node_search(command.peer.as_ptr());
         if node.is_null() || node.cast::<*mut u8>().read().is_null() || node.add(4).read() & 1 != 0
         {
@@ -841,11 +903,7 @@ mod target {
         let callbacks = descriptor.add(0x14).cast::<u32>();
         callbacks.write_unaligned(callbacks.read_unaligned() | (1 << 13));
 
-        DEFERRED_AP_MANAGEMENT_RETRY_EDGE.store(retry_edge, Ordering::Release);
-        DEFERRED_AP_MANAGEMENT_BUFFER.store(buffer as usize, Ordering::Release);
-        let result = linked_ieee80211_mgmt_output(node, buffer, 0xd0);
-        DEFERRED_AP_MANAGEMENT_BUFFER.store(0, Ordering::Release);
-        DEFERRED_AP_MANAGEMENT_RETRY_EDGE.store(false, Ordering::Release);
+        let result = strict_deferred_ap_action_output(node, buffer);
         if result == 0 {
             ieee80211_set_tim(node, 0);
             true
@@ -882,7 +940,7 @@ mod target {
                     handled = true;
                 }
                 Poll::Ready(crate::ap_power_save::PeerEdge::Retry) => {
-                    let submitted = unsafe { submit_deferred_ap_management(command, true) };
+                    let submitted = unsafe { submit_deferred_ap_management(command) };
                     release_deferred_slot(slot);
                     if submitted {
                         DEFERRED_AP_MANAGEMENT_SUBMITTED.fetch_add(1, Ordering::Relaxed);
@@ -894,33 +952,6 @@ mod target {
             }
         }
         handled
-    }
-
-    fn is_owned_deferred_ap_management(buffer: *mut u8) -> bool {
-        !buffer.is_null()
-            && DEFERRED_AP_MANAGEMENT_BUFFER.load(Ordering::Acquire) == buffer as usize
-    }
-
-    unsafe fn submit_owned_deferred_ap_management(
-        node: *mut u8,
-        buffer: *mut u8,
-        subtype: u8,
-    ) -> i32 {
-        // `ieee80211_mgmt_output` has one measured branch into the vendor
-        // linked PS queue: bufferable AP management plus node flag 0x10.
-        // A Rust-owned continuation already waited for an RX-derived
-        // Active/PS-Poll edge, so suppress only that bit while the finite
-        // ordinary output body runs. Local MIE masking makes the temporary
-        // view indivisible without a spin lock or another-core stall.
-        let interrupt_state = crate::critical::strict_wifi_int_disable();
-        let flags = node.add(0x0c).cast::<u32>();
-        let previous = flags.read();
-        flags.write(previous & !0x10);
-        let result = __real_ieee80211_mgmt_output(node, buffer, subtype);
-        let current = flags.read();
-        flags.write((current & !0x10) | (previous & 0x10));
-        crate::critical::strict_wifi_int_restore(interrupt_state);
-        result
     }
 
     unsafe fn record_management_tx_rejection(
@@ -1106,7 +1137,6 @@ mod target {
         let on_wifi_hart = crate::critical::on_strict_wifi_hart();
         let in_radio_context = crate::context::in_radio_context();
         let owned_action = crate::sta_link::is_owned_action_management(buffer, subtype);
-        let owned_deferred_ap_action = is_owned_deferred_ap_management(buffer);
         let ap_addba_response = if on_wifi_hart && in_radio_context && !buffer.is_null() {
             is_bounded_ap_addba_response(buffer, subtype)
         } else {
@@ -1168,16 +1198,9 @@ mod target {
         {
             if ap_addba_response
                 && node.add(0x04).read() & 1 == 0
-                && !owned_deferred_ap_action
                 && try_defer_ap_addba_response(node, buffer)
             {
                 return 0;
-            }
-            if ap_addba_response
-                && owned_deferred_ap_action
-                && DEFERRED_AP_MANAGEMENT_RETRY_EDGE.load(Ordering::Acquire)
-            {
-                return submit_owned_deferred_ap_management(node, buffer, subtype);
             }
             return reject_management_tx(
                 ManagementTxRejectionReason::ApNodeState,

@@ -814,9 +814,10 @@ association generation, and nine-byte action body into an eight-slot
 Rust-owned table, recycles the original ESF immediately, and registers the
 radio owner on that peer's RX-derived Active/PS-Poll/removal edge. A ready
 continuation reconstructs a fresh fixed-pool management frame, restores the
-pinned callback bit 13, and submits the ordinary home-channel output branch
-under local MIE masking. Repeated requests for one peer update the owned dialog
-body instead of growing a linked queue.
+pinned callback bit 13, reproduces the finite AP/action header and descriptor
+stores in Rust, and enters `ic_tx_pkt` directly. It neither changes the live
+node power-save bit nor re-enters `ieee80211_mgmt_output`. Repeated requests for
+one peer update the owned dialog body instead of growing a linked queue.
 The neighboring `ieee80211_set_tx_pti` wrapper replaces its OSI-table call with
 the exact bounded success operation from the pinned coexistence archive: one
 volatile byte read from exported `coex_pti_tab[48]` and two descriptor stores.

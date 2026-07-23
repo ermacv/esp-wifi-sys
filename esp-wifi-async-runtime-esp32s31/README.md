@@ -567,8 +567,10 @@ Bufferable AP ADDBA responses use a bounded management exception: a sleeping
 peer transfers the nine-byte action body into one of eight Rust-owned slots,
 the original ESF is recycled, and the same `RadioOwnerFuture` resumes only on a
 peer-bound Active/PS-Poll/removal edge. The continuation reconstructs a fresh
-fixed-pool frame and never links it into `ieee80211_pwrsave` or
-`pwrsave_flushq`. A failed data post poisons the backend until Wi-Fi deinit
+fixed-pool frame, reproduces the bounded AP/action header and descriptor tail,
+and enters `ic_tx_pkt` directly. It never links into `ieee80211_pwrsave` or
+`pwrsave_flushq`, re-enters `ieee80211_mgmt_output`, or changes the peer's live
+power-save flag. A failed data post poisons the backend until Wi-Fi deinit
 rather than retrying an ambiguously owned buffer. A STA transmission is
 rejected until the async EAPOL TX-done callback is active.
 Pairwise and group CCMP installation bypass both stock allocating wrappers: the
