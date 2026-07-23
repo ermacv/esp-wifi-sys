@@ -61,6 +61,7 @@ ASSERT(__esp_s31_ap_rxcb_end - __esp_s31_ap_rxcb == 0x4,
 ASSERT(__esp_s31_beacon_dtim_send_mc_end -
        __esp_s31_beacon_dtim_send_mc == 0x1,
        "ESP32-S31 beacon DTIM flag ABI changed");
+/* LLD relaxes the pinned 0x11c-byte RISC-V input section to 0x10c bytes. */
 ASSERT(__esp_s31_addba_response_txcb_end -
-       __esp_s31_addba_response_txcb == 0x11c,
+       __esp_s31_addba_response_txcb == 0x10c,
        "ESP32-S31 ADDBA response callback ABI changed");

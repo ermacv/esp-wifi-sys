@@ -337,7 +337,7 @@ const fn is_ap_addba_response_completion_layout(
     frame_control == 0x00d0
         && header_len == 0x0020
         && remaining_len == 0x000d
-        && layout == 0x2732
+        && matches!(layout, 0x2732 | 0x2733)
         && buffer_flags == 0xc00b_402c
         && descriptor_flags == 0
         && descriptor_security == 0x0114_0000
@@ -1689,17 +1689,19 @@ mod tests {
     #[test]
     fn only_successful_measured_ap_addba_completion_is_a_noop() {
         let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
-        assert!(is_ap_addba_response_completion_layout(
-            0x00d0,
-            0x20,
-            0x0d,
-            0x2732,
-            0xc00b_402c,
-            0,
-            0x0114_0000,
-            callbacks,
-            1,
-        ));
+        for layout in [0x2732, 0x2733] {
+            assert!(is_ap_addba_response_completion_layout(
+                0x00d0,
+                0x20,
+                0x0d,
+                layout,
+                0xc00b_402c,
+                0,
+                0x0114_0000,
+                callbacks,
+                1,
+            ));
+        }
         assert!(!is_ap_addba_response_completion_layout(
             0x00d0,
             0x20,
