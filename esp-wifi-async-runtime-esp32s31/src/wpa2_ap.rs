@@ -85,7 +85,11 @@ pub struct ManagementTxRejectionSnapshot {
     pub subtype: u8,
     pub node: usize,
     pub buffer: usize,
+    pub layout: u16,
+    pub raw_frame_control: u16,
     pub frame_control: u16,
+    pub raw_word0: u32,
+    pub raw_word1: u32,
     pub category: u8,
     pub action: u8,
     pub interface_mode: u32,
@@ -372,7 +376,11 @@ mod target {
         subtype: AtomicU8,
         node: AtomicUsize,
         buffer: AtomicUsize,
+        layout: AtomicUsize,
+        raw_frame_control: AtomicUsize,
         frame_control: AtomicUsize,
+        raw_word0: AtomicUsize,
+        raw_word1: AtomicUsize,
         category: AtomicU8,
         action: AtomicU8,
         interface_mode: AtomicUsize,
@@ -387,7 +395,11 @@ mod target {
                 subtype: AtomicU8::new(0),
                 node: AtomicUsize::new(0),
                 buffer: AtomicUsize::new(0),
+                layout: AtomicUsize::new(0),
+                raw_frame_control: AtomicUsize::new(0),
                 frame_control: AtomicUsize::new(0),
+                raw_word0: AtomicUsize::new(0),
+                raw_word1: AtomicUsize::new(0),
                 category: AtomicU8::new(0),
                 action: AtomicU8::new(0),
                 interface_mode: AtomicUsize::new(u32::MAX as usize),
@@ -595,15 +607,23 @@ mod target {
         node: *mut u8,
         buffer: *mut u8,
     ) {
+        let mut layout = 0_u16;
+        let mut raw_frame_control = 0_u16;
         let mut frame_control = 0_u16;
+        let mut raw_word0 = 0_u32;
+        let mut raw_word1 = 0_u32;
         let mut category = 0_u8;
         let mut action = 0_u8;
         if !buffer.is_null() {
+            layout = buffer.add(0x24).cast::<u16>().read_unaligned();
             let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
             if !first_buffer.is_null() {
                 let mut header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
                 if !header.is_null() {
-                    if buffer.add(0x24).cast::<u16>().read_unaligned() & 0x2000 != 0 {
+                    raw_frame_control = header.cast::<u16>().read_unaligned();
+                    raw_word0 = header.cast::<u32>().read_unaligned();
+                    raw_word1 = header.add(4).cast::<u32>().read_unaligned();
+                    if layout & 0x2000 != 0 {
                         header = header.add(8);
                     }
                     frame_control = header.cast::<u16>().read_unaligned();
@@ -640,8 +660,20 @@ mod target {
             .buffer
             .store(buffer as usize, Ordering::Relaxed);
         MANAGEMENT_TX_REJECTION
+            .layout
+            .store(usize::from(layout), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .raw_frame_control
+            .store(usize::from(raw_frame_control), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
             .frame_control
             .store(usize::from(frame_control), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .raw_word0
+            .store(raw_word0 as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .raw_word1
+            .store(raw_word1 as usize, Ordering::Relaxed);
         MANAGEMENT_TX_REJECTION
             .category
             .store(category, Ordering::Relaxed);
@@ -1043,9 +1075,15 @@ mod target {
             subtype: MANAGEMENT_TX_REJECTION.subtype.load(Ordering::Acquire),
             node: MANAGEMENT_TX_REJECTION.node.load(Ordering::Acquire),
             buffer: MANAGEMENT_TX_REJECTION.buffer.load(Ordering::Acquire),
+            layout: MANAGEMENT_TX_REJECTION.layout.load(Ordering::Acquire) as u16,
+            raw_frame_control: MANAGEMENT_TX_REJECTION
+                .raw_frame_control
+                .load(Ordering::Acquire) as u16,
             frame_control: MANAGEMENT_TX_REJECTION
                 .frame_control
                 .load(Ordering::Acquire) as u16,
+            raw_word0: MANAGEMENT_TX_REJECTION.raw_word0.load(Ordering::Acquire) as u32,
+            raw_word1: MANAGEMENT_TX_REJECTION.raw_word1.load(Ordering::Acquire) as u32,
             category: MANAGEMENT_TX_REJECTION.category.load(Ordering::Acquire),
             action: MANAGEMENT_TX_REJECTION.action.load(Ordering::Acquire),
             interface_mode: MANAGEMENT_TX_REJECTION
