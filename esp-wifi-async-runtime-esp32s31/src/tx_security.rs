@@ -378,13 +378,16 @@ pub(crate) const fn strict_ap_eapol_power_save_completion_llc_offset(
     remaining_len: u16,
     layout: u16,
 ) -> Option<usize> {
-    if frame_control == 0x0288
+    // A naturally retransmitted M1/M3 carries the IEEE 802.11 Retry bit.
+    // It has the same callback contract and buffer layout as the first
+    // attempt, so classify it without admitting any other FC mutation.
+    if frame_control & !0x0800 == 0x0288
         && header_len == 0x22
         && remaining_len == 0x6f
         && layout == 0x2000
     {
         Some(0x1a)
-    } else if frame_control == 0x0288
+    } else if frame_control & !0x0800 == 0x0288
         && header_len == 0x22
         && remaining_len == 0xa7
         && layout == 0x2001
@@ -1390,6 +1393,14 @@ mod tests {
         );
         assert_eq!(
             strict_ap_eapol_power_save_completion_llc_offset(0x0288, 0x22, 0xa7, 0x2001),
+            Some(0x1a)
+        );
+        assert_eq!(
+            strict_ap_eapol_power_save_completion_llc_offset(0x0a88, 0x22, 0x6f, 0x2000),
+            Some(0x1a)
+        );
+        assert_eq!(
+            strict_ap_eapol_power_save_completion_llc_offset(0x0a88, 0x22, 0xa7, 0x2001),
             Some(0x1a)
         );
         for rejected in [
