@@ -110,7 +110,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
     descriptor_security: u32,
 ) -> bool {
     if frame_control & !0x0800 != 0x4288
-        || !matches!(descriptor_flags, 0x0000_2009 | 0x0000_2109)
+        || descriptor_flags & !0x0000_1100 != 0x0000_2009
         || !matches!(
             descriptor_security,
             0x0114_0348 | 0x0214_0348 | 0x0414_0348
@@ -1129,6 +1129,8 @@ mod tests {
         for (frame_control, descriptor_flags, descriptor_security) in [
             (0x4288, 0x0000_2009, 0x0114_0348),
             (0x4a88, 0x0000_2109, 0x0214_0348),
+            (0x4288, 0x0000_3009, 0x0114_0348),
+            (0x4a88, 0x0000_3109, 0x0214_0348),
             (0x4a88, 0x0000_2109, 0x0414_0348),
         ] {
             assert!(strict_ap_pairwise_power_save_completion(
