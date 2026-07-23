@@ -32,6 +32,7 @@ pub struct PersistentFrameCompletionLayout {
     pub layout: u16,
     pub buffer_flags: u32,
     pub descriptor_flags: u32,
+    pub descriptor_security: u32,
 }
 
 /// Restore one retained plaintext management or beacon buffer after TX done.
@@ -86,6 +87,11 @@ pub const fn strict_persistent_frame_completion_layout(
         layout: input.layout & !0x2000,
         buffer_flags: (input.buffer_flags & !BUFFER_LENGTH_MASK) | ((restored_len as u32) << 14),
         descriptor_flags: input.descriptor_flags & !PERSISTENT_BIT,
+        // Queue, ownership and direct-recycle bits in this word describe the
+        // completed submission, not the retained object's next transmission.
+        // A beacon keeps only its fixed hardware-key direction selector;
+        // ordinary retained management replies return to plaintext base state.
+        descriptor_security: if beacon { 0x0004_0000 } else { 0 },
     })
 }
 
@@ -744,6 +750,7 @@ mod tests {
                 layout: 0,
                 buffer_flags: 0xc01e_8084,
                 descriptor_flags: 0x0000_0412,
+                descriptor_security: 0,
             })
         );
         assert_eq!(
@@ -783,6 +790,7 @@ mod tests {
                 layout: 0,
                 buffer_flags: 0xc023_00f8,
                 descriptor_flags: 0x0000_0412,
+                descriptor_security: 0x0004_0000,
             })
         );
         assert_eq!(
@@ -797,6 +805,7 @@ mod tests {
                 layout: 0x02db,
                 buffer_flags: 0xc023_00f8,
                 descriptor_flags: 0x0000_0412,
+                descriptor_security: 0x0004_0000,
             }),
         );
     }

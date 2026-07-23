@@ -1129,6 +1129,10 @@ unsafe fn restore_persistent_frame(frame: *mut u8, descriptor: *mut u8) -> Resul
     descriptor
         .cast::<u32>()
         .write_unaligned(output.descriptor_flags);
+    descriptor
+        .add(0x10)
+        .cast::<u32>()
+        .write_unaligned(output.descriptor_security);
     Ok(())
 }
 
