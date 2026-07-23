@@ -6,7 +6,10 @@
 //! gives it to a backend exactly once. A strict backend must either accept the
 //! command immediately into fixed storage or return it unchanged.
 
-use core::sync::atomic::{compiler_fence, Ordering};
+use core::{
+    sync::atomic::{compiler_fence, Ordering},
+    task::{Context, Poll},
+};
 
 use crate::{
     command::{RadioCommandHandler, RadioCommandQueue},
@@ -217,6 +220,14 @@ pub trait TryWpa2Io<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
         &mut self,
         command: Wpa2IoCommand<N>,
     ) -> Result<(), Wpa2IoFailure<Self::Error, N>>;
+
+    fn prepare_retry(&mut self, _error: &Self::Error) -> bool {
+        false
+    }
+
+    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
 }
 
 pub struct Wpa2IoHandler<B> {
@@ -245,6 +256,18 @@ where
 
     fn handle(&mut self, command: Wpa2IoCommand<N>) -> Result<(), Self::Error> {
         self.backend.try_execute(command)
+    }
+
+    fn recover_retry(&mut self, failure: Self::Error) -> Result<Wpa2IoCommand<N>, Self::Error> {
+        if self.backend.prepare_retry(&failure.error) {
+            Ok(failure.command)
+        } else {
+            Err(failure)
+        }
+    }
+
+    fn poll_retry_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.backend.poll_retry_ready(cx)
     }
 }
 

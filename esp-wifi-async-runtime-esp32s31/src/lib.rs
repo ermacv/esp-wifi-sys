@@ -15,6 +15,7 @@ compile_error!(
 
 pub mod adapter;
 pub mod allocation;
+mod ap_power_save;
 pub mod channel;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod channel_switch;
@@ -106,8 +107,7 @@ pub use adapter::{
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use allocation::{allow_heap_for_wifi_teardown, patch_allocator_probes};
-#[cfg(target_arch = "riscv32")]
-pub use esf::enable_prestart_management_pool;
+pub use ap_power_save::{ap_power_save_snapshot, ApPowerSaveSnapshot};
 pub use channel::{BoundedChannel, Receive, TrySendError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
@@ -144,6 +144,8 @@ pub use data_tx::{
 pub use delay::{
     direct_delay_snapshot, DirectDelaySiteSnapshot, DirectDelaySnapshot, DIRECT_DELAY_SITE_CAPACITY,
 };
+#[cfg(target_arch = "riscv32")]
+pub use esf::enable_prestart_management_pool;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use esf::rejected_esf_operations;
 pub use event::{PpAction, PpEvent};
@@ -167,11 +169,6 @@ pub use lmac::{
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use lmac::{submit_basic_ht_ampdu, LmacAsyncError};
-#[cfg(target_arch = "riscv32")]
-pub use txdone::{
-    complete_initial_ap_start, strict_management_tx_done_snapshot, InitialApStartError,
-    StrictManagementTxDoneSnapshot,
-};
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-mic"))]
 pub use michael::{
     async_michael_callback_installed, install_async_michael_callback,
@@ -250,12 +247,17 @@ pub use tx_rate::FixedRateScheduleSnapshot;
 pub use tx_rate::{fixed_rate_schedule_snapshot, strict_rate_schedule, try_fixed_rate_schedule};
 #[cfg(target_arch = "riscv32")]
 pub use tx_security::strict_pp_proc_tx_sec_frame;
+#[cfg(feature = "hil-vendor-tx")]
+pub use tx_security::{hil_tx_security_rejected_snapshot, HilTxSecurityRejectedSnapshot};
 pub use tx_security::{
     strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
     TxSecurityLayoutInput, TxSecurityLayoutOutput,
 };
-#[cfg(feature = "hil-vendor-tx")]
-pub use tx_security::{hil_tx_security_rejected_snapshot, HilTxSecurityRejectedSnapshot};
+#[cfg(target_arch = "riscv32")]
+pub use txdone::{
+    complete_initial_ap_start, strict_management_tx_done_snapshot, InitialApStartError,
+    StrictManagementTxDoneSnapshot,
+};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

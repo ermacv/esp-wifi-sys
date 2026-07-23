@@ -151,6 +151,19 @@ pub trait RadioCommandHandler<C> {
     type Error;
 
     fn handle(&mut self, command: C) -> Result<(), Self::Error>;
+
+    /// Recover an owned command from a transient handler failure.
+    ///
+    /// The default keeps the existing fail-fast contract. Specialized
+    /// handlers may return the command and arrange an event-driven readiness
+    /// edge through `poll_retry_ready`.
+    fn recover_retry(&mut self, error: Self::Error) -> Result<C, Self::Error> {
+        Err(error)
+    }
+
+    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
 }
 
 /// Polls application commands and the Wi-Fi runtime on the same executor
@@ -161,6 +174,7 @@ pub struct RadioOwnerFuture<'a, W, C, H, const N: usize> {
     commands: &'a RadioCommandQueue<C, N>,
     handler: H,
     command_budget: usize,
+    pending_command: Option<C>,
 }
 
 impl<'a, W, C, H, const N: usize> RadioOwnerFuture<'a, W, C, H, N> {
@@ -176,6 +190,7 @@ impl<'a, W, C, H, const N: usize> RadioOwnerFuture<'a, W, C, H, N> {
             commands,
             handler,
             command_budget,
+            pending_command: None,
         }
     }
 
@@ -195,15 +210,45 @@ impl<'a, W, C, H, const N: usize> RadioOwnerFuture<'a, W, C, H, N> {
 impl<W, C, H, const N: usize> Future for RadioOwnerFuture<'_, W, C, H, N>
 where
     W: Future + Unpin,
+    C: Unpin,
     H: RadioCommandHandler<C> + Unpin,
 {
     type Output = Result<W::Output, H::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut received = 0;
+        let mut retry_blocked = false;
+
+        if self.pending_command.is_some() {
+            match self.handler.poll_retry_ready(cx) {
+                Poll::Pending => retry_blocked = true,
+                Poll::Ready(()) => {
+                    let command = self
+                        .pending_command
+                        .take()
+                        .expect("pending command checked above");
+                    let result = {
+                        let _radio_context = RadioContextGuard::enter(RADIO_COMMAND_CONTEXT_EVENT);
+                        self.handler.handle(command)
+                    };
+                    if let Err(error) = result {
+                        match self.handler.recover_retry(error) {
+                            Ok(command) => {
+                                self.pending_command = Some(command);
+                                retry_blocked = true;
+                            }
+                            Err(error) => return Poll::Ready(Err(error)),
+                        }
+                    } else {
+                        received = 1;
+                    }
+                }
+            }
+        }
+
         let mut receive = self.commands.receive();
 
-        while received < self.command_budget {
+        while !retry_blocked && received < self.command_budget {
             let command = if received == 0 {
                 match Pin::new(&mut receive).poll(cx) {
                     Poll::Ready(command) => {
@@ -224,7 +269,13 @@ where
                 self.handler.handle(command)
             };
             if let Err(error) = result {
-                return Poll::Ready(Err(error));
+                match self.handler.recover_retry(error) {
+                    Ok(command) => {
+                        self.pending_command = Some(command);
+                        break;
+                    }
+                    Err(error) => return Poll::Ready(Err(error)),
+                }
             }
             received += 1;
         }
@@ -255,6 +306,43 @@ mod tests {
     struct Handler {
         sum: u32,
         all_in_radio_context: bool,
+    }
+
+    #[derive(Default)]
+    struct RetryHandler {
+        attempts: usize,
+        sum: u32,
+        ready: bool,
+    }
+
+    impl RadioCommandHandler<u32> for RetryHandler {
+        type Error = (u8, u32);
+
+        fn handle(&mut self, command: u32) -> Result<(), Self::Error> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                Err((1, command))
+            } else {
+                self.sum += command;
+                Ok(())
+            }
+        }
+
+        fn recover_retry(&mut self, error: Self::Error) -> Result<u32, Self::Error> {
+            if error.0 == 1 {
+                Ok(error.1)
+            } else {
+                Err(error)
+            }
+        }
+
+        fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
+            if self.ready {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
     }
 
     impl RadioCommandHandler<u32> for Handler {
@@ -300,5 +388,26 @@ mod tests {
         assert_eq!(commands.try_receive(), Some(7));
         assert_eq!(submit.as_mut().poll(&mut context), Poll::Ready(()));
         assert_eq!(commands.try_receive(), Some(9));
+    }
+
+    #[test]
+    fn owner_retains_retryable_command_until_event_readiness() {
+        let commands = RadioCommandQueue::<u32, 1>::new();
+        commands.try_submit(7).unwrap();
+        let mut owner =
+            RadioOwnerFuture::new(pending::<()>(), &commands, RetryHandler::default(), 1);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
+        assert_eq!(owner.handler().attempts, 1);
+        assert_eq!(owner.handler().sum, 0);
+        assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
+        assert_eq!(owner.handler().attempts, 1);
+
+        owner.handler_mut().ready = true;
+        assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
+        assert_eq!(owner.handler().attempts, 2);
+        assert_eq!(owner.handler().sum, 7);
     }
 }

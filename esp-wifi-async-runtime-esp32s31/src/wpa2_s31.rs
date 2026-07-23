@@ -167,8 +167,10 @@ impl<const N: usize> S31StaticKeyStorage<N> {
                 && slot.hardware_index.load(Ordering::Acquire) == hardware_index
             {
                 #[cfg(target_arch = "riscv32")]
-                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)]
-                    .store(slot as *const StaticVendorKeySlot as usize, Ordering::Release);
+                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].store(
+                    slot as *const StaticVendorKeySlot as usize,
+                    Ordering::Release,
+                );
                 return Some(slot.object.get());
             }
         }
@@ -180,8 +182,10 @@ impl<const N: usize> S31StaticKeyStorage<N> {
             {
                 slot.hardware_index.store(hardware_index, Ordering::Release);
                 #[cfg(target_arch = "riscv32")]
-                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)]
-                    .store(slot as *const StaticVendorKeySlot as usize, Ordering::Release);
+                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].store(
+                    slot as *const StaticVendorKeySlot as usize,
+                    Ordering::Release,
+                );
                 return Some(slot.object.get());
             }
         }
@@ -209,12 +213,7 @@ impl<const N: usize> S31StaticKeyStorage<N> {
 fn unregister_static_vendor_key_slot(slot: &StaticVendorKeySlot) {
     let slot_address = slot as *const StaticVendorKeySlot as usize;
     for registered in &STATIC_VENDOR_KEY_SLOTS {
-        let _ = registered.compare_exchange(
-            slot_address,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ = registered.compare_exchange(slot_address, 0, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -359,6 +358,7 @@ mod target {
         fn initialization_cnx_node_alloc(peer: *const u8) -> *mut u8;
         fn cnx_bss_init(node: *mut u8, interface: *mut u8);
         fn ieee80211_search_node(interface: u32, frame: *const u8, error: *mut u32) -> *mut u8;
+        fn ieee80211_set_tim(node: *mut u8, set: u32) -> i32;
         fn ieee80211_is_tx_allowed(node: *mut u8, authentication_frame: bool) -> bool;
         fn esf_buf_alloc(frame: *const u8, kind: u32, length: u32) -> *mut u8;
         fn ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
@@ -904,6 +904,7 @@ mod target {
         sta_authorized_peer: Option<[u8; 6]>,
         authorized_peers: StaticAuthorizedPeers<K>,
         tx_poisoned: bool,
+        ap_power_save_epoch: usize,
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -933,6 +934,7 @@ mod target {
                 sta_authorized_peer: None,
                 authorized_peers: StaticAuthorizedPeers::new(),
                 tx_poisoned: false,
+                ap_power_save_epoch: 0,
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_tx_diagnostic: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -955,14 +957,14 @@ mod target {
         ///
         /// Vendor `trc_init` must have completed, and the caller must own the
         /// radio runtime so no concurrent vendor task can mutate the contexts.
-        pub unsafe fn configure_ap_fixed_rate(
-            &mut self,
-            rate: u8,
-        ) -> Result<(), S31Wpa2IoError> {
+        pub unsafe fn configure_ap_fixed_rate(&mut self, rate: u8) -> Result<(), S31Wpa2IoError> {
             let table = ptr::addr_of_mut!(g_per_conn_trc);
 
             let context_at = |index: usize| {
-                table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read()
+                table
+                    .add(index * size_of::<*mut u8>())
+                    .cast::<*mut u8>()
+                    .read()
             };
             let validate = |context: *mut u8| {
                 let primary = context
@@ -1248,9 +1250,8 @@ mod target {
             #[cfg(feature = "hil-vendor-tx")]
             if self.vendor_tx_diagnostic && data_owner.is_some() {
                 let mut peer_error = 0_u32;
-                let diagnostic_node = unsafe {
-                    ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error)
-                };
+                let diagnostic_node =
+                    unsafe { ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error) };
                 let diagnostic_interface = unsafe {
                     ptr::addr_of_mut!(g_ic)
                         .add(0x10 + usize::try_from(interface).unwrap_or(0) * 4)
@@ -1316,6 +1317,12 @@ mod target {
                 let sleeping = unsafe { node.add(0x2fe).read() != 0 };
                 let flags = unsafe { node.add(0x0c).cast::<u32>().read() };
                 if sleeping || flags & 0x10 != 0 {
+                    // `ieee80211_set_tim` is a measured finite leaf in the
+                    // pinned archive. The owned command remains with the Rust
+                    // radio owner; no vendor PS queue or OSI primitive is
+                    // entered.
+                    unsafe { ieee80211_set_tim(node, 1) };
+                    crate::ap_power_save::record_deferred_transmit();
                     return Err(S31Wpa2IoError::TxPeerPowerSaveUnsupported);
                 }
             }
@@ -1521,8 +1528,7 @@ mod target {
                         // logical-id mapping used while receiving a rekey.
                         node.add(0x135).write(hardware_index);
                         if station_mapping {
-                            node.add(0x137 + usize::from(key_id))
-                                .write(hardware_index);
+                            node.add(0x137 + usize::from(key_id)).write(hardware_index);
                         }
                     }
                 }
@@ -1563,37 +1569,46 @@ mod target {
                     Ok(())
                 }
                 Wpa2IoCommand::TransmitData(frame) => {
-                    self.try_transmit_wifi_data(&frame).map_err(|error| {
-                        Wpa2IoFailure {
+                    self.try_transmit_wifi_data(&frame)
+                        .map_err(|error| Wpa2IoFailure {
                             error,
                             command: Wpa2IoCommand::TransmitData(frame),
-                        }
-                    })
+                        })
                 }
                 Wpa2IoCommand::InstallKey(install) => {
-                    self.install_ccmp(install).map_err(|(error, install)| {
-                        Wpa2IoFailure {
+                    self.install_ccmp(install)
+                        .map_err(|(error, install)| Wpa2IoFailure {
                             error,
                             command: Wpa2IoCommand::InstallKey(install),
-                        }
-                    })
+                        })
                 }
                 Wpa2IoCommand::SetPeerAuthorized {
                     interface,
                     peer,
                     authorized,
-                } => {
-                    self.set_peer_authorized(interface, peer, authorized).map_err(
-                        |error| Wpa2IoFailure {
+                } => self
+                    .set_peer_authorized(interface, peer, authorized)
+                    .map_err(|error| Wpa2IoFailure {
                         error,
                         command: Wpa2IoCommand::SetPeerAuthorized {
                             interface,
                             peer,
                             authorized,
                         },
-                    })
-                }
+                    }),
             }
+        }
+
+        fn prepare_retry(&mut self, error: &Self::Error) -> bool {
+            if *error != S31Wpa2IoError::TxPeerPowerSaveUnsupported {
+                return false;
+            }
+            self.ap_power_save_epoch = crate::ap_power_save::active_epoch();
+            true
+        }
+
+        fn poll_retry_ready(&mut self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
+            crate::ap_power_save::poll_active_edge(self.ap_power_save_epoch, cx)
         }
     }
 }
@@ -1601,9 +1616,9 @@ mod target {
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 pub use target::hil_sta_pairwise_key_snapshot;
 #[cfg(target_arch = "riscv32")]
-pub(crate) use target::{release_static_ap_node, runtime_key_link_wrapper_active};
-#[cfg(target_arch = "riscv32")]
 pub use target::S31StaticWpa2Io;
+#[cfg(target_arch = "riscv32")]
+pub(crate) use target::{release_static_ap_node, runtime_key_link_wrapper_active};
 
 #[cfg(test)]
 mod tests {
