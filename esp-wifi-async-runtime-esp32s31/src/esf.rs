@@ -24,7 +24,9 @@ const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 // static RX bound with fixed Rust-owned storage instead.
 const LARGE_RX_PAYLOAD_CAPACITY: usize = 1700;
 const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
-const LARGE_RX_SLOT_CAPACITY: usize = 16;
+// One native atomic word owns this pool. On the 32-bit S31 target the mask
+// therefore has 31 usable bits without a width-sized shift.
+const LARGE_RX_SLOT_CAPACITY: usize = 31;
 const LARGE_RX_SLOT_MASK: usize = (1 << LARGE_RX_SLOT_CAPACITY) - 1;
 
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
@@ -351,6 +353,65 @@ pub(crate) fn large_rx_frame(slot: u8) -> Option<*mut u8> {
         return None;
     }
     Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>())
+}
+
+/// Validate transfer of a kind-7 receive object into the safe network channel.
+///
+/// The ESF slot remains claimed; this only proves that the callback's packet
+/// view is contained by the exact live SRAM object represented by `frame`.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) unsafe fn owned_large_rx_view_valid(
+    frame: *mut u8,
+    buffer: *mut u8,
+    length: usize,
+) -> bool {
+    if buffer.is_null() || length == 0 {
+        return false;
+    }
+    let Some(index) = large_rx_slot_index(frame) else {
+        return false;
+    };
+    let bit = 1_usize << index;
+    if CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit == 0 {
+        return false;
+    }
+    let start = frame.add(ESF_HEADER_SIZE) as usize;
+    let Some(end) = (buffer as usize).checked_add(length) else {
+        return false;
+    };
+    buffer as usize >= start && end <= start + LARGE_RX_PAYLOAD_CAPACITY
+}
+
+/// Release a kind-7 frame after the safe network-channel owner drops it.
+///
+/// This is the allocation-free leaf of `ppRecycleRxPkt` specialized to the
+/// Rust-owned kind-7 pool. It may run outside the virtual Wi-Fi task because
+/// it touches no vendor list or lock: the sole ownership transition is one
+/// atomic bit clear.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) unsafe fn release_owned_large_rx_frame(frame: *mut u8) -> bool {
+    let Some(index) = large_rx_slot_index(frame) else {
+        return false;
+    };
+    let buffer_descriptor = frame
+        .add(0x04)
+        .cast::<*mut u8>()
+        .read();
+    let payload = frame
+        .add(ESF_BUFFER_POINTER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if !buffer_descriptor.is_null() {
+        buffer_descriptor.add(4).cast::<*mut u8>().write(payload);
+    }
+    let bit = 1_usize << index;
+    CLAIMED_LARGE_RX_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit != 0
 }
 
 /// Return whether `frame` belongs to one of the fixed pools handled by the

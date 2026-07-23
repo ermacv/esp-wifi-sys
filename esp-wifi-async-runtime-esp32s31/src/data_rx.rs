@@ -12,6 +12,14 @@ use crate::channel::BoundedChannel;
 
 pub const WIFI_DATA_RX_CAPACITY: usize = 32;
 pub const WIFI_DATA_RX_FRAME_CAPACITY: usize = 1600;
+#[cfg(target_arch = "riscv32")]
+const WIFI_DATA_RX_COPY_CAPACITY: usize = 8;
+#[cfg(not(target_arch = "riscv32"))]
+const WIFI_DATA_RX_COPY_CAPACITY: usize = WIFI_DATA_RX_CAPACITY;
+#[cfg(target_arch = "riscv32")]
+const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = 512;
+#[cfg(not(target_arch = "riscv32"))]
+const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = WIFI_DATA_RX_FRAME_CAPACITY;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WifiDataInterface {
@@ -20,9 +28,8 @@ pub enum WifiDataInterface {
 }
 
 struct RxSlotData {
-    interface: WifiDataInterface,
     length: usize,
-    bytes: [u8; WIFI_DATA_RX_FRAME_CAPACITY],
+    bytes: [u8; WIFI_DATA_RX_COPY_FRAME_CAPACITY],
 }
 
 struct RxSlot {
@@ -35,9 +42,8 @@ impl RxSlot {
         Self {
             occupied: AtomicBool::new(false),
             data: UnsafeCell::new(RxSlotData {
-                interface: WifiDataInterface::Station,
                 length: 0,
-                bytes: [0; WIFI_DATA_RX_FRAME_CAPACITY],
+                bytes: [0; WIFI_DATA_RX_COPY_FRAME_CAPACITY],
             }),
         }
     }
@@ -51,7 +57,8 @@ unsafe impl Sync for RxSlot {}
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.data_rx_slots"
 )]
-static RX_SLOTS: [RxSlot; WIFI_DATA_RX_CAPACITY] = [const { RxSlot::new() }; WIFI_DATA_RX_CAPACITY];
+static RX_SLOTS: [RxSlot; WIFI_DATA_RX_COPY_CAPACITY] =
+    [const { RxSlot::new() }; WIFI_DATA_RX_COPY_CAPACITY];
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.data_rx_channel"
@@ -110,15 +117,37 @@ pub fn wifi_data_rx_snapshot() -> WifiDataRxSnapshot {
     }
 }
 
-struct RxSlotToken {
-    index: usize,
+enum RxStorage {
+    Copied { index: usize },
+    #[cfg(target_arch = "riscv32")]
+    LargeEsf {
+        buffer: *mut u8,
+        length: usize,
+        frame: *mut u8,
+    },
 }
+
+struct RxSlotToken {
+    interface: WifiDataInterface,
+    storage: RxStorage,
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Send for RxSlotToken {}
 
 impl Drop for RxSlotToken {
     fn drop(&mut self) {
-        RX_SLOTS[self.index]
-            .occupied
-            .store(false, Ordering::Release);
+        match &self.storage {
+            RxStorage::Copied { index } => {
+                RX_SLOTS[*index].occupied.store(false, Ordering::Release);
+            }
+            #[cfg(target_arch = "riscv32")]
+            RxStorage::LargeEsf { frame, .. } => {
+                if unsafe { !crate::esf::release_owned_large_rx_frame(*frame) } {
+                    RX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         RX_RELEASED.fetch_add(1, Ordering::Relaxed);
         RX_OCCUPIED.fetch_sub(1, Ordering::AcqRel);
     }
@@ -130,12 +159,20 @@ pub struct OwnedWifiDataFrame {
 
 impl OwnedWifiDataFrame {
     pub fn interface(&self) -> WifiDataInterface {
-        unsafe { (*RX_SLOTS[self.token.index].data.get()).interface }
+        self.token.interface
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        let data = unsafe { &*RX_SLOTS[self.token.index].data.get() };
-        &data.bytes[..data.length]
+        match &self.token.storage {
+            RxStorage::Copied { index } => {
+                let data = unsafe { &*RX_SLOTS[*index].data.get() };
+                &data.bytes[..data.length]
+            }
+            #[cfg(target_arch = "riscv32")]
+            RxStorage::LargeEsf { buffer, length, .. } => unsafe {
+                core::slice::from_raw_parts(*buffer, *length)
+            },
+        }
     }
 
     /// Mutable packet view for a network-stack receive token.
@@ -143,8 +180,16 @@ impl OwnedWifiDataFrame {
     /// Ownership of the slot token guarantees exclusive access until this
     /// frame is dropped and returns the slot to the interrupt producer.
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        let data = unsafe { &mut *RX_SLOTS[self.token.index].data.get() };
-        &mut data.bytes[..data.length]
+        match &mut self.token.storage {
+            RxStorage::Copied { index } => {
+                let data = unsafe { &mut *RX_SLOTS[*index].data.get() };
+                &mut data.bytes[..data.length]
+            }
+            #[cfg(target_arch = "riscv32")]
+            RxStorage::LargeEsf { buffer, length, .. } => unsafe {
+                core::slice::from_raw_parts_mut(*buffer, *length)
+            },
+        }
     }
 }
 
@@ -184,7 +229,7 @@ pub fn rejected_wifi_data_frames() -> usize {
     link_section = ".rwtext.wifi_strict.data_rx_copy"
 )]
 unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length: usize) -> bool {
-    if buffer.is_null() || length == 0 || length > WIFI_DATA_RX_FRAME_CAPACITY {
+    if buffer.is_null() || length == 0 || length > WIFI_DATA_RX_COPY_FRAME_CAPACITY {
         REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
         RX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
         return false;
@@ -199,17 +244,26 @@ unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length
         return false;
     };
 
+    let data = &mut *slot.data.get();
+    data.length = length;
+    core::ptr::copy_nonoverlapping(buffer, data.bytes.as_mut_ptr(), length);
+    enqueue_token(RxSlotToken {
+        interface,
+        storage: RxStorage::Copied { index },
+    })
+}
+
+fn enqueue_token(token: RxSlotToken) -> bool {
     RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
     let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
     record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
-
-    let data = &mut *slot.data.get();
-    data.interface = interface;
-    data.length = length;
-    core::ptr::copy_nonoverlapping(buffer, data.bytes.as_mut_ptr(), length);
-    if let Err(error) = RX_CHANNEL.try_send(RxSlotToken { index }) {
+    if let Err(error) = RX_CHANNEL.try_send(token) {
         REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
-        RX_REJECTED_CHANNEL_CONTENDED.fetch_add(1, Ordering::Relaxed);
+        if RX_CHANNEL.len() >= WIFI_DATA_RX_CAPACITY {
+            RX_REJECTED_SLOTS_FULL.fetch_add(1, Ordering::Relaxed);
+        } else {
+            RX_REJECTED_CHANNEL_CONTENDED.fetch_add(1, Ordering::Relaxed);
+        }
         drop(error.0);
         return false;
     }
@@ -272,13 +326,36 @@ mod target {
         length: u16,
         vendor_buffer: *mut c_void,
     ) -> i32 {
-        let accepted = copy_into_slot(interface, buffer.cast(), usize::from(length));
-        if !vendor_buffer.is_null() {
-            // The callback owns `vendor_buffer`. Under the virtual Wi-Fi task
-            // identity its API-lock path cannot wait, and the pinned S31
-            // function immediately recycles the fixed RX object.
-            esp_wifi_internal_free_rx_buffer(vendor_buffer);
-        }
+        let length = usize::from(length);
+        let owns_large_esf = length <= WIFI_DATA_RX_FRAME_CAPACITY
+            && !vendor_buffer.is_null()
+            && crate::esf::owned_large_rx_view_valid(
+                vendor_buffer.cast(),
+                buffer.cast(),
+                length,
+            );
+        let accepted = if owns_large_esf {
+            // Transfer the live kind-7 object into the bounded safe channel.
+            // Its token releases the one Rust pool bit directly on Drop, so
+            // no vendor mutex or task identity crosses into embassy-net.
+            enqueue_token(RxSlotToken {
+                interface,
+                storage: RxStorage::LargeEsf {
+                    buffer: buffer.cast(),
+                    length,
+                    frame: vendor_buffer.cast(),
+                },
+            })
+        } else {
+            // Small vendor-static frames cannot be returned to their intrusive
+            // free list from an arbitrary network task. Copy them into the
+            // compact owned pool, then recycle while still on the radio owner.
+            let accepted = copy_into_slot(interface, buffer.cast(), length);
+            if !vendor_buffer.is_null() {
+                esp_wifi_internal_free_rx_buffer(vendor_buffer);
+            }
+            accepted
+        };
         if accepted {
             ESP_OK as i32
         } else {
