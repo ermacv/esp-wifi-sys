@@ -583,7 +583,17 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
         return Err(TxDoneError::InvalidBeaconFrame);
     }
     let metadata = first_buffer.add(4).cast::<*mut u8>().read();
-    if metadata.is_null() || metadata.cast::<u32>().read_unaligned() != 0x90 {
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let expected_metadata_len = (lengths as u16)
+        .checked_add((lengths >> 16) as u16)
+        .and_then(|length| length.checked_sub(8))
+        .map(u32::from);
+    let metadata_len = if metadata.is_null() {
+        None
+    } else {
+        Some(metadata.cast::<u32>().read_unaligned())
+    };
+    if metadata_len != expected_metadata_len {
         #[cfg(feature = "hil-vendor-tx")]
         crate::tx_trace::record_descriptor_transition(
             crate::tx_trace::TxTraceEvent::PipelineRejected,
@@ -593,16 +603,11 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
             0,
             2,
             metadata.addr() as u32,
-            if metadata.is_null() {
-                0
-            } else {
-                metadata.cast::<u32>().read_unaligned()
-            },
-            first_buffer.cast::<u32>().read_unaligned(),
+            metadata_len.unwrap_or(0),
+            expected_metadata_len.unwrap_or(u32::MAX),
         );
         return Err(TxDoneError::InvalidBeaconFrame);
     }
-    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
     let layout_word = frame.add(0x24).cast::<u16>().read_unaligned();
     let buffer_flags = first_buffer.cast::<u32>().read_unaligned();
     let completion_input = crate::tx_security::TxSecurityLayoutInput {

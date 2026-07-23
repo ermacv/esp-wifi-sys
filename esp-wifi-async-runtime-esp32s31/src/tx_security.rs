@@ -1434,6 +1434,26 @@ mod tests {
             })
         );
 
+        // WPA2 plus the bgnax capability IEs grows the persistent beacon.
+        // Metadata covers the complete submitted MPDU minus its eight-byte
+        // one-transmission prefix; it is therefore not a profile-independent
+        // 0x90 constant.
+        let extended = TxSecurityLayoutInput {
+            remaining_len: 0x00d6,
+            buffer_flags: 0xc03b_82f8,
+            ..measured
+        };
+        assert_eq!(
+            strict_tx_security_layout(extended),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x00da,
+                layout: 0x2000,
+                buffer_flags: 0xc03e_82f8,
+                metadata_len: 0x00f2,
+            })
+        );
+
         for rejected in [
             TxSecurityLayoutInput {
                 descriptor_flags: 0x0080_0410,
