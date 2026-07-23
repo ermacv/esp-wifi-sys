@@ -220,6 +220,7 @@ pub enum S31Wpa2IoError {
     AuthorizationWithoutPairwiseKey,
     MissingApTransmitGroupKey,
     MissingApTransmitGroupNode,
+    MissingApRateContext,
     StaPeerUnauthorized,
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
@@ -276,6 +277,7 @@ mod target {
         static mut g_ic: u8;
         static mut g_wifi_nvs: *mut u8;
         static mut g_sta_connected_flag: u8;
+        static mut g_per_conn_trc: u8;
         #[cfg(feature = "hil-vendor-tx")]
         static mut gWpaSm: u8;
 
@@ -345,6 +347,14 @@ mod target {
     const AP_NODE_LEN: usize = 0x510;
     const AP_NODE_HARDWARE_INDEX_OFFSET: usize = 0x134;
     const AP_NODE_BITMAP_OFFSET: usize = 0x118;
+    const RATE_CONTEXT_PRIMARY_RATE_OFFSET: usize = 0x08;
+    const RATE_CONTEXT_SECONDARY_RATE_OFFSET: usize = 0x09;
+    const RATE_CONTEXT_MODE_OFFSET: usize = 0x0c;
+    const RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET: usize = 0x64;
+    const RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET: usize = 0x68;
+    const AP_FIRST_PEER_RATE_CONTEXT: usize = 1;
+    const AP_LAST_PEER_RATE_CONTEXT: usize = 16;
+    const AP_DEFAULT_RATE_CONTEXT: usize = 20;
 
     #[repr(C, align(4))]
     struct StaticApNode {
@@ -840,6 +850,64 @@ mod target {
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_wpa_tx_diagnostic: false,
             })
+        }
+
+        /// Select one finite, prebuilt TX schedule for every AP connection.
+        ///
+        /// This is the allocation-free body reached by the pinned
+        /// `rc_set_fix_rate(AP, true, rate)` path after its ioctl/task wrapper.
+        /// Peer contexts 1..=16 and the AP default/group context 20 are
+        /// validated in full before the first write. Both primary and
+        /// secondary fixed-rate bits are enabled, so `rcGetSched` never enters
+        /// adaptive rate control for an AP-owned descriptor.
+        ///
+        /// # Safety
+        ///
+        /// Vendor `trc_init` must have completed, and the caller must own the
+        /// radio runtime so no concurrent vendor task can mutate the contexts.
+        pub unsafe fn configure_ap_fixed_rate(
+            &mut self,
+            rate: u8,
+        ) -> Result<(), S31Wpa2IoError> {
+            let table = ptr::addr_of_mut!(g_per_conn_trc);
+
+            let validate = |index: usize| {
+                let context = table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read();
+                if context.is_null() {
+                    return false;
+                }
+                let primary = context
+                    .add(RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_unaligned();
+                let secondary = context
+                    .add(RATE_CONTEXT_SECONDARY_SCHEDULE_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_unaligned();
+                !primary.is_null() && !secondary.is_null()
+            };
+
+            for index in AP_FIRST_PEER_RATE_CONTEXT..=AP_LAST_PEER_RATE_CONTEXT {
+                if !validate(index) {
+                    return Err(S31Wpa2IoError::MissingApRateContext);
+                }
+            }
+            if !validate(AP_DEFAULT_RATE_CONTEXT) {
+                return Err(S31Wpa2IoError::MissingApRateContext);
+            }
+
+            let apply = |index: usize| {
+                let context = table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read();
+                context.add(RATE_CONTEXT_PRIMARY_RATE_OFFSET).write(rate);
+                context.add(RATE_CONTEXT_SECONDARY_RATE_OFFSET).write(rate);
+                let mode = context.add(RATE_CONTEXT_MODE_OFFSET).cast::<u16>();
+                mode.write_unaligned(mode.read_unaligned() | 0x03);
+            };
+            for index in AP_FIRST_PEER_RATE_CONTEXT..=AP_LAST_PEER_RATE_CONTEXT {
+                apply(index);
+            }
+            apply(AP_DEFAULT_RATE_CONTEXT);
+            Ok(())
         }
 
         /// Route HIL frames through the stock `ieee80211_output_do` oracle.
