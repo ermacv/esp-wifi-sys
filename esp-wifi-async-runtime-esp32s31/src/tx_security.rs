@@ -36,6 +36,7 @@ pub struct PersistentFrameCompletionLayout {
 }
 
 const AP_GROUP_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 18;
+const AP_PAIRWISE_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 20;
 
 const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control != 0x4208
@@ -53,6 +54,24 @@ const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
     };
     input.buffer_flags
         == 0xc000_0000 | (mpdu_len as u32) << 14 | (mpdu_len as u32 + 14)
+}
+
+const fn is_protected_ap_pairwise_data(input: TxSecurityLayoutInput) -> bool {
+    if input.frame_control != 0x4288
+        || input.descriptor_flags != 0x0000_2009
+        || input.descriptor_security != 0x0004_0348
+        || input.header_len != 0x001a
+        || input.remaining_len < 8
+        || input.layout & 0xe000 != 0
+    {
+        return false;
+    }
+    let mpdu_len = match input.header_len.checked_add(input.remaining_len) {
+        Some(value) if value <= AP_PAIRWISE_MAX_MPDU_LEN => value,
+        _ => return false,
+    };
+    input.buffer_flags
+        == 0xc000_0000 | (mpdu_len as u32) << 14 | (mpdu_len as u32 + 12)
 }
 
 pub(crate) const fn strict_ap_group_power_save_completion(
@@ -79,6 +98,35 @@ pub(crate) const fn strict_ap_group_power_save_completion(
     };
     buffer_flags
         == 0xc000_0000 | (output_len as u32) << 14 | (output_len as u32 - 6)
+}
+
+pub(crate) const fn strict_ap_pairwise_power_save_completion(
+    frame_control: u16,
+    header_len: u16,
+    remaining_len: u16,
+    layout: u16,
+    buffer_flags: u32,
+    descriptor_flags: u32,
+    descriptor_security: u32,
+) -> bool {
+    if frame_control & !0x0800 != 0x4288
+        || !matches!(descriptor_flags, 0x0000_2009 | 0x0000_2109)
+        || !matches!(
+            descriptor_security,
+            0x0114_0348 | 0x0214_0348 | 0x0414_0348
+        )
+        || header_len != 0x0022
+        || remaining_len < 20
+        || layout & 0xe000 != 0x2000
+    {
+        return false;
+    }
+    let output_len = match header_len.checked_add(remaining_len) {
+        Some(value) if value <= AP_PAIRWISE_MAX_MPDU_LEN + 20 => value,
+        _ => return false,
+    };
+    buffer_flags
+        == 0xc000_0000 | (output_len as u32) << 14 | (output_len as u32 - 8)
 }
 
 /// Restore one retained plaintext management or beacon buffer after TX done.
@@ -221,6 +269,7 @@ pub const fn strict_tx_security_layout(
         && input.layout == 0
         && input.buffer_flags == 0xc01b_0082;
     let protected_ap_group_data = is_protected_ap_group_data(input);
+    let protected_ap_pairwise_data = is_protected_ap_pairwise_data(input);
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
@@ -242,6 +291,7 @@ pub const fn strict_tx_security_layout(
         && matches!(input.descriptor_flags, 0x0000_2009 | 0x0200_2009)
         && input.descriptor_security == 0x0000_0304)
         || protected_ap_group_data
+        || protected_ap_pairwise_data
     {
         // The security selector in bits 8..11 is 3. The pinned vendor table
         // maps that selector to the eight-byte CCMP MIC plus four-byte FCS.
@@ -535,6 +585,7 @@ unsafe fn trap_invalid_tx_security_layout(input: TxSecurityLayoutInput) -> ! {
 mod tests {
     use super::{
         strict_ap_beacon_completion_layout, strict_ap_group_power_save_completion,
+        strict_ap_pairwise_power_save_completion,
         strict_ap_eapol_power_save_completion_llc_offset,
         strict_persistent_frame_completion_layout, strict_tx_security_layout,
         ApBeaconCompletionLayout, PersistentFrameCompletionLayout, TxSecurityLayoutInput,
@@ -1049,6 +1100,58 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 buffer_flags: 0xc01d_0083,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_hardware_observed_wpa2_ap_pairwise_ccmp_layout() {
+        let measured = TxSecurityLayoutInput {
+            header_len: 0x001a,
+            remaining_len: 0x002c,
+            layout: 0,
+            buffer_flags: 0xc011_8052,
+            descriptor_flags: 0x0000_2009,
+            descriptor_security: 0x0004_0348,
+            frame_control: 0x4288,
+        };
+        let expected = TxSecurityLayoutOutput {
+            header_len: 0x0022,
+            remaining_len: 0x0038,
+            layout: 0x2000,
+            buffer_flags: 0xc016_8052,
+            metadata_len: 0x0052,
+        };
+        assert_eq!(strict_tx_security_layout(measured), Some(expected));
+        for (frame_control, descriptor_flags, descriptor_security) in [
+            (0x4288, 0x0000_2009, 0x0114_0348),
+            (0x4a88, 0x0000_2109, 0x0214_0348),
+            (0x4a88, 0x0000_2109, 0x0414_0348),
+        ] {
+            assert!(strict_ap_pairwise_power_save_completion(
+                frame_control,
+                expected.header_len,
+                expected.remaining_len,
+                expected.layout,
+                expected.buffer_flags,
+                descriptor_flags,
+                descriptor_security,
+            ));
+        }
+        for rejected in [
+            TxSecurityLayoutInput {
+                descriptor_flags: 0x0000_200b,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0349,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                buffer_flags: 0xc011_8053,
                 ..measured
             },
         ] {

@@ -1028,7 +1028,15 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
     let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
     let descriptor_security = descriptor.add(0x10).cast::<u32>().read_unaligned();
     let buffer_flags = buffer.cast::<u32>().read_unaligned();
-    let protected_group = crate::tx_security::strict_ap_group_power_save_completion(
+    let protected_data = crate::tx_security::strict_ap_group_power_save_completion(
+        frame_control,
+        lengths as u16,
+        (lengths >> 16) as u16,
+        layout,
+        buffer_flags,
+        descriptor_flags,
+        descriptor_security,
+    ) || crate::tx_security::strict_ap_pairwise_power_save_completion(
         frame_control,
         lengths as u16,
         (lengths >> 16) as u16,
@@ -1037,7 +1045,7 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
         descriptor_flags,
         descriptor_security,
     );
-    if protected_group {
+    if protected_data {
         return Ok(());
     }
     let Some(llc_offset) = crate::tx_security::strict_ap_eapol_power_save_completion_llc_offset(
