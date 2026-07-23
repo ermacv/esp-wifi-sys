@@ -150,6 +150,7 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wdev_csi_rx_process",
     "wDev_ftm_set_t1t4",
     "wDev_isNANPktInValidSlot",
+    "wDev_AppendRxBlocks",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
