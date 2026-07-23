@@ -175,6 +175,12 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
 // cache recycle.
 const INVARIANT_EXCLUDED_INDIRECTS: &[&str] = &["ieee80211_recycle_cache_eb"];
 
+// Preparation calls the pinned one-store
+// `esp_wifi_set_sta_rx_probe_req(NULL)` leaf and verifies the ROM-BSS pointer
+// before strict RX is armed. This callback only exports observed Probe Request
+// frames; ordinary AP/STA management delivery does not depend on it.
+const INVARIANT_EXCLUDED_INDIRECT_SITES: &[(&str, u64)] = &[("wDev_ProcessRxSucData", 0x296)];
+
 // `phy_get_romfunc_addr` overwrites these exact slots after obtaining the ROM
 // table. The pinned S31 object writes offset 20 to `phy_set_rx_comp_new` and
 // offset 36 to `phy_wifi_get_tx_tab_new`; both targets audit cleanly.
@@ -608,6 +614,11 @@ fn pinned_indirect_site_target(function: &str, site: &str) -> Option<&'static st
         })
 }
 
+fn is_invariant_excluded_indirect_site(function: &str, site: &str) -> bool {
+    instruction_site_address(site)
+        .is_some_and(|address| INVARIANT_EXCLUDED_INDIRECT_SITES.contains(&(function, address)))
+}
+
 fn parse_instruction(line: &str) -> Option<Instruction> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     let address = u64::from_str_radix(fields.first()?.trim_end_matches(':'), 16).ok()?;
@@ -749,7 +760,10 @@ fn audit_graph(graph: &BTreeMap<String, FunctionInfo>, roots: &[String]) -> BTre
                         predecessor.insert(target.to_owned(), function.clone());
                     }
                     queue.push_back(target.to_owned());
-                } else if pinned_indirect.is_none() && !excludes_all_indirects {
+                } else if pinned_indirect.is_none()
+                    && !excludes_all_indirects
+                    && !is_invariant_excluded_indirect_site(&function, site)
+                {
                     violations.insert(Violation::Indirect {
                         root: root.to_owned(),
                         function: function.clone(),
@@ -1099,8 +1113,8 @@ mod tests {
 
     use super::{
         calls_symbol, definition_name, direct_relocation_target, indirect_site,
-        is_code_symbol_kind, is_internal_sram_code, is_pinned_bounded_cycle, parse_object,
-        pinned_indirect_site_target,
+        is_code_symbol_kind, is_internal_sram_code, is_invariant_excluded_indirect_site,
+        is_pinned_bounded_cycle, parse_object, pinned_indirect_site_target,
     };
 
     #[test]
@@ -1152,6 +1166,22 @@ mod tests {
             pinned_indirect_site_target("different_function", "5fe: jalr a5"),
             None
         );
+    }
+
+    #[test]
+    fn indirect_invariant_exclusions_are_instruction_specific() {
+        assert!(is_invariant_excluded_indirect_site(
+            "wDev_ProcessRxSucData",
+            "296: jalr a4"
+        ));
+        assert!(!is_invariant_excluded_indirect_site(
+            "wDev_ProcessRxSucData",
+            "5fe: jalr a5"
+        ));
+        assert!(!is_invariant_excluded_indirect_site(
+            "different_function",
+            "296: jalr a4"
+        ));
     }
 
     #[test]

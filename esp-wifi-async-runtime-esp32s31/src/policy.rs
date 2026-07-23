@@ -9,6 +9,8 @@ static STRICT_PREPARATION_STAGE: AtomicU8 = AtomicU8::new(0);
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static mut g_tx_done_cb_func: usize;
+    static mut wifi_sta_rx_probe_req: usize;
+    fn esp_wifi_set_sta_rx_probe_req(callback: *mut core::ffi::c_void) -> i32;
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -91,6 +93,8 @@ pub enum StrictRuntimeError {
     ReadPromiscuous(i32),
     PromiscuousStillEnabled,
     DisablePromiscuousCallback(i32),
+    DisableStaProbeRequestCallback(i32),
+    StaProbeRequestCallbackStillInstalled,
     OptionalRxModesStillEnabled {
         promiscuous: u8,
         dump_errors: u8,
@@ -317,6 +321,17 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     let result = esp_wifi_set_promiscuous_rx_cb(None);
     if result != 0 {
         return Err(StrictRuntimeError::DisablePromiscuousCallback(result));
+    }
+    // `wDev_ProcessRxSucData+0x296` dispatches received probe requests through
+    // this global callback. It is an optional observation API, not part of
+    // ordinary AP/STA management delivery. The pinned setter is one pointer
+    // store; verify the ROM-BSS readback before the strict RX root is armed.
+    let result = esp_wifi_set_sta_rx_probe_req(core::ptr::null_mut());
+    if result != 0 {
+        return Err(StrictRuntimeError::DisableStaProbeRequestCallback(result));
+    }
+    if core::ptr::addr_of!(wifi_sta_rx_probe_req).read() != 0 {
+        return Err(StrictRuntimeError::StaProbeRequestCallbackStillInstalled);
     }
     let (promiscuous, dump_errors, csi_callback) = crate::wdev::strict_optional_rx_mode_state();
     if promiscuous != 0 || dump_errors != 0 || csi_callback != 0 {
