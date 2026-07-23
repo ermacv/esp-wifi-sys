@@ -9,7 +9,9 @@ static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_arch = "riscv32")]
 use crate::{
-    rx_descriptor::{descriptor_buffer_length, recycled_descriptor_word},
+    rx_descriptor::{
+        descriptor_buffer_length, descriptor_owned_by_hardware, recycled_descriptor_word,
+    },
     timer::RawOsiTimer,
 };
 
@@ -96,6 +98,7 @@ struct RxRecycleProbe {
     deferred: AtomicUsize,
     timers_armed: AtomicUsize,
     completions: AtomicUsize,
+    terminal_restarts: AtomicUsize,
     reload_active: AtomicUsize,
     pending_chains: AtomicUsize,
 }
@@ -109,6 +112,7 @@ impl RxRecycleProbe {
             deferred: AtomicUsize::new(0),
             timers_armed: AtomicUsize::new(0),
             completions: AtomicUsize::new(0),
+            terminal_restarts: AtomicUsize::new(0),
             reload_active: AtomicUsize::new(0),
             pending_chains: AtomicUsize::new(0),
         }
@@ -123,6 +127,7 @@ pub struct WdevRxRecycleSnapshot {
     pub deferred: usize,
     pub timers_armed: usize,
     pub completions: usize,
+    pub terminal_restarts: usize,
     pub reload_active: bool,
     pub pending_chains: usize,
     pub software_head: usize,
@@ -447,6 +452,27 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             if !next.is_null() {
                 hal_mac_rx_set_base(next);
             }
+        } else {
+            // The asynchronous path can observe a state the vendor's inline
+            // spin almost never reaches: MAC consumed exactly through the
+            // accepted tail, software already recycled every received frame,
+            // and no later RX edge exists to restart the engine.  Only the
+            // hardware-owner bit makes the current software head eligible;
+            // a completed but undecoded descriptor has this bit clear and
+            // must never be submitted again.
+            let software_head = ptr::addr_of!(wDevCtrl)
+                .cast::<*mut u8>()
+                .read_unaligned();
+            if !software_head.is_null()
+                && descriptor_owned_by_hardware(
+                    software_head.cast::<u32>().read_unaligned(),
+                )
+            {
+                hal_mac_rx_set_base(software_head);
+                RX_RECYCLE_PROBE
+                    .terminal_restarts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -545,6 +571,9 @@ pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
         deferred: RX_RECYCLE_PROBE.deferred.load(Ordering::Acquire),
         timers_armed: RX_RECYCLE_PROBE.timers_armed.load(Ordering::Acquire),
         completions: RX_RECYCLE_PROBE.completions.load(Ordering::Acquire),
+        terminal_restarts: RX_RECYCLE_PROBE
+            .terminal_restarts
+            .load(Ordering::Acquire),
         reload_active: RX_RECYCLE_PROBE.reload_active.load(Ordering::Acquire) != 0,
         pending_chains: RX_RECYCLE_PROBE.pending_chains.load(Ordering::Acquire),
         software_head: unsafe { control.cast::<*mut u8>().read_unaligned() as usize },
