@@ -206,10 +206,16 @@ const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
 // two), so neither cycle observes hardware state or has an unbounded exit.
 // `rc_get_trc` clears one set bit from a local u32 peer bitmap per iteration,
 // and compares exactly six address bytes, so it exits after at most 32 steps.
+// `is_ndpa_to_dut` scans four-byte HE user-info records. Its record count is
+// `(frame_len - 21) >> 2`, explicitly narrowed to u8 before the do-while loop.
+// The zero case wraps once through all u8 values, making the exact worst case
+// 256 finite data records. It never polls a register or waits for external
+// state; the per-record `hal_he_get_aid` call is an audited direct leaf.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
     ("phy_set_tx_gain_mem_new", 0xaa),
     ("phy_set_tx_gain_mem_new", 0x12e),
     ("rc_get_trc", 0x74),
+    ("is_ndpa_to_dut", 0x66),
 ];
 
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[

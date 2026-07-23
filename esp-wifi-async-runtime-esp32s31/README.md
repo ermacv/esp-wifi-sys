@@ -411,6 +411,12 @@ only when the corresponding `__wrap_malloc`, `__wrap_calloc`,
 `__wrap_realloc`, or `__wrap_free` symbol is linked. `lmacTxDone` must resolve
 through `__wrap_lmacTxDone`; its callback bitmap, inline `ppProcTxDone`/PM tail,
 and TX-queue resume are then executor continuations.
+The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
+that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
+walks four-byte frame records with a counter narrowed to `u8`; including the
+zero/wrap case, it executes at most 256 times and never polls hardware or
+external state. Its logging call is still consumed by the mandatory
+`wifi_log` wrapper.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
 posts another event for a captured remainder. `hal_mac_get_txq_complete` is
