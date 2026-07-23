@@ -140,6 +140,9 @@ pub const fn strict_tx_security_layout(
     let transient_probe_response = matches!(input.descriptor_security, 0 | 0x0004_0000)
         && input.frame_control == 0x0050
         && input.descriptor_flags == 0x0800_0010;
+    let transient_authentication_response = input.frame_control == 0x00b0
+        && input.descriptor_flags == 0
+        && input.descriptor_security == 0x0004_0000;
     let transient_deauthentication = input.frame_control == 0x00c0
         && matches!(
             (input.descriptor_flags, input.descriptor_security),
@@ -151,6 +154,7 @@ pub const fn strict_tx_security_layout(
             || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c)))
         || persistent_management_reply
         || transient_probe_response
+        || transient_authentication_response
         || transient_deauthentication
         || ap_beacon
     {
@@ -518,6 +522,40 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 descriptor_security: 1,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_transient_ap_authentication_response_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0006_0018, 0x0730, 0xc007_8028, 0, 0x00b0)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x0a,
+                layout: 0x2730,
+                buffer_flags: 0xc00a_8028,
+                metadata_len: 0x22,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x0050,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_flags: 1,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0008_0000,
                 ..measured
             },
         ] {
