@@ -856,10 +856,12 @@ mod target {
         ///
         /// This is the allocation-free body reached by the pinned
         /// `rc_set_fix_rate(AP, true, rate)` path after its ioctl/task wrapper.
-        /// Peer contexts 1..=16 and the AP default/group context 20 are
-        /// validated in full before the first write. Both primary and
-        /// secondary fixed-rate bits are enabled, so `rcGetSched` never enters
-        /// adaptive rate control for an AP-owned descriptor.
+        /// Every live peer context in 1..=16 and the mandatory AP
+        /// default/group context 20 are validated in full before the first
+        /// write. Null unassociated peer slots are skipped exactly like the
+        /// recovered vendor leaf. Both primary and secondary fixed-rate bits
+        /// are enabled, so `rcGetSched` never enters adaptive rate control for
+        /// a context owned at takeover.
         ///
         /// # Safety
         ///
@@ -871,11 +873,10 @@ mod target {
         ) -> Result<(), S31Wpa2IoError> {
             let table = ptr::addr_of_mut!(g_per_conn_trc);
 
-            let validate = |index: usize| {
-                let context = table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read();
-                if context.is_null() {
-                    return false;
-                }
+            let context_at = |index: usize| {
+                table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read()
+            };
+            let validate = |context: *mut u8| {
                 let primary = context
                     .add(RATE_CONTEXT_PRIMARY_SCHEDULE_OFFSET)
                     .cast::<*mut u8>()
@@ -888,25 +889,29 @@ mod target {
             };
 
             for index in AP_FIRST_PEER_RATE_CONTEXT..=AP_LAST_PEER_RATE_CONTEXT {
-                if !validate(index) {
+                let context = context_at(index);
+                if !context.is_null() && !validate(context) {
                     return Err(S31Wpa2IoError::MissingApRateContext);
                 }
             }
-            if !validate(AP_DEFAULT_RATE_CONTEXT) {
+            let default_context = context_at(AP_DEFAULT_RATE_CONTEXT);
+            if default_context.is_null() || !validate(default_context) {
                 return Err(S31Wpa2IoError::MissingApRateContext);
             }
 
-            let apply = |index: usize| {
-                let context = table.add(index * size_of::<*mut u8>()).cast::<*mut u8>().read();
+            let apply = |context: *mut u8| {
                 context.add(RATE_CONTEXT_PRIMARY_RATE_OFFSET).write(rate);
                 context.add(RATE_CONTEXT_SECONDARY_RATE_OFFSET).write(rate);
                 let mode = context.add(RATE_CONTEXT_MODE_OFFSET).cast::<u16>();
                 mode.write_unaligned(mode.read_unaligned() | 0x03);
             };
             for index in AP_FIRST_PEER_RATE_CONTEXT..=AP_LAST_PEER_RATE_CONTEXT {
-                apply(index);
+                let context = context_at(index);
+                if !context.is_null() {
+                    apply(context);
+                }
             }
-            apply(AP_DEFAULT_RATE_CONTEXT);
+            apply(default_context);
             Ok(())
         }
 
