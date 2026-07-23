@@ -183,6 +183,14 @@ const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
     ("phy_wifi_set_tx_gain_new", "phy_wifi_get_tx_tab_new"),
 ];
 
+// The vendor RX-success object calls OSI slot 1 at this exact instruction.
+// `wifi_osi_funcs_t` places `_env_is_chip` at byte offset 4, and strict handoff
+// replaces and verifies that slot with the constant SRAM leaf below. Keep this
+// proof site-specific: `wDev_ProcessRxSucData` has another unrelated indirect
+// callback at 0x296 which remains subject to the audit.
+const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
+    &[("wDev_ProcessRxSucData", 0x5fe, "wifi_strict_env_is_chip")];
+
 // `phy_wifi_set_tx_gain_new` calls its leaf with count=32. Its outer loop is
 // exactly that count and its inner loop copies four u16 words (offset 0..8 by
 // two), so neither cycle observes hardware state or has an unbounded exit.
@@ -274,8 +282,10 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 // 0..=4. It must remain executable from internal SRAM, and the final image must
 // not contain an instruction which transfers control to the absolute ROM
 // `ppProcessTxQ` export.
-const REQUIRED_SRAM_CODE: &[&str] =
-    &["esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue"];
+const REQUIRED_SRAM_CODE: &[&str] = &[
+    "esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue",
+    "wifi_strict_env_is_chip",
+];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",
     "pp_timer_do_process",
@@ -589,6 +599,15 @@ fn is_pinned_bounded_cycle(function: &str, site: &str) -> bool {
         .is_some_and(|address| PINNED_BOUNDED_CYCLE_SITES.contains(&(function, address)))
 }
 
+fn pinned_indirect_site_target(function: &str, site: &str) -> Option<&'static str> {
+    let address = instruction_site_address(site)?;
+    PINNED_INDIRECT_SITES
+        .iter()
+        .find_map(|(caller, pinned_address, target)| {
+            (*caller == function && *pinned_address == address).then_some(*target)
+        })
+}
+
 fn parse_instruction(line: &str) -> Option<Instruction> {
     let fields = line.split_whitespace().collect::<Vec<_>>();
     let address = u64::from_str_radix(fields.first()?.trim_end_matches(':'), 16).ok()?;
@@ -723,10 +742,14 @@ fn audit_graph(graph: &BTreeMap<String, FunctionInfo>, roots: &[String]) -> BTre
             let pinned_indirect = PINNED_INDIRECT_TARGETS
                 .iter()
                 .find_map(|(caller, target)| (*caller == function).then_some(*target));
-            if pinned_indirect.is_none()
-                && !INVARIANT_EXCLUDED_INDIRECTS.contains(&function.as_str())
-            {
-                for site in &info.indirect_sites {
+            let excludes_all_indirects = INVARIANT_EXCLUDED_INDIRECTS.contains(&function.as_str());
+            for site in &info.indirect_sites {
+                if let Some(target) = pinned_indirect_site_target(&function, site) {
+                    if !predecessor.contains_key(target) && target != root {
+                        predecessor.insert(target.to_owned(), function.clone());
+                    }
+                    queue.push_back(target.to_owned());
+                } else if pinned_indirect.is_none() && !excludes_all_indirects {
                     violations.insert(Violation::Indirect {
                         root: root.to_owned(),
                         function: function.clone(),
@@ -1077,6 +1100,7 @@ mod tests {
     use super::{
         calls_symbol, definition_name, direct_relocation_target, indirect_site,
         is_code_symbol_kind, is_internal_sram_code, is_pinned_bounded_cycle, parse_object,
+        pinned_indirect_site_target,
     };
 
     #[test]
@@ -1112,6 +1136,22 @@ mod tests {
             "different_function",
             "aa: bne a5, s8, 0x94 <.L10>"
         ));
+    }
+
+    #[test]
+    fn indirect_target_proofs_are_instruction_specific() {
+        assert_eq!(
+            pinned_indirect_site_target("wDev_ProcessRxSucData", "5fe: jalr a5"),
+            Some("wifi_strict_env_is_chip")
+        );
+        assert_eq!(
+            pinned_indirect_site_target("wDev_ProcessRxSucData", "296: jalr a4"),
+            None
+        );
+        assert_eq!(
+            pinned_indirect_site_target("different_function", "5fe: jalr a5"),
+            None
+        );
     }
 
     #[test]

@@ -741,8 +741,22 @@ pub fn take_wifi_runtime(
 /// Replace only scheduling-related callbacks in an otherwise complete S31 OSI
 /// table. Hardware interrupts, PHY, clocks, allocator, NVS, and coexistence
 /// hooks remain owned by the caller's base adapter.
+///
+/// `_env_is_chip` is also pinned here because the vendor RX-success path calls
+/// OSI slot 1 indirectly. The strict runtime supports only real ESP32-S31
+/// silicon, so this leaf has one constant, finite answer and needs no adapter
+/// state.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[inline(never)]
+#[link_section = ".rwtext.wifi_strict.env_is_chip"]
+pub unsafe extern "C" fn wifi_strict_env_is_chip() -> bool {
+    true
+}
+
 #[cfg(target_arch = "riscv32")]
 pub fn patch_pp_runtime_callbacks(table: &mut wifi_osi_funcs_t) {
+    table._env_is_chip = Some(wifi_strict_env_is_chip);
     table._task_yield_from_isr = Some(task_yield_from_isr);
     table._semphr_create = Some(semphr_create);
     table._semphr_delete = Some(semphr_delete);
@@ -801,7 +815,8 @@ pub(crate) fn pp_runtime_callbacks_patched() -> bool {
             })
         };
     }
-    callback_is!(_task_yield_from_isr, task_yield_from_isr)
+    callback_is!(_env_is_chip, wifi_strict_env_is_chip)
+        && callback_is!(_task_yield_from_isr, task_yield_from_isr)
         && callback_is!(_semphr_create, semphr_create)
         && callback_is!(_semphr_delete, semphr_delete)
         && callback_is!(_semphr_take, semphr_take)
