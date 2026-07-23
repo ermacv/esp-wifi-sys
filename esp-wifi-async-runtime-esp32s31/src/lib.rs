@@ -292,7 +292,8 @@ pub use wpa2_aes::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use wpa2_ap::{
-    async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks, Wpa2ApInstallError,
+    async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks,
+    management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 pub use wpa2_ap::{
     receive_wpa2_ap_event, rejected_wpa2_ap_events, try_receive_wpa2_ap_event,
