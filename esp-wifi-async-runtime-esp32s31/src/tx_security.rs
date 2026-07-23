@@ -143,7 +143,7 @@ pub const fn strict_tx_security_layout(
     let transient_deauthentication = input.frame_control == 0x00c0
         && matches!(
             (input.descriptor_flags, input.descriptor_security),
-            (0x0000_0010, 0) | (0x0800_0000, 0x0004_0000)
+            (0x0000_0010, 0 | 0x0004_0000) | (0x0800_0000, 0x0004_0000)
         );
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
@@ -546,6 +546,18 @@ mod tests {
             }),
             strict_tx_security_layout(measured),
         );
+        assert_eq!(
+            strict_tx_security_layout(
+                input(0x0002_0018, 0x0428, 0xc006_8024, 0x0000_0010, 0x00c0,)
+            ),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x06,
+                layout: 0x2428,
+                buffer_flags: 0xc009_8024,
+                metadata_len: 0x1e,
+            }),
+        );
         for rejected in [
             TxSecurityLayoutInput {
                 frame_control: 0x00a0,
@@ -557,7 +569,7 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 descriptor_flags: 0x0000_0010,
-                descriptor_security: 0x0004_0000,
+                descriptor_security: 0x0008_0000,
                 ..measured
             },
         ] {
