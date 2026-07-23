@@ -913,9 +913,10 @@ mod target {
         ap_active_epoch: usize,
         ap_ps_poll_epoch: usize,
         ap_removal_epoch: usize,
+        ap_waiting_association_epoch: usize,
         ap_waiting_peer: [u8; 6],
         ap_retry_armed: bool,
-        ap_cancelled_peer: Option<[u8; 6]>,
+        ap_cancelled_peer: Option<([u8; 6], usize)>,
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -948,6 +949,7 @@ mod target {
                 ap_active_epoch: 0,
                 ap_ps_poll_epoch: 0,
                 ap_removal_epoch: 0,
+                ap_waiting_association_epoch: 0,
                 ap_waiting_peer: [0; 6],
                 ap_retry_armed: false,
                 ap_cancelled_peer: None,
@@ -1063,11 +1065,20 @@ mod target {
         }
 
         fn cancel_if_ap_peer_removed(&mut self, interface: Wpa2Interface, peer: &[u8; 6]) -> bool {
-            if interface != Wpa2Interface::AccessPoint
-                || peer[0] & 1 != 0
-                || (self.ap_cancelled_peer != Some(*peer)
-                    && crate::wpa2_ap::is_wpa2_ap_peer_associated(peer))
-            {
+            if interface != Wpa2Interface::AccessPoint || peer[0] & 1 != 0 {
+                return false;
+            }
+            let association_epoch = crate::wpa2_ap::wpa2_ap_peer_association_epoch(peer);
+            if let Some((cancelled_peer, cancelled_epoch)) = self.ap_cancelled_peer {
+                if cancelled_peer == *peer {
+                    if association_epoch.is_some_and(|epoch| epoch != cancelled_epoch) {
+                        self.ap_cancelled_peer = None;
+                        return false;
+                    }
+                } else if association_epoch.is_some() {
+                    return false;
+                }
+            } else if association_epoch.is_some() {
                 return false;
             }
             let _ = self.authorized_peers.set(*peer, false);
@@ -1188,9 +1199,6 @@ mod target {
                         .authorized_peers
                         .set(peer, authorized)
                         .map_err(|()| S31Wpa2IoError::AuthorizationSlotsFull);
-                    if result.is_ok() && authorized && self.ap_cancelled_peer == Some(peer) {
-                        self.ap_cancelled_peer = None;
-                    }
                     result
                 }
             }
@@ -1681,6 +1689,8 @@ mod target {
             self.ap_active_epoch = crate::ap_power_save::active_epoch(&peer);
             self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
             self.ap_removal_epoch = crate::ap_power_save::removal_epoch(&peer);
+            self.ap_waiting_association_epoch =
+                crate::wpa2_ap::wpa2_ap_peer_association_epoch(&peer).unwrap_or(0);
             self.ap_retry_armed = true;
             #[cfg(feature = "hil-vendor-tx")]
             {
@@ -1732,7 +1742,8 @@ mod target {
             if matches_waiting_peer {
                 let _ = self.authorized_peers.set(self.ap_waiting_peer, false);
                 self.ap_retry_armed = false;
-                self.ap_cancelled_peer = Some(self.ap_waiting_peer);
+                self.ap_cancelled_peer =
+                    Some((self.ap_waiting_peer, self.ap_waiting_association_epoch));
                 crate::ap_power_save::record_cancelled_transmit();
             }
         }

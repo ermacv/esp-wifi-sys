@@ -293,6 +293,7 @@ mod target {
 
     struct PeerSlot {
         claimed: AtomicBool,
+        association_epoch: AtomicUsize,
         station: UnsafeCell<PinnedStation>,
     }
 
@@ -300,6 +301,7 @@ mod target {
         const fn new() -> Self {
             Self {
                 claimed: AtomicBool::new(false),
+                association_epoch: AtomicUsize::new(0),
                 station: UnsafeCell::new(PinnedStation {
                     bytes: [0; PINNED_STATION_SIZE],
                 }),
@@ -327,6 +329,7 @@ mod target {
 
     static PEERS: [PeerSlot; WPA2_AP_ASSOC_CAPACITY] =
         [const { PeerSlot::new() }; WPA2_AP_ASSOC_CAPACITY];
+    static NEXT_ASSOCIATION_EPOCH: AtomicUsize = AtomicUsize::new(1);
     static AP_RSN: ApRsnStorage = ApRsnStorage::new();
     static AP_RSN_LEN: AtomicUsize = AtomicUsize::new(0);
     static AP_CONTEXT: StaticByte = StaticByte(UnsafeCell::new(0));
@@ -398,6 +401,10 @@ mod target {
     unsafe fn claim_peer(peer: [u8; 6]) -> Option<*mut c_void> {
         for slot in &PEERS {
             if slot.claimed.load(Ordering::Acquire) && station_mac(slot) == peer {
+                slot.association_epoch.store(
+                    NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                    Ordering::Release,
+                );
                 return Some(slot.station.get().cast());
             }
         }
@@ -415,6 +422,10 @@ mod target {
                         .cast::<u8>()
                         .add(PINNED_STATION_MAC_OFFSET),
                     peer.len(),
+                );
+                slot.association_epoch.store(
+                    NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                    Ordering::Release,
                 );
                 return Some(slot.station.get().cast());
             }
@@ -842,9 +853,10 @@ mod target {
         CALLBACKS_INSTALLED.load(Ordering::Acquire)
     }
 
-    pub(crate) fn is_wpa2_ap_peer_associated(peer: &[u8; 6]) -> bool {
-        PEERS.iter().any(|slot| {
-            slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer }
+    pub(crate) fn wpa2_ap_peer_association_epoch(peer: &[u8; 6]) -> Option<usize> {
+        PEERS.iter().find_map(|slot| {
+            (slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer })
+                .then(|| slot.association_epoch.load(Ordering::Acquire))
         })
     }
 }
@@ -854,7 +866,7 @@ pub use target::{
     async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks, Wpa2ApInstallError,
 };
 #[cfg(target_arch = "riscv32")]
-pub(crate) use target::{is_wpa2_ap_peer_associated, management_link_wrappers_active};
+pub(crate) use target::{management_link_wrappers_active, wpa2_ap_peer_association_epoch};
 
 #[cfg(test)]
 mod tests {
