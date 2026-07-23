@@ -8,8 +8,10 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 const ROOTS: &[&str] = &[
-    // The Rust event-23 dispatcher owns every hardware-completion outcome.
-    "wdevProcessRxSucDataAll",
+    // The Rust event-25 continuation owns the bounded outer descriptor walk.
+    // The per-unit decoder and last-descriptor pointer leaf remain explicit.
+    "wDev_ProcessRxSucData",
+    "hal_mac_rx_get_last_dscr",
     // Targets of callback bits required by basic STA/AP. Strict continuations
     // dispatch both mode-0 and the timeout/discard mode-1 bits directly. The
     // same callbacks remain reachable from vendor TX-completion roots until
@@ -61,6 +63,7 @@ const ROOTS: &[&str] = &[
 ];
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
+    "wdevProcessRxSucDataAll",
     "ic_get_next_tbtt",
     "pp_timer_do_process",
     "pp_default_event_handler",

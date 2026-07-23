@@ -49,6 +49,7 @@ unsafe extern "C" {
     fn lmacProcessTxComplete();
     #[cfg(not(feature = "strict-no-wait"))]
     fn lmacProcessCollisions_task();
+    #[cfg(not(feature = "strict-no-wait"))]
     fn wdevProcessRxSucDataAll();
     #[cfg(not(feature = "strict-no-wait"))]
     fn pm_on_tbtt(argument: *mut c_void);
@@ -86,6 +87,8 @@ pub enum VendorDispatchError {
     TxDoneContinuation(crate::txdone::TxDoneError),
     #[cfg(feature = "strict-no-wait")]
     FtmUnsupported,
+    #[cfg(feature = "strict-no-wait")]
+    WdevRxContinuation(crate::wdev::WdevRxContinuationError),
     #[cfg(feature = "strict-no-wait")]
     PromiscuousRxUnsupported,
     #[cfg(feature = "strict-no-wait")]
@@ -513,6 +516,10 @@ impl PpDispatcher for VendorPpDispatcher {
                     lmacProcessCollisions_task();
                 }
                 PpAction::WdevRxSuccess => {
+                    #[cfg(feature = "strict-no-wait")]
+                    crate::wdev::process_rx_success()
+                        .map_err(VendorDispatchError::WdevRxContinuation)?;
+                    #[cfg(not(feature = "strict-no-wait"))]
                     wdevProcessRxSucDataAll();
                     #[cfg(feature = "strict-no-wait")]
                     if crate::wdev::take_ftm_attempted() {

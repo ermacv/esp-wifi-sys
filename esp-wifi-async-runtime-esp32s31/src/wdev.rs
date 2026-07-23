@@ -1,9 +1,19 @@
 use core::{
     ffi::c_void,
+    ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WdevRxContinuationError {
+    WrongHart,
+    ResetStateUnavailable,
+    MissingLastDescriptor,
+    DescriptorCountOverflow,
+    DescriptorChainTooLong,
+}
 
 unsafe extern "C" {
     #[link_name = "wDev_record_ftm_data"]
@@ -31,6 +41,107 @@ unsafe extern "C" {
     #[link_name = "wDev_isNANPktInValidSlot"]
     fn vendor_is_nan_packet_in_valid_slot(frame: *mut u8) -> i32;
     fn __real_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32;
+}
+
+#[cfg(target_arch = "riscv32")]
+const MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT: usize = 64;
+
+#[cfg(target_arch = "riscv32")]
+unsafe extern "C" {
+    static mut wDevCtrl: u8;
+    static mut g_wdev_last_desc_reset_ptr: *mut u8;
+    fn hal_mac_rx_get_last_dscr() -> *mut u8;
+    fn wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
+}
+
+/// Replace the vendor event-25 outer descriptor walk and both indirect OSI
+/// critical-section calls.
+///
+/// The hardware publishes one finite linked prefix ending at the descriptor
+/// returned by `hal_mac_rx_get_last_dscr`. Rust preserves the vendor rule that
+/// bit 30 marks the final descriptor of a receive unit and passes the bounded
+/// prefix count to the still-audited per-unit decoder. A malformed list can no
+/// longer cycle forever: at most 64 descriptors are consumed per executor
+/// event, and every error restores local interrupts before returning.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+#[inline(never)]
+pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError> {
+    if !crate::critical::on_strict_wifi_hart() {
+        return Err(WdevRxContinuationError::WrongHart);
+    }
+    let reset = ptr::addr_of!(g_wdev_last_desc_reset_ptr).read();
+    if reset.is_null() {
+        return Err(WdevRxContinuationError::ResetStateUnavailable);
+    }
+
+    let mut last = hal_mac_rx_get_last_dscr();
+    if reset.read() != 0 {
+        if !last.is_null() {
+            reset.write(0);
+        }
+    } else if last.is_null() {
+        return Err(WdevRxContinuationError::MissingLastDescriptor);
+    }
+
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let mut descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+    let mut subframe_count = 0_u32;
+    let mut descriptors_seen = 0_usize;
+    while !descriptor.is_null() {
+        if descriptors_seen == MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT {
+            crate::critical::strict_wifi_int_restore(interrupt_state);
+            return Err(WdevRxContinuationError::DescriptorChainTooLong);
+        }
+        descriptors_seen += 1;
+        let next = descriptor.add(8).cast::<*mut u8>().read_unaligned();
+        subframe_count = match subframe_count.checked_add(1) {
+            Some(count) if count <= u32::from(u16::MAX) => count,
+            _ => {
+                crate::critical::strict_wifi_int_restore(interrupt_state);
+                return Err(WdevRxContinuationError::DescriptorCountOverflow);
+            }
+        };
+
+        if descriptor.cast::<u32>().read_unaligned() & (1 << 30) != 0 {
+            crate::critical::strict_wifi_int_restore(interrupt_state);
+            wDev_ProcessRxSucData(descriptor, subframe_count);
+            subframe_count = 0;
+            if descriptor == last {
+                return Ok(());
+            }
+            last = hal_mac_rx_get_last_dscr();
+            if reset.read() == 0 && last.is_null() {
+                return Err(WdevRxContinuationError::MissingLastDescriptor);
+            }
+            descriptor = next;
+            if descriptor.is_null() {
+                return Ok(());
+            }
+            // Match the vendor outer walk: only the pointer publication is
+            // protected; the per-unit decoder executes with interrupts on.
+            let new_interrupt_state = crate::critical::strict_wifi_int_disable();
+            // The strict local primitive can only return the current MIE bit.
+            // It must match the state initially captured for this radio event.
+            if new_interrupt_state & 8 != interrupt_state & 8 {
+                crate::critical::strict_wifi_int_restore(new_interrupt_state);
+                return Err(WdevRxContinuationError::WrongHart);
+            }
+            continue;
+        }
+        if descriptor == last {
+            crate::critical::strict_wifi_int_restore(interrupt_state);
+            return Ok(());
+        }
+        last = hal_mac_rx_get_last_dscr();
+        if reset.read() == 0 && last.is_null() {
+            crate::critical::strict_wifi_int_restore(interrupt_state);
+            return Err(WdevRxContinuationError::MissingLastDescriptor);
+        }
+        descriptor = next;
+    }
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    Ok(())
 }
 
 pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
