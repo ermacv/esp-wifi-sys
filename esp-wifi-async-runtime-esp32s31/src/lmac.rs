@@ -836,6 +836,14 @@ unsafe fn process_tx_retry(
     }
     let descriptor = descriptor(frame)?;
     let flags = descriptor.cast::<u32>().read();
+    if flags == AP_BEACON_SUCCESS_DESCRIPTOR {
+        // A beacon is a persistent broadcast object, so ACK/CTS retry has no
+        // useful peer semantics. Treat a hardware-error edge as completion of
+        // this one transmission: release the retained buffer and arm the next
+        // Rust async TBTT instead of resubmitting a descriptor that the beacon
+        // producer may already refresh in place.
+        return process_tx_success(queue_state, 0x7f);
+    }
     if flags == 0x0000_200b {
         // AP group frames are broadcast and therefore have no meaningful
         // ACK retry. A hardware error is local to this descriptor: complete
