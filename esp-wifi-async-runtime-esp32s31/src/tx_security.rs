@@ -258,6 +258,13 @@ pub const fn strict_tx_security_layout(
             (input.descriptor_flags, input.descriptor_security),
             (0x0000_0010, 0 | 0x0004_0000) | (0x0800_0000, 0x0004_0000)
         );
+    let transient_ap_addba_response = input.frame_control == 0x00d0
+        && input.descriptor_flags == 0
+        && input.descriptor_security == 0x0004_0000
+        && input.header_len == 0x0018
+        && input.remaining_len == 0x0009
+        && input.layout == 0x0732
+        && input.buffer_flags == 0xc008_402c;
     let transient_ap_eapol = input.frame_control == 0x0288
         && input.descriptor_flags == 0x0200_200c
         && input.descriptor_security == 0x0004_0000
@@ -286,6 +293,7 @@ pub const fn strict_tx_security_layout(
         || transient_authentication_response
         || transient_association_response
         || transient_deauthentication
+        || transient_ap_addba_response
         || transient_ap_eapol
         || transient_ap_plaintext_data
         || ap_beacon
@@ -846,6 +854,40 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 descriptor_security: 0x0008_0000,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_only_the_measured_transient_ap_addba_response_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0009_0018, 0x0732, 0xc008_402c, 0, 0x00d0)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x0d,
+                layout: 0x2732,
+                buffer_flags: 0xc00b_402c,
+                metadata_len: 0x25,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                remaining_len: 8,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                layout: 2,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_flags: 1,
                 ..measured
             },
         ] {
