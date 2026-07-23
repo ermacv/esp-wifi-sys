@@ -2309,6 +2309,9 @@ unsafe fn pack_four_bytes_unconditional(
 /// queue kind 3 with no TXOP ownership, linked MPDU, or aggregate descriptor
 /// state. Rejecting those invariants before mutation keeps the remaining path
 /// finite and hands the frame directly to the existing Rust TX-done steps.
+/// WPA2 AP group data uses the measured `0x200b` classify state: the same
+/// finite RTS-threshold test selects one retry-byte clear, and the vendor leaf
+/// publishes response `0x7f` before converging on the common completion path.
 unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), LmacAsyncError> {
     let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
     if queue_kind != 3 {
@@ -2334,7 +2337,14 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         .read();
     let flags = descriptor.cast::<u32>().read();
     let ap_beacon = flags == AP_BEACON_SUCCESS_DESCRIPTOR;
-    if !ap_beacon && flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0 {
+    let classified_ap_group = flags == 0x0000_200b;
+    if !ap_beacon
+        && !classified_ap_group
+        && flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0
+    {
+        return Err(LmacAsyncError::UnsupportedTxSuccessDescriptor(flags));
+    }
+    if classified_ap_group && flags & TX_SUCCESS_AGGREGATE_STATE_MASK != 0 {
         return Err(LmacAsyncError::UnsupportedTxSuccessDescriptor(flags));
     }
 
@@ -2344,14 +2354,18 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         // matching long-frame success leaf, which only clears the adjacent
         // state byte. Broadcast beacons have no ACK/retry state to update.
         queue_state.add(8).write(queue_state.add(9).read());
-        queue_state.add(0x0b).write(0);
-        if flags & 0x0000_0100 != 0 {
+        if classified_ap_group && basic_frame_is_long(frame, descriptor) {
             queue_state.add(0x0c).write(0);
+        } else {
+            queue_state.add(0x0b).write(0);
+            if flags & 0x0000_0100 != 0 {
+                queue_state.add(0x0c).write(0);
+            }
         }
     }
     descriptor
         .add(TX_DESCRIPTOR_RESPONSE_OFFSET)
-        .write(response);
+        .write(if classified_ap_group { 0x7f } else { response });
 
     // Basic non-aggregate convergence from `lmacEndFrameExchangeSequence`
     // and `lmacRecycleMPDU`.
