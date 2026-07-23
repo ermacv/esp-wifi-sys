@@ -113,7 +113,12 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
         || descriptor_flags & !(0x0200_0000 | 0x0000_1100) != 0x0000_2009
         || !matches!(
             descriptor_security,
-            0x0114_0348 | 0x01a4_0348 | 0x0214_0348 | 0x0414_0348 | 0x04a4_0348
+            0x0114_0348
+                | 0x01a4_0348
+                | 0x0214_0348
+                | 0x02a4_0348
+                | 0x0414_0348
+                | 0x04a4_0348
         )
         || header_len != 0x0022
         || remaining_len < 20
@@ -1241,6 +1246,7 @@ mod tests {
             // Android's rate-control state survives through TX success/retry.
             (0x4288, 0x0200_2009, 0x0114_0348),
             (0x4a88, 0x0200_2109, 0x0214_0348),
+            (0x4a88, 0x0000_2109, 0x02a4_0348),
         ] {
             assert!(strict_ap_pairwise_power_save_completion(
                 frame_control,
