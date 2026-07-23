@@ -134,7 +134,11 @@ pub struct WdevRxRecycleSnapshot {
     pub reload_active: bool,
     pub pending_chains: usize,
     pub software_head: usize,
+    pub software_head_word: u32,
+    pub software_head_next: usize,
     pub software_tail: usize,
+    pub software_tail_word: u32,
+    pub software_tail_next: usize,
     pub hardware_control: u32,
     pub hardware_base: usize,
     pub hardware_next: usize,
@@ -625,6 +629,8 @@ pub unsafe extern "C" fn __wrap_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8
 #[cfg(target_arch = "riscv32")]
 pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
     let control = ptr::addr_of!(wDevCtrl);
+    let software_head = unsafe { control.cast::<*mut u8>().read_unaligned() };
+    let software_tail = unsafe { control.add(4).cast::<*mut u8>().read_unaligned() };
     WdevRxRecycleSnapshot {
         calls: RX_RECYCLE_PROBE.calls.load(Ordering::Acquire),
         immediate: RX_RECYCLE_PROBE.immediate.load(Ordering::Acquire),
@@ -636,8 +642,38 @@ pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
             .load(Ordering::Acquire),
         reload_active: RX_RECYCLE_PROBE.reload_active.load(Ordering::Acquire) != 0,
         pending_chains: RX_RECYCLE_PROBE.pending_chains.load(Ordering::Acquire),
-        software_head: unsafe { control.cast::<*mut u8>().read_unaligned() as usize },
-        software_tail: unsafe { control.add(4).cast::<*mut u8>().read_unaligned() as usize },
+        software_head: software_head as usize,
+        software_head_word: if software_head.is_null() {
+            0
+        } else {
+            unsafe { software_head.cast::<u32>().read_volatile() }
+        },
+        software_head_next: if software_head.is_null() {
+            0
+        } else {
+            unsafe {
+                software_head
+                    .add(RX_DESCRIPTOR_NEXT_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_volatile() as usize
+            }
+        },
+        software_tail: software_tail as usize,
+        software_tail_word: if software_tail.is_null() {
+            0
+        } else {
+            unsafe { software_tail.cast::<u32>().read_volatile() }
+        },
+        software_tail_next: if software_tail.is_null() {
+            0
+        } else {
+            unsafe {
+                software_tail
+                    .add(RX_DESCRIPTOR_NEXT_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_volatile() as usize
+            }
+        },
         hardware_control: unsafe { WIFI_MAC_RX_CONTROL_REGISTER.read_volatile() },
         hardware_base: unsafe { WIFI_MAC_RX_BASE_REGISTER.read_volatile() as usize },
         hardware_next: unsafe { hal_mac_rx_read_rxdscrnext() as usize },
