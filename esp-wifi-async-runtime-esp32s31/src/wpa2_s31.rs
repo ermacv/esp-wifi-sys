@@ -219,6 +219,7 @@ pub enum S31Wpa2IoError {
     UnexpectedStaPairwiseHardwareIndex,
     AuthorizationWithoutPairwiseKey,
     MissingApTransmitGroupKey,
+    MissingApTransmitGroupNode,
     StaPeerUnauthorized,
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
@@ -1252,7 +1253,7 @@ mod target {
             let interface = install.interface();
             let peer = *install.peer();
             let kind = install.kind();
-            let (hardware_index, key_index, spp, sta_gtk_node) = match kind {
+            let (hardware_index, key_index, spp, gtk_node) = match kind {
                 Wpa2KeyKind::Pairwise => {
                     let hardware_index = unsafe {
                         match interface {
@@ -1275,16 +1276,27 @@ mod target {
                     let Some(hardware_index) = group_hardware_index(interface, key_id) else {
                         return Err((S31Wpa2IoError::InvalidGroupKeyId(key_id), install));
                     };
-                    let sta_gtk_node = if interface == Wpa2Interface::Station {
-                        let node = unsafe { sta_interface_node() };
-                        if node.is_null() {
-                            return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
+                    let gtk_node = match interface {
+                        Wpa2Interface::Station => {
+                            let node = unsafe { sta_interface_node() };
+                            if node.is_null() {
+                                return Err((S31Wpa2IoError::MissingStaInterfaceState, install));
+                            }
+                            Some((node, true))
                         }
-                        Some(node)
-                    } else {
-                        None
+                        Wpa2Interface::AccessPoint => {
+                            // AP group installs carry the broadcast peer. The
+                            // pinned `ieee80211_set_gtk` resolves it to the
+                            // interface/BSS node rather than an associated
+                            // station node.
+                            let node = unsafe { strict_ap_node_search(peer.as_ptr()) };
+                            if node.is_null() {
+                                return Err((S31Wpa2IoError::MissingApTransmitGroupNode, install));
+                            }
+                            Some((node, false))
+                        }
                     };
-                    (hardware_index, u32::from(key_id), 0, sta_gtk_node)
+                    (hardware_index, u32::from(key_id), 0, gtk_node)
                 }
             };
             if hardware_index > MAX_VENDOR_KEY_INDEX {
@@ -1363,14 +1375,15 @@ mod target {
                 // The foreign-pointer case was rejected before any mutation.
                 software_key_slot.write(object as *mut _ as *mut c_void);
                 if let Wpa2KeyKind::Group { key_id, .. } = kind {
-                    if let Some(station) = sta_gtk_node {
-                        // ppInstallKey proves this exact metadata update for
-                        // hardware indices zero and one. It is a finite pair
-                        // of byte stores with no callback or lock.
-                        station.add(0x135).write(hardware_index);
-                        station
-                            .add(0x137 + usize::from(key_id))
-                            .write(hardware_index);
+                    if let Some((node, station_mapping)) = gtk_node {
+                        // `ieee80211_set_gtk` proves the active selector for
+                        // both roles. STA additionally keeps the recovered
+                        // logical-id mapping used while receiving a rekey.
+                        node.add(0x135).write(hardware_index);
+                        if station_mapping {
+                            node.add(0x137 + usize::from(key_id))
+                                .write(hardware_index);
+                        }
                     }
                 }
             }
