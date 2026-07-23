@@ -676,6 +676,24 @@ unsafe fn begin_lmac(
         return Err(TxDoneError::LmacPipelineBusy);
     }
     let descriptor = descriptor(frame)?;
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::TxDoneBegin,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        if resume_queue { resume_event } else { u8::MAX },
+        descriptor.add(0x0d).read(),
+        u32::from(resume_timeout)
+            | (u32::from(resume_queue) << 1)
+            | (u32::from(resume_ampdu) << 2)
+            | (u32::from(resume_intercept) << 3),
+        descriptor
+            .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+            .cast::<u32>()
+            .read(),
+        u32::from(descriptor.add(19).read()),
+    );
     let txrx = txrx()?;
     let registered = txrx.add(TX_CALLBACK_MODE1_MASK_OFFSET).cast::<u32>().read();
     let callbacks = descriptor
@@ -811,9 +829,44 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     {
         rcUpdateTxDone(frame.add(0x2c).cast(), descriptor.cast());
     }
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::RateControlDone,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        if state.resume_queue {
+            state.resume_event
+        } else {
+            u8::MAX
+        },
+        descriptor.add(0x0d).read(),
+        flags,
+        descriptor
+            .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+            .cast::<u32>()
+            .read(),
+        u32::from(descriptor.add(19).read()),
+    );
     if pp_post(16, ptr::null_mut()) != 0 {
         return Err(TxDoneError::InternalQueueFull);
     }
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::TxDoneCommit,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        if state.resume_queue {
+            state.resume_event
+        } else {
+            u8::MAX
+        },
+        descriptor.add(0x0d).read(),
+        flags,
+        16,
+        u32::from(descriptor.add(19).read()),
+    );
 
     let resume_timeout = state.resume_timeout;
     let resume_queue = state.resume_queue;
@@ -904,6 +957,29 @@ unsafe fn hardware_event_for_frame(frame: *mut u8) -> Result<u8, TxDoneError> {
 pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
     crate::channel_switch::tx_done_edge();
     if begin_from_wrapped_lmac(frame.cast(), mode).is_err() {
+        #[cfg(feature = "hil-vendor-tx")]
+        {
+            let raw_frame = frame.cast::<u8>();
+            if !raw_frame.is_null() {
+                if let Ok(raw_descriptor) = descriptor(raw_frame) {
+                    crate::tx_trace::record_descriptor_transition(
+                        crate::tx_trace::TxTraceEvent::PipelineRejected,
+                        raw_frame,
+                        raw_descriptor,
+                        tx_trace_frame_control(raw_frame),
+                        u8::MAX,
+                        raw_descriptor.add(0x0d).read(),
+                        mode,
+                        raw_descriptor
+                            .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+                            .cast::<u32>()
+                            .read(),
+                        u32::from(raw_descriptor.add(19).read()),
+                    );
+                }
+            }
+            crate::tx_trace::freeze_tx_trace();
+        }
         let state = &mut *LMAC_STATE.0.get();
         state.failed = true;
         state.active = false;
@@ -1207,6 +1283,18 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     // The strict ESF wrapper accepts only its fixed Rust management pool or
     // initialized vendor static free lists; dynamic/cache branches remain
     // unreachable.
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::Recycle,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        u8::MAX,
+        descriptor.add(0x0d).read(),
+        u32::from(frame_type),
+        flags,
+        u32::from(descriptor.add(19).read()),
+    );
     esf_buf_recycle(frame.cast());
     crate::data_tx::complete_hardware_wifi_data_tx(frame);
 
@@ -1412,6 +1500,29 @@ unsafe fn descriptor(frame: *mut u8) -> Result<*mut u8, TxDoneError> {
     } else {
         Ok(descriptor)
     }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.tx_trace_frame_control"
+)]
+unsafe fn tx_trace_frame_control(frame: *mut u8) -> u16 {
+    if frame.is_null() {
+        return 0;
+    }
+    let buffer = frame.add(4).cast::<*mut u8>().read();
+    if buffer.is_null() {
+        return 0;
+    }
+    let mut data = buffer.add(4).cast::<*mut u8>().read();
+    if data.is_null() {
+        return 0;
+    }
+    if frame.add(0x24).cast::<u16>().read_unaligned() & 0x2000 != 0 {
+        data = data.add(8);
+    }
+    data.cast::<u16>().read_unaligned()
 }
 
 unsafe fn descriptor_queue(descriptor: *mut u8) -> u8 {

@@ -473,11 +473,35 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
             .read_unaligned(),
         frame_control: header.cast::<u16>().read_unaligned(),
     };
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::SecurityInput,
+        frame,
+        descriptor,
+        input.frame_control,
+        u8::MAX,
+        0,
+        lengths,
+        u32::from(input.layout),
+        input.buffer_flags,
+    );
     let output = match strict_tx_security_layout(input) {
         Some(value) => value,
         None => {
             #[cfg(feature = "hil-vendor-tx")]
             {
+                crate::tx_trace::record_descriptor_transition(
+                    crate::tx_trace::TxTraceEvent::SecurityRejected,
+                    frame,
+                    descriptor,
+                    input.frame_control,
+                    u8::MAX,
+                    0,
+                    lengths,
+                    u32::from(input.layout),
+                    input.buffer_flags,
+                );
+                crate::tx_trace::freeze_tx_trace();
                 record_hil_rejected_tx_security(input);
                 return -1;
             }
@@ -530,6 +554,18 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     metadata.cast::<u32>().write_unaligned(0);
     metadata.add(4).cast::<u32>().write_unaligned(0);
     metadata.cast::<u32>().write_unaligned(output.metadata_len);
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::SecurityPrepared,
+        frame,
+        descriptor,
+        input.frame_control,
+        u8::MAX,
+        0,
+        u32::from(output.header_len) | (u32::from(output.remaining_len) << 16),
+        u32::from(output.layout),
+        output.buffer_flags,
+    );
     0
 }
 

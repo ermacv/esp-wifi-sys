@@ -68,6 +68,8 @@ mod tx_proto;
 mod tx_queue;
 mod tx_rate;
 mod tx_security;
+#[cfg(feature = "hil-vendor-tx")]
+mod tx_trace;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod txdone;
 #[cfg(target_arch = "riscv32")]
@@ -252,6 +254,11 @@ pub use tx_security::{hil_tx_security_rejected_snapshot, HilTxSecurityRejectedSn
 pub use tx_security::{
     strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
     TxSecurityLayoutInput, TxSecurityLayoutOutput,
+};
+#[cfg(feature = "hil-vendor-tx")]
+pub use tx_trace::{
+    freeze_tx_trace, mark_tx_trace_scenario, tx_trace_entry, tx_trace_snapshot, TxTraceEntry,
+    TxTraceEvent, TxTraceSnapshot, TX_TRACE_CAPACITY,
 };
 #[cfg(target_arch = "riscv32")]
 pub use txdone::{

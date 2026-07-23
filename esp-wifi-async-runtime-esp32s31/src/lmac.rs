@@ -701,7 +701,20 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
 
     let status = completion[1] >> 4;
     #[cfg(feature = "hil-vendor-tx")]
-    record_tx_complete(queue_state, queue, status, completion[2]);
+    {
+        record_tx_complete(queue_state, queue, status, completion[2]);
+        crate::tx_trace::record_descriptor_transition(
+            crate::tx_trace::TxTraceEvent::CompletionInterrupt,
+            completed_frame,
+            completed_descriptor,
+            tx_trace_frame_control(completed_frame),
+            queue,
+            completion[2],
+            u32::from_le_bytes([completion[0], completion[1], completion[2], completion[3]]),
+            auxiliary[0],
+            auxiliary[1],
+        );
+    }
 
     let block_ack = if aggregate && status == 0 {
         Some(
@@ -836,6 +849,29 @@ unsafe fn process_tx_retry(
     }
     let descriptor = descriptor(frame)?;
     let flags = descriptor.cast::<u32>().read();
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::RetryDecision,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read(),
+        match cause {
+            BasicRetryCause::CtsTimeout => 2,
+            BasicRetryCause::AckTimeout => 5,
+            BasicRetryCause::Collision => 1,
+        },
+        MAC_CLOCK_REG.read_volatile(),
+        pack_four_bytes_unconditional(
+            queue_state,
+            TX_QUEUE_RATE_OFFSET,
+            TX_QUEUE_SAVED_RATE_OFFSET,
+            TX_QUEUE_SHORT_RETRY_OFFSET,
+            TX_QUEUE_LONG_RETRY_OFFSET,
+        ),
+        u32::from(queue_state.add(TX_QUEUE_STATUS_OFFSET).read())
+            | (u32::from(queue_state.add(TX_QUEUE_END_STATE_OFFSET).read()) << 8),
+    );
     if flags == AP_BEACON_SUCCESS_DESCRIPTOR {
         // A beacon is a persistent broadcast object, so ACK/CTS retry has no
         // useful peer semantics. Treat a hardware-error edge as completion of
@@ -1077,6 +1113,20 @@ unsafe fn submit_basic_retry(
     format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
 
     configure_basic_edca(queue_state, descriptor);
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::RetrySubmit,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        hardware_queue,
+        descriptor.add(TX_DESCRIPTOR_RESPONSE_OFFSET).read(),
+        txq_config_register(queue_state).read_volatile(),
+        MAC_CLOCK_REG.read_volatile(),
+        u32::from(descriptor.add(5).read())
+            | (u32::from(descriptor.add(6).read()) << 8)
+            | (u32::from(descriptor.add(7).read()) << 16),
+    );
     enable_basic_tx_queue(queue_state, descriptor)?;
     Ok(())
 }
@@ -1425,7 +1475,21 @@ pub unsafe fn submit_basic_ht_ampdu(
     }
     format_basic_ht_ampdu_ppdu(queue_state, &chain, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
+    #[cfg(feature = "hil-vendor-tx")]
+    let trace_chain = (chain.first, chain.subframes, chain.aggregate_length);
     install_basic_ht_ampdu_owner(hardware_queue, chain)?;
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::Submit,
+        trace_chain.0,
+        descriptor,
+        tx_trace_frame_control(trace_chain.0),
+        hardware_queue,
+        descriptor.add(TX_DESCRIPTOR_RESPONSE_OFFSET).read(),
+        txq_config_register(queue_state).read_volatile(),
+        MAC_CLOCK_REG.read_volatile(),
+        u32::from(trace_chain.1) | (u32::from(trace_chain.2) << 8),
+    );
     match enable_basic_tx_queue(queue_state, descriptor) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -1517,6 +1581,19 @@ pub unsafe fn submit_basic_non_he_frame(
     }
     format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
+    #[cfg(feature = "hil-vendor-tx")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::Submit,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        hardware_queue,
+        descriptor.add(TX_DESCRIPTOR_RESPONSE_OFFSET).read(),
+        txq_config_register(queue_state).read_volatile(),
+        MAC_CLOCK_REG.read_volatile(),
+        u32::from(queue_state.add(TX_QUEUE_STATUS_OFFSET).read())
+            | (u32::from(queue_state.add(TX_QUEUE_KIND_OFFSET).read()) << 8),
+    );
     enable_basic_tx_queue(queue_state, descriptor)
 }
 
@@ -2827,6 +2904,32 @@ unsafe fn descriptor(frame: *mut u8) -> Result<*mut u8, LmacAsyncError> {
     } else {
         Ok(descriptor)
     }
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+#[link_section = ".rwtext.wifi_strict.tx_trace_frame_control"]
+unsafe fn tx_trace_frame_control(frame: *mut u8) -> u16 {
+    if frame.is_null() {
+        return 0;
+    }
+    let buffer = frame.add(4).cast::<*mut u8>().read();
+    if buffer.is_null() {
+        return 0;
+    }
+    let mut data = buffer.add(4).cast::<*mut u8>().read();
+    if data.is_null() {
+        return 0;
+    }
+    if frame
+        .add(TX_FRAME_LAYOUT_FLAGS_OFFSET)
+        .cast::<u16>()
+        .read_unaligned()
+        & 0x2000
+        != 0
+    {
+        data = data.add(8);
+    }
+    data.cast::<u16>().read_unaligned()
 }
 
 unsafe fn descriptor_queue(descriptor: *mut u8) -> u8 {
