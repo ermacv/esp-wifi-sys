@@ -151,6 +151,13 @@ pub const fn strict_tx_security_layout(
             (input.descriptor_flags, input.descriptor_security),
             (0x0000_0010, 0 | 0x0004_0000) | (0x0800_0000, 0x0004_0000)
         );
+    let transient_ap_eapol = input.frame_control == 0x0288
+        && input.descriptor_flags == 0x0200_200c
+        && input.descriptor_security == 0x0004_0000
+        && input.header_len == 0x001a
+        && input.remaining_len == 0x006b
+        && input.layout == 0
+        && input.buffer_flags == 0xc021_4099;
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
@@ -160,6 +167,7 @@ pub const fn strict_tx_security_layout(
         || transient_authentication_response
         || transient_association_response
         || transient_deauthentication
+        || transient_ap_eapol
         || ap_beacon
     {
         // AP beacons carry the pinned hardware-key direction word even though
@@ -651,6 +659,44 @@ mod tests {
             TxSecurityLayoutInput {
                 descriptor_flags: 0x0000_0010,
                 descriptor_security: 0x0008_0000,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_transient_ap_message1_eapol_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x006b_001a, 0, 0xc021_4099, 0x0200_200c, 0x0288)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x22,
+                remaining_len: 0x6f,
+                layout: 0x2000,
+                buffer_flags: 0xc024_4099,
+                metadata_len: 0x89,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x0188,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                remaining_len: 0x006a,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                buffer_flags: 0xc021_0099,
                 ..measured
             },
         ] {
