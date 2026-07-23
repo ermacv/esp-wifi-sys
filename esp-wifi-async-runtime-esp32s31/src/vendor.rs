@@ -517,8 +517,15 @@ impl PpDispatcher for VendorPpDispatcher {
                 }
                 PpAction::WdevRxSuccess => {
                     #[cfg(feature = "strict-no-wait")]
-                    crate::wdev::process_rx_success()
-                        .map_err(VendorDispatchError::WdevRxContinuation)?;
+                    {
+                        // RX completion itself is a stronger wake source than
+                        // the fallback reload timer.  Commit any MAC-accepted
+                        // recycle tail before the decoder can detach and
+                        // append descriptors using `wDevCtrl.tail`.
+                        crate::wdev::settle_rx_reload_before_success();
+                        crate::wdev::process_rx_success()
+                            .map_err(VendorDispatchError::WdevRxContinuation)?;
+                    }
                     #[cfg(not(feature = "strict-no-wait"))]
                     wdevProcessRxSucDataAll();
                     #[cfg(feature = "strict-no-wait")]

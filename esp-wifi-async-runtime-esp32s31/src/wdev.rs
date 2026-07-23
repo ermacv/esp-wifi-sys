@@ -49,6 +49,7 @@ enum RxRecycleError {
     TailMismatch,
     ChainTooLong,
     TimerUnavailable,
+    TimerCancelFailed,
     ReloadStillActive,
     MissingHardwareTail,
     UnexpectedCallback,
@@ -424,6 +425,12 @@ unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
     if hal_mac_rx_is_dscr_reload() != 0 {
         fail_rx_recycle(state, RxRecycleError::ReloadStillActive);
     }
+    complete_rx_reload(state);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
     RX_RECYCLE_PROBE.completions.fetch_add(1, Ordering::Relaxed);
 
     let reload_tail = state.reload_tail;
@@ -469,6 +476,29 @@ unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
             fail_rx_recycle(state, error);
         }
     }
+}
+
+/// Finish a descriptor reload before decoding the RX event which proves that
+/// the MAC has already advanced.
+///
+/// A hardware RX event can reach the executor before the conservative settle
+/// timer.  Decoding that event while `wDevCtrl.tail` still names the previous
+/// chain lets `wDev_DiscardFrame` recycle descriptors against stale software
+/// list metadata.  Observe the reload bit exactly once here; when it is clear,
+/// cancel the fallback timer and publish the accepted tail before entering the
+/// vendor per-frame decoder.  A still-active reload remains owned by the
+/// already armed timer and this function returns immediately.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+pub(crate) unsafe fn settle_rx_reload_before_success() {
+    let state = &mut *RX_RECYCLE_STATE.0.get();
+    if state.failed || !state.reload_active || hal_mac_rx_is_dscr_reload() != 0 {
+        return;
+    }
+    if !crate::adapter::cancel_internal_timer(RX_RECYCLE_TIMER.0.get().cast()) {
+        fail_rx_recycle(state, RxRecycleError::TimerCancelFailed);
+    }
+    complete_rx_reload(state);
 }
 
 #[cfg(target_arch = "riscv32")]
