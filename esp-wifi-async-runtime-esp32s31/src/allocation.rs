@@ -561,6 +561,7 @@ mod target {
             || release_ipc_envelope(ptr)
             || release_wpa_ie_slot(ptr)
             || release_rate_context(ptr)
+            || unsafe { crate::wpa2_s31::release_static_vendor_key_object(ptr) }
             || unsafe { crate::wpa2_s31::release_static_ap_node(ptr) }
     }
 

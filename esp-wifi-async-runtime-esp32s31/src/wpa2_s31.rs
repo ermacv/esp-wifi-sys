@@ -10,6 +10,9 @@ use core::{
     sync::atomic::{compiler_fence, AtomicBool, AtomicU8, Ordering},
 };
 
+#[cfg(target_arch = "riscv32")]
+use core::{ffi::c_void, sync::atomic::AtomicUsize};
+
 use crate::wpa2_crypto::WPA2_TK_LEN;
 
 const VENDOR_KEY_PREFIX_LEN: usize = 0xa8;
@@ -25,6 +28,10 @@ const AP_GROUP_HARDWARE_INDEX_BASE: u8 = 1;
 const MAX_WPA2_GTK_ID: u8 = 3;
 #[cfg(target_arch = "riscv32")]
 const MAX_VENDOR_KEY_INDEX: u8 = 24;
+
+#[cfg(target_arch = "riscv32")]
+static STATIC_VENDOR_KEY_SLOTS: [AtomicUsize; MAX_VENDOR_KEY_INDEX as usize + 1] =
+    [const { AtomicUsize::new(0) }; MAX_VENDOR_KEY_INDEX as usize + 1];
 
 const fn hardware_key_direction(cipher: u32, hardware_index: u32) -> u32 {
     if cipher & 0x001c_0000 == 0x0004_0000 {
@@ -159,6 +166,9 @@ impl<const N: usize> S31StaticKeyStorage<N> {
             if slot.claimed.load(Ordering::Acquire)
                 && slot.hardware_index.load(Ordering::Acquire) == hardware_index
             {
+                #[cfg(target_arch = "riscv32")]
+                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)]
+                    .store(slot as *const StaticVendorKeySlot as usize, Ordering::Release);
                 return Some(slot.object.get());
             }
         }
@@ -169,6 +179,9 @@ impl<const N: usize> S31StaticKeyStorage<N> {
                 .is_ok()
             {
                 slot.hardware_index.store(hardware_index, Ordering::Release);
+                #[cfg(target_arch = "riscv32")]
+                STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)]
+                    .store(slot as *const StaticVendorKeySlot as usize, Ordering::Release);
                 return Some(slot.object.get());
             }
         }
@@ -182,12 +195,64 @@ impl<const N: usize> S31StaticKeyStorage<N> {
     /// may be executing.
     pub unsafe fn reset_after_wifi_deinit(&'static self) {
         for slot in &self.slots {
+            #[cfg(target_arch = "riscv32")]
+            unregister_static_vendor_key_slot(slot);
             (*slot.object.get()).wipe();
             slot.hardware_index.store(u8::MAX, Ordering::Release);
             slot.claimed.store(false, Ordering::Release);
         }
         self.backend_taken.store(false, Ordering::Release);
     }
+}
+
+#[cfg(target_arch = "riscv32")]
+fn unregister_static_vendor_key_slot(slot: &StaticVendorKeySlot) {
+    let slot_address = slot as *const StaticVendorKeySlot as usize;
+    for registered in &STATIC_VENDOR_KEY_SLOTS {
+        let _ = registered.compare_exchange(
+            slot_address,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Consume the vendor `free` performed after `ic_del_key` for a Rust-owned
+/// static key object. The software-key table is cleared by the caller directly
+/// after this callback returns; this only wipes and releases the backing slot.
+///
+/// # Safety
+/// `pointer` must be the value passed by the serialized vendor key teardown on
+/// the strict radio-owner stack.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn release_static_vendor_key_object(pointer: *mut c_void) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    for registered in &STATIC_VENDOR_KEY_SLOTS {
+        let slot_address = registered.load(Ordering::Acquire);
+        if slot_address == 0 {
+            continue;
+        }
+        let slot = &*(slot_address as *const StaticVendorKeySlot);
+        if !core::ptr::eq(slot.object.get().cast::<c_void>(), pointer)
+            || !slot.claimed.load(Ordering::Acquire)
+        {
+            continue;
+        }
+        if registered
+            .compare_exchange(slot_address, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        (*slot.object.get()).wipe();
+        slot.hardware_index.store(u8::MAX, Ordering::Release);
+        slot.claimed.store(false, Ordering::Release);
+        return true;
+    }
+    false
 }
 
 impl<const N: usize> Default for S31StaticKeyStorage<N> {
