@@ -104,7 +104,6 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
     "wDev_IndicateCtrlFrame",
-    "wDev_IndicateFrame",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
@@ -154,7 +153,6 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
     "wDev_IndicateCtrlFrame",
-    "wDev_IndicateFrame",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
@@ -213,11 +211,19 @@ const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
 // The zero case wraps once through all u8 values, making the exact worst case
 // 256 finite data records. It never polls a register or waits for external
 // state; the per-record `hal_he_get_aid` call is an audited direct leaf.
+// Strict Rust calls `wDev_ProcessRxSucData` only after its SRAM outer walk has
+// followed the completed descriptor segment, checked every payload and found
+// the final marker within 64 links. That exact tail and count are passed into
+// `wDev_IndicateFrame`; its two backedges only copy the already-owned segment.
+// The ROM-to-flash call is not GNU-wrap interposable, so this proof belongs at
+// the real Rust caller rather than behind a link-only wrapper.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
     ("phy_set_tx_gain_mem_new", 0xaa),
     ("phy_set_tx_gain_mem_new", 0x12e),
     ("rc_get_trc", 0x74),
     ("is_ndpa_to_dut", 0x66),
+    ("wDev_IndicateFrame", 0x184),
+    ("wDev_IndicateFrame", 0x32a),
 ];
 
 const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
@@ -245,7 +251,6 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_wDev_isNANPktInValidSlot",
     "__wrap_wDev_AppendRxBlocks",
     "__wrap_wDev_IndicateCtrlFrame",
-    "__wrap_wDev_IndicateFrame",
     "__wrap_wpa_sm_rx_eapol",
     "__wrap_wpa_ap_rx_eapol",
     "__wrap_hal_crypto_set_key_entry",
@@ -308,7 +313,6 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue",
     "wifi_strict_env_is_chip",
     "__wrap_wDev_AppendRxBlocks",
-    "__wrap_wDev_IndicateFrame",
 ];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",

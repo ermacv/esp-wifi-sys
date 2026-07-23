@@ -117,18 +117,6 @@ pub struct WdevRxRecycleSnapshot {
 }
 
 #[cfg(target_arch = "riscv32")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IndicateFrameError {
-    WrongHart,
-    MissingHead,
-    MissingTail,
-    MissingBuffer,
-    InvalidCount,
-    CountMismatch,
-    TailNotReached,
-}
-
-#[cfg(target_arch = "riscv32")]
 struct IndicateFrameProbe {
     calls: AtomicUsize,
     validated: AtomicUsize,
@@ -208,23 +196,8 @@ unsafe extern "C" {
     fn vendor_csi_rx_process();
     #[link_name = "wDev_IndicateCtrlFrame"]
     fn vendor_indicate_ctrl_frame(frame: *mut u8, count: u32, kind: u32) -> i32;
-    #[link_name = "wDev_IndicateFrame"]
-    fn vendor_indicate_frame(
-        mode: u32,
-        fragment: u32,
-        tail: *mut u8,
-        descriptor_count: u32,
-        timestamp: u32,
-    );
     fn __real_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32;
     fn __real_wDev_IndicateCtrlFrame(frame: *mut u8, count: u32, kind: u32) -> i32;
-    fn __real_wDev_IndicateFrame(
-        mode: u32,
-        fragment: u32,
-        tail: *mut u8,
-        descriptor_count: u32,
-        timestamp: u32,
-    );
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -552,6 +525,15 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
         }
         descriptors_seen += 1;
         let next = descriptor.add(8).cast::<*mut u8>().read_unaligned();
+        if descriptor
+            .add(RX_DESCRIPTOR_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read_unaligned()
+            .is_null()
+        {
+            crate::critical::strict_wifi_int_restore(interrupt_state);
+            return Err(WdevRxContinuationError::MissingRxMetadata);
+        }
         subframe_count = match subframe_count.checked_add(1) {
             Some(count) if count <= u32::from(u16::MAX) => count,
             _ => {
@@ -566,15 +548,13 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
                 crate::critical::strict_wifi_int_restore(interrupt_state);
                 return Err(WdevRxContinuationError::CurrentDescriptorMismatch);
             }
-            if descriptor
-                .add(4)
-                .cast::<*mut u8>()
-                .read_unaligned()
-                .is_null()
-            {
-                crate::critical::strict_wifi_int_restore(interrupt_state);
-                return Err(WdevRxContinuationError::MissingRxMetadata);
-            }
+            INDICATE_FRAME_PROBE.calls.fetch_add(1, Ordering::Relaxed);
+            INDICATE_FRAME_PROBE
+                .validated
+                .fetch_add(1, Ordering::Relaxed);
+            INDICATE_FRAME_PROBE
+                .max_descriptors
+                .fetch_max(subframe_count as usize, Ordering::Relaxed);
             crate::critical::strict_wifi_int_restore(interrupt_state);
             wDev_ProcessRxSucData(descriptor, subframe_count);
             subframe_count = 0;
@@ -656,9 +636,6 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_indicate_ctrl_frame as *const (),
         __wrap_wDev_IndicateCtrlFrame as *const (),
-    ) && core::ptr::eq(
-        vendor_indicate_frame as *const (),
-        __wrap_wDev_IndicateFrame as *const (),
     ) && runtime_rx_recycle_link_wrapper_active()
 }
 
@@ -738,110 +715,6 @@ pub unsafe extern "C" fn __wrap_wDev_IndicateCtrlFrame(
     } else {
         __real_wDev_IndicateCtrlFrame(frame, count, kind)
     }
-}
-
-#[cfg(target_arch = "riscv32")]
-#[link_section = ".rwtext.wifi_strict.indicate_frame"]
-unsafe fn validate_indicate_frame_chain(
-    tail: *mut u8,
-    descriptor_count: u32,
-) -> Result<usize, IndicateFrameError> {
-    if tail.is_null() {
-        return Err(IndicateFrameError::MissingTail);
-    }
-    let expected =
-        usize::try_from(descriptor_count).map_err(|_| IndicateFrameError::InvalidCount)?;
-    if expected == 0 || expected > MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT {
-        return Err(IndicateFrameError::InvalidCount);
-    }
-
-    let mut descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
-    if descriptor.is_null() {
-        return Err(IndicateFrameError::MissingHead);
-    }
-    for index in 1..=expected {
-        if descriptor
-            .add(RX_DESCRIPTOR_BUFFER_OFFSET)
-            .cast::<*mut u8>()
-            .read_unaligned()
-            .is_null()
-        {
-            return Err(IndicateFrameError::MissingBuffer);
-        }
-        if descriptor == tail {
-            return if index == expected {
-                Ok(index)
-            } else {
-                Err(IndicateFrameError::CountMismatch)
-            };
-        }
-        if index == expected {
-            return Err(IndicateFrameError::TailNotReached);
-        }
-        descriptor = descriptor
-            .add(RX_DESCRIPTOR_NEXT_OFFSET)
-            .cast::<*mut u8>()
-            .read_unaligned();
-        if descriptor.is_null() {
-            return Err(IndicateFrameError::TailNotReached);
-        }
-    }
-    Err(IndicateFrameError::TailNotReached)
-}
-
-#[cfg(target_arch = "riscv32")]
-#[cold]
-#[inline(never)]
-#[link_section = ".rwtext.wifi_strict.indicate_frame"]
-unsafe fn fail_indicate_frame(_error: IndicateFrameError) -> ! {
-    core::arch::asm!("ebreak", options(noreturn))
-}
-
-/// Guard the vendor frame-copy leaf with the Rust-owned descriptor bound.
-///
-/// `process_rx_success` transfers one completed descriptor segment at a time
-/// and never supplies more than 64 descriptors. This wrapper repeats the
-/// proof at the final call boundary: the current `wDevCtrl` head must reach
-/// `tail` in exactly `descriptor_count` links, with a non-null payload for
-/// every descriptor. The completed segment is owned by this radio
-/// continuation until the real leaf discards it, so its next pointers cannot
-/// be republished concurrently. The two vendor copy-loop backedges are
-/// therefore bounded by the validated count rather than by external state.
-#[no_mangle]
-#[link_section = ".rwtext.wifi_strict.indicate_frame"]
-pub unsafe extern "C" fn __wrap_wDev_IndicateFrame(
-    mode: u32,
-    fragment: u32,
-    tail: *mut u8,
-    descriptor_count: u32,
-    timestamp: u32,
-) {
-    if !crate::critical::strict_wifi_hart_armed() {
-        __real_wDev_IndicateFrame(mode, fragment, tail, descriptor_count, timestamp);
-        return;
-    }
-    if !crate::critical::on_strict_wifi_hart() {
-        fail_indicate_frame(IndicateFrameError::WrongHart);
-    }
-    INDICATE_FRAME_PROBE.calls.fetch_add(1, Ordering::Relaxed);
-
-    // Keep the head/link snapshot atomic with respect to the local Wi-Fi ISR.
-    // After this bounded validation the completed segment remains exclusively
-    // owned by the current continuation until the real leaf recycles it.
-    let interrupt_state = crate::critical::strict_wifi_int_disable();
-    let validated = validate_indicate_frame_chain(tail, descriptor_count);
-    crate::critical::strict_wifi_int_restore(interrupt_state);
-    let count = match validated {
-        Ok(count) => count,
-        Err(error) => fail_indicate_frame(error),
-    };
-    INDICATE_FRAME_PROBE
-        .validated
-        .fetch_add(1, Ordering::Relaxed);
-    INDICATE_FRAME_PROBE
-        .max_descriptors
-        .fetch_max(count, Ordering::Relaxed);
-    __real_wDev_IndicateFrame(mode, fragment, tail, descriptor_count, timestamp);
 }
 
 #[cfg(target_arch = "riscv32")]
