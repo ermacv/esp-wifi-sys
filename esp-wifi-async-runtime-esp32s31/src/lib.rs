@@ -251,6 +251,8 @@ pub use tx_security::{
     strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
     TxSecurityLayoutInput, TxSecurityLayoutOutput,
 };
+#[cfg(feature = "hil-vendor-tx")]
+pub use tx_security::{hil_tx_security_rejected_snapshot, HilTxSecurityRejectedSnapshot};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

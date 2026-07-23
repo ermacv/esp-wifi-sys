@@ -352,7 +352,15 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     };
     let output = match strict_tx_security_layout(input) {
         Some(value) => value,
-        None => trap_invalid_tx_security_layout(input),
+        None => {
+            #[cfg(feature = "hil-vendor-tx")]
+            {
+                record_hil_rejected_tx_security(input);
+                return -1;
+            }
+            #[cfg(not(feature = "hil-vendor-tx"))]
+            trap_invalid_tx_security_layout(input)
+        }
     };
 
     // No packet state is mutated until every pointer and recovered invariant
@@ -400,6 +408,20 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     metadata.add(4).cast::<u32>().write_unaligned(0);
     metadata.cast::<u32>().write_unaligned(output.metadata_len);
     0
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+fn record_hil_rejected_tx_security(input: TxSecurityLayoutInput) {
+    HIL_REJECTED_DESCRIPTOR_FLAGS.store(input.descriptor_flags, Ordering::Release);
+    HIL_REJECTED_DESCRIPTOR_SECURITY.store(input.descriptor_security, Ordering::Release);
+    HIL_REJECTED_FRAME_CONTROL.store(u32::from(input.frame_control), Ordering::Release);
+    HIL_REJECTED_LENGTHS.store(
+        u32::from(input.header_len) | (u32::from(input.remaining_len) << 16),
+        Ordering::Release,
+    );
+    HIL_REJECTED_LAYOUT.store(u32::from(input.layout), Ordering::Release);
+    HIL_REJECTED_BUFFER_FLAGS.store(input.buffer_flags, Ordering::Release);
+    HIL_REJECTED_COUNT.fetch_add(1, Ordering::AcqRel);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1053,5 +1075,45 @@ mod tests {
                 None
             );
         }
+    }
+}
+#[cfg(feature = "hil-vendor-tx")]
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_DESCRIPTOR_FLAGS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_DESCRIPTOR_SECURITY: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_FRAME_CONTROL: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_LENGTHS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_LAYOUT: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_REJECTED_BUFFER_FLAGS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "hil-vendor-tx")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HilTxSecurityRejectedSnapshot {
+    pub count: usize,
+    pub input: TxSecurityLayoutInput,
+}
+
+#[cfg(feature = "hil-vendor-tx")]
+pub fn hil_tx_security_rejected_snapshot() -> HilTxSecurityRejectedSnapshot {
+    HilTxSecurityRejectedSnapshot {
+        count: HIL_REJECTED_COUNT.load(Ordering::Acquire),
+        input: TxSecurityLayoutInput {
+            header_len: HIL_REJECTED_LENGTHS.load(Ordering::Acquire) as u16,
+            remaining_len: (HIL_REJECTED_LENGTHS.load(Ordering::Acquire) >> 16) as u16,
+            layout: HIL_REJECTED_LAYOUT.load(Ordering::Acquire) as u16,
+            buffer_flags: HIL_REJECTED_BUFFER_FLAGS.load(Ordering::Acquire),
+            descriptor_flags: HIL_REJECTED_DESCRIPTOR_FLAGS.load(Ordering::Acquire),
+            descriptor_security: HIL_REJECTED_DESCRIPTOR_SECURITY.load(Ordering::Acquire),
+            frame_control: HIL_REJECTED_FRAME_CONTROL.load(Ordering::Acquire) as u16,
+        },
     }
 }
