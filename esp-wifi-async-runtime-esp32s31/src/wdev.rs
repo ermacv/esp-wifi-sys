@@ -247,6 +247,8 @@ unsafe extern "C" {
     fn hal_mac_rx_is_dscr_reload() -> u32;
     fn hal_mac_rx_read_rxdscrlast() -> *mut u8;
     fn hal_mac_rx_read_rxdscrnext() -> *mut u8;
+    fn hal_mac_rx_disable();
+    fn hal_mac_rx_enable();
     fn hal_mac_rx_set_base(descriptor: *mut u8);
     fn hal_mac_rx_set_dscr_reload();
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
@@ -367,20 +369,17 @@ unsafe fn publish_rx_recycle_chain(
     if published_head.is_null() {
         control.cast::<*mut u8>().write_unaligned(head);
         control.add(4).cast::<*mut u8>().write_unaligned(tail);
-        // A runtime-empty software list means MAC may already have entered
-        // its terminal descriptor state. Unlike cold initialization, writing
-        // RX base alone does not make that state fetch the new chain. Publish
-        // base first, then use the same hardware reload edge and async settle
-        // continuation as the ordinary non-empty append path.
-        hal_mac_rx_set_base(head);
-        state.reload_active = true;
-        state.reload_tail = tail;
-        RX_RECYCLE_PROBE
-            .reload_active
-            .store(1, Ordering::Release);
-        hal_mac_rx_set_dscr_reload();
+        // A runtime-empty list is stronger than the vendor cold-init case:
+        // the RX descriptor walker has already reached its terminal state.
+        // Hardware telemetry proves that neither a base write nor a reload
+        // edge makes that state fetch a valid hardware-owned chain.  The
+        // vendor MAC sleep path establishes the bounded state transition:
+        // clear the RX-enable gate, publish the new base, then reopen it.
+        // All three operations are finite MMIO leaves and execute only while
+        // the software list is empty under the local Wi-Fi interrupt lock.
+        restart_terminal_rx(head);
         crate::critical::strict_wifi_int_restore(interrupt_state);
-        return Ok(true);
+        return Ok(false);
     }
 
     let published_tail = control.add(4).cast::<*mut u8>().read_unaligned();
@@ -557,7 +556,7 @@ unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState, reload_settle
         && current_head == saved_head
         && saved_head != saved_last
     {
-        hal_mac_rx_set_base(saved_head);
+        restart_terminal_rx(saved_head);
         RX_RECYCLE_PROBE
             .terminal_restarts
             .fetch_add(1, Ordering::Relaxed);
@@ -566,6 +565,22 @@ unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState, reload_settle
     state.drained_head = ptr::null_mut();
     state.drained_last = ptr::null_mut();
     crate::critical::strict_wifi_int_restore(interrupt_state);
+}
+
+/// Reopen the RX descriptor walker after a proven terminal-list transition.
+///
+/// The S31 MAC keeps bit 31 set even after its descriptor FSM reaches the end
+/// of a chain. A base write and the ordinary append reload doorbell are both
+/// acknowledged without leaving that terminal state. The vendor sleep/wakeup
+/// leaves establish that an RX-enable falling/rising edge is the bounded
+/// restart primitive. Callers must hold the local Wi-Fi interrupt lock and
+/// prove that no hardware-current descriptor exists before invoking it.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn restart_terminal_rx(head: *mut u8) {
+    hal_mac_rx_disable();
+    hal_mac_rx_set_base(head);
+    hal_mac_rx_enable();
 }
 
 /// Finish a descriptor reload before decoding the RX event which proves that
