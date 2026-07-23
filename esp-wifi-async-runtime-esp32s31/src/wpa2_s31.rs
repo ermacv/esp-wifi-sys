@@ -321,6 +321,8 @@ mod target {
             enable: u32,
             spp: u32,
         );
+        #[cfg(feature = "hil-vendor-tx")]
+        fn ets_printf(format: *const u8, ...) -> i32;
     }
 
     const SEARCH_ERROR_CACHED_TX_ENABLED: u32 = 0x3002;
@@ -1303,33 +1305,63 @@ mod target {
                     Ok(())
                 }
                 Wpa2IoCommand::TransmitData(frame) => {
-                    self.try_transmit_wifi_data(&frame)
-                        .map_err(|error| Wpa2IoFailure {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command data begin\r\n".as_ptr().cast());
+                    }
+                    let result = self.try_transmit_wifi_data(&frame).map_err(|error| {
+                        Wpa2IoFailure {
                             error,
                             command: Wpa2IoCommand::TransmitData(frame),
-                        })
+                        }
+                    });
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command data end\r\n".as_ptr().cast());
+                    }
+                    result
                 }
                 Wpa2IoCommand::InstallKey(install) => {
-                    self.install_ccmp(install)
-                        .map_err(|(error, install)| Wpa2IoFailure {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command key begin\r\n".as_ptr().cast());
+                    }
+                    let result = self.install_ccmp(install).map_err(|(error, install)| {
+                        Wpa2IoFailure {
                             error,
                             command: Wpa2IoCommand::InstallKey(install),
-                        })
+                        }
+                    });
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command key end\r\n".as_ptr().cast());
+                    }
+                    result
                 }
                 Wpa2IoCommand::SetPeerAuthorized {
                     interface,
                     peer,
                     authorized,
-                } => self
-                    .set_peer_authorized(interface, peer, authorized)
-                    .map_err(|error| Wpa2IoFailure {
+                } => {
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command auth begin\r\n".as_ptr().cast());
+                    }
+                    let result = self.set_peer_authorized(interface, peer, authorized).map_err(
+                        |error| Wpa2IoFailure {
                         error,
                         command: Wpa2IoCommand::SetPeerAuthorized {
                             interface,
                             peer,
                             authorized,
                         },
-                    }),
+                    });
+                    #[cfg(feature = "hil-vendor-tx")]
+                    unsafe {
+                        ets_printf(c"HIL command auth end\r\n".as_ptr().cast());
+                    }
+                    result
+                }
             }
         }
     }
