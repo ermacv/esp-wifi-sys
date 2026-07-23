@@ -167,6 +167,13 @@ pub const fn strict_tx_security_layout(
             || (input.remaining_len == 0x00a3
                 && input.layout == 1
                 && input.buffer_flags == 0xc02f_40d1));
+    let transient_ap_plaintext_data = input.frame_control == 0x0208
+        && input.descriptor_flags == 0x0000_200a
+        && input.descriptor_security == 0x0004_0000
+        && input.header_len == 0x0018
+        && input.remaining_len == 0x0054
+        && input.layout == 0
+        && input.buffer_flags == 0xc01b_0082;
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
@@ -177,6 +184,7 @@ pub const fn strict_tx_security_layout(
         || transient_association_response
         || transient_deauthentication
         || transient_ap_eapol
+        || transient_ap_plaintext_data
         || ap_beacon
     {
         // AP beacons carry the pinned hardware-key direction word even though
@@ -915,6 +923,40 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 remaining_len: 0xa2,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_measured_plaintext_ap_data_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0000,
+            ..input(0x0054_0018, 0, 0xc01b_0082, 0x0000_200a, 0x0208)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x58,
+                layout: 0x2000,
+                buffer_flags: 0xc01e_0082,
+                metadata_len: 0x70,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x4208,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_flags: 0x0000_2009,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                remaining_len: 0x0055,
                 ..measured
             },
         ] {
