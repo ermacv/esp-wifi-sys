@@ -7,6 +7,9 @@
 
 // The reorder owner remains deliberately bounded even when the application
 // enables a deeper kind-7 pool for the async network channel.
+#[cfg(feature = "rx-ba-window-8")]
+pub const RX_BLOCK_ACK_MAX_WINDOW: u16 = 8;
+#[cfg(not(feature = "rx-ba-window-8"))]
 pub const RX_BLOCK_ACK_MAX_WINDOW: u16 = 16;
 pub const RX_AMPDU_SLOT_CAPACITY: usize = RX_BLOCK_ACK_MAX_WINDOW as usize;
 #[cfg(feature = "large-rx-pool-48")]
@@ -279,7 +282,7 @@ mod tests {
 
     #[test]
     fn in_order_frames_are_released_immediately() {
-        let mut reorder = RxBlockAckReorder::new(10, 16).unwrap();
+        let mut reorder = RxBlockAckReorder::new(10, RX_BLOCK_ACK_MAX_WINDOW).unwrap();
         let release = reorder.ingest(frame(10, 0)).unwrap();
         assert_eq!(release.iter().collect::<std::vec::Vec<_>>(), [frame(10, 0)]);
         assert_eq!(reorder.next_sequence(), 11);
@@ -288,7 +291,7 @@ mod tests {
 
     #[test]
     fn gap_is_buffered_and_then_released_in_sequence_order() {
-        let mut reorder = RxBlockAckReorder::new(100, 16).unwrap();
+        let mut reorder = RxBlockAckReorder::new(100, RX_BLOCK_ACK_MAX_WINDOW).unwrap();
         assert!(reorder.ingest(frame(102, 2)).unwrap().buffered);
         assert!(reorder.ingest(frame(101, 1)).unwrap().buffered);
         let release = reorder.ingest(frame(100, 0)).unwrap();
@@ -300,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "rx-ba-window-8"))]
     fn window_advance_releases_owned_frames_and_counts_missing_without_long_loop() {
         let mut reorder = RxBlockAckReorder::new(0, 16).unwrap();
         reorder.ingest(frame(2, 2)).unwrap();
@@ -353,7 +357,7 @@ mod tests {
 
     #[test]
     fn esf_slot_id_is_independent_of_reorder_window_index() {
-        let mut reorder = RxBlockAckReorder::new(1, 16).unwrap();
+        let mut reorder = RxBlockAckReorder::new(1, RX_BLOCK_ACK_MAX_WINDOW).unwrap();
         let highest_valid = (RX_ESF_SLOT_ID_CAPACITY - 1) as u8;
         let first_invalid = RX_ESF_SLOT_ID_CAPACITY as u8;
         assert_eq!(

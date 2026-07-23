@@ -25,6 +25,9 @@ hil-ampdu-intercept = ["hil-vendor-tx"]
 # Laboratory RX BlockAck bring-up. This accepts one SoftAP TID-0 agreement
 # through Rust-owned fixed state and the recovered finite MAC register leaf.
 hil-rx-ampdu = []
+# HIL profile which trades reorder depth for a larger zero-copy network
+# ownership budget while keeping the same 32 internal-SRAM ESF objects.
+rx-ba-window-8 = []
 # Deep kind-7 RX storage for PSRAM-backed application profiles. The ESF
 # objects themselves remain in internal SRAM because the Wi-Fi interrupt path
 # owns and fills them.
