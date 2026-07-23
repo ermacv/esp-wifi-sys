@@ -24,14 +24,17 @@ const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 // static RX bound with fixed Rust-owned storage instead.
 const LARGE_RX_PAYLOAD_CAPACITY: usize = 1700;
 const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
-// One native atomic word owns this pool. All 32 bits are usable on S31; the
-// full-width case must avoid evaluating `1 << usize::BITS`.
+// The default profile uses one native atomic word. PSRAM-backed application
+// profiles can spend more internal SRAM here and use two independent native
+// words. This deliberately avoids emulated 64-bit atomics and critical
+// sections in the interrupt-facing allocator.
+#[cfg(feature = "large-rx-pool-49")]
+const LARGE_RX_SLOT_CAPACITY: usize = 49;
+#[cfg(not(feature = "large-rx-pool-49"))]
 const LARGE_RX_SLOT_CAPACITY: usize = 32;
-const LARGE_RX_SLOT_MASK: usize = if LARGE_RX_SLOT_CAPACITY == usize::BITS as usize {
-    usize::MAX
-} else {
-    (1 << LARGE_RX_SLOT_CAPACITY) - 1
-};
+const LARGE_RX_CLAIM_WORD_BITS: usize = usize::BITS as usize;
+const LARGE_RX_CLAIM_WORDS: usize =
+    (LARGE_RX_SLOT_CAPACITY + LARGE_RX_CLAIM_WORD_BITS - 1) / LARGE_RX_CLAIM_WORD_BITS;
 
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
 const ESF_TX_DESCRIPTOR_OFFSET: usize = 0x48;
@@ -85,7 +88,8 @@ static LARGE_RX_SLOTS: [LargeRxSlot; LARGE_RX_SLOT_CAPACITY] =
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_large_rx_claims"
 )]
-static CLAIMED_LARGE_RX_SLOTS: AtomicUsize = AtomicUsize::new(0);
+static CLAIMED_LARGE_RX_SLOTS: [AtomicUsize; LARGE_RX_CLAIM_WORDS] =
+    [const { AtomicUsize::new(0) }; LARGE_RX_CLAIM_WORDS];
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_rejections"
@@ -281,17 +285,48 @@ fn claim_management_slot() -> Option<usize> {
     link_section = ".rwtext.wifi_strict.esf"
 )]
 fn claim_large_rx_slot() -> Option<usize> {
-    let claimed = CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire);
-    let free = !claimed & LARGE_RX_SLOT_MASK;
-    if free == 0 {
-        return None;
+    // This is a bounded scan of one or two independent native words, never a
+    // retry loop. A racing owner may cause one immediate failed claim, but
+    // allocation never waits or enters a critical section.
+    let mut word_index = 0;
+    while word_index < LARGE_RX_CLAIM_WORDS {
+        let claims = &CLAIMED_LARGE_RX_SLOTS[word_index];
+        let claimed = claims.load(Ordering::Acquire);
+        let first_slot = word_index * LARGE_RX_CLAIM_WORD_BITS;
+        let remaining = LARGE_RX_SLOT_CAPACITY - first_slot;
+        let valid_mask = if remaining >= LARGE_RX_CLAIM_WORD_BITS {
+            usize::MAX
+        } else {
+            (1_usize << remaining) - 1
+        };
+        let free = !claimed & valid_mask;
+        if free != 0 {
+            let word_slot = free.trailing_zeros() as usize;
+            let bit = 1_usize << word_slot;
+            if claims
+                .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(first_slot + word_slot);
+            }
+        }
+        word_index += 1;
     }
-    let index = free.trailing_zeros() as usize;
-    let bit = 1_usize << index;
-    CLAIMED_LARGE_RX_SLOTS
-        .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
-        .ok()
-        .map(|_| index)
+    None
+}
+
+#[inline(always)]
+fn large_rx_slot_claimed(index: usize) -> bool {
+    let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
+    let bit = 1_usize << (index % LARGE_RX_CLAIM_WORD_BITS);
+    CLAIMED_LARGE_RX_SLOTS[word_index].load(Ordering::Acquire) & bit != 0
+}
+
+#[inline(always)]
+fn release_large_rx_slot(index: usize) -> bool {
+    let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
+    let bit = 1_usize << (index % LARGE_RX_CLAIM_WORD_BITS);
+    CLAIMED_LARGE_RX_SLOTS[word_index].fetch_and(!bit, Ordering::AcqRel) & bit != 0
 }
 
 #[cfg_attr(
@@ -334,9 +369,7 @@ fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
 )]
 pub(crate) fn large_rx_slot_id(frame: *mut u8) -> Option<u8> {
     let index = large_rx_slot_index(frame)?;
-    let bit = 1_usize << index;
-    (CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit != 0)
-        .then_some(index as u8)
+    large_rx_slot_claimed(index).then_some(index as u8)
 }
 
 /// Resolve a reorder slot ID back to its still-owned ESF object.
@@ -352,8 +385,7 @@ pub(crate) fn large_rx_frame(slot: u8) -> Option<*mut u8> {
     if index >= LARGE_RX_SLOT_CAPACITY {
         return None;
     }
-    let bit = 1_usize << index;
-    if CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit == 0 {
+    if !large_rx_slot_claimed(index) {
         return None;
     }
     Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>())
@@ -378,8 +410,7 @@ pub(crate) unsafe fn owned_large_rx_view_valid(
     let Some(index) = large_rx_slot_index(frame) else {
         return false;
     };
-    let bit = 1_usize << index;
-    if CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit == 0 {
+    if !large_rx_slot_claimed(index) {
         return false;
     }
     let start = frame.add(ESF_HEADER_SIZE) as usize;
@@ -414,8 +445,7 @@ pub(crate) unsafe fn release_owned_large_rx_frame(frame: *mut u8) -> bool {
     if !buffer_descriptor.is_null() {
         buffer_descriptor.add(4).cast::<*mut u8>().write(payload);
     }
-    let bit = 1_usize << index;
-    CLAIMED_LARGE_RX_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    release_large_rx_slot(index)
 }
 
 /// Return whether `frame` belongs to one of the fixed pools handled by the
@@ -452,7 +482,7 @@ unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8>
     let index = claim_large_rx_slot()?;
     let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
     if initialize_frame(frame, 7, source, length, LARGE_RX_PAYLOAD_CAPACITY).is_none() {
-        CLAIMED_LARGE_RX_SLOTS.fetch_and(!(1_usize << index), Ordering::AcqRel);
+        release_large_rx_slot(index);
         return None;
     }
     Some(frame)
@@ -657,8 +687,7 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
         return;
     }
     if let Some(index) = large_rx_slot_index(frame) {
-        let bit = 1_usize << index;
-        if CLAIMED_LARGE_RX_SLOTS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
+        if !release_large_rx_slot(index) {
             reject(u32::MAX, frame as usize);
         }
         return;
@@ -693,8 +722,9 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
             .count_ones() as usize,
         management_capacity: MANAGEMENT_SLOT_CAPACITY,
         large_rx_claimed: CLAIMED_LARGE_RX_SLOTS
-            .load(Ordering::Acquire)
-            .count_ones() as usize,
+            .iter()
+            .map(|claims| claims.load(Ordering::Acquire).count_ones() as usize)
+            .sum(),
         large_rx_capacity: LARGE_RX_SLOT_CAPACITY,
         rejected_operations: rejected_esf_operations(),
         last_rejected_kind: LAST_REJECTED_ESF_KIND.load(Ordering::Acquire) as u32,
@@ -705,6 +735,6 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
 const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
 const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
 const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
-const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= usize::BITS as usize);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= u8::MAX as usize);
+const _: () = assert!(LARGE_RX_CLAIM_WORDS <= 2);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY == crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY);

@@ -18,8 +18,9 @@ const WIFI_DATA_RX_COPY_CAPACITY: usize = 8;
 const WIFI_DATA_RX_COPY_CAPACITY: usize = WIFI_DATA_RX_CAPACITY;
 #[cfg(target_arch = "riscv32")]
 const WIFI_DATA_RX_COPY_FRAME_CAPACITY: usize = 512;
-// Reserve one kind-7 object beyond the complete 16-frame reorder window:
-// 15 network owners + 16 retained MPDUs + 1 gap-closing input = 32.
+// Reserve one kind-7 object beyond the complete 16-frame reorder window. The
+// default pool therefore admits 15 network owners; the deep pool admits the
+// complete 32-entry channel: 32 network + 16 reorder + 1 input = 49.
 #[cfg(target_arch = "riscv32")]
 const WIFI_DATA_RX_ZERO_COPY_LIMIT: usize =
     crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY - crate::rx_ampdu::RX_AMPDU_SLOT_CAPACITY - 1;

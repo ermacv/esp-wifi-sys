@@ -25,6 +25,10 @@ hil-ampdu-intercept = ["hil-vendor-tx"]
 # Laboratory RX BlockAck bring-up. This accepts one SoftAP TID-0 agreement
 # through Rust-owned fixed state and the recovered finite MAC register leaf.
 hil-rx-ampdu = []
+# Deep kind-7 RX storage for PSRAM-backed application profiles. The ESF
+# objects themselves remain in internal SRAM because the Wi-Fi interrupt path
+# owns and fills them.
+large-rx-pool-49 = []
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-wifi-sys-esp32s31 = { path = "../esp-wifi-sys-esp32s31" }
