@@ -1047,7 +1047,7 @@ mod target {
             }
 
             #[cfg(feature = "hil-vendor-tx")]
-            if self.vendor_tx_diagnostic {
+            if self.vendor_tx_diagnostic && data_owner.is_some() {
                 let result = unsafe {
                     ieee80211_output_do(interface, frame.as_ptr(), length, 0, ptr::null_mut())
                 };
