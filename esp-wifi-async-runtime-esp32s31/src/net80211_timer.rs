@@ -48,6 +48,7 @@ unsafe extern "C" {
     fn ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
     fn __real_ieee80211_timer_process(kind: u32, id: u32, argument: *mut c_void) -> i32;
     fn ieee80211_hostap_send_beacon_process();
+    fn hostap_handle_timer_process(peer: *mut c_void);
     fn cnx_auth_timeout_process();
     fn cnx_assoc_timeout_process();
     fn cnx_connect_next_ap_timeout_process();
@@ -61,7 +62,7 @@ pub(crate) fn timer_process_link_wrapper_active() -> bool {
 }
 
 const fn supported_strict_timer(id: u8) -> bool {
-    matches!(id, 0 | 8 | 9 | 11 | 13 | 44)
+    matches!(id, 0 | 8 | 9 | 11 | 12 | 13 | 44)
 }
 
 fn claim_slot() -> Option<usize> {
@@ -205,6 +206,13 @@ pub(crate) unsafe fn dispatch(argument: *mut c_void) -> Result<(), Net80211Timer
         // bypassing the heap-owning timer envelope in the vendor producer.
         11 => {
             cnx_auth_timeout_process();
+            Ok(())
+        }
+        // `ieee80211_register_hostap_timer` replaces table id 12 with the AP
+        // peer lifecycle leaf. Preserve its peer argument in the fixed timer
+        // envelope and run it on the sole radio-owner stack.
+        12 => {
+            hostap_handle_timer_process(original_argument);
             Ok(())
         }
         13 => {
