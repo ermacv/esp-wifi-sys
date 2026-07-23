@@ -163,7 +163,7 @@ pub use delay::{
 #[cfg(target_arch = "riscv32")]
 pub use esf::enable_prestart_management_pool;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use esf::rejected_esf_operations;
+pub use esf::{fixed_esf_pool_snapshot, rejected_esf_operations, FixedEsfPoolSnapshot};
 pub use event::{PpAction, PpEvent};
 #[cfg(target_arch = "riscv32")]
 pub use event_bridge::patch_async_event_post;

@@ -598,6 +598,29 @@ pub fn rejected_esf_operations() -> usize {
     REJECTED_ESF_OPERATIONS.load(Ordering::Acquire)
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FixedEsfPoolSnapshot {
+    pub management_claimed: usize,
+    pub management_capacity: usize,
+    pub large_rx_claimed: usize,
+    pub large_rx_capacity: usize,
+    pub rejected_operations: usize,
+}
+
+pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
+    FixedEsfPoolSnapshot {
+        management_claimed: CLAIMED_MANAGEMENT_SLOTS
+            .load(Ordering::Acquire)
+            .count_ones() as usize,
+        management_capacity: MANAGEMENT_SLOT_CAPACITY,
+        large_rx_claimed: CLAIMED_LARGE_RX_SLOTS
+            .load(Ordering::Acquire)
+            .count_ones() as usize,
+        large_rx_capacity: LARGE_RX_SLOT_CAPACITY,
+        rejected_operations: rejected_esf_operations(),
+    }
+}
+
 const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
 const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
 const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);

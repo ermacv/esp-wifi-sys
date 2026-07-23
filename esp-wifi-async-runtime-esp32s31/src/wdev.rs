@@ -91,6 +91,8 @@ struct RxRecycleProbe {
     deferred: AtomicUsize,
     timers_armed: AtomicUsize,
     completions: AtomicUsize,
+    reload_active: AtomicUsize,
+    pending_chains: AtomicUsize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -102,6 +104,8 @@ impl RxRecycleProbe {
             deferred: AtomicUsize::new(0),
             timers_armed: AtomicUsize::new(0),
             completions: AtomicUsize::new(0),
+            reload_active: AtomicUsize::new(0),
+            pending_chains: AtomicUsize::new(0),
         }
     }
 }
@@ -114,6 +118,8 @@ pub struct WdevRxRecycleSnapshot {
     pub deferred: usize,
     pub timers_armed: usize,
     pub completions: usize,
+    pub reload_active: bool,
+    pub pending_chains: usize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -347,9 +353,15 @@ unsafe fn publish_rx_recycle_chain(
         .add(RX_DESCRIPTOR_NEXT_OFFSET)
         .cast::<*mut u8>()
         .write_unaligned(head);
-    control.add(4).cast::<*mut u8>().write_unaligned(tail);
+    // The pinned vendor leaf keeps the previously published tail visible
+    // until MAC reload completes. Publishing the future tail here lets RX
+    // interrupt code observe a chain endpoint which hardware has not accepted
+    // yet and eventually corrupts the descriptor list under sustained load.
     state.reload_active = true;
     state.reload_tail = tail;
+    RX_RECYCLE_PROBE
+        .reload_active
+        .store(1, Ordering::Release);
     hal_mac_rx_set_dscr_reload();
     crate::critical::strict_wifi_int_restore(interrupt_state);
     Ok(true)
@@ -367,6 +379,11 @@ unsafe fn publish_or_defer_rx_recycle_chain(
         let interrupt_state = crate::critical::strict_wifi_int_disable();
         let result = append_pending_rx_recycle_chain(state, head, tail);
         crate::critical::strict_wifi_int_restore(interrupt_state);
+        if result.is_ok() {
+            RX_RECYCLE_PROBE
+                .pending_chains
+                .fetch_add(1, Ordering::Relaxed);
+        }
         return result;
     }
     if publish_rx_recycle_chain(state, head, tail)? {
@@ -412,12 +429,27 @@ unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
         }
     }
 
+    // Match the terminal store in `wDev_AppendRxBlocks`: the new tail becomes
+    // globally visible only after the reload bit cleared and any base repair
+    // completed.
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    ptr::addr_of_mut!(wDevCtrl)
+        .add(4)
+        .cast::<*mut u8>()
+        .write_unaligned(reload_tail);
+    crate::critical::strict_wifi_int_restore(interrupt_state);
     state.reload_active = false;
+    RX_RECYCLE_PROBE
+        .reload_active
+        .store(0, Ordering::Release);
     state.reload_tail = ptr::null_mut();
     let pending_head = state.pending_head;
     let pending_tail = state.pending_tail;
     state.pending_head = ptr::null_mut();
     state.pending_tail = ptr::null_mut();
+    RX_RECYCLE_PROBE
+        .pending_chains
+        .store(0, Ordering::Release);
     if !pending_head.is_null() {
         if let Err(error) = publish_or_defer_rx_recycle_chain(state, pending_head, pending_tail) {
             fail_rx_recycle(state, error);
@@ -468,6 +500,8 @@ pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
         deferred: RX_RECYCLE_PROBE.deferred.load(Ordering::Acquire),
         timers_armed: RX_RECYCLE_PROBE.timers_armed.load(Ordering::Acquire),
         completions: RX_RECYCLE_PROBE.completions.load(Ordering::Acquire),
+        reload_active: RX_RECYCLE_PROBE.reload_active.load(Ordering::Acquire) != 0,
+        pending_chains: RX_RECYCLE_PROBE.pending_chains.load(Ordering::Acquire),
     }
 }
 
