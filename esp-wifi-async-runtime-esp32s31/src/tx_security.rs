@@ -180,9 +180,16 @@ pub const fn strict_tx_security_layout(
         // the 802.11 Protected bit is clear. The first strict AP bring-up
         // trapped this exact descriptor tuple before any state was mutated.
         4_u16
-    } else if input.frame_control == 0x4188
+    } else if (input.frame_control == 0x4188
         && matches!(input.descriptor_flags, 0x0000_2009 | 0x0200_2009)
-        && input.descriptor_security == 0x0000_0304
+        && input.descriptor_security == 0x0000_0304)
+        || (input.frame_control == 0x4288
+            && input.descriptor_flags == 0x0200_200d
+            && input.descriptor_security == 0x0004_0348
+            && input.header_len == 0x001a
+            && input.remaining_len == 0x00ab
+            && input.layout == 1
+            && input.buffer_flags == 0xc031_40d1)
     {
         // The security selector in bits 8..11 is 3. The pinned vendor table
         // maps that selector to the eight-byte CCMP MIC plus four-byte FCS.
@@ -841,6 +848,40 @@ mod tests {
                 ..expected
             }),
         );
+    }
+
+    #[test]
+    fn reproduces_transient_ap_message3_ccmp_layout() {
+        let measured = TxSecurityLayoutInput {
+            descriptor_security: 0x0004_0348,
+            ..input(0x00ab_001a, 1, 0xc031_40d1, 0x0200_200d, 0x4288)
+        };
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x22,
+                remaining_len: 0xb7,
+                layout: 0x2001,
+                buffer_flags: 0xc036_40d1,
+                metadata_len: 0xd1,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x4188,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0304,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                remaining_len: 0xaa,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
     }
 
     #[test]
