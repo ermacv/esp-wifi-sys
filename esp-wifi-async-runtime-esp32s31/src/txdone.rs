@@ -34,8 +34,11 @@ const CALLBACK_MGMT: u8 = 2;
 const CALLBACK_STA_EAPOL: u8 = 3;
 const CALLBACK_AP_BEACON: u8 = 4;
 const CALLBACK_AP_DATA: u8 = 11;
-const BASIC_MODE0_CALLBACKS: u32 =
-    (1 << CALLBACK_MGMT) | (1 << CALLBACK_AP_BEACON) | (1 << CALLBACK_AP_DATA);
+const CALLBACK_AP_POWER_SAVE: u8 = 12;
+const BASIC_MODE0_CALLBACKS: u32 = (1 << CALLBACK_MGMT)
+    | (1 << CALLBACK_AP_BEACON)
+    | (1 << CALLBACK_AP_DATA)
+    | (1 << CALLBACK_AP_POWER_SAVE);
 const BASIC_MODE1_CALLBACKS: u32 = 1 << CALLBACK_STA_EAPOL;
 
 const PHASE_IDLE: u8 = 0;
@@ -156,6 +159,7 @@ unsafe extern "C" {
     #[link_name = "__real_ieee80211_hostapd_beacon_txcb"]
     fn initialization_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
+    fn ieee80211_hostapd_ps_txcb(frame: *mut c_void);
     #[link_name = "ic_get_next_tbtt"]
     fn vendor_ic_get_next_tbtt() -> u32;
     fn hal_get_tsf_time(interface: u32) -> u32;
@@ -955,15 +959,75 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
         return Err(TxDoneError::CallbackRegistryMismatch(bit));
     }
 
-    callback(state.frame.cast());
-    if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
-        return Err(TxDoneError::StrictCallbackFailed);
+    if bit == CALLBACK_AP_POWER_SAVE {
+        strict_ap_power_save_txdone(state.frame)?;
+    } else {
+        callback(state.frame.cast());
+        if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {
+            return Err(TxDoneError::StrictCallbackFailed);
+        }
     }
     state.callbacks &= !(1 << bit);
     if state.callbacks == 0 {
         state.phase = PHASE_RECYCLE;
     }
     enqueue_step()
+}
+
+/// Consume the hostap power-save callback attached by the stock AP transmit
+/// leaf without entering its connection-node/TIM state machine.
+///
+/// The pinned callback performs only software power-save bookkeeping:
+/// `cnx_node_search`, counter updates and a possible `ieee80211_set_tim` call.
+/// Strict AP deliberately has no sleeping-client queues, while WPA2 EAPOL
+/// retransmission is owned by the Rust async state machine. Consequently the
+/// only valid use of callback slot 12 is the measured AP-to-station EAPOL
+/// frame. Ordinary data using this callback would require an explicit Rust
+/// power-save implementation and remains rejected.
+unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError> {
+    if frame.is_null() || !crate::esf::is_strict_recyclable_frame(frame) {
+        return Err(TxDoneError::NonStaticFrameType(if frame.is_null() {
+            u8::MAX
+        } else {
+            frame.add(FRAME_TYPE_OFFSET).read()
+        }));
+    }
+    let descriptor = descriptor(frame)?;
+    let descriptor_callbacks = descriptor
+        .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+        .cast::<u32>()
+        .read();
+    if descriptor_callbacks & (1 << CALLBACK_AP_POWER_SAVE) == 0 {
+        return Err(TxDoneError::UnsupportedCallbackBits(descriptor_callbacks));
+    }
+
+    let buffer = frame.add(4).cast::<*mut u8>().read();
+    if buffer.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    let mut header = buffer.add(4).cast::<*const u8>().read();
+    if header.is_null() {
+        return Err(TxDoneError::MissingDescriptor);
+    }
+    let layout = frame.add(0x24).cast::<u16>().read_unaligned();
+    if layout & 0x2000 != 0 {
+        header = header.add(8);
+    }
+    let frame_control = header.cast::<u16>().read_unaligned();
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let Some(header_len) = crate::tx_security::strict_ap_eapol_power_save_completion_header_len(
+        frame_control,
+        lengths as u16,
+        (lengths >> 16) as u16,
+        layout,
+    ) else {
+        return Err(TxDoneError::StrictCallbackFailed);
+    };
+    const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
+    if core::slice::from_raw_parts(header.add(header_len), LLC_EAPOL.len()) != LLC_EAPOL {
+        return Err(TxDoneError::StrictCallbackFailed);
+    }
+    Ok(())
 }
 
 unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
@@ -1149,6 +1213,7 @@ fn callback_for_bit(bit: u8) -> Option<TxCallback> {
         CALLBACK_MGMT => Some(__wrap_ieee80211_tx_mgt_cb),
         CALLBACK_AP_BEACON => Some(__wrap_ieee80211_hostapd_beacon_txcb),
         CALLBACK_AP_DATA => Some(ieee80211_hostapd_data_txcb),
+        CALLBACK_AP_POWER_SAVE => Some(ieee80211_hostapd_ps_txcb),
         _ => None,
     }
 }

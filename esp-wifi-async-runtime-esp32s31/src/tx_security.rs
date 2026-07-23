@@ -241,6 +241,30 @@ pub const fn strict_tx_security_layout(
     })
 }
 
+/// Return the 802.11 header length for the one measured AP EAPOL completion
+/// carrying the stock hostap power-save callback bit.
+///
+/// These are the exact post-security-layout values produced for WPA2 message
+/// one. Keeping this leaf closed prevents callback slot 12 from silently
+/// admitting ordinary power-save data, whose TIM/queue state is not owned by
+/// the strict Rust runtime.
+pub(crate) const fn strict_ap_eapol_power_save_completion_header_len(
+    frame_control: u16,
+    header_len: u16,
+    remaining_len: u16,
+    layout: u16,
+) -> Option<usize> {
+    if frame_control == 0x0288
+        && header_len == 0x22
+        && remaining_len == 0x6f
+        && layout == 0x2000
+    {
+        Some(0x1a)
+    } else {
+        None
+    }
+}
+
 /// SRAM-resident, allocation-free replacement for the measured plaintext and
 /// WPA2-CCMP branches of the vendor `ppProcTxSecFrame` leaf.
 ///
@@ -388,9 +412,11 @@ unsafe fn trap_invalid_tx_security_layout(input: TxSecurityLayoutInput) -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        strict_ap_beacon_completion_layout, strict_persistent_frame_completion_layout,
-        strict_tx_security_layout, ApBeaconCompletionLayout, PersistentFrameCompletionLayout,
-        TxSecurityLayoutInput, TxSecurityLayoutOutput,
+        strict_ap_beacon_completion_layout,
+        strict_ap_eapol_power_save_completion_header_len,
+        strict_persistent_frame_completion_layout, strict_tx_security_layout,
+        ApBeaconCompletionLayout, PersistentFrameCompletionLayout, TxSecurityLayoutInput,
+        TxSecurityLayoutOutput,
     };
 
     const fn input(
@@ -947,6 +973,27 @@ mod tests {
             },
         ] {
             assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn admits_only_measured_ap_eapol_power_save_completion() {
+        assert_eq!(
+            strict_ap_eapol_power_save_completion_header_len(0x0288, 0x22, 0x6f, 0x2000),
+            Some(0x1a)
+        );
+        for rejected in [
+            (0x0188, 0x22, 0x6f, 0x2000),
+            (0x0288, 0x1a, 0x6f, 0x2000),
+            (0x0288, 0x22, 0x6e, 0x2000),
+            (0x0288, 0x22, 0x6f, 0),
+        ] {
+            assert_eq!(
+                strict_ap_eapol_power_save_completion_header_len(
+                    rejected.0, rejected.1, rejected.2, rejected.3,
+                ),
+                None
+            );
         }
     }
 }
