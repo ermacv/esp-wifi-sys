@@ -1,10 +1,17 @@
 use core::{
+    cell::UnsafeCell,
     ffi::c_void,
     ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
 static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_arch = "riscv32")]
+use crate::{
+    rx_descriptor::{descriptor_buffer_length, recycled_descriptor_word},
+    timer::RawOsiTimer,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WdevRxContinuationError {
@@ -16,6 +23,81 @@ pub enum WdevRxContinuationError {
     DescriptorCountOverflow,
     DescriptorChainTooLong,
 }
+
+#[cfg(target_arch = "riscv32")]
+const MAX_RX_RECYCLE_DESCRIPTORS_PER_CHAIN: usize = 64;
+#[cfg(target_arch = "riscv32")]
+const RX_RELOAD_SETTLE_US: u32 = 5;
+#[cfg(target_arch = "riscv32")]
+const RX_DESCRIPTOR_NEXT_OFFSET: usize = 8;
+#[cfg(target_arch = "riscv32")]
+const RX_DESCRIPTOR_BUFFER_OFFSET: usize = 4;
+#[cfg(target_arch = "riscv32")]
+const RX_DESCRIPTOR_SENTINEL: u32 = 0xdead_beef;
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RxRecycleError {
+    WrongHart,
+    MissingHead,
+    MissingTail,
+    MissingBuffer,
+    TailMismatch,
+    ChainTooLong,
+    TimerUnavailable,
+    ReloadStillActive,
+    MissingHardwareTail,
+    UnexpectedCallback,
+}
+
+#[cfg(target_arch = "riscv32")]
+struct RxRecycleState {
+    reload_active: bool,
+    failed: bool,
+    reload_tail: *mut u8,
+    pending_head: *mut u8,
+    pending_tail: *mut u8,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl RxRecycleState {
+    const fn new() -> Self {
+        Self {
+            reload_active: false,
+            failed: false,
+            reload_tail: ptr::null_mut(),
+            pending_head: ptr::null_mut(),
+            pending_tail: ptr::null_mut(),
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+struct RxRecycleStateCell(UnsafeCell<RxRecycleState>);
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Sync for RxRecycleStateCell {}
+
+#[cfg(target_arch = "riscv32")]
+struct RxRecycleTimerCell(UnsafeCell<RawOsiTimer>);
+
+#[cfg(target_arch = "riscv32")]
+unsafe impl Sync for RxRecycleTimerCell {}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.rx_recycle_state"]
+static RX_RECYCLE_STATE: RxRecycleStateCell =
+    RxRecycleStateCell(UnsafeCell::new(RxRecycleState::new()));
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.rx_recycle_timer"]
+static RX_RECYCLE_TIMER: RxRecycleTimerCell = RxRecycleTimerCell(UnsafeCell::new(RawOsiTimer {
+    next: ptr::null_mut(),
+    expire: 0,
+    period: 0,
+    callback: None,
+    argument: ptr::null_mut(),
+}));
 
 unsafe extern "C" {
     #[link_name = "wDev_record_ftm_data"]
@@ -57,8 +139,261 @@ unsafe extern "C" {
     static mut wDevCtrl: u8;
     static mut g_wdev_last_desc_reset_ptr: *mut u8;
     static mut g_wdev_csi_rx: usize;
+    #[link_name = "wDev_AppendRxBlocks"]
+    fn vendor_append_rx_blocks(head: *mut u8, tail: *mut u8, count: u32);
+    fn __real_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8, count: u32);
     fn hal_mac_rx_get_last_dscr() -> *mut u8;
+    fn hal_mac_rx_is_dscr_reload() -> u32;
+    fn hal_mac_rx_read_rxdscrnext() -> *mut u8;
+    fn hal_mac_rx_set_base(descriptor: *mut u8);
+    fn hal_mac_rx_set_dscr_reload();
     fn wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn prepare_rx_recycle_chain(
+    head: *mut u8,
+    expected_tail: *mut u8,
+) -> Result<(), RxRecycleError> {
+    if head.is_null() {
+        return Err(RxRecycleError::MissingHead);
+    }
+    if expected_tail.is_null() {
+        return Err(RxRecycleError::MissingTail);
+    }
+
+    let mut descriptor = head;
+    let mut last = ptr::null_mut();
+    let mut seen = 0;
+    while !descriptor.is_null() {
+        if seen == MAX_RX_RECYCLE_DESCRIPTORS_PER_CHAIN {
+            return Err(RxRecycleError::ChainTooLong);
+        }
+        seen += 1;
+
+        let word_ptr = descriptor.cast::<u32>();
+        let word = word_ptr.read_unaligned();
+        let buffer = descriptor
+            .add(RX_DESCRIPTOR_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read_unaligned();
+        if buffer.is_null() {
+            return Err(RxRecycleError::MissingBuffer);
+        }
+        let next = descriptor
+            .add(RX_DESCRIPTOR_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read_unaligned();
+
+        word_ptr.write_unaligned(recycled_descriptor_word(word));
+        buffer.cast::<u32>().write_unaligned(RX_DESCRIPTOR_SENTINEL);
+        buffer
+            .add(descriptor_buffer_length(word))
+            .cast::<u32>()
+            .write_unaligned(RX_DESCRIPTOR_SENTINEL);
+
+        last = descriptor;
+        descriptor = next;
+    }
+    if last != expected_tail {
+        return Err(RxRecycleError::TailMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn append_pending_rx_recycle_chain(
+    state: &mut RxRecycleState,
+    head: *mut u8,
+    tail: *mut u8,
+) -> Result<(), RxRecycleError> {
+    if state.pending_head.is_null() {
+        if !state.pending_tail.is_null() {
+            return Err(RxRecycleError::MissingHead);
+        }
+        state.pending_head = head;
+        state.pending_tail = tail;
+        return Ok(());
+    }
+    if state.pending_tail.is_null() {
+        return Err(RxRecycleError::MissingTail);
+    }
+    state
+        .pending_tail
+        .add(RX_DESCRIPTOR_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(head);
+    state.pending_tail = tail;
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn arm_rx_reload_settle_timer() -> Result<(), RxRecycleError> {
+    if crate::adapter::schedule_internal_timer(
+        RX_RECYCLE_TIMER.0.get().cast(),
+        rx_reload_settled,
+        ptr::null_mut(),
+        RX_RELOAD_SETTLE_US,
+    ) {
+        Ok(())
+    } else {
+        Err(RxRecycleError::TimerUnavailable)
+    }
+}
+
+/// Attach one prepared descriptor chain without waiting for the MAC reload bit.
+///
+/// Returns `true` when a later timer continuation is required. The caller owns
+/// `state` and execution is serialized on the strict Wi-Fi hart.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn publish_rx_recycle_chain(
+    state: &mut RxRecycleState,
+    head: *mut u8,
+    tail: *mut u8,
+) -> Result<bool, RxRecycleError> {
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let control = ptr::addr_of_mut!(wDevCtrl);
+    let published_head = control.cast::<*mut u8>().read_unaligned();
+    if published_head.is_null() {
+        control.cast::<*mut u8>().write_unaligned(head);
+        control.add(4).cast::<*mut u8>().write_unaligned(tail);
+        hal_mac_rx_set_base(head);
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+        return Ok(false);
+    }
+
+    let published_tail = control.add(4).cast::<*mut u8>().read_unaligned();
+    if published_tail.is_null() {
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+        return Err(RxRecycleError::MissingTail);
+    }
+    published_tail
+        .add(RX_DESCRIPTOR_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(head);
+    control.add(4).cast::<*mut u8>().write_unaligned(tail);
+    state.reload_active = true;
+    state.reload_tail = tail;
+    hal_mac_rx_set_dscr_reload();
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    Ok(true)
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn publish_or_defer_rx_recycle_chain(
+    state: &mut RxRecycleState,
+    head: *mut u8,
+    tail: *mut u8,
+) -> Result<(), RxRecycleError> {
+    if state.reload_active {
+        let interrupt_state = crate::critical::strict_wifi_int_disable();
+        let result = append_pending_rx_recycle_chain(state, head, tail);
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+        return result;
+    }
+    if publish_rx_recycle_chain(state, head, tail)? {
+        arm_rx_reload_settle_timer()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
+    let state = &mut *RX_RECYCLE_STATE.0.get();
+    if state.failed || !state.reload_active {
+        fail_rx_recycle(state, RxRecycleError::UnexpectedCallback);
+    }
+    if !crate::critical::on_strict_wifi_hart() {
+        fail_rx_recycle(state, RxRecycleError::WrongHart);
+    }
+    // Exactly one status observation per async continuation. A MAC which has
+    // not completed within the declared settle interval is a hard invariant
+    // failure; it is never converted back into polling or a retry timer.
+    if hal_mac_rx_is_dscr_reload() != 0 {
+        fail_rx_recycle(state, RxRecycleError::ReloadStillActive);
+    }
+
+    let reload_tail = state.reload_tail;
+    if hal_mac_rx_read_rxdscrnext().is_null() {
+        let hardware_tail = hal_mac_rx_get_last_dscr();
+        if hardware_tail != reload_tail {
+            if hardware_tail.is_null() {
+                fail_rx_recycle(state, RxRecycleError::MissingHardwareTail);
+            }
+            let next = hardware_tail
+                .add(RX_DESCRIPTOR_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .read_unaligned();
+            if !next.is_null() {
+                hal_mac_rx_set_base(next);
+            }
+        }
+    }
+
+    state.reload_active = false;
+    state.reload_tail = ptr::null_mut();
+    let pending_head = state.pending_head;
+    let pending_tail = state.pending_tail;
+    state.pending_head = ptr::null_mut();
+    state.pending_tail = ptr::null_mut();
+    if !pending_head.is_null() {
+        if let Err(error) = publish_or_defer_rx_recycle_chain(state, pending_head, pending_tail) {
+            fail_rx_recycle(state, error);
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[cold]
+#[inline(never)]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn fail_rx_recycle(state: &mut RxRecycleState, _error: RxRecycleError) -> ! {
+    state.failed = true;
+    core::arch::asm!("ebreak", options(noreturn))
+}
+
+/// Allocation-free replacement for the vendor RX descriptor recycle leaf.
+///
+/// The stock implementation spins up to 100,001 times on the MAC reload bit.
+/// Strict mode instead formats a finite descriptor chain, publishes it under a
+/// local interrupt critical section and returns. Completion is checked once by
+/// an executor-driven Rust timer; additional chains coalesce in SRAM.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+pub unsafe extern "C" fn __wrap_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8, _count: u32) {
+    if !crate::critical::strict_wifi_hart_armed() {
+        __real_wDev_AppendRxBlocks(head, tail, _count);
+        return;
+    }
+    let state = &mut *RX_RECYCLE_STATE.0.get();
+    if state.failed || !crate::critical::on_strict_wifi_hart() {
+        fail_rx_recycle(state, RxRecycleError::WrongHart);
+    }
+    if let Err(error) = prepare_rx_recycle_chain(head, tail)
+        .and_then(|()| publish_or_defer_rx_recycle_chain(state, head, tail))
+    {
+        fail_rx_recycle(state, error);
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+fn runtime_rx_recycle_link_wrapper_active() -> bool {
+    core::ptr::eq(
+        vendor_append_rx_blocks as *const (),
+        __wrap_wDev_AppendRxBlocks as *const (),
+    )
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn runtime_rx_recycle_link_wrapper_active() -> bool {
+    true
 }
 
 /// Replace the vendor event-25 outer descriptor walk and both indirect OSI
@@ -203,7 +538,7 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_csi_rx_process as *const (),
         __wrap_wdev_csi_rx_process as *const (),
-    )
+    ) && runtime_rx_recycle_link_wrapper_active()
 }
 
 pub(crate) fn take_ftm_attempted() -> bool {

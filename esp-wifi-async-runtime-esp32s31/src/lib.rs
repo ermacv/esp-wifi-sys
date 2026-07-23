@@ -52,6 +52,7 @@ pub mod radio;
 pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;
+mod rx_descriptor;
 pub mod scan;
 mod sta_link;
 pub mod strict;

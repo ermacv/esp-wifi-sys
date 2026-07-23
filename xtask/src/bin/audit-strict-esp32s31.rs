@@ -102,6 +102,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wdev_csi_rx_process",
     "wDev_ftm_set_t1t4",
     "wDev_isNANPktInValidSlot",
+    "wDev_AppendRxBlocks",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
@@ -231,6 +232,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_wdev_csi_rx_process",
     "__wrap_wDev_ftm_set_t1t4",
     "__wrap_wDev_isNANPktInValidSlot",
+    "__wrap_wDev_AppendRxBlocks",
     "__wrap_wpa_sm_rx_eapol",
     "__wrap_wpa_ap_rx_eapol",
     "__wrap_hal_crypto_set_key_entry",
@@ -280,6 +282,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
 // public symbol directly to a uniquely named Rust function instead.
 const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
+    ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
     ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
     ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];
@@ -291,6 +294,7 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 const REQUIRED_SRAM_CODE: &[&str] = &[
     "esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue",
     "wifi_strict_env_is_chip",
+    "__wrap_wDev_AppendRxBlocks",
 ];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",

@@ -22,6 +22,9 @@ esf_buf_alloc = __wrap_esf_buf_alloc;
 __real_esf_buf_recycle = 0x2f800d24;
 esf_buf_recycle = __wrap_esf_buf_recycle;
 
+__real_wDev_AppendRxBlocks = 0x2f8010c4;
+wDev_AppendRxBlocks = __wrap_wDev_AppendRxBlocks;
+
 __real_hal_mac_get_txq_state = 0x2f800d3c;
 hal_mac_get_txq_state = __wrap_hal_mac_get_txq_state;
 

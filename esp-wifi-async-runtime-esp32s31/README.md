@@ -199,16 +199,21 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=wifi_assert
 ```
 
-The other ten entries (`esf_buf_alloc`, `esf_buf_recycle`,
+The other eleven entries (`esf_buf_alloc`, `esf_buf_recycle`,
 `ieee80211_set_tx_pti`, `lmacTxDone`, `hal_mac_get_txq_state`,
 `hal_mac_get_txq_complete`,
-`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, and
-`esp_test_tx_enab_statistics`) are ECO0 ROM exports. Do not pass them through
+`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`,
+`esp_test_tx_enab_statistics`, and `wDev_AppendRxBlocks`) are ECO0 ROM exports.
+Do not pass them through
 LLD `--wrap`: `esp-rom-sys` defines them with absolute linker-script
 assignments, and LLD would rewrite the Rust `__wrap_*` definition itself to a
 ROM address. Load `esp32s31-rom-wrap-overrides.x` after all `esp-rom-sys` ROM
 fragments instead. It pins each original address under `__real_*` and aliases
 the public entry to Rust without modifying ROM or a vendor archive.
+In strict mode the RX recycle replacement prepares at most 64 descriptors,
+publishes one chain under local interrupt masking, and returns immediately.
+The MAC reload completion is observed once from a Rust one-shot timer
+continuation; concurrently returned chains coalesce in fixed SRAM state.
 `ppTxProtoProc` uses the same late fragment but is a complete replacement, not
 a delegating probe: the fragment retains the unique
 `wifi_strict_pp_tx_proto_proc` Rust symbol and aliases the public ROM name
