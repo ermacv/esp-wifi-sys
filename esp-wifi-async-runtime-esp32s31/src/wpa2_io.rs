@@ -12,7 +12,7 @@ use core::{
 };
 
 use crate::{
-    command::{RadioCommandHandler, RadioCommandQueue},
+    command::{PendingCommandAction, RadioCommandHandler, RadioCommandQueue},
     data_tx::OwnedWifiDataTxFrame,
     wpa2::Wpa2Interface,
     wpa2_crypto::{Wpa2Ptk, WPA2_TK_LEN},
@@ -225,9 +225,11 @@ pub trait TryWpa2Io<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
         false
     }
 
-    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
-        Poll::Ready(())
+    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<PendingCommandAction> {
+        Poll::Ready(PendingCommandAction::Retry)
     }
+
+    fn cancel_retry(&mut self, _command: &Wpa2IoCommand<N>) {}
 }
 
 pub struct Wpa2IoHandler<B> {
@@ -266,8 +268,12 @@ where
         }
     }
 
-    fn poll_retry_ready(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    fn poll_retry_ready(&mut self, cx: &mut Context<'_>) -> Poll<PendingCommandAction> {
         self.backend.poll_retry_ready(cx)
+    }
+
+    fn cancel_retry(&mut self, command: Wpa2IoCommand<N>) {
+        self.backend.cancel_retry(&command);
     }
 }
 

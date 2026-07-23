@@ -725,6 +725,7 @@ mod target {
         let mut owned_peer = [0; 6];
         owned_peer.copy_from_slice(core::slice::from_raw_parts(peer, 6));
         let existed = release_peer(&owned_peer);
+        crate::ap_power_save::observe_peer_removed(&owned_peer);
         if EVENTS
             .try_send(Wpa2ApPeerEvent::Removed { peer: owned_peer })
             .is_err()
@@ -840,14 +841,20 @@ mod target {
     pub fn async_wpa2_ap_callbacks_installed() -> bool {
         CALLBACKS_INSTALLED.load(Ordering::Acquire)
     }
+
+    pub(crate) fn is_wpa2_ap_peer_associated(peer: &[u8; 6]) -> bool {
+        PEERS.iter().any(|slot| {
+            slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer }
+        })
+    }
 }
 
-#[cfg(target_arch = "riscv32")]
-pub(crate) use target::management_link_wrappers_active;
 #[cfg(target_arch = "riscv32")]
 pub use target::{
     async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks, Wpa2ApInstallError,
 };
+#[cfg(target_arch = "riscv32")]
+pub(crate) use target::{is_wpa2_ap_peer_associated, management_link_wrappers_active};
 
 #[cfg(test)]
 mod tests {

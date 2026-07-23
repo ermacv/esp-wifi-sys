@@ -112,8 +112,8 @@ pub use channel::{BoundedChannel, Receive, TrySendError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
 pub use command::{
-    RadioCommandHandler, RadioCommandQueue, RadioCommandReady, RadioCommandSnapshot,
-    RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,
+    PendingCommandAction, RadioCommandHandler, RadioCommandQueue, RadioCommandReady,
+    RadioCommandSnapshot, RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,
 };
 pub use context::{current_event, in_radio_context, RadioContextGuard};
 #[cfg(target_arch = "riscv32")]

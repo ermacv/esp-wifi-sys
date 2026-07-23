@@ -319,6 +319,7 @@ mod target {
 
     use super::*;
     use crate::{
+        command::PendingCommandAction,
         context::in_radio_context,
         data_rx::WifiDataInterface,
         data_tx::OwnedWifiDataTxFrame,
@@ -906,6 +907,7 @@ mod target {
         tx_poisoned: bool,
         ap_active_epoch: usize,
         ap_ps_poll_epoch: usize,
+        ap_removal_epoch: usize,
         ap_waiting_peer: [u8; 6],
         ap_retry_armed: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -939,6 +941,7 @@ mod target {
                 tx_poisoned: false,
                 ap_active_epoch: 0,
                 ap_ps_poll_epoch: 0,
+                ap_removal_epoch: 0,
                 ap_waiting_peer: [0; 6],
                 ap_retry_armed: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -1050,6 +1053,18 @@ mod target {
 
         fn has_ap_transmit_group_key(&self) -> bool {
             self.ap_transmit_group_hardware_index().is_some()
+        }
+
+        fn cancel_if_ap_peer_removed(&mut self, interface: Wpa2Interface, peer: &[u8; 6]) -> bool {
+            if interface != Wpa2Interface::AccessPoint
+                || peer[0] & 1 != 0
+                || crate::wpa2_ap::is_wpa2_ap_peer_associated(peer)
+            {
+                return false;
+            }
+            let _ = self.authorized_peers.set(*peer, false);
+            crate::ap_power_save::record_cancelled_transmit();
+            true
         }
 
         fn ap_transmit_group_hardware_index(&self) -> Option<u8> {
@@ -1584,6 +1599,19 @@ mod target {
                             command: Wpa2IoCommand::Transmit(frame),
                         });
                     }
+                    let Some(peer) = frame
+                        .as_bytes()
+                        .get(..6)
+                        .and_then(|bytes| <&[u8; 6]>::try_from(bytes).ok())
+                    else {
+                        return Err(Wpa2IoFailure {
+                            error: S31Wpa2IoError::TxLengthOverflow,
+                            command: Wpa2IoCommand::Transmit(frame),
+                        });
+                    };
+                    if self.cancel_if_ap_peer_removed(frame.interface(), peer) {
+                        return Ok(());
+                    }
                     if let Err(error) = self.submit_eapol(&frame) {
                         return Err(Wpa2IoFailure {
                             error,
@@ -1593,6 +1621,15 @@ mod target {
                     Ok(())
                 }
                 Wpa2IoCommand::TransmitData(frame) => {
+                    if self.cancel_if_ap_peer_removed(
+                        match frame.interface() {
+                            WifiDataInterface::Station => Wpa2Interface::Station,
+                            WifiDataInterface::AccessPoint => Wpa2Interface::AccessPoint,
+                        },
+                        frame.destination(),
+                    ) {
+                        return Ok(());
+                    }
                     self.try_transmit_wifi_data(&frame)
                         .map_err(|error| Wpa2IoFailure {
                             error,
@@ -1630,17 +1667,49 @@ mod target {
             self.ap_waiting_peer = peer;
             self.ap_active_epoch = crate::ap_power_save::active_epoch(&peer);
             self.ap_ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
+            self.ap_removal_epoch = crate::ap_power_save::removal_epoch(&peer);
             self.ap_retry_armed = true;
             true
         }
 
-        fn poll_retry_ready(&mut self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
-            crate::ap_power_save::poll_peer_edge(
+        fn poll_retry_ready(
+            &mut self,
+            cx: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<PendingCommandAction> {
+            match crate::ap_power_save::poll_peer_edge(
                 self.ap_active_epoch,
                 self.ap_ps_poll_epoch,
+                self.ap_removal_epoch,
                 &self.ap_waiting_peer,
                 cx,
-            )
+            ) {
+                core::task::Poll::Ready(crate::ap_power_save::PeerEdge::Retry) => {
+                    core::task::Poll::Ready(PendingCommandAction::Retry)
+                }
+                core::task::Poll::Ready(crate::ap_power_save::PeerEdge::Removed) => {
+                    core::task::Poll::Ready(PendingCommandAction::Cancel)
+                }
+                core::task::Poll::Pending => core::task::Poll::Pending,
+            }
+        }
+
+        fn cancel_retry(&mut self, command: &Wpa2IoCommand<N>) {
+            let matches_waiting_peer = match command {
+                Wpa2IoCommand::Transmit(frame) => {
+                    frame.interface() == Wpa2Interface::AccessPoint
+                        && frame.as_bytes().get(..6) == Some(&self.ap_waiting_peer)
+                }
+                Wpa2IoCommand::TransmitData(frame) => {
+                    frame.interface() == WifiDataInterface::AccessPoint
+                        && frame.destination() == &self.ap_waiting_peer
+                }
+                _ => false,
+            };
+            if matches_waiting_peer {
+                let _ = self.authorized_peers.set(self.ap_waiting_peer, false);
+                self.ap_retry_armed = false;
+                crate::ap_power_save::record_cancelled_transmit();
+            }
         }
     }
 }

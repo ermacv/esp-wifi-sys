@@ -147,6 +147,12 @@ impl<C, const N: usize> Future for RadioCommandReady<'_, C, N> {
 }
 
 /// Run-to-completion handler owned exclusively by [`RadioOwnerFuture`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingCommandAction {
+    Retry,
+    Cancel,
+}
+
 pub trait RadioCommandHandler<C> {
     type Error;
 
@@ -161,9 +167,16 @@ pub trait RadioCommandHandler<C> {
         Err(error)
     }
 
-    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
-        Poll::Ready(())
+    fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<PendingCommandAction> {
+        Poll::Ready(PendingCommandAction::Retry)
     }
+
+    /// Cancel one command retained after a transient failure.
+    ///
+    /// This runs under the same logical radio identity as `handle`. The
+    /// default simply drops the owned command; specialized handlers may first
+    /// revoke state that made the command admissible.
+    fn cancel_retry(&mut self, _command: C) {}
 }
 
 /// Polls application commands and the Wi-Fi runtime on the same executor
@@ -222,7 +235,18 @@ where
         if self.pending_command.is_some() {
             match self.handler.poll_retry_ready(cx) {
                 Poll::Pending => retry_blocked = true,
-                Poll::Ready(()) => {
+                Poll::Ready(PendingCommandAction::Cancel) => {
+                    let command = self
+                        .pending_command
+                        .take()
+                        .expect("pending command checked above");
+                    {
+                        let _radio_context = RadioContextGuard::enter(RADIO_COMMAND_CONTEXT_EVENT);
+                        self.handler.cancel_retry(command);
+                    }
+                    received = 1;
+                }
+                Poll::Ready(PendingCommandAction::Retry) => {
                     let command = self
                         .pending_command
                         .take()
@@ -299,7 +323,7 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{RadioCommandHandler, RadioCommandQueue, RadioOwnerFuture};
+    use super::{PendingCommandAction, RadioCommandHandler, RadioCommandQueue, RadioOwnerFuture};
     use crate::context::in_radio_context;
 
     #[derive(Default)]
@@ -313,6 +337,9 @@ mod tests {
         attempts: usize,
         sum: u32,
         ready: bool,
+        cancel: bool,
+        cancelled: u32,
+        cancel_in_radio_context: bool,
     }
 
     impl RadioCommandHandler<u32> for RetryHandler {
@@ -336,12 +363,19 @@ mod tests {
             }
         }
 
-        fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
-            if self.ready {
-                Poll::Ready(())
+        fn poll_retry_ready(&mut self, _cx: &mut Context<'_>) -> Poll<PendingCommandAction> {
+            if self.cancel {
+                Poll::Ready(PendingCommandAction::Cancel)
+            } else if self.ready {
+                Poll::Ready(PendingCommandAction::Retry)
             } else {
                 Poll::Pending
             }
+        }
+
+        fn cancel_retry(&mut self, command: u32) {
+            self.cancelled += command;
+            self.cancel_in_radio_context = in_radio_context();
         }
     }
 
@@ -409,5 +443,28 @@ mod tests {
         assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
         assert_eq!(owner.handler().attempts, 2);
         assert_eq!(owner.handler().sum, 7);
+    }
+
+    #[test]
+    fn owner_cancels_pending_command_and_continues_the_queue() {
+        let commands = RadioCommandQueue::<u32, 2>::new();
+        commands.try_submit(7).unwrap();
+        commands.try_submit(9).unwrap();
+        let mut owner =
+            RadioOwnerFuture::new(pending::<()>(), &commands, RetryHandler::default(), 2);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
+        assert_eq!(owner.handler().attempts, 1);
+        assert_eq!(owner.handler().sum, 0);
+
+        owner.handler_mut().cancel = true;
+        assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
+        assert_eq!(owner.handler().attempts, 2);
+        assert_eq!(owner.handler().cancelled, 7);
+        assert!(owner.handler().cancel_in_radio_context);
+        assert_eq!(owner.handler().sum, 9);
+        assert_eq!(commands.len(), 0);
     }
 }

@@ -19,17 +19,20 @@ static PS_POLL_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static PEER_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static SLEEP_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+static REMOVAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEFERRED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
+static CANCELLED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
 
 // This matches the fixed WPA2 AP association capacity. The table is written
-// only by the serialized radio-owner RX pump. Atomic fields keep diagnostic
-// readers and waker publication well-defined without a critical section.
+// only by serialized callbacks on the radio owner. Atomic fields keep waker
+// publication well-defined without a critical section.
 const PEER_EVENT_CAPACITY: usize = crate::wpa2_ap::WPA2_AP_ASSOC_CAPACITY;
 
 struct PeerEventSlot {
     peer: [AtomicU8; 6],
     active_epoch: AtomicUsize,
     ps_poll_epoch: AtomicUsize,
+    removal_epoch: AtomicUsize,
 }
 
 impl PeerEventSlot {
@@ -38,6 +41,7 @@ impl PeerEventSlot {
             peer: [const { AtomicU8::new(0) }; 6],
             active_epoch: AtomicUsize::new(0),
             ps_poll_epoch: AtomicUsize::new(0),
+            removal_epoch: AtomicUsize::new(0),
         }
     }
 
@@ -52,6 +56,7 @@ impl PeerEventSlot {
         self.active_epoch
             .load(Ordering::Acquire)
             .max(self.ps_poll_epoch.load(Ordering::Acquire))
+            .max(self.removal_epoch.load(Ordering::Acquire))
     }
 
     fn replace_peer(&self, peer: &[u8; 6]) {
@@ -59,6 +64,7 @@ impl PeerEventSlot {
         // its key so a reader cannot attach an old credit to the new peer.
         self.active_epoch.store(0, Ordering::Release);
         self.ps_poll_epoch.store(0, Ordering::Release);
+        self.removal_epoch.store(0, Ordering::Release);
         for (stored, value) in self.peer.iter().zip(peer) {
             stored.store(*value, Ordering::Relaxed);
         }
@@ -72,6 +78,7 @@ static PEER_EVENTS: [PeerEventSlot; PEER_EVENT_CAPACITY] =
 enum PeerEvent {
     Active(usize),
     PsPoll(usize),
+    Removed(usize),
 }
 
 fn publish_peer_event(peer: &[u8; 6], event: PeerEvent) {
@@ -98,6 +105,7 @@ fn publish_in_slot(slot: &PeerEventSlot, event: PeerEvent) {
     match event {
         PeerEvent::Active(epoch) => slot.active_epoch.store(epoch, Ordering::Release),
         PeerEvent::PsPoll(epoch) => slot.ps_poll_epoch.store(epoch, Ordering::Release),
+        PeerEvent::Removed(epoch) => slot.removal_epoch.store(epoch, Ordering::Release),
     }
 }
 
@@ -114,16 +122,17 @@ fn next_peer_event_epoch() -> usize {
     }
 }
 
-fn peer_epochs(peer: &[u8; 6]) -> (usize, usize) {
+fn peer_epochs(peer: &[u8; 6]) -> (usize, usize, usize) {
     for slot in &PEER_EVENTS {
         if slot.matches(peer) {
             return (
                 slot.active_epoch.load(Ordering::Acquire),
                 slot.ps_poll_epoch.load(Ordering::Acquire),
+                slot.removal_epoch.load(Ordering::Acquire),
             );
         }
     }
-    (0, 0)
+    (0, 0, 0)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -131,7 +140,9 @@ pub struct ApPowerSaveSnapshot {
     pub sleep_observations: usize,
     pub active_observations: usize,
     pub ps_poll_observations: usize,
+    pub removal_observations: usize,
     pub deferred_transmits: usize,
+    pub cancelled_transmits: usize,
 }
 
 pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
@@ -139,16 +150,17 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
         sleep_observations: SLEEP_OBSERVATIONS.load(Ordering::Acquire),
         active_observations: ACTIVE_OBSERVATIONS.load(Ordering::Acquire),
         ps_poll_observations: PS_POLL_EPOCH.load(Ordering::Acquire),
+        removal_observations: REMOVAL_OBSERVATIONS.load(Ordering::Acquire),
         deferred_transmits: DEFERRED_TRANSMITS.load(Ordering::Acquire),
+        cancelled_transmits: CANCELLED_TRANSMITS.load(Ordering::Acquire),
     }
 }
 
 /// Observe a raw 802.11 frame before the vendor receive callback consumes it.
 ///
 /// Only an infrastructure data frame directed to the AP can publish a client
-/// power-management transition. The source address is deliberately not
-/// retained: the deferred command is revalidated against its destination node
-/// when retried, so another peer can cause at most one bounded failed attempt.
+/// power-management transition. Readiness is retained per source address so
+/// one peer cannot wake or cancel a command owned by another peer.
 pub(crate) fn observe_frame(frame: &[u8]) {
     if frame.len() < 2 {
         return;
@@ -197,6 +209,22 @@ pub(crate) fn record_deferred_transmit() {
     DEFERRED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
 
+pub(crate) fn observe_peer_removed(peer: &[u8; 6]) {
+    REMOVAL_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+    publish_peer_event(peer, PeerEvent::Removed(next_peer_event_epoch()));
+    ACTIVE_EDGE.wake();
+}
+
+pub(crate) fn record_cancelled_transmit() {
+    CANCELLED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PeerEdge {
+    Retry,
+    Removed,
+}
+
 /// Register the radio owner for the next RX-derived active-mode edge.
 ///
 /// Readiness is never produced by inspecting node state, avoiding a status or
@@ -209,6 +237,10 @@ pub(crate) fn ps_poll_epoch(peer: &[u8; 6]) -> usize {
     peer_epochs(peer).1
 }
 
+pub(crate) fn removal_epoch(peer: &[u8; 6]) -> usize {
+    peer_epochs(peer).2
+}
+
 pub(crate) fn ps_poll_credit_after(after: usize, peer: &[u8; 6]) -> Option<usize> {
     let epoch = ps_poll_epoch(peer);
     (epoch != 0 && epoch != after).then_some(epoch)
@@ -217,12 +249,17 @@ pub(crate) fn ps_poll_credit_after(after: usize, peer: &[u8; 6]) -> Option<usize
 pub(crate) fn poll_peer_edge(
     active_after: usize,
     ps_poll_after: usize,
+    removal_after: usize,
     peer: &[u8; 6],
     cx: &mut Context<'_>,
-) -> Poll<()> {
+) -> Poll<PeerEdge> {
     ACTIVE_EDGE.register(cx.waker());
-    if active_epoch(peer) != active_after || ps_poll_credit_after(ps_poll_after, peer).is_some() {
-        Poll::Ready(())
+    if removal_epoch(peer) != removal_after {
+        Poll::Ready(PeerEdge::Removed)
+    } else if active_epoch(peer) != active_after
+        || ps_poll_credit_after(ps_poll_after, peer).is_some()
+    {
+        Poll::Ready(PeerEdge::Retry)
     } else {
         Poll::Pending
     }
@@ -231,8 +268,10 @@ pub(crate) fn poll_peer_edge(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_epoch, ap_power_save_snapshot, observe_frame, ps_poll_credit_after, ps_poll_epoch,
+        active_epoch, ap_power_save_snapshot, observe_frame, observe_peer_removed, poll_peer_edge,
+        ps_poll_credit_after, ps_poll_epoch, removal_epoch, PeerEdge,
     };
+    use core::task::{Context, Poll, Waker};
 
     #[test]
     fn only_to_ds_data_publishes_power_state() {
@@ -290,5 +329,29 @@ mod tests {
         observe_frame(&frame);
         assert_ne!(active_epoch(&peer), before);
         assert_eq!(active_epoch(&other), other_before);
+    }
+
+    #[test]
+    fn peer_removal_cancels_only_the_matching_waiter() {
+        let peer = [30, 2, 3, 4, 5, 6];
+        let other = [31, 2, 3, 4, 5, 6];
+        let active_before = active_epoch(&peer);
+        let ps_poll_before = ps_poll_epoch(&peer);
+        let removal_before = removal_epoch(&peer);
+        let other_removal_before = removal_epoch(&other);
+        observe_peer_removed(&peer);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert_eq!(
+            poll_peer_edge(
+                active_before,
+                ps_poll_before,
+                removal_before,
+                &peer,
+                &mut context,
+            ),
+            Poll::Ready(PeerEdge::Removed)
+        );
+        assert_eq!(removal_epoch(&other), other_removal_before);
     }
 }
