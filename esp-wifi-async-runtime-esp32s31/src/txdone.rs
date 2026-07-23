@@ -315,7 +315,7 @@ pub fn strict_management_tx_done_snapshot() -> StrictManagementTxDoneSnapshot {
 }
 
 const fn is_ap_deauthentication_completion(frame_control: u16, descriptor_security: u32) -> bool {
-    frame_control & 0x00fc == 0x00c0 && descriptor_security & 0x00c0_0000 == 0x0040_0000
+    frame_control & 0x00fc == 0x00c0 && descriptor_security & 0x0500_0000 != 0
 }
 
 #[cfg(target_arch = "riscv32")]
