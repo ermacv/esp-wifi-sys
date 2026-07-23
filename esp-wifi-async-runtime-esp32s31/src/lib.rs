@@ -296,8 +296,8 @@ pub use wpa2_ap::{
 };
 pub use wpa2_ap::{
     receive_wpa2_ap_event, rejected_wpa2_ap_events, try_receive_wpa2_ap_event,
-    validate_wpa2_ap_rsn, wpa2_ap_join_snapshot, Wpa2ApJoinSnapshot, Wpa2ApPeerEvent,
-    Wpa2ApRsnError, WPA2_AP_ASSOC_CAPACITY,
+    validate_wpa2_ap_rsn, wpa2_ap_join_snapshot, ManagementTxRejectionSnapshot, Wpa2ApJoinSnapshot,
+    Wpa2ApPeerEvent, Wpa2ApRsnError, WPA2_AP_ASSOC_CAPACITY,
 };
 pub use wpa2_ap_async::{
     complete_wpa2_ap_message2, complete_wpa2_ap_message3, complete_wpa2_ap_message4,

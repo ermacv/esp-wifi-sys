@@ -78,6 +78,20 @@ pub struct Wpa2ApJoinSnapshot {
     pub last_rsn_prefix: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ManagementTxRejectionSnapshot {
+    pub count: usize,
+    pub reason: u32,
+    pub subtype: u8,
+    pub node: usize,
+    pub buffer: usize,
+    pub frame_control: u16,
+    pub category: u8,
+    pub action: u8,
+    pub interface_mode: u32,
+    pub node_flags: u32,
+}
+
 fn rsn_error_code(error: Wpa2ApRsnError) -> u8 {
     match error {
         Wpa2ApRsnError::Malformed => 1,
@@ -334,7 +348,57 @@ mod target {
     static AP_RSN_LEN: AtomicUsize = AtomicUsize::new(0);
     static AP_CONTEXT: StaticByte = StaticByte(UnsafeCell::new(0));
     static CALLBACKS_INSTALLED: AtomicBool = AtomicBool::new(false);
-    static REJECTED_MANAGEMENT_TX: AtomicUsize = AtomicUsize::new(0);
+    #[repr(u32)]
+    enum ManagementTxRejectionReason {
+        WrongHart = 1,
+        OutsideRadioContext = 2,
+        NullNode = 3,
+        NullBuffer = 4,
+        UnsupportedSubtype = 5,
+        MeshEnabled = 6,
+        OffHomeChannel = 7,
+        NullInterface = 8,
+        UnsupportedInterfaceMode = 9,
+        ApNodeState = 10,
+        PtiWrongHart = 11,
+        PtiNullBuffer = 12,
+        PtiMissingDescriptor = 13,
+        PtiEventOutOfRange = 14,
+    }
+
+    struct ManagementTxRejectionDiagnostics {
+        count: AtomicUsize,
+        reason: AtomicUsize,
+        subtype: AtomicU8,
+        node: AtomicUsize,
+        buffer: AtomicUsize,
+        frame_control: AtomicUsize,
+        category: AtomicU8,
+        action: AtomicU8,
+        interface_mode: AtomicUsize,
+        node_flags: AtomicUsize,
+    }
+
+    impl ManagementTxRejectionDiagnostics {
+        const fn new() -> Self {
+            Self {
+                count: AtomicUsize::new(0),
+                reason: AtomicUsize::new(0),
+                subtype: AtomicU8::new(0),
+                node: AtomicUsize::new(0),
+                buffer: AtomicUsize::new(0),
+                frame_control: AtomicUsize::new(0),
+                category: AtomicU8::new(0),
+                action: AtomicU8::new(0),
+                interface_mode: AtomicUsize::new(u32::MAX as usize),
+                node_flags: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[link_section = ".critical.bss.wifi_strict.management_tx_rejection"]
+    static MANAGEMENT_TX_REJECTION: ManagementTxRejectionDiagnostics =
+        ManagementTxRejectionDiagnostics::new();
     static PTI_REJECTED_BUFFER: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
@@ -525,17 +589,83 @@ mod target {
         }
     }
 
-    fn record_management_tx_rejection(subtype: u8, argument: usize) {
-        REJECTED_MANAGEMENT_TX.fetch_add(1, Ordering::Relaxed);
-        crate::adapter::blocking_probe().record(
-            crate::diagnostics::BlockingCall::ManagementTxRejected,
-            u32::from(subtype),
-            argument,
-        );
+    unsafe fn record_management_tx_rejection(
+        reason: ManagementTxRejectionReason,
+        subtype: u8,
+        node: *mut u8,
+        buffer: *mut u8,
+    ) {
+        let mut frame_control = 0_u16;
+        let mut category = 0_u8;
+        let mut action = 0_u8;
+        if !buffer.is_null() {
+            let mut header = buffer.add(4).cast::<*mut u8>().read_unaligned();
+            if !header.is_null() {
+                if buffer.add(0x24).cast::<u16>().read_unaligned() & 0x2000 != 0 {
+                    header = header.add(8);
+                }
+                frame_control = header.cast::<u16>().read_unaligned();
+                if frame_control & 0x00fc == 0x00d0 {
+                    category = header.add(24).read();
+                    action = header.add(25).read();
+                }
+            }
+        }
+        let interface = if node.is_null() {
+            ptr::null_mut()
+        } else {
+            node.cast::<*mut u8>().read_unaligned()
+        };
+        let interface_mode = if interface.is_null() {
+            u32::MAX
+        } else {
+            interface.add(0x138).cast::<u32>().read_unaligned()
+        };
+        let node_flags = if node.is_null() {
+            0
+        } else {
+            node.add(0x0c).cast::<u32>().read_unaligned()
+        };
+
+        MANAGEMENT_TX_REJECTION
+            .subtype
+            .store(subtype, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .node
+            .store(node as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .buffer
+            .store(buffer as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .frame_control
+            .store(usize::from(frame_control), Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .category
+            .store(category, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .action
+            .store(action, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .interface_mode
+            .store(interface_mode as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .node_flags
+            .store(node_flags as usize, Ordering::Relaxed);
+        MANAGEMENT_TX_REJECTION
+            .reason
+            .store(reason as usize, Ordering::Release);
+        MANAGEMENT_TX_REJECTION
+            .count
+            .fetch_add(1, Ordering::Release);
     }
 
-    unsafe fn reject_management_tx(subtype: u8, node: *mut u8, buffer: *mut u8) -> i32 {
-        record_management_tx_rejection(subtype, node as usize);
+    unsafe fn reject_management_tx(
+        reason: ManagementTxRejectionReason,
+        subtype: u8,
+        node: *mut u8,
+        buffer: *mut u8,
+    ) -> i32 {
+        record_management_tx_rejection(reason, subtype, node, buffer);
         if !buffer.is_null() && crate::critical::on_strict_wifi_hart() {
             esf_buf_recycle(buffer.cast());
         }
@@ -577,30 +707,55 @@ mod target {
         }
         let subtype_allowed = matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
             || crate::sta_link::is_owned_action_management(buffer, subtype);
-        if !crate::critical::on_strict_wifi_hart()
-            || !crate::context::in_radio_context()
-            || node.is_null()
-            || buffer.is_null()
-            || !subtype_allowed
-            || ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0
-            || !chm_is_at_home_channel()
-        {
-            return reject_management_tx(subtype, node, buffer);
+        let rejection = if !crate::critical::on_strict_wifi_hart() {
+            Some(ManagementTxRejectionReason::WrongHart)
+        } else if !crate::context::in_radio_context() {
+            Some(ManagementTxRejectionReason::OutsideRadioContext)
+        } else if node.is_null() {
+            Some(ManagementTxRejectionReason::NullNode)
+        } else if buffer.is_null() {
+            Some(ManagementTxRejectionReason::NullBuffer)
+        } else if !subtype_allowed {
+            Some(ManagementTxRejectionReason::UnsupportedSubtype)
+        } else if ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0 {
+            Some(ManagementTxRejectionReason::MeshEnabled)
+        } else if !chm_is_at_home_channel() {
+            Some(ManagementTxRejectionReason::OffHomeChannel)
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            return reject_management_tx(reason, subtype, node, buffer);
         }
         let interface = node.cast::<*mut u8>().read();
         if interface.is_null() {
-            return reject_management_tx(subtype, node, buffer);
+            return reject_management_tx(
+                ManagementTxRejectionReason::NullInterface,
+                subtype,
+                node,
+                buffer,
+            );
         }
         let mode = interface.add(0x138).cast::<u32>().read();
         if mode > 1 {
-            return reject_management_tx(subtype, node, buffer);
+            return reject_management_tx(
+                ManagementTxRejectionReason::UnsupportedInterfaceMode,
+                subtype,
+                node,
+                buffer,
+            );
         }
         if mode == 1
             && (node.add(0x04).read() & 1 != 0
                 || node.add(0x0c).cast::<u32>().read() & 0x10 != 0
                 || node.add(0x2fe).read() != 0)
         {
-            return reject_management_tx(subtype, node, buffer);
+            return reject_management_tx(
+                ManagementTxRejectionReason::ApNodeState,
+                subtype,
+                node,
+                buffer,
+            );
         }
         __real_ieee80211_mgmt_output(node, buffer, subtype)
     }
@@ -618,19 +773,44 @@ mod target {
             return;
         }
         PTI_REJECTED_BUFFER.store(0, Ordering::Release);
-        if !crate::critical::on_strict_wifi_hart() || buffer.is_null() {
-            record_management_tx_rejection(event as u8, buffer as usize);
+        if !crate::critical::on_strict_wifi_hart() {
+            record_management_tx_rejection(
+                ManagementTxRejectionReason::PtiWrongHart,
+                event as u8,
+                ptr::null_mut(),
+                buffer,
+            );
+            PTI_REJECTED_BUFFER.store(rejected_buffer_key(buffer), Ordering::Release);
+            return;
+        }
+        if buffer.is_null() {
+            record_management_tx_rejection(
+                ManagementTxRejectionReason::PtiNullBuffer,
+                event as u8,
+                ptr::null_mut(),
+                buffer,
+            );
             PTI_REJECTED_BUFFER.store(rejected_buffer_key(buffer), Ordering::Release);
             return;
         }
         let descriptor = buffer.add(0x34).cast::<*mut u8>().read();
         if descriptor.is_null() {
-            record_management_tx_rejection(event as u8, buffer as usize);
+            record_management_tx_rejection(
+                ManagementTxRejectionReason::PtiMissingDescriptor,
+                event as u8,
+                ptr::null_mut(),
+                buffer,
+            );
             PTI_REJECTED_BUFFER.store(rejected_buffer_key(buffer), Ordering::Release);
             return;
         }
         if event >= 48 {
-            record_management_tx_rejection(event as u8, buffer as usize);
+            record_management_tx_rejection(
+                ManagementTxRejectionReason::PtiEventOutOfRange,
+                event as u8,
+                ptr::null_mut(),
+                buffer,
+            );
             PTI_REJECTED_BUFFER.store(rejected_buffer_key(buffer), Ordering::Release);
             return;
         }
@@ -853,6 +1033,25 @@ mod target {
         CALLBACKS_INSTALLED.load(Ordering::Acquire)
     }
 
+    pub fn management_tx_rejection_snapshot() -> ManagementTxRejectionSnapshot {
+        ManagementTxRejectionSnapshot {
+            count: MANAGEMENT_TX_REJECTION.count.load(Ordering::Acquire),
+            reason: MANAGEMENT_TX_REJECTION.reason.load(Ordering::Acquire) as u32,
+            subtype: MANAGEMENT_TX_REJECTION.subtype.load(Ordering::Acquire),
+            node: MANAGEMENT_TX_REJECTION.node.load(Ordering::Acquire),
+            buffer: MANAGEMENT_TX_REJECTION.buffer.load(Ordering::Acquire),
+            frame_control: MANAGEMENT_TX_REJECTION
+                .frame_control
+                .load(Ordering::Acquire) as u16,
+            category: MANAGEMENT_TX_REJECTION.category.load(Ordering::Acquire),
+            action: MANAGEMENT_TX_REJECTION.action.load(Ordering::Acquire),
+            interface_mode: MANAGEMENT_TX_REJECTION
+                .interface_mode
+                .load(Ordering::Acquire) as u32,
+            node_flags: MANAGEMENT_TX_REJECTION.node_flags.load(Ordering::Acquire) as u32,
+        }
+    }
+
     pub(crate) fn wpa2_ap_peer_association_epoch(peer: &[u8; 6]) -> Option<usize> {
         PEERS.iter().find_map(|slot| {
             (slot.claimed.load(Ordering::Acquire) && unsafe { station_mac(slot) == *peer })
@@ -863,7 +1062,8 @@ mod target {
 
 #[cfg(target_arch = "riscv32")]
 pub use target::{
-    async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks, Wpa2ApInstallError,
+    async_wpa2_ap_callbacks_installed, install_async_wpa2_ap_callbacks,
+    management_tx_rejection_snapshot, Wpa2ApInstallError,
 };
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{management_link_wrappers_active, wpa2_ap_peer_association_epoch};
@@ -920,9 +1120,7 @@ mod tests {
         zero_pmkid[..22].copy_from_slice(&rsn(4, 2, 0));
         zero_pmkid[1] = 22;
         assert_eq!(
-            validate_wpa2_ap_rsn(&zero_pmkid)
-                .unwrap()
-                .as_bytes(),
+            validate_wpa2_ap_rsn(&zero_pmkid).unwrap().as_bytes(),
             &zero_pmkid
         );
 
