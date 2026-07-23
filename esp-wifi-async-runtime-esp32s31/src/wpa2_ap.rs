@@ -639,10 +639,14 @@ mod target {
                         header = header.add(8);
                     }
                     frame_control = header.cast::<u16>().read_unaligned();
-                    if frame_control & 0x00fc == 0x00d0 {
-                        category = header.add(24).read();
-                        action = header.add(25).read();
-                    }
+                    // `ieee80211_mgmt_output` receives a buffer whose body has
+                    // already been constructed, but `ieee80211_send_setup`
+                    // has not replaced the 802.11 header yet. A recycled
+                    // buffer can therefore still expose the previous frame
+                    // control while the action body at the fixed 24-byte
+                    // management-header offset is already authoritative.
+                    category = header.add(24).read();
+                    action = header.add(25).read();
                 }
             }
         }
