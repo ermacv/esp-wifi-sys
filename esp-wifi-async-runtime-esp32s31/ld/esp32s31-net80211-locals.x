@@ -10,6 +10,17 @@ EXTERN(ap_rxcb)
 
 SECTIONS
 {
+  .text.esp_wifi_async_net80211 : ALIGN(2)
+  {
+    __esp_s31_addba_response_txcb = .;
+    KEEP(*(.text.addba_response_txcb))
+    __esp_s31_addba_response_txcb_end = .;
+  } > ROTEXT
+}
+INSERT BEFORE .text;
+
+SECTIONS
+{
   .bss.esp_wifi_async_net80211 (NOLOAD) : ALIGN(4)
   {
     __esp_s31_beacon_send_start_flag = .;
@@ -50,3 +61,6 @@ ASSERT(__esp_s31_ap_rxcb_end - __esp_s31_ap_rxcb == 0x4,
 ASSERT(__esp_s31_beacon_dtim_send_mc_end -
        __esp_s31_beacon_dtim_send_mc == 0x1,
        "ESP32-S31 beacon DTIM flag ABI changed");
+ASSERT(__esp_s31_addba_response_txcb_end -
+       __esp_s31_addba_response_txcb == 0x11c,
+       "ESP32-S31 ADDBA response callback ABI changed");

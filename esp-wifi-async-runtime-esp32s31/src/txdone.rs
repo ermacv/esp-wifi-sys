@@ -204,6 +204,7 @@ unsafe extern "C" {
     fn initialization_hostapd_beacon_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_ps_txcb(frame: *mut c_void);
+    #[link_name = "__esp_s31_addba_response_txcb"]
     fn addba_response_txcb(frame: *mut c_void);
     #[link_name = "ic_get_next_tbtt"]
     fn vendor_ic_get_next_tbtt() -> u32;
