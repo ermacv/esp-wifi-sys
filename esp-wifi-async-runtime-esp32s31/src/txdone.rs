@@ -12,6 +12,11 @@ use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
 use crate::event::PpEvent;
 
+#[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+unsafe extern "C" {
+    fn ets_printf(format: *const u8, ...) -> i32;
+}
+
 pub(crate) const TX_DONE_CONTINUATION: u32 = u32::MAX - 2;
 pub(crate) const LMAC_TX_DONE_CONTINUATION: u32 = u32::MAX - 3;
 
@@ -979,6 +984,27 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
     enqueue_step()
 }
 
+const fn is_strict_ap_group_power_save_completion(
+    frame_control: u16,
+    header_len: u16,
+    remaining_len: u16,
+    layout: u16,
+    buffer_flags: u32,
+    descriptor_flags: u32,
+    descriptor_security: u32,
+) -> bool {
+    frame_control == 0x4208
+        && descriptor_flags == 0x0000_200b
+        && descriptor_security == 0x0004_0342
+        && header_len == 0x0020
+        && layout >= 0x2000
+        && layout <= 0x2003
+        && matches!(
+            (remaining_len, buffer_flags),
+            (0x0038, 0xc016_0052) | (0x0068, 0xc022_0082)
+        )
+}
+
 /// Consume the hostap power-save callback attached by the stock AP transmit
 /// leaf without entering its connection-node/TIM state machine.
 ///
@@ -1023,17 +1049,15 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
     let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
     let descriptor_security = descriptor.add(0x10).cast::<u32>().read_unaligned();
     let buffer_flags = buffer.cast::<u32>().read_unaligned();
-    let protected_group = frame_control == 0x4208
-        && descriptor_flags == 0x0000_200b
-        && descriptor_security == 0x0004_0342
-        && lengths as u16 == 0x0020
-        && matches!(
-            ((lengths >> 16) as u16, layout, buffer_flags),
-            (0x0038, 0x2001, 0xc016_0052)
-                | (0x0038, 0x2003, 0xc016_0052)
-                | (0x0068, 0x2000, 0xc022_0082)
-                | (0x0068, 0x2002, 0xc022_0082)
-        );
+    let protected_group = is_strict_ap_group_power_save_completion(
+        frame_control,
+        lengths as u16,
+        (lengths >> 16) as u16,
+        layout,
+        buffer_flags,
+        descriptor_flags,
+        descriptor_security,
+    );
     if protected_group {
         return Ok(());
     }
@@ -1043,10 +1067,43 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
         (lengths >> 16) as u16,
         layout,
     ) else {
+        #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+        ets_printf(
+            c"HIL PS reject tuple: fc=%04x len=%04x:%04x layout=%04x buffer=%08x df=%08x ds=%08x cb=%08x\r\n"
+                .as_ptr()
+                .cast(),
+            u32::from(frame_control),
+            lengths as u16 as u32,
+            (lengths >> 16) as u16 as u32,
+            u32::from(layout),
+            buffer_flags,
+            descriptor_flags,
+            descriptor_security,
+            descriptor_callbacks,
+        );
         return Err(TxDoneError::StrictCallbackFailed);
     };
     const LLC_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
     if core::slice::from_raw_parts(header.add(llc_offset), LLC_EAPOL.len()) != LLC_EAPOL {
+        #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+        ets_printf(
+            c"HIL PS reject LLC: fc=%04x len=%04x:%04x layout=%04x off=%02x bytes=%02x%02x%02x%02x%02x%02x%02x%02x\r\n"
+                .as_ptr()
+                .cast(),
+            u32::from(frame_control),
+            lengths as u16 as u32,
+            (lengths >> 16) as u16 as u32,
+            u32::from(layout),
+            llc_offset as u32,
+            u32::from(header.add(llc_offset).read()),
+            u32::from(header.add(llc_offset + 1).read()),
+            u32::from(header.add(llc_offset + 2).read()),
+            u32::from(header.add(llc_offset + 3).read()),
+            u32::from(header.add(llc_offset + 4).read()),
+            u32::from(header.add(llc_offset + 5).read()),
+            u32::from(header.add(llc_offset + 6).read()),
+            u32::from(header.add(llc_offset + 7).read()),
+        );
         return Err(TxDoneError::StrictCallbackFailed);
     }
     Ok(())
@@ -1294,7 +1351,7 @@ fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_ap_deauthentication_completion;
+    use super::{is_ap_deauthentication_completion, is_strict_ap_group_power_save_completion};
     #[cfg(feature = "hil-vendor-tx")]
     use super::ieee80211_data_header_len;
 
@@ -1304,6 +1361,43 @@ mod tests {
         assert!(is_ap_deauthentication_completion(0x00c0, 0x0414_0000));
         assert!(!is_ap_deauthentication_completion(0x00c0, 0x0004_0000));
         assert!(!is_ap_deauthentication_completion(0x00a0, 0x0114_0000));
+    }
+
+    #[test]
+    fn ap_group_completion_accepts_each_static_pool_slot_at_either_measured_size() {
+        for layout in 0x2000..=0x2003 {
+            for (remaining_len, buffer_flags) in
+                [(0x0038, 0xc016_0052), (0x0068, 0xc022_0082)]
+            {
+                assert!(is_strict_ap_group_power_save_completion(
+                    0x4208,
+                    0x0020,
+                    remaining_len,
+                    layout,
+                    buffer_flags,
+                    0x0000_200b,
+                    0x0004_0342,
+                ));
+            }
+        }
+        assert!(!is_strict_ap_group_power_save_completion(
+            0x4208,
+            0x0020,
+            0x0038,
+            0x2004,
+            0xc016_0052,
+            0x0000_200b,
+            0x0004_0342,
+        ));
+        assert!(!is_strict_ap_group_power_save_completion(
+            0x4208,
+            0x0020,
+            0x0038,
+            0x2000,
+            0xc022_0082,
+            0x0000_200b,
+            0x0004_0342,
+        ));
     }
 
     #[cfg(feature = "hil-vendor-tx")]

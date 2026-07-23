@@ -178,16 +178,13 @@ pub const fn strict_tx_security_layout(
         && input.descriptor_flags == 0x0000_200b
         && input.descriptor_security == 0x0004_0342
         && input.header_len == 0x0018
+        // The low two layout bits identify the rotating static pool entry;
+        // they do not encode the packet size. Cross-assignments observed on
+        // successive boots demonstrate that size and pool slot are independent.
+        && input.layout <= 3
         && matches!(
-            (
-                input.remaining_len,
-                input.layout,
-                input.buffer_flags,
-            ),
-            (0x002c, 1, 0xc011_0052)
-                | (0x002c, 3, 0xc011_0052)
-                | (0x005c, 0, 0xc01d_0082)
-                | (0x005c, 2, 0xc01d_0082)
+            (input.remaining_len, input.buffer_flags),
+            (0x002c, 0xc011_0052) | (0x005c, 0xc01d_0082)
         );
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
@@ -948,52 +945,27 @@ mod tests {
                 metadata_len: 0x0080,
             }),
         );
-        for (input, expected) in [
-            (
-                TxSecurityLayoutInput {
-                    remaining_len: 0x002c,
-                    layout: 1,
-                    buffer_flags: 0xc011_0052,
-                    ..measured
-                },
-                TxSecurityLayoutOutput {
-                    header_len: 0x0020,
-                    remaining_len: 0x0038,
-                    layout: 0x2001,
-                    buffer_flags: 0xc016_0052,
-                    metadata_len: 0x0050,
-                },
-            ),
-            (
-                TxSecurityLayoutInput {
-                    remaining_len: 0x002c,
-                    layout: 3,
-                    buffer_flags: 0xc011_0052,
-                    ..measured
-                },
-                TxSecurityLayoutOutput {
-                    header_len: 0x0020,
-                    remaining_len: 0x0038,
-                    layout: 0x2003,
-                    buffer_flags: 0xc016_0052,
-                    metadata_len: 0x0050,
-                },
-            ),
-            (
-                TxSecurityLayoutInput {
-                    layout: 2,
-                    ..measured
-                },
-                TxSecurityLayoutOutput {
-                    header_len: 0x0020,
-                    remaining_len: 0x0068,
-                    layout: 0x2002,
-                    buffer_flags: 0xc022_0082,
-                    metadata_len: 0x0080,
-                },
-            ),
-        ] {
-            assert_eq!(strict_tx_security_layout(input), Some(expected));
+        for layout in 0..=3 {
+            for (remaining_len, buffer_flags, output_remaining, output_buffer, metadata_len) in [
+                (0x002c, 0xc011_0052, 0x0038, 0xc016_0052, 0x0050),
+                (0x005c, 0xc01d_0082, 0x0068, 0xc022_0082, 0x0080),
+            ] {
+                assert_eq!(
+                    strict_tx_security_layout(TxSecurityLayoutInput {
+                        remaining_len,
+                        layout,
+                        buffer_flags,
+                        ..measured
+                    }),
+                    Some(TxSecurityLayoutOutput {
+                        header_len: 0x0020,
+                        remaining_len: output_remaining,
+                        layout: 0x2000 | layout,
+                        buffer_flags: output_buffer,
+                        metadata_len,
+                    }),
+                );
+            }
         }
         for rejected in [
             TxSecurityLayoutInput {
