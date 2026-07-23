@@ -21,7 +21,7 @@ const KEY_LENGTH_OFFSET: usize = 0xa4;
 const KEY_BYTES_OFFSET: usize = 0xa8;
 const STA_PAIRWISE_HARDWARE_INDEX: u8 = 4;
 const STA_GROUP_HARDWARE_INDEX: u8 = 1;
-const AP_GROUP_HARDWARE_INDEX_BASE: u8 = 8;
+const AP_GROUP_HARDWARE_INDEX_BASE: u8 = 1;
 const MAX_WPA2_GTK_ID: u8 = 3;
 #[cfg(target_arch = "riscv32")]
 const MAX_VENDOR_KEY_INDEX: u8 = 24;
@@ -218,6 +218,7 @@ pub enum S31Wpa2IoError {
     MissingStaInterfaceState,
     UnexpectedStaPairwiseHardwareIndex,
     AuthorizationWithoutPairwiseKey,
+    MissingApTransmitGroupKey,
     StaPeerUnauthorized,
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
@@ -878,14 +879,21 @@ mod target {
         }
 
         fn has_ap_transmit_group_key(&self) -> bool {
-            (0..K).any(|index| {
-                self.keys.get(index).is_some_and(|key| {
-                    key.interface() == Wpa2Interface::AccessPoint
-                        && matches!(
-                            key.kind(),
-                            Wpa2KeyKind::Group { transmit: true, .. }
-                        )
-                })
+            self.ap_transmit_group_hardware_index().is_some()
+        }
+
+        fn ap_transmit_group_hardware_index(&self) -> Option<u8> {
+            (0..K).find_map(|index| {
+                let key = self.keys.get(index)?;
+                match key.kind() {
+                    Wpa2KeyKind::Group {
+                        key_id,
+                        transmit: true,
+                    } if key.interface() == Wpa2Interface::AccessPoint => {
+                        group_hardware_index(Wpa2Interface::AccessPoint, key_id)
+                    }
+                    _ => None,
+                }
             })
         }
 
@@ -955,6 +963,23 @@ mod target {
                     Ok(())
                 }
                 Wpa2Interface::AccessPoint => {
+                    if authorized {
+                        let hardware_index = self
+                            .ap_transmit_group_hardware_index()
+                            .ok_or(S31Wpa2IoError::MissingApTransmitGroupKey)?;
+                        unsafe {
+                            let node = cnx_node_search(peer.as_ptr());
+                            if node.is_null() || node.add(0x134).read() == hardware_index {
+                                return Err(S31Wpa2IoError::MissingApPeerHardwareIndex);
+                            }
+                            // `ieee80211_crypto_encap` selects multicast AP
+                            // traffic through this byte. The stock AP key
+                            // setter stores `key_id + 1`; publish the same
+                            // already-installed fixed hardware slot without
+                            // entering its allocator-backed wrapper.
+                            node.add(0x135).write(hardware_index);
+                        }
+                    }
                     #[cfg(feature = "hil-vendor-tx")]
                     unsafe {
                         let node = cnx_node_search(peer.as_ptr());
