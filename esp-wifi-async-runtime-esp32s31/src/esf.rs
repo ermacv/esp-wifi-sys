@@ -24,10 +24,14 @@ const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 // static RX bound with fixed Rust-owned storage instead.
 const LARGE_RX_PAYLOAD_CAPACITY: usize = 1700;
 const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
-// One native atomic word owns this pool. On the 32-bit S31 target the mask
-// therefore has 31 usable bits without a width-sized shift.
-const LARGE_RX_SLOT_CAPACITY: usize = 31;
-const LARGE_RX_SLOT_MASK: usize = (1 << LARGE_RX_SLOT_CAPACITY) - 1;
+// One native atomic word owns this pool. All 32 bits are usable on S31; the
+// full-width case must avoid evaluating `1 << usize::BITS`.
+const LARGE_RX_SLOT_CAPACITY: usize = 32;
+const LARGE_RX_SLOT_MASK: usize = if LARGE_RX_SLOT_CAPACITY == usize::BITS as usize {
+    usize::MAX
+} else {
+    (1 << LARGE_RX_SLOT_CAPACITY) - 1
+};
 
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
 const ESF_TX_DESCRIPTOR_OFFSET: usize = 0x48;
@@ -701,5 +705,5 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
 const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
 const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
 const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
-const _: () = assert!(LARGE_RX_SLOT_CAPACITY < usize::BITS as usize);
+const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= usize::BITS as usize);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= u8::MAX as usize);
