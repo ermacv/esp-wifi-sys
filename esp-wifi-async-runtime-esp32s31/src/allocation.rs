@@ -34,6 +34,7 @@ pub struct AllocationSnapshot {
     pub last_failure_source: AllocationSource,
     pub last_failure_size: usize,
     pub last_failure_caller: usize,
+    pub last_free_pointer: usize,
     pub last_free_caller: usize,
 }
 
@@ -50,6 +51,7 @@ pub struct AllocationProbe {
     last_failure_source: AtomicUsize,
     last_failure_size: AtomicUsize,
     last_failure_caller: AtomicUsize,
+    last_free_pointer: AtomicUsize,
     last_free_caller: AtomicUsize,
 }
 
@@ -66,6 +68,7 @@ impl AllocationProbe {
             last_failure_source: AtomicUsize::new(AllocationSource::None as usize),
             last_failure_size: AtomicUsize::new(0),
             last_failure_caller: AtomicUsize::new(0),
+            last_free_pointer: AtomicUsize::new(0),
             last_free_caller: AtomicUsize::new(0),
         }
     }
@@ -102,11 +105,12 @@ impl AllocationProbe {
     }
 
     fn record_free(&self) {
-        self.record_free_at(0);
+        self.record_free_at(0, 0);
     }
 
-    fn record_free_at(&self, caller: usize) {
+    fn record_free_at(&self, pointer: usize, caller: usize) {
         self.frees.fetch_add(1, Ordering::Relaxed);
+        self.last_free_pointer.store(pointer, Ordering::Relaxed);
         self.last_free_caller.store(caller, Ordering::Relaxed);
         if in_radio_context() {
             self.radio_context_calls.fetch_add(1, Ordering::Relaxed);
@@ -127,6 +131,7 @@ impl AllocationProbe {
             ),
             last_failure_size: self.last_failure_size.load(Ordering::Acquire),
             last_failure_caller: self.last_failure_caller.load(Ordering::Acquire),
+            last_free_pointer: self.last_free_pointer.load(Ordering::Acquire),
             last_free_caller: self.last_free_caller.load(Ordering::Acquire),
         }
     }
@@ -658,7 +663,7 @@ mod target {
         if release_strict_allocation(ptr) {
             return;
         }
-        PROBE.record_free_at(caller);
+        PROBE.record_free_at(ptr as usize, caller);
         if !heap_forbidden() {
             __real_free(ptr);
         }
@@ -759,7 +764,7 @@ mod target {
         if release_strict_allocation(ptr) {
             return;
         }
-        PROBE.record_free_at(caller);
+        PROBE.record_free_at(ptr as usize, caller);
         if heap_forbidden() {
             return;
         }
