@@ -54,6 +54,12 @@ pub mod runtime;
 mod rx;
 mod rx_descriptor;
 pub mod rx_ampdu;
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-rx-ampdu"
+))]
+mod rx_ampdu_ap;
 pub mod rx_ampdu_hw;
 pub mod scan;
 mod sta_link;
@@ -200,14 +206,29 @@ pub use queue::{PushError, RadioQueue, RadioQueueSnapshot};
 pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
 pub use runtime::WifiRuntimeFuture;
 pub use rx_ampdu::{
-    RxAmpduError, RxAmpduMpdu, RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY,
-    RX_BLOCK_ACK_MAX_WINDOW,
+    write_successful_addba_response, RxAddbaResponseError, RxAmpduError, RxAmpduMpdu,
+    RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY, RX_BLOCK_ACK_MAX_WINDOW,
 };
 pub use rx_ampdu_hw::{S31RxBlockAckAgreement, S31RxBlockAckAgreementError};
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-rx-ampdu"
+))]
+pub use rx_ampdu_ap::{
+    remove_peer as remove_rx_ampdu_peer, wait_for_gap as wait_for_rx_ampdu_gap,
+    RxAmpduGapFuture,
+};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{
     block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
 };
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-rx-ampdu"
+))]
+pub use rx::expire_rx_ampdu_gap;
 pub use scan::{
     best_matching_ssid, StrictScanError, StrictScanRecord, StrictScanSummary,
     STRICT_SCAN_EXTENDED_RATES_CAPACITY, STRICT_SCAN_RECORD_CAPACITY, STRICT_SCAN_RSNXE_CAPACITY,

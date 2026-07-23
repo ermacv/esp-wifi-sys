@@ -233,6 +233,27 @@ pub fn block_ack_rx_snapshot() -> BlockAckRxSnapshot {
     BLOCK_ACK_COUNTERS.snapshot()
 }
 
+#[cfg(feature = "hil-rx-ampdu")]
+pub fn expire_rx_ampdu_gap(generation: usize) -> usize {
+    let txrx = unsafe { ptr::addr_of!(pTxRx).read() };
+    if txrx.is_null() {
+        return 0;
+    }
+    let Some(release) = crate::rx_ampdu_ap::expire_gap(generation) else {
+        return 0;
+    };
+    let mut processed = 0;
+    for frame in release.iter() {
+        let Some(packet) = crate::rx_ampdu_ap::frame_for_slot(frame.slot) else {
+            COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        unsafe { process_deaggregated(txrx, packet) };
+        processed += 1;
+    }
+    processed
+}
+
 pub(crate) const fn is_continuation(kind: u32) -> bool {
     kind == RX_CONTINUATION_EVENT
 }
@@ -271,13 +292,14 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
         unsafe { ppRecycleRxPkt(packet) };
         return;
     }
-    // Kind 7 uses a linked hardware block chain. The stock checker walks it
-    // until a sentinel and can assert/log on corruption; that unbounded error
-    // path is outside the strict profile. Ordinary and aggregate descriptors
-    // with the same flag remain valid and continue below.
-    if unsafe { descriptor.cast::<u32>().read() } & 0x10 != 0
-        && unsafe { packet.add(26).read() } == 7
-    {
+    // `wDev_IndicateAmpdu` has already split the hardware aggregate into
+    // individually owned kind-7 ESF objects. Without the RX BlockAck HIL path
+    // these objects remain fail-closed; the vendor's software reorder would
+    // enter allocated state that strict takeover intentionally did not create.
+    let aggregate_kind7 = unsafe { descriptor.cast::<u32>().read() } & 0x10 != 0
+        && unsafe { packet.add(26).read() } == 7;
+    #[cfg(not(feature = "hil-rx-ampdu"))]
+    if aggregate_kind7 {
         COUNTERS.block_error.fetch_add(1, Ordering::Relaxed);
         unsafe { ppRecycleRxPkt(packet) };
         return;
@@ -331,8 +353,64 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
             unsafe { ppRecycleRxPkt(packet) };
             return;
         }
+        #[cfg(feature = "hil-rx-ampdu")]
+        if aggregate_kind7 {
+            match crate::rx_ampdu_ap::ingest(packet, raw_bytes) {
+                crate::rx_ampdu_ap::Ingress::Retained => return,
+                crate::rx_ampdu_ap::Ingress::Reject => {
+                    COUNTERS.block_error.fetch_add(1, Ordering::Relaxed);
+                    unsafe { ppRecycleRxPkt(packet) };
+                    return;
+                }
+                crate::rx_ampdu_ap::Ingress::Release(release) => {
+                    for frame in release.iter() {
+                        let Some(owned_packet) =
+                            crate::rx_ampdu_ap::frame_for_slot(frame.slot)
+                        else {
+                            COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
+                        unsafe { process_deaggregated(txrx, owned_packet) };
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    #[cfg(feature = "hil-rx-ampdu")]
+    if aggregate_kind7 {
+        COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+        unsafe { ppRecycleRxPkt(packet) };
+        return;
     }
 
+    unsafe { process_protocol(txrx, packet, rx_control, payload_owner) };
+}
+
+#[cfg(feature = "hil-rx-ampdu")]
+unsafe fn process_deaggregated(txrx: *mut u8, packet: *mut u8) {
+    let descriptor = unsafe { packet.add(0x34).cast::<*mut u8>().read() };
+    let rx_control = unsafe { packet.add(0x10).cast::<*mut u8>().read() };
+    let payload_owner = unsafe { packet.add(4).cast::<*mut u8>().read() };
+    if descriptor.is_null() || rx_control.is_null() || payload_owner.is_null() {
+        COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+        unsafe { ppRecycleRxPkt(packet) };
+        return;
+    }
+    // The aggregate has already been deaggregated and reordered by Rust.
+    // Clear only the vendor software-reorder marker before the ordinary
+    // protocol leaf; all hardware RX status remains intact.
+    let descriptor_word = unsafe { descriptor.cast::<u32>().read() };
+    unsafe { descriptor.cast::<u32>().write(descriptor_word & !0x10) };
+    unsafe { process_protocol(txrx, packet, rx_control, payload_owner) };
+}
+
+unsafe fn process_protocol(
+    txrx: *mut u8,
+    packet: *mut u8,
+    rx_control: *mut u8,
+    payload_owner: *mut u8,
+) {
     if unsafe { ppRxProtoProc(packet, rx_control) } != 0 {
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
         unsafe { ppRecycleRxPkt(packet) };
@@ -495,6 +573,8 @@ fn observe_block_ack_action(frame: &[u8]) {
     let Some(action) = crate::tx_ampdu::parse_block_ack_action(&frame[24..]) else {
         return;
     };
+    #[cfg(feature = "hil-rx-ampdu")]
+    crate::rx_ampdu_ap::observe_action(frame, action);
     if is_frame_to_local_address(frame) {
         BLOCK_ACK_COUNTERS.to_local.fetch_add(1, Ordering::Relaxed);
     }

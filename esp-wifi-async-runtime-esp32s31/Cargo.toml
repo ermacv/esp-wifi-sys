@@ -22,6 +22,9 @@ hil-vendor-tx = []
 # Laboratory bridge: retain fully prepared MPDUs at ppMapTxQueue and feed the
 # Rust A-MPDU submit/completion path. The vendor mapper remains in the graph.
 hil-ampdu-intercept = ["hil-vendor-tx"]
+# Laboratory RX BlockAck bring-up. This accepts one SoftAP TID-0 agreement
+# through Rust-owned fixed state and the recovered finite MAC register leaf.
+hil-rx-ampdu = []
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-wifi-sys-esp32s31 = { path = "../esp-wifi-sys-esp32s31" }

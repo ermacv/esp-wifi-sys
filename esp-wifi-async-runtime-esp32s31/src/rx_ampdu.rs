@@ -29,6 +29,40 @@ pub enum RxAmpduError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RxAddbaResponseError {
+    InvalidBodyLength(usize),
+    InvalidTid(u8),
+    InvalidWindow(u16),
+}
+
+/// Write one successful immediate BlockAck response into an owned action body.
+///
+/// A-MSDU is deliberately not advertised by the initial strict RX path.
+pub fn write_successful_addba_response(
+    body: &mut [u8],
+    dialog_token: u8,
+    tid: u8,
+    window: u16,
+) -> Result<(), RxAddbaResponseError> {
+    if body.len() != 9 {
+        return Err(RxAddbaResponseError::InvalidBodyLength(body.len()));
+    }
+    if tid > 15 {
+        return Err(RxAddbaResponseError::InvalidTid(tid));
+    }
+    if window == 0 || window > 0x03ff {
+        return Err(RxAddbaResponseError::InvalidWindow(window));
+    }
+    body.fill(0);
+    body[0] = crate::tx_ampdu::BLOCK_ACK_CATEGORY;
+    body[1] = crate::tx_ampdu::ADDBA_RESPONSE_ACTION;
+    body[2] = dialog_token;
+    let parameters = 1_u16 << 1 | u16::from(tid) << 2 | window << 6;
+    body[5..7].copy_from_slice(&parameters.to_le_bytes());
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RxAmpduRelease {
     pub frames: [Option<RxAmpduMpdu>; RX_AMPDU_SLOT_CAPACITY],
     pub count: u8,
@@ -334,5 +368,24 @@ mod tests {
             [frame(4095, 1), frame(1, 3)]
         );
         assert_eq!(reorder.occupied(), 0);
+    }
+
+    #[test]
+    fn successful_response_narrows_the_window_and_disables_amsdu() {
+        let mut body = [0xff; 9];
+        write_successful_addba_response(&mut body, 137, 0, 16).unwrap();
+        assert_eq!(body, [3, 1, 137, 0, 0, 0x02, 0x04, 0, 0]);
+        assert_eq!(
+            crate::tx_ampdu::parse_block_ack_action(&body),
+            Some(crate::tx_ampdu::BlockAckAction::AddbaResponse {
+                dialog_token: 137,
+                status: 0,
+                tid: 0,
+                immediate: true,
+                amsdu: false,
+                window: 16,
+                timeout_tu: 0,
+            })
+        );
     }
 }

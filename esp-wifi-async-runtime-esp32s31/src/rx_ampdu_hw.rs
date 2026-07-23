@@ -88,7 +88,9 @@ const fn active_control(hardware_index: u8, tid: u8) -> u32 {
         | EXTRA_SOFTAP_RX_BA_WRITE
         | EXTRA_SOFTAP_RX_BA_ENABLE
         | ((hardware_index as u32) << 5 & EXTRA_SOFTAP_RX_BA_INDEX_MASK)
-        | ((tid as u32) << 12 & EXTRA_SOFTAP_RX_BA_TID_MASK)
+        // The pinned caller passes its per-TID table byte offset (`tid * 4`)
+        // to the HAL leaf, which then shifts the low nibble into this field.
+        | ((tid as u32) << 14 & EXTRA_SOFTAP_RX_BA_TID_MASK)
 }
 
 const fn peer_head(peer: [u8; 6]) -> u32 {
@@ -192,7 +194,7 @@ mod tests {
     #[test]
     fn packs_the_recovered_register_layout() {
         assert_eq!(selected_control(0xffff_ffff, 3), 0xffff_fc7f);
-        assert_eq!(active_control(3, 6), 0xc000_6061);
+        assert_eq!(active_control(3, 6), 0xc000_8061);
         assert_eq!(peer_head(AGREEMENT.peer), 0xa8fb_1570);
         assert_eq!(peer_tail(1, AGREEMENT.peer, 16), 0x0041_f048);
     }

@@ -308,6 +308,39 @@ fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
     (index < LARGE_RX_SLOT_CAPACITY).then_some(index)
 }
 
+/// Map a live kind-7 ESF object to the fixed slot ID used by the safe reorder
+/// state. The pointer is validated against the exact internal-SRAM pool.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) fn large_rx_slot_id(frame: *mut u8) -> Option<u8> {
+    let index = large_rx_slot_index(frame)?;
+    let bit = 1_usize << index;
+    (CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit != 0)
+        .then_some(index as u8)
+}
+
+/// Resolve a reorder slot ID back to its still-owned ESF object.
+///
+/// The returned raw pointer remains owned by the fixed pool. The caller may
+/// pass it through the RX protocol path exactly once or recycle it.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) fn large_rx_frame(slot: u8) -> Option<*mut u8> {
+    let index = usize::from(slot);
+    if index >= LARGE_RX_SLOT_CAPACITY {
+        return None;
+    }
+    let bit = 1_usize << index;
+    if CLAIMED_LARGE_RX_SLOTS.load(Ordering::Acquire) & bit == 0 {
+        return None;
+    }
+    Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>())
+}
+
 /// Return whether `frame` belongs to one of the fixed pools handled by the
 /// strict recycler. The caller must hold a live ESF object.
 #[cfg_attr(
@@ -569,3 +602,4 @@ const _: () = assert!(mem::size_of::<ManagementSlot>() == MANAGEMENT_SLOT_SIZE);
 const _: () = assert!(MANAGEMENT_SLOT_CAPACITY < usize::BITS as usize);
 const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY < usize::BITS as usize);
+const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= u8::MAX as usize);

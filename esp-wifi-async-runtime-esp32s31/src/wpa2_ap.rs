@@ -1642,6 +1642,16 @@ mod target {
                 buffer,
             );
         }
+        #[cfg(feature = "hil-rx-ampdu")]
+        if ap_addba_response {
+            if let Some(body) = ap_addba_response_body(buffer) {
+                let mut peer = [0_u8; 6];
+                ptr::copy_nonoverlapping(node.add(4), peer.as_mut_ptr(), peer.len());
+                let body =
+                    core::slice::from_raw_parts_mut(body, DEFERRED_AP_ACTION_BODY_LEN);
+                let _ = crate::rx_ampdu_ap::try_accept_response(peer, body);
+            }
+        }
         __real_ieee80211_mgmt_output(node, buffer, subtype)
     }
 
