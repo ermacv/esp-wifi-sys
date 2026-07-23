@@ -105,7 +105,15 @@ pub struct HilDataTxDoneSnapshot {
     pub qos_control: u16,
     pub hardware_status: u8,
     pub descriptor_status: u32,
+    pub receiver: [u8; 6],
     pub transmitter: [u8; 6],
+    pub address3: [u8; 6],
+    pub sequence_control: u16,
+    pub header_len: u16,
+    pub remaining_len: u16,
+    pub layout: u16,
+    pub buffer_flags: u32,
+    pub descriptor_flags: u32,
     pub ccmp_header: [u8; 8],
     pub payload_prefix: [u8; 8],
 }
@@ -119,7 +127,15 @@ pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
         qos_control: HIL_DATA_QOS_CONTROL.load(Ordering::Acquire) as u16,
         hardware_status: HIL_DATA_HW_STATUS.load(Ordering::Acquire) as u8,
         descriptor_status: HIL_DATA_DESCRIPTOR_STATUS.load(Ordering::Acquire) as u32,
+        receiver: load_hil_bytes(&HIL_DATA_RECEIVER),
         transmitter: load_hil_bytes(&HIL_DATA_TRANSMITTER),
+        address3: load_hil_bytes(&HIL_DATA_ADDRESS3),
+        sequence_control: HIL_DATA_SEQUENCE_CONTROL.load(Ordering::Acquire) as u16,
+        header_len: HIL_DATA_HEADER_LEN.load(Ordering::Acquire) as u16,
+        remaining_len: HIL_DATA_REMAINING_LEN.load(Ordering::Acquire) as u16,
+        layout: HIL_DATA_LAYOUT.load(Ordering::Acquire) as u16,
+        buffer_flags: HIL_DATA_BUFFER_FLAGS.load(Ordering::Acquire) as u32,
+        descriptor_flags: HIL_DATA_DESCRIPTOR_FLAGS.load(Ordering::Acquire) as u32,
         ccmp_header: load_hil_bytes(&HIL_DATA_CCMP_HEADER),
         payload_prefix: load_hil_bytes(&HIL_DATA_PAYLOAD_PREFIX),
     }
@@ -127,6 +143,22 @@ pub fn hil_data_tx_done_snapshot() -> HilDataTxDoneSnapshot {
 
 #[cfg(feature = "hil-vendor-tx")]
 static HIL_DATA_QOS_CONTROL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_RECEIVER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_ADDRESS3: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_SEQUENCE_CONTROL: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_HEADER_LEN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_REMAINING_LEN: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_LAYOUT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_BUFFER_FLAGS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-vendor-tx")]
+static HIL_DATA_DESCRIPTOR_FLAGS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "hil-vendor-tx")]
 fn load_hil_bytes<const N: usize>(source: &[AtomicU8; N]) -> [u8; N] {
@@ -1100,7 +1132,9 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     let frame = state.frame;
     let descriptor = descriptor(frame)?;
     #[cfg(feature = "hil-vendor-tx")]
-    capture_hil_data_tx_done(frame, descriptor)?;
+    if crate::data_tx::owns_hardware_wifi_data_tx(frame) {
+        capture_hil_data_tx_done(frame, descriptor)?;
+    }
     let flags = descriptor.cast::<u32>().read();
     // The stock bit-13 branch only feeds `trc_onPPTxDone` after inspecting
     // optional tracing metadata. Strict mode has no tracing consumer and
@@ -1222,7 +1256,9 @@ unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Resul
     let header_len = ieee80211_data_header_len(frame_control);
     let protected = frame_control & 0x4000 != 0;
     let security_len = if protected { 8 } else { 0 };
+    store_hil_bytes(&HIL_DATA_RECEIVER, payload.add(4));
     store_hil_bytes(&HIL_DATA_TRANSMITTER, payload.add(10));
+    store_hil_bytes(&HIL_DATA_ADDRESS3, payload.add(16));
     if protected {
         store_hil_bytes(&HIL_DATA_CCMP_HEADER, payload.add(header_len));
     } else {
@@ -1241,6 +1277,25 @@ unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Resul
         } else {
             0
         },
+        Ordering::Release,
+    );
+    HIL_DATA_SEQUENCE_CONTROL.store(
+        usize::from(payload.add(22).cast::<u16>().read_unaligned()),
+        Ordering::Release,
+    );
+    let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    HIL_DATA_HEADER_LEN.store(usize::from(lengths as u16), Ordering::Release);
+    HIL_DATA_REMAINING_LEN.store(usize::from((lengths >> 16) as u16), Ordering::Release);
+    HIL_DATA_LAYOUT.store(
+        usize::from(frame.add(0x24).cast::<u16>().read_unaligned()),
+        Ordering::Release,
+    );
+    HIL_DATA_BUFFER_FLAGS.store(
+        payload_owner.cast::<u32>().read_unaligned() as usize,
+        Ordering::Release,
+    );
+    HIL_DATA_DESCRIPTOR_FLAGS.store(
+        descriptor.cast::<u32>().read_unaligned() as usize,
         Ordering::Release,
     );
     HIL_DATA_HW_STATUS.store(usize::from(descriptor.add(19).read()), Ordering::Release);

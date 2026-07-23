@@ -331,6 +331,17 @@ pub(crate) fn complete_hardware_wifi_data_tx(frame: *mut u8) -> bool {
     true
 }
 
+/// Return whether `frame` is the exact vendor buffer currently owned by one
+/// Rust data-TX slot. This is a bounded diagnostic/dispatch predicate: it
+/// neither changes ownership nor waits for a completion.
+pub(crate) fn owns_hardware_wifi_data_tx(frame: *mut u8) -> bool {
+    let address = frame as usize;
+    address > HARDWARE_CREDIT_RESERVED
+        && TX_SLOTS
+            .iter()
+            .any(|slot| slot.hardware_frame.load(Ordering::Acquire) == address)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
