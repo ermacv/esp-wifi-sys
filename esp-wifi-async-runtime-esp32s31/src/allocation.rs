@@ -224,6 +224,11 @@ mod target {
     // `rc_enable_trc`. AP peer rate contexts are bounded by the vendor table
     // indices 1..=16 and are returned through `rc_disable_trc`.
     const RATE_CONTEXT_ALLOCATION_RETURN_OFFSET: usize = 0x3e;
+    const RATE_TABLE_SCRATCH_SIZE: usize = 212;
+    // Return address after the pinned S31 `_wifi_zalloc(212)` call in
+    // `ieee80211_setup_ratetable`. The function uses this as serialized
+    // scratch and frees it before returning.
+    const RATE_TABLE_SCRATCH_ALLOCATION_RETURN_OFFSET: usize = 0x26;
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -269,6 +274,17 @@ mod target {
 
     unsafe impl Sync for RateContext {}
 
+    #[repr(C, align(4))]
+    struct RateTableScratch(UnsafeCell<[u8; RATE_TABLE_SCRATCH_SIZE]>);
+
+    impl RateTableScratch {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; RATE_TABLE_SCRATCH_SIZE]))
+        }
+    }
+
+    unsafe impl Sync for RateTableScratch {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -282,6 +298,9 @@ mod target {
     static RATE_CONTEXTS: [RateContext; RATE_CONTEXT_CAPACITY] =
         [const { RateContext::new() }; RATE_CONTEXT_CAPACITY];
     static CLAIMED_RATE_CONTEXTS: AtomicUsize = AtomicUsize::new(0);
+    #[link_section = ".critical.bss.wifi_strict.rate_table_scratch"]
+    static RATE_TABLE_SCRATCH: RateTableScratch = RateTableScratch::new();
+    static RATE_TABLE_SCRATCH_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -295,6 +314,11 @@ mod target {
         ) -> i32;
         fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
         fn rc_enable_trc(interface: u32, peer: *const u8, index: u32, mode: u32) -> *mut c_void;
+        fn ieee80211_setup_ratetable(
+            interface: *mut c_void,
+            mode: u32,
+            phy_mode: u32,
+        ) -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -556,11 +580,42 @@ mod target {
         true
     }
 
+    fn claim_rate_table_scratch(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller = ieee80211_setup_ratetable as *const () as usize
+            + RATE_TABLE_SCRATCH_ALLOCATION_RETURN_OFFSET;
+        if size != RATE_TABLE_SCRATCH_SIZE || caller != expected_caller {
+            return None;
+        }
+        RATE_TABLE_SCRATCH_CLAIMED
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let scratch = RATE_TABLE_SCRATCH.0.get();
+        unsafe { scratch.write([0; RATE_TABLE_SCRATCH_SIZE]) };
+        Some(scratch.cast())
+    }
+
+    fn release_rate_table_scratch(scratch: *mut c_void) -> bool {
+        if scratch != RATE_TABLE_SCRATCH.0.get().cast() {
+            return false;
+        }
+        if RATE_TABLE_SCRATCH_CLAIMED.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe {
+            RATE_TABLE_SCRATCH
+                .0
+                .get()
+                .write([0; RATE_TABLE_SCRATCH_SIZE])
+        };
+        true
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
         release_blacklist_node(ptr)
             || release_ipc_envelope(ptr)
             || release_wpa_ie_slot(ptr)
             || release_rate_context(ptr)
+            || release_rate_table_scratch(ptr)
             || unsafe { crate::wpa2_s31::release_static_vendor_key_object(ptr) }
             || unsafe { crate::wpa2_s31::release_static_ap_node(ptr) }
     }
@@ -710,6 +765,9 @@ mod target {
                 if let Some(context) = claim_rate_context(size, caller) {
                     return context;
                 }
+                if let Some(scratch) = claim_rate_table_scratch(size, caller) {
+                    return scratch;
+                }
             }
             PROBE.record_request_at(size, true, false, source, caller);
             return core::ptr::null_mut();
@@ -849,6 +907,7 @@ mod target {
     const _: () = assert!(WPA_IE_SLOT_CAPACITY < usize::BITS as usize);
     const _: () = assert!(mem::size_of::<RateContext>() == RATE_CONTEXT_SIZE);
     const _: () = assert!(RATE_CONTEXT_CAPACITY < usize::BITS as usize);
+    const _: () = assert!(mem::size_of::<RateTableScratch>() == RATE_TABLE_SCRATCH_SIZE);
 }
 
 #[cfg(target_arch = "riscv32")]
