@@ -140,12 +140,16 @@ pub const fn strict_tx_security_layout(
     let transient_probe_response = matches!(input.descriptor_security, 0 | 0x0004_0000)
         && input.frame_control == 0x0050
         && input.descriptor_flags == 0x0800_0010;
+    let transient_deauthentication = input.descriptor_security == 0
+        && input.frame_control == 0x00c0
+        && input.descriptor_flags == 0x0000_0010;
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
             || (input.frame_control == 0x0188 && input.descriptor_flags == 0x0200_200c)))
         || persistent_management_reply
         || transient_probe_response
+        || transient_deauthentication
         || ap_beacon
     {
         // AP beacons carry the pinned hardware-key direction word even though
@@ -496,6 +500,37 @@ mod tests {
             },
             TxSecurityLayoutInput {
                 descriptor_security: 1,
+                ..measured
+            },
+        ] {
+            assert_eq!(strict_tx_security_layout(rejected), None);
+        }
+    }
+
+    #[test]
+    fn reproduces_transient_ap_deauthentication_layout() {
+        let measured = input(0x0002_0018, 0x00e9, 0xc006_8084, 0x0000_0010, 0x00c0);
+        assert_eq!(
+            strict_tx_security_layout(measured),
+            Some(TxSecurityLayoutOutput {
+                header_len: 0x20,
+                remaining_len: 0x06,
+                layout: 0x20e9,
+                buffer_flags: 0xc009_8084,
+                metadata_len: 0x1e,
+            }),
+        );
+        for rejected in [
+            TxSecurityLayoutInput {
+                frame_control: 0x00a0,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_flags: 0,
+                ..measured
+            },
+            TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0000,
                 ..measured
             },
         ] {
