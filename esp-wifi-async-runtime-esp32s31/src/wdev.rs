@@ -59,6 +59,7 @@ enum RxRecycleError {
 #[cfg(target_arch = "riscv32")]
 struct RxRecycleState {
     reload_active: bool,
+    terminal_restart_active: bool,
     failed: bool,
     reload_tail: *mut u8,
     pending_head: *mut u8,
@@ -72,6 +73,7 @@ impl RxRecycleState {
     const fn new() -> Self {
         Self {
             reload_active: false,
+            terminal_restart_active: false,
             failed: false,
             reload_tail: ptr::null_mut(),
             pending_head: ptr::null_mut(),
@@ -374,12 +376,13 @@ unsafe fn publish_rx_recycle_chain(
         // Hardware telemetry proves that neither a base write nor a reload
         // edge makes that state fetch a valid hardware-owned chain.  The
         // vendor MAC sleep path establishes the bounded state transition:
-        // clear the RX-enable gate, publish the new base, then reopen it.
-        // All three operations are finite MMIO leaves and execute only while
-        // the software list is empty under the local Wi-Fi interrupt lock.
-        restart_terminal_rx(head);
+        // clear the RX-enable gate, publish the new base, then reopen it after
+        // an asynchronous settle edge. All MMIO operations are finite leaves
+        // and execute only while the software list is empty under the local
+        // Wi-Fi interrupt lock.
+        begin_terminal_rx_restart(state, head);
         crate::critical::strict_wifi_int_restore(interrupt_state);
-        return Ok(false);
+        return Ok(true);
     }
 
     let published_tail = control.add(4).cast::<*mut u8>().read_unaligned();
@@ -442,6 +445,10 @@ unsafe extern "C" fn rx_reload_settled(_argument: *mut c_void) {
     if !crate::critical::on_strict_wifi_hart() {
         fail_rx_recycle(state, RxRecycleError::WrongHart);
     }
+    if state.terminal_restart_active {
+        finish_terminal_rx_restart(state);
+        return;
+    }
     // Exactly one status observation per async continuation. A MAC which has
     // not completed within the declared settle interval is a hard invariant
     // failure; it is never converted back into polling or a retry timer.
@@ -472,12 +479,6 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
             }
         }
     }
-    // The vendor repair writes RX base after observing the cleared reload bit
-    // but before publishing the accepted software tail. Preserve that exact
-    // ordering for the pointer-ABA case where a just-recycled descriptor is
-    // both the old hardware last and the new reload tail.
-    try_restart_drained_rx_chain(state, true);
-
     // Match the terminal store in `wDev_AppendRxBlocks`: the new tail becomes
     // globally visible only after the reload bit cleared and any base repair
     // completed.
@@ -499,6 +500,11 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
     RX_RECYCLE_PROBE
         .pending_chains
         .store(0, Ordering::Release);
+    // A reload which completed while the walker exhausted its old chain may
+    // have left a proven terminal frontier. Start its separate async enable
+    // edge only after the accepted software tail is visible and the ordinary
+    // reload state no longer owns the shared settle timer.
+    try_restart_drained_rx_chain(state, false);
     if !pending_head.is_null() {
         if let Err(error) = publish_or_defer_rx_recycle_chain(state, pending_head, pending_tail) {
             fail_rx_recycle(state, error);
@@ -556,7 +562,7 @@ unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState, reload_settle
         && current_head == saved_head
         && saved_head != saved_last
     {
-        restart_terminal_rx(saved_head);
+        begin_terminal_rx_restart(state, saved_head);
         RX_RECYCLE_PROBE
             .terminal_restarts
             .fetch_add(1, Ordering::Relaxed);
@@ -565,22 +571,57 @@ unsafe fn try_restart_drained_rx_chain(state: &mut RxRecycleState, reload_settle
     state.drained_head = ptr::null_mut();
     state.drained_last = ptr::null_mut();
     crate::critical::strict_wifi_int_restore(interrupt_state);
+    if state.terminal_restart_active {
+        if let Err(error) = arm_rx_reload_settle_timer() {
+            fail_rx_recycle(state, error);
+        }
+    }
 }
 
-/// Reopen the RX descriptor walker after a proven terminal-list transition.
+/// Start reopening the RX descriptor walker after a terminal-list transition.
 ///
 /// The S31 MAC keeps bit 31 set even after its descriptor FSM reaches the end
 /// of a chain. A base write and the ordinary append reload doorbell are both
 /// acknowledged without leaving that terminal state. The vendor sleep/wakeup
-/// leaves establish that an RX-enable falling/rising edge is the bounded
-/// restart primitive. Callers must hold the local Wi-Fi interrupt lock and
-/// prove that no hardware-current descriptor exists before invoking it.
+/// and cold-init paths establish a falling/rising RX-enable edge with work
+/// between the two writes. Strict mode models that work as one asynchronous
+/// settle timer rather than a CPU delay. The caller holds the local Wi-Fi
+/// interrupt lock and has proved that no hardware-current descriptor exists.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.rx_recycle"]
-unsafe fn restart_terminal_rx(head: *mut u8) {
+unsafe fn begin_terminal_rx_restart(state: &mut RxRecycleState, head: *mut u8) {
     hal_mac_rx_disable();
     hal_mac_rx_set_base(head);
+    state.reload_active = true;
+    state.terminal_restart_active = true;
+    RX_RECYCLE_PROBE
+        .reload_active
+        .store(1, Ordering::Release);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn finish_terminal_rx_restart(state: &mut RxRecycleState) {
     hal_mac_rx_enable();
+    RX_RECYCLE_PROBE.completions.fetch_add(1, Ordering::Relaxed);
+    state.terminal_restart_active = false;
+    state.reload_active = false;
+    RX_RECYCLE_PROBE
+        .reload_active
+        .store(0, Ordering::Release);
+
+    let pending_head = state.pending_head;
+    let pending_tail = state.pending_tail;
+    state.pending_head = ptr::null_mut();
+    state.pending_tail = ptr::null_mut();
+    RX_RECYCLE_PROBE
+        .pending_chains
+        .store(0, Ordering::Release);
+    if !pending_head.is_null() {
+        if let Err(error) = publish_or_defer_rx_recycle_chain(state, pending_head, pending_tail) {
+            fail_rx_recycle(state, error);
+        }
+    }
 }
 
 /// Finish a descriptor reload before decoding the RX event which proves that
