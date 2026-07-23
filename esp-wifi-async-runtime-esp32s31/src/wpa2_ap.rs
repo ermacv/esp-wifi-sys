@@ -1010,7 +1010,8 @@ mod target {
                 node,
             );
         }
-        if wifi_nvs.add(0x3fb).read() != 0 {
+        // `wifi_bandwidth_t::WIFI_BW20` is encoded as one on this ABI.
+        if wifi_nvs.add(0x3fb).read() != 1 {
             return reject_association_construction(
                 AssociationRejectionReason::UnsupportedBandwidth,
                 node,
