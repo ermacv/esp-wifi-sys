@@ -343,6 +343,8 @@ mod tests {
     struct Handler {
         sum: u32,
         all_in_radio_context: bool,
+        internal_polls: usize,
+        internal_in_radio_context: bool,
     }
 
     #[derive(Default)]
@@ -395,6 +397,12 @@ mod tests {
     impl RadioCommandHandler<u32> for Handler {
         type Error = ();
 
+        fn poll_internal(&mut self, _cx: &mut Context<'_>) -> bool {
+            self.internal_polls += 1;
+            self.internal_in_radio_context = in_radio_context();
+            false
+        }
+
         fn handle(&mut self, command: u32) -> Result<(), Self::Error> {
             self.sum += command;
             self.all_in_radio_context = in_radio_context();
@@ -414,6 +422,8 @@ mod tests {
         assert_eq!(Pin::new(&mut owner).poll(&mut context), Poll::Pending);
         assert_eq!(owner.handler().sum, 5);
         assert!(owner.handler().all_in_radio_context);
+        assert_eq!(owner.handler().internal_polls, 1);
+        assert!(owner.handler().internal_in_radio_context);
         assert!(!in_radio_context());
         let snapshot = commands.snapshot();
         assert_eq!(snapshot.submitted, 2);
