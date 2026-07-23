@@ -164,7 +164,10 @@ unsafe extern "C" {
     fn vendor_sniffer_rx_data();
     #[link_name = "wdev_csi_rx_process"]
     fn vendor_csi_rx_process();
+    #[link_name = "wDev_IndicateCtrlFrame"]
+    fn vendor_indicate_ctrl_frame(frame: *mut u8, count: u32, kind: u32) -> i32;
     fn __real_wDev_isNANPktInValidSlot(frame: *mut u8) -> i32;
+    fn __real_wDev_IndicateCtrlFrame(frame: *mut u8, count: u32, kind: u32) -> i32;
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -593,6 +596,9 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     ) && core::ptr::eq(
         vendor_csi_rx_process as *const (),
         __wrap_wdev_csi_rx_process as *const (),
+    ) && core::ptr::eq(
+        vendor_indicate_ctrl_frame as *const (),
+        __wrap_wDev_IndicateCtrlFrame as *const (),
     ) && runtime_rx_recycle_link_wrapper_active()
 }
 
@@ -652,6 +658,27 @@ pub unsafe extern "C" fn __wrap_wDev_SnifferRxData() {}
 /// pointer remains null before this boundary can be armed.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_wdev_csi_rx_process() {}
+
+/// Elide the allocation-only CSI control-frame envelope in strict AP/STA mode.
+///
+/// The pinned function returns one on every path. Its only observable work is
+/// an OSI Wi-Fi allocation, two finite copies, `wdev_csi_rx_process`, and the
+/// matching OSI free. Preparation has disabled CSI and verified both the
+/// callback and `wDevCtrl` state, so the constant return preserves the caller's
+/// control-flow result without constructing an unused dynamic envelope.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.csi_control"]
+pub unsafe extern "C" fn __wrap_wDev_IndicateCtrlFrame(
+    frame: *mut u8,
+    count: u32,
+    kind: u32,
+) -> i32 {
+    if crate::critical::strict_wifi_hart_armed() {
+        1
+    } else {
+        __real_wDev_IndicateCtrlFrame(frame, count, kind)
+    }
+}
 
 /// Remove the vendor power-save/mesh beacon tail under `WIFI_PS_NONE`.
 ///
