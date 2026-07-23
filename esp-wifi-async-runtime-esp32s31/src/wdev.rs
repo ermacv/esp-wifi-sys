@@ -363,9 +363,20 @@ unsafe fn publish_rx_recycle_chain(
     if published_head.is_null() {
         control.cast::<*mut u8>().write_unaligned(head);
         control.add(4).cast::<*mut u8>().write_unaligned(tail);
+        // A runtime-empty software list means MAC may already have entered
+        // its terminal descriptor state. Unlike cold initialization, writing
+        // RX base alone does not make that state fetch the new chain. Publish
+        // base first, then use the same hardware reload edge and async settle
+        // continuation as the ordinary non-empty append path.
         hal_mac_rx_set_base(head);
+        state.reload_active = true;
+        state.reload_tail = tail;
+        RX_RECYCLE_PROBE
+            .reload_active
+            .store(1, Ordering::Release);
+        hal_mac_rx_set_dscr_reload();
         crate::critical::strict_wifi_int_restore(interrupt_state);
-        return Ok(false);
+        return Ok(true);
     }
 
     let published_tail = control.add(4).cast::<*mut u8>().read_unaligned();
