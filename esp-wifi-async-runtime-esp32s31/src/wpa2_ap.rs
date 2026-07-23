@@ -1,6 +1,6 @@
 //! Static WPA2-Personal AP association boundary for the pinned S31 ABI.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::{
     channel::{BoundedChannel, Receive},
@@ -41,6 +41,86 @@ pub enum Wpa2ApPeerEvent {
 
 static EVENTS: BoundedChannel<Wpa2ApPeerEvent, WPA2_AP_ASSOC_CAPACITY> = BoundedChannel::new();
 static REJECTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.ap_join_diagnostics"
+)]
+static JOIN_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.ap_join_diagnostics"
+)]
+static JOIN_ACCEPTED: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.ap_join_diagnostics"
+)]
+static JOIN_LAST_RSN_LEN: AtomicUsize = AtomicUsize::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.ap_join_diagnostics"
+)]
+static JOIN_LAST_ERROR: AtomicU8 = AtomicU8::new(0);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.ap_join_diagnostics"
+)]
+static JOIN_LAST_RSN_PREFIX: [AtomicU8; 32] = [const { AtomicU8::new(0) }; 32];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Wpa2ApJoinSnapshot {
+    pub attempts: usize,
+    pub accepted: usize,
+    pub last_rsn_len: usize,
+    pub last_error: Option<Wpa2ApRsnError>,
+    pub last_rsn_prefix: [u8; 32],
+}
+
+fn rsn_error_code(error: Wpa2ApRsnError) -> u8 {
+    match error {
+        Wpa2ApRsnError::Malformed => 1,
+        Wpa2ApRsnError::CapacityExceeded => 2,
+        Wpa2ApRsnError::UnsupportedVersion => 3,
+        Wpa2ApRsnError::UnsupportedGroupCipher => 4,
+        Wpa2ApRsnError::UnsupportedPairwiseCipher => 5,
+        Wpa2ApRsnError::UnsupportedAkm => 6,
+        Wpa2ApRsnError::ManagementFrameProtectionRequired => 7,
+    }
+}
+
+fn rsn_error_from_code(code: u8) -> Option<Wpa2ApRsnError> {
+    match code {
+        1 => Some(Wpa2ApRsnError::Malformed),
+        2 => Some(Wpa2ApRsnError::CapacityExceeded),
+        3 => Some(Wpa2ApRsnError::UnsupportedVersion),
+        4 => Some(Wpa2ApRsnError::UnsupportedGroupCipher),
+        5 => Some(Wpa2ApRsnError::UnsupportedPairwiseCipher),
+        6 => Some(Wpa2ApRsnError::UnsupportedAkm),
+        7 => Some(Wpa2ApRsnError::ManagementFrameProtectionRequired),
+        _ => None,
+    }
+}
+
+fn record_join_rsn(bytes: &[u8], error: Option<Wpa2ApRsnError>) {
+    JOIN_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    JOIN_LAST_RSN_LEN.store(bytes.len(), Ordering::Relaxed);
+    for (index, destination) in JOIN_LAST_RSN_PREFIX.iter().enumerate() {
+        destination.store(bytes.get(index).copied().unwrap_or(0), Ordering::Relaxed);
+    }
+    JOIN_LAST_ERROR.store(error.map(rsn_error_code).unwrap_or(0), Ordering::Release);
+}
+
+pub fn wpa2_ap_join_snapshot() -> Wpa2ApJoinSnapshot {
+    Wpa2ApJoinSnapshot {
+        attempts: JOIN_ATTEMPTS.load(Ordering::Acquire),
+        accepted: JOIN_ACCEPTED.load(Ordering::Acquire),
+        last_rsn_len: JOIN_LAST_RSN_LEN.load(Ordering::Acquire),
+        last_error: rsn_error_from_code(JOIN_LAST_ERROR.load(Ordering::Acquire)),
+        last_rsn_prefix: core::array::from_fn(|index| {
+            JOIN_LAST_RSN_PREFIX[index].load(Ordering::Acquire)
+        }),
+    }
+}
 
 fn read_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, Wpa2ApRsnError> {
     let value = bytes
@@ -553,10 +633,17 @@ mod target {
         let mut peer = [0; 6];
         peer.copy_from_slice(core::slice::from_raw_parts(join.bssid, 6));
         let rsn_bytes = core::slice::from_raw_parts(join.wpa_ie, usize::from(join.wpa_ie_len));
-        let Ok(rsn_ie) = validate_wpa2_ap_rsn(rsn_bytes) else {
-            let _ = send_association_response(peer, join.subtype, WLAN_STATUS_INVALID_IE);
-            REJECTED.fetch_add(1, Ordering::Relaxed);
-            return false;
+        let rsn_ie = match validate_wpa2_ap_rsn(rsn_bytes) {
+            Ok(rsn_ie) => {
+                record_join_rsn(rsn_bytes, None);
+                rsn_ie
+            }
+            Err(error) => {
+                record_join_rsn(rsn_bytes, Some(error));
+                let _ = send_association_response(peer, join.subtype, WLAN_STATUS_INVALID_IE);
+                REJECTED.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
         };
 
         if EVENTS.len() >= WPA2_AP_ASSOC_CAPACITY {
@@ -598,6 +685,7 @@ mod target {
             REJECTED.fetch_add(1, Ordering::Relaxed);
             return false;
         }
+        JOIN_ACCEPTED.fetch_add(1, Ordering::Relaxed);
         true
     }
 
