@@ -647,6 +647,13 @@ mod target {
     /// Final-link guard for direct C `free` references.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_free(ptr: *mut c_void) {
+        // ISO C defines `free(NULL)` as a no-op.  The vendor peer teardown
+        // unconditionally frees its optional per-peer rate-control context;
+        // strict AP may deliberately leave that slot null.  Do not report the
+        // absence of an allocation as a runtime heap operation.
+        if ptr.is_null() {
+            return;
+        }
         let caller = caller_address();
         if release_strict_allocation(ptr) {
             return;
@@ -745,6 +752,9 @@ mod target {
         call_malloc(&MALLOC, size, AllocationSource::OsiMalloc, caller_address())
     }
     unsafe extern "C" fn free(ptr: *mut c_void) {
+        if ptr.is_null() {
+            return;
+        }
         let caller = caller_address();
         if release_strict_allocation(ptr) {
             return;
