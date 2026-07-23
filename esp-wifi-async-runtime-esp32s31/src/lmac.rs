@@ -1045,7 +1045,7 @@ unsafe fn submit_basic_retry(
     let mut flags = descriptor.cast::<u32>().read();
     let descriptor_word = descriptor.add(0x10).cast::<u32>().read();
     if flags & (TX_FRAME_OFFCHANNEL_BIT | TX_FRAME_FTM_BIT) != 0
-        || descriptor_word & 0x00c0_0000 == 0x0080_0000
+        || !admitted_basic_packet_kind(hardware_queue, descriptor_word)
     {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
     }
@@ -1401,7 +1401,7 @@ pub unsafe fn submit_basic_ht_ampdu(
         .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
         .cast::<u32>()
         .read();
-    if descriptor_word & 0x00c0_0000 == 0x0080_0000 {
+    if !admitted_basic_packet_kind(hardware_queue, descriptor_word) {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
     }
 
@@ -1495,7 +1495,7 @@ pub unsafe fn submit_basic_non_he_frame(
         .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
         .cast::<u32>()
         .read();
-    if descriptor_word & 0x00c0_0000 == 0x0080_0000 {
+    if !admitted_basic_packet_kind(hardware_queue, descriptor_word) {
         return Err(LmacAsyncError::UnsupportedTxSubmissionDescriptor(flags));
     }
 
@@ -1518,6 +1518,19 @@ pub unsafe fn submit_basic_non_he_frame(
     format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
     enable_basic_tx_queue(queue_state, descriptor)
+}
+
+const fn admitted_basic_packet_kind(hardware_queue: u8, descriptor_word: u32) -> bool {
+    let packet_kind = descriptor_word & 0x00c0_0000;
+    if packet_kind != 0x0080_0000 {
+        return true;
+    }
+    // AP pairwise data was measured on the initialized WMM mapping HW2/Q10.
+    // The bits used for the packet-kind discriminator overlap the high bits
+    // of the logical queue number, so rejecting kind two unconditionally also
+    // rejects ordinary encrypted unicast traffic.
+    let logical_queue = ((descriptor_word >> 20) & 0x0f) as u8;
+    hardware_queue == 2 && logical_queue == 10
 }
 
 /// Transfer the prepared chain into the fixed owner slot before hardware can
