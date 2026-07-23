@@ -50,3 +50,9 @@ ppProcTxSecFrame = wifi_strict_pp_proc_tx_sec_frame;
 
 __real_esp_test_tx_enab_statistics = 0x2f801144;
 esp_test_tx_enab_statistics = __wrap_esp_test_tx_enab_statistics;
+
+__real_esp_test_rx_process_complete = 0x2f801158;
+esp_test_rx_process_complete = __wrap_esp_test_rx_process_complete;
+
+__real_esp_test_rx_parse_mu = 0x2f801178;
+esp_test_rx_parse_mu = __wrap_esp_test_rx_parse_mu;

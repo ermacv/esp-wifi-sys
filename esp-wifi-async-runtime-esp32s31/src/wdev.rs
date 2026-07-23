@@ -11,6 +11,8 @@ pub enum WdevRxContinuationError {
     WrongHart,
     ResetStateUnavailable,
     MissingLastDescriptor,
+    CurrentDescriptorMismatch,
+    MissingRxMetadata,
     DescriptorCountOverflow,
     DescriptorChainTooLong,
 }
@@ -104,6 +106,20 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
         };
 
         if descriptor.cast::<u32>().read_unaligned() & (1 << 30) != 0 {
+            let published = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+            if published != descriptor {
+                crate::critical::strict_wifi_int_restore(interrupt_state);
+                return Err(WdevRxContinuationError::CurrentDescriptorMismatch);
+            }
+            if descriptor
+                .add(4)
+                .cast::<*mut u8>()
+                .read_unaligned()
+                .is_null()
+            {
+                crate::critical::strict_wifi_int_restore(interrupt_state);
+                return Err(WdevRxContinuationError::MissingRxMetadata);
+            }
             crate::critical::strict_wifi_int_restore(interrupt_state);
             wDev_ProcessRxSucData(descriptor, subframe_count);
             subframe_count = 0;

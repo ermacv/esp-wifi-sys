@@ -13,6 +13,16 @@ unsafe extern "C" {
     fn vendor_wifi_gpio_debug(selector: u32, value: u32);
     #[link_name = "esp_test_tx_enab_statistics"]
     fn vendor_test_tx_enable_statistics(queue: u32) -> i32;
+    #[link_name = "esp_test_rx_parse_mu"]
+    fn vendor_test_rx_parse_mu(descriptor: *mut c_void, rx_control: *mut c_void);
+    #[link_name = "esp_test_rx_process_complete"]
+    fn vendor_test_rx_process_complete(
+        descriptor: *mut c_void,
+        discarded: u32,
+        first_descriptor: *mut c_void,
+        subframe_count: u32,
+        error: u32,
+    );
 }
 
 pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
@@ -33,6 +43,14 @@ pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
         && core::ptr::eq(
             vendor_test_tx_enable_statistics as *const (),
             __wrap_esp_test_tx_enab_statistics as *const (),
+        )
+        && core::ptr::eq(
+            vendor_test_rx_parse_mu as *const (),
+            __wrap_esp_test_rx_parse_mu as *const (),
+        )
+        && core::ptr::eq(
+            vendor_test_rx_process_complete as *const (),
+            __wrap_esp_test_rx_process_complete as *const (),
         )
 }
 
@@ -68,4 +86,29 @@ pub unsafe extern "C" fn __wrap_wifi_gpio_debug(_selector: u32, _value: u32) {}
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_esp_test_tx_enab_statistics(_queue: u32) -> i32 {
     0
+}
+
+/// Disable the optional RX MU test-statistics parser.
+///
+/// The pinned implementation first checks `esp_test_rx_mu_statistics` and
+/// otherwise returns without affecting descriptor ownership or frame delivery.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_test_rx_parse_mu(
+    _descriptor: *mut c_void,
+    _rx_control: *mut c_void,
+) {
+}
+
+/// Disable the optional per-frame RX test-statistics collector.
+///
+/// The vendor caller ignores its return path and immediately continues with
+/// ordinary frame accounting and `wDev_IndicateFrame`.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_test_rx_process_complete(
+    _descriptor: *mut c_void,
+    _discarded: u32,
+    _first_descriptor: *mut c_void,
+    _subframe_count: u32,
+    _error: u32,
+) {
 }
