@@ -37,6 +37,10 @@ const ROOTS: &[&str] = &[
     "ic_set_mac",
     "ic_set_rx_policy",
     "ic_set_rx_policy_ubssid_check",
+    // Fixed-buffer management-frame allocation and a two-byte channel-state
+    // pointer leaf used by Rust-owned STA/AP management constructors.
+    "ieee80211_getmgtframe",
+    "chm_get_home_channel",
     // Direct leaves used by the one-frame strict event-16 continuation.
     "esp_wifi_internal_free_rx_buffer",
     // Direct leaves used by the bounded Rust event-17 receive pump. The stock
@@ -51,9 +55,6 @@ const ROOTS: &[&str] = &[
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
-    // Exact allocation-free AP association-response branch used after the
-    // heap-backed WPA station callbacks have been patched.
-    "ieee80211_assoc_resp_construct",
     "ieee80211_set_tx_desc",
     // Timer ID 0 is completed entirely by Rust; no vendor timer callback is a
     // strict root. All other stock net80211 timers fail closed.
@@ -156,14 +157,10 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "ppProcTxSecFrame",
 ];
 
-// These pinned register-indirect sites are excluded only after their live
-// guards have been reproduced at the strict call sites: mesh is rejected
-// before association construction, ESF frame[0] is forced null before cache
-// recycle.
-const INVARIANT_EXCLUDED_INDIRECTS: &[&str] = &[
-    "ieee80211_assoc_resp_construct",
-    "ieee80211_recycle_cache_eb",
-];
+// This pinned register-indirect site is excluded only after its live guard has
+// been reproduced at the strict call site: ESF frame[0] is forced null before
+// cache recycle.
+const INVARIANT_EXCLUDED_INDIRECTS: &[&str] = &["ieee80211_recycle_cache_eb"];
 
 // `phy_get_romfunc_addr` overwrites these exact slots after obtaining the ROM
 // table. The pinned S31 object writes offset 20 to `phy_set_rx_comp_new` and

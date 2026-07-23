@@ -113,6 +113,36 @@ pub struct DeferredApManagementSnapshot {
 }
 
 pub const AP_ASSOCIATION_RESPONSE_CAPTURE_CAPACITY: usize = 256;
+const STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN: usize = 103;
+const STRICT_AP_BGN_RATES: [u8; 12] = [
+    0x8b, 0x96, 0x82, 0x84, 0x0c, 0x18, 0x30, 0x60, 0x6c, 0x12, 0x24, 0x48,
+];
+const STRICT_AP_BGN_HT20_ASSOCIATION_RESPONSE: [u8; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN] = [
+    0x31, 0x04, 0x00, 0x00, 0x01, 0xc0, 0x01, 0x08, 0x8b, 0x96, 0x82, 0x84, 0x0c, 0x18, 0x30, 0x60,
+    0x32, 0x04, 0x6c, 0x12, 0x24, 0x48, 0x2a, 0x01, 0x00, 0x2d, 0x1a, 0x6e, 0x11, 0x00, 0xff, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x3d, 0x16, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdd, 0x18, 0x00,
+    0x50, 0xf2, 0x02, 0x01, 0x01, 0x04, 0x00, 0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00, 0x42,
+    0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
+];
+
+fn write_strict_ap_bgn_ht20_association_response(
+    body: &mut [u8; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN],
+    status: u16,
+    association_id: u16,
+    primary_channel: u8,
+) -> bool {
+    if !(1..=13).contains(&primary_channel) || (status == 0 && association_id & 0x3fff == 0) {
+        return false;
+    }
+    body.copy_from_slice(&STRICT_AP_BGN_HT20_ASSOCIATION_RESPONSE);
+    body[2..4].copy_from_slice(&status.to_le_bytes());
+    body[4..6].copy_from_slice(&if status == 0 { association_id } else { 0 }.to_le_bytes());
+    // First byte of the HT Operation element.
+    body[55] = primary_channel;
+    true
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ApAssociationResponseSnapshot {
@@ -582,7 +612,6 @@ mod target {
         fn __esp_hostap_sta_join(join: *mut WpaStationJoinParam) -> bool;
         fn __esp_hostap_sta_join_end();
         fn cnx_node_search(peer: *const u8) -> *mut u8;
-        fn ieee80211_assoc_resp_construct(node: *mut u8, status: u8) -> *mut u8;
         fn ieee80211_getmgtframe(
             body: *mut *mut u8,
             header_length: u32,
@@ -603,6 +632,7 @@ mod target {
         fn linked_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
         fn __real_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
         fn chm_is_at_home_channel() -> bool;
+        fn chm_get_home_channel() -> *const u8;
         fn ic_tx_pkt(buffer: *mut u8) -> i32;
         fn esf_buf_recycle(frame: *mut c_void);
     }
@@ -719,24 +749,17 @@ mod target {
         let Ok(subtype @ (0x10 | 0x30)) = u8::try_from(subtype) else {
             return false;
         };
-        let Ok(status) = u8::try_from(status) else {
+        if u8::try_from(status).is_err() {
             return false;
-        };
+        }
         let node = cnx_node_search(peer.as_ptr());
         if node.is_null() || node.cast::<*mut u8>().read().is_null() {
             return false;
         }
-        // All register-indirect calls in the pinned constructor live in its
-        // mesh-only branch. Recheck the live invariant at the call site so a
-        // strict association response cannot enter that callback table.
-        if ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0 {
+        let Some(buffer) = construct_strict_ap_association_response(node, status) else {
             return false;
-        }
-        let buffer = ieee80211_assoc_resp_construct(node, status);
-        if buffer.is_null() {
-            return false;
-        }
-        capture_ap_association_response(buffer, subtype, u16::from(status));
+        };
+        capture_ap_association_response(buffer, subtype, status);
         if status != 0 {
             // Exact side effect of the pinned `ieee80211_send_mgmt` response
             // branch: clear the association-pending bit after an error.
@@ -746,6 +769,69 @@ mod target {
         ieee80211_set_tx_desc(node, buffer, 7, 0, 0);
         linked_ieee80211_set_tx_pti(buffer, 6);
         linked_ieee80211_mgmt_output(node, buffer, subtype) == 0
+    }
+
+    unsafe fn construct_strict_ap_association_response(
+        node: *mut u8,
+        status: u16,
+    ) -> Option<*mut u8> {
+        let interface = node.cast::<*mut u8>().read();
+        if interface.is_null()
+            || interface.add(0x138).cast::<u32>().read_unaligned() != 1
+            || interface.add(0x154).read().wrapping_sub(2) > 1
+            || interface.add(0x144).cast::<u32>().read_unaligned() & 0x0080_0000 == 0
+            || interface.add(0xa4).cast::<u32>().read_unaligned() & 0x0000_2000 == 0
+            || interface.add(0x228).cast::<u32>().read_unaligned() & 1 != 0
+            || node.add(0x31).read().wrapping_sub(2) > 1
+        {
+            return None;
+        }
+        let node_flags = node.add(0x0c).cast::<u32>().read_unaligned();
+        if node_flags & 0x42 != 0x42
+            || node_flags & 0xc0 == 0xc0
+            || node.add(0x73).read() != STRICT_AP_BGN_RATES.len() as u8
+        {
+            return None;
+        }
+        for (index, expected) in STRICT_AP_BGN_RATES.iter().copied().enumerate() {
+            if node.add(0x74 + index).read() != expected {
+                return None;
+            }
+        }
+
+        // The pinned channel-manager getters are finite pointer leaves. A
+        // zero secondary-channel byte is the live proof that this exact
+        // response template describes the configured HT20 profile.
+        let channel = chm_get_home_channel();
+        if channel.is_null() || channel.add(1).read() != 0 {
+            return None;
+        }
+        let primary_channel = channel.read();
+        let association_id = node.add(0x26).cast::<u16>().read_unaligned();
+        let mut body = ptr::null_mut();
+        let buffer = ieee80211_getmgtframe(
+            &mut body,
+            24,
+            STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN as u32,
+        );
+        if buffer.is_null() || body.is_null() {
+            return None;
+        }
+        let response = &mut *body.cast::<[u8; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN]>();
+        if !write_strict_ap_bgn_ht20_association_response(
+            response,
+            status,
+            association_id,
+            primary_channel,
+        ) {
+            esf_buf_recycle(buffer.cast());
+            return None;
+        }
+        buffer
+            .add(0x14)
+            .cast::<u32>()
+            .write_unaligned(((STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN as u32) << 16) | 24);
+        Some(buffer)
     }
 
     unsafe fn capture_ap_association_response(buffer: *mut u8, subtype: u8, status: u16) {
@@ -1777,5 +1863,39 @@ mod tests {
         assert_eq!(updated_tim_bitmap_byte(0xa5, 10, true), 0xa5);
         assert_eq!(updated_tim_bitmap_byte(0xa5, 8, false), 0xa4);
         assert_eq!(updated_tim_bitmap_byte(0xa5, 15, false), 0x25);
+    }
+
+    #[test]
+    fn strict_bgn_ht20_association_response_matches_hardware_oracle() {
+        let mut body = [0; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN];
+        assert!(write_strict_ap_bgn_ht20_association_response(
+            &mut body, 0, 0xc001, 1
+        ));
+        assert_eq!(body, STRICT_AP_BGN_HT20_ASSOCIATION_RESPONSE);
+        assert_eq!(
+            &body[6..16],
+            &[1, 8, 0x8b, 0x96, 0x82, 0x84, 12, 24, 48, 96]
+        );
+        assert_eq!(&body[16..22], &[50, 4, 0x6c, 0x12, 0x24, 0x48]);
+        assert_eq!(&body[25..27], &[45, 26]);
+        assert_eq!(&body[53..55], &[61, 22]);
+        assert_eq!(&body[77..80], &[221, 24, 0]);
+    }
+
+    #[test]
+    fn strict_association_response_owns_status_aid_and_channel() {
+        let mut body = [0; STRICT_AP_ASSOCIATION_RESPONSE_BODY_LEN];
+        assert!(write_strict_ap_bgn_ht20_association_response(
+            &mut body, 17, 0xc123, 11
+        ));
+        assert_eq!(&body[2..4], &17_u16.to_le_bytes());
+        assert_eq!(&body[4..6], &[0, 0]);
+        assert_eq!(body[55], 11);
+        assert!(!write_strict_ap_bgn_ht20_association_response(
+            &mut body, 0, 0, 1
+        ));
+        assert!(!write_strict_ap_bgn_ht20_association_response(
+            &mut body, 0, 1, 14
+        ));
     }
 }
