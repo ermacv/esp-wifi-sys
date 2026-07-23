@@ -35,6 +35,52 @@ pub struct PersistentFrameCompletionLayout {
     pub descriptor_security: u32,
 }
 
+const AP_GROUP_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACITY as u16 + 18;
+
+const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
+    if input.frame_control != 0x4208
+        || input.descriptor_flags != 0x0000_200b
+        || input.descriptor_security != 0x0004_0342
+        || input.header_len != 0x0018
+        || input.remaining_len < 8
+        || input.layout & 0xe000 != 0
+    {
+        return false;
+    }
+    let mpdu_len = match input.header_len.checked_add(input.remaining_len) {
+        Some(value) if value <= AP_GROUP_MAX_MPDU_LEN => value,
+        _ => return false,
+    };
+    input.buffer_flags
+        == 0xc000_0000 | (mpdu_len as u32) << 14 | (mpdu_len as u32 + 14)
+}
+
+pub(crate) const fn strict_ap_group_power_save_completion(
+    frame_control: u16,
+    header_len: u16,
+    remaining_len: u16,
+    layout: u16,
+    buffer_flags: u32,
+    descriptor_flags: u32,
+    descriptor_security: u32,
+) -> bool {
+    if frame_control != 0x4208
+        || descriptor_flags != 0x0000_200b
+        || !matches!(descriptor_security, 0x0114_0342 | 0x0414_0342)
+        || header_len != 0x0020
+        || remaining_len < 20
+        || layout & 0xe000 != 0x2000
+    {
+        return false;
+    }
+    let output_len = match header_len.checked_add(remaining_len) {
+        Some(value) if value <= AP_GROUP_MAX_MPDU_LEN + 20 => value,
+        _ => return false,
+    };
+    buffer_flags
+        == 0xc000_0000 | (output_len as u32) << 14 | (output_len as u32 - 6)
+}
+
 /// Restore one retained plaintext management or beacon buffer after TX done.
 ///
 /// The pinned `ppProcTxDone` branch removes the four-byte FCS reservation and
@@ -174,18 +220,7 @@ pub const fn strict_tx_security_layout(
         && input.remaining_len == 0x0054
         && input.layout == 0
         && input.buffer_flags == 0xc01b_0082;
-    let protected_ap_group_data = input.frame_control == 0x4208
-        && input.descriptor_flags == 0x0000_200b
-        && input.descriptor_security == 0x0004_0342
-        && input.header_len == 0x0018
-        // The low thirteen bits are an opaque identity/layout value preserved
-        // across the security transform. Successive static objects produced
-        // 0, 1, 2, 3 and 4; only the upper ownership bits have semantics here.
-        && input.layout & 0xe000 == 0
-        && matches!(
-            (input.remaining_len, input.buffer_flags),
-            (0x002c, 0xc011_0052) | (0x005c, 0xc01d_0082)
-        );
+    let protected_ap_group_data = is_protected_ap_group_data(input);
     let trailer_len = if (input.descriptor_security == 0
         && ((matches!(input.frame_control, 0x00b0 | 0x0000 | 0x00d0)
             && input.descriptor_flags == 0)
@@ -499,7 +534,7 @@ unsafe fn trap_invalid_tx_security_layout(input: TxSecurityLayoutInput) -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        strict_ap_beacon_completion_layout,
+        strict_ap_beacon_completion_layout, strict_ap_group_power_save_completion,
         strict_ap_eapol_power_save_completion_llc_offset,
         strict_persistent_frame_completion_layout, strict_tx_security_layout,
         ApBeaconCompletionLayout, PersistentFrameCompletionLayout, TxSecurityLayoutInput,
@@ -949,6 +984,7 @@ mod tests {
             for (remaining_len, buffer_flags, output_remaining, output_buffer, metadata_len) in [
                 (0x002c, 0xc011_0052, 0x0038, 0xc016_0052, 0x0050),
                 (0x005c, 0xc01d_0082, 0x0068, 0xc022_0082, 0x0080),
+                (0x0070, 0xc022_0096, 0x007c, 0xc027_0096, 0x0094),
             ] {
                 assert_eq!(
                     strict_tx_security_layout(TxSecurityLayoutInput {
@@ -965,8 +1001,39 @@ mod tests {
                         metadata_len,
                     }),
                 );
+                for descriptor_security in [0x0114_0342, 0x0414_0342] {
+                    assert!(strict_ap_group_power_save_completion(
+                        0x4208,
+                        0x0020,
+                        output_remaining,
+                        0x2000 | layout,
+                        output_buffer,
+                        0x0000_200b,
+                        descriptor_security,
+                    ));
+                }
             }
         }
+        let max_mpdu_len = super::AP_GROUP_MAX_MPDU_LEN;
+        let max_input_flags =
+            0xc000_0000 | (u32::from(max_mpdu_len) << 14) | (u32::from(max_mpdu_len) + 14);
+        assert!(strict_tx_security_layout(TxSecurityLayoutInput {
+            remaining_len: max_mpdu_len - 0x18,
+            buffer_flags: max_input_flags,
+            ..measured
+        })
+        .is_some());
+        let oversized_len = max_mpdu_len + 1;
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                remaining_len: oversized_len - 0x18,
+                buffer_flags: 0xc000_0000
+                    | (u32::from(oversized_len) << 14)
+                    | (u32::from(oversized_len) + 14),
+                ..measured
+            }),
+            None,
+        );
         for rejected in [
             TxSecurityLayoutInput {
                 descriptor_flags: 0x0000_200a,

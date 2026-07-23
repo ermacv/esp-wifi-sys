@@ -984,28 +984,6 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
     enqueue_step()
 }
 
-const fn is_strict_ap_group_power_save_completion(
-    frame_control: u16,
-    header_len: u16,
-    remaining_len: u16,
-    layout: u16,
-    buffer_flags: u32,
-    descriptor_flags: u32,
-    descriptor_security: u32,
-) -> bool {
-    frame_control == 0x4208
-        && descriptor_flags == 0x0000_200b
-        // The input security leaf sees 0x0004_0342. Successful hardware
-        // completion adds the measured 0x0110_0000 queue/status bits.
-        && descriptor_security == 0x0114_0342
-        && header_len == 0x0020
-        && layout & 0xe000 == 0x2000
-        && matches!(
-            (remaining_len, buffer_flags),
-            (0x0038, 0xc016_0052) | (0x0068, 0xc022_0082)
-        )
-}
-
 /// Consume the hostap power-save callback attached by the stock AP transmit
 /// leaf without entering its connection-node/TIM state machine.
 ///
@@ -1050,7 +1028,7 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
     let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
     let descriptor_security = descriptor.add(0x10).cast::<u32>().read_unaligned();
     let buffer_flags = buffer.cast::<u32>().read_unaligned();
-    let protected_group = is_strict_ap_group_power_save_completion(
+    let protected_group = crate::tx_security::strict_ap_group_power_save_completion(
         frame_control,
         lengths as u16,
         (lengths >> 16) as u16,
@@ -1352,7 +1330,7 @@ fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ap_deauthentication_completion, is_strict_ap_group_power_save_completion};
+    use super::is_ap_deauthentication_completion;
     #[cfg(feature = "hil-vendor-tx")]
     use super::ieee80211_data_header_len;
 
@@ -1362,43 +1340,6 @@ mod tests {
         assert!(is_ap_deauthentication_completion(0x00c0, 0x0414_0000));
         assert!(!is_ap_deauthentication_completion(0x00c0, 0x0004_0000));
         assert!(!is_ap_deauthentication_completion(0x00a0, 0x0114_0000));
-    }
-
-    #[test]
-    fn ap_group_completion_accepts_each_static_pool_slot_at_either_measured_size() {
-        for layout in [0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x3fff] {
-            for (remaining_len, buffer_flags) in
-                [(0x0038, 0xc016_0052), (0x0068, 0xc022_0082)]
-            {
-                assert!(is_strict_ap_group_power_save_completion(
-                    0x4208,
-                    0x0020,
-                    remaining_len,
-                    layout,
-                    buffer_flags,
-                    0x0000_200b,
-                    0x0114_0342,
-                ));
-            }
-        }
-        assert!(!is_strict_ap_group_power_save_completion(
-            0x4208,
-            0x0020,
-            0x0038,
-            0x4004,
-            0xc016_0052,
-            0x0000_200b,
-            0x0114_0342,
-        ));
-        assert!(!is_strict_ap_group_power_save_completion(
-            0x4208,
-            0x0020,
-            0x0038,
-            0x2000,
-            0xc022_0082,
-            0x0000_200b,
-            0x0114_0342,
-        ));
     }
 
     #[cfg(feature = "hil-vendor-tx")]
