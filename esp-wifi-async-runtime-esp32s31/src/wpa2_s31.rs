@@ -144,6 +144,61 @@ impl<const N: usize> StaticAuthorizedPeers<N> {
     }
 }
 
+struct StaticCancelledPeerGenerations<const N: usize> {
+    peers: [Option<([u8; 6], usize)>; N],
+}
+
+impl<const N: usize> StaticCancelledPeerGenerations<N> {
+    const fn new() -> Self {
+        Self {
+            peers: [const { None }; N],
+        }
+    }
+
+    fn get(&self, peer: &[u8; 6]) -> Option<usize> {
+        self.peers.iter().find_map(|candidate| {
+            candidate
+                .as_ref()
+                .filter(|(candidate_peer, _)| candidate_peer == peer)
+                .map(|(_, epoch)| *epoch)
+        })
+    }
+
+    fn remove(&mut self, peer: &[u8; 6]) {
+        if let Some(slot) = self.peers.iter_mut().find(|candidate| {
+            candidate
+                .as_ref()
+                .is_some_and(|(candidate_peer, _)| candidate_peer == peer)
+        }) {
+            *slot = None;
+        }
+    }
+
+    fn set(&mut self, peer: [u8; 6], epoch: usize) -> Result<(), ()> {
+        if let Some(slot) = self.peers.iter_mut().find(|candidate| {
+            candidate
+                .as_ref()
+                .is_some_and(|(candidate_peer, _)| *candidate_peer == peer)
+        }) {
+            *slot = Some((peer, epoch));
+            return Ok(());
+        }
+        let Some(slot) = self.peers.iter_mut().find(|candidate| candidate.is_none()) else {
+            return Err(());
+        };
+        *slot = Some((peer, epoch));
+        Ok(())
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&[u8; 6]) -> bool) {
+        for slot in &mut self.peers {
+            if slot.as_ref().is_some_and(|(peer, _)| !keep(peer)) {
+                *slot = None;
+            }
+        }
+    }
+}
+
 /// Stable-address storage referenced by the pinned net80211 key table.
 pub struct S31StaticKeyStorage<const N: usize> {
     backend_taken: AtomicBool,
@@ -916,7 +971,7 @@ mod target {
         ap_waiting_association_epoch: usize,
         ap_waiting_peer: [u8; 6],
         ap_retry_armed: bool,
-        ap_cancelled_peer: Option<([u8; 6], usize)>,
+        ap_cancelled_peers: StaticCancelledPeerGenerations<WPA2_AP_ASSOC_CAPACITY>,
         #[cfg(feature = "hil-vendor-tx")]
         vendor_tx_diagnostic: bool,
         #[cfg(feature = "hil-vendor-tx")]
@@ -952,7 +1007,7 @@ mod target {
                 ap_waiting_association_epoch: 0,
                 ap_waiting_peer: [0; 6],
                 ap_retry_armed: false,
-                ap_cancelled_peer: None,
+                ap_cancelled_peers: StaticCancelledPeerGenerations::new(),
                 #[cfg(feature = "hil-vendor-tx")]
                 vendor_tx_diagnostic: false,
                 #[cfg(feature = "hil-vendor-tx")]
@@ -1069,13 +1124,9 @@ mod target {
                 return false;
             }
             let association_epoch = crate::wpa2_ap::wpa2_ap_peer_association_epoch(peer);
-            if let Some((cancelled_peer, cancelled_epoch)) = self.ap_cancelled_peer {
-                if cancelled_peer == *peer {
-                    if association_epoch.is_some_and(|epoch| epoch != cancelled_epoch) {
-                        self.ap_cancelled_peer = None;
-                        return false;
-                    }
-                } else if association_epoch.is_some() {
+            if let Some(cancelled_epoch) = self.ap_cancelled_peers.get(peer) {
+                if association_epoch.is_some_and(|epoch| epoch != cancelled_epoch) {
+                    self.ap_cancelled_peers.remove(peer);
                     return false;
                 }
             } else if association_epoch.is_some() {
@@ -1742,8 +1793,12 @@ mod target {
             if matches_waiting_peer {
                 let _ = self.authorized_peers.set(self.ap_waiting_peer, false);
                 self.ap_retry_armed = false;
-                self.ap_cancelled_peer =
-                    Some((self.ap_waiting_peer, self.ap_waiting_association_epoch));
+                self.ap_cancelled_peers
+                    .retain(|peer| crate::wpa2_ap::wpa2_ap_peer_association_epoch(peer).is_some());
+                let inserted = self
+                    .ap_cancelled_peers
+                    .set(self.ap_waiting_peer, self.ap_waiting_association_epoch);
+                debug_assert!(inserted.is_ok());
                 crate::ap_power_save::record_cancelled_transmit();
             }
         }
@@ -1867,5 +1922,29 @@ mod tests {
         assert_eq!(peers.set(first, false), Ok(()));
         assert_eq!(peers.set(second, true), Ok(()));
         assert!(peers.contains(&second));
+    }
+
+    #[test]
+    fn cancelled_generations_are_peer_bound_and_fixed_capacity() {
+        let first = [1, 2, 3, 4, 5, 6];
+        let second = [6, 5, 4, 3, 2, 1];
+        let third = [7, 7, 7, 7, 7, 7];
+        let mut peers = StaticCancelledPeerGenerations::<2>::new();
+
+        assert_eq!(peers.get(&first), None);
+        assert_eq!(peers.set(first, 10), Ok(()));
+        assert_eq!(peers.set(second, 20), Ok(()));
+        assert_eq!(peers.get(&first), Some(10));
+        assert_eq!(peers.get(&second), Some(20));
+        assert_eq!(peers.set(first, 11), Ok(()));
+        assert_eq!(peers.get(&first), Some(11));
+        assert_eq!(peers.set(third, 30), Err(()));
+
+        peers.retain(|peer| *peer != second);
+        assert_eq!(peers.get(&second), None);
+        assert_eq!(peers.set(third, 30), Ok(()));
+        peers.remove(&first);
+        assert_eq!(peers.get(&first), None);
+        assert_eq!(peers.get(&third), Some(30));
     }
 }
