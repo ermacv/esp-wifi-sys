@@ -81,6 +81,7 @@ pub struct Wpa2ApJoinSnapshot {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ManagementTxRejectionSnapshot {
     pub count: usize,
+    pub captured: bool,
     pub reason: u32,
     pub subtype: u8,
     pub node: usize,
@@ -372,6 +373,7 @@ mod target {
 
     struct ManagementTxRejectionDiagnostics {
         count: AtomicUsize,
+        captured: AtomicBool,
         reason: AtomicUsize,
         subtype: AtomicU8,
         node: AtomicUsize,
@@ -391,6 +393,7 @@ mod target {
         const fn new() -> Self {
             Self {
                 count: AtomicUsize::new(0),
+                captured: AtomicBool::new(false),
                 reason: AtomicUsize::new(0),
                 subtype: AtomicU8::new(0),
                 node: AtomicUsize::new(0),
@@ -607,6 +610,15 @@ mod target {
         node: *mut u8,
         buffer: *mut u8,
     ) {
+        MANAGEMENT_TX_REJECTION
+            .count
+            .fetch_add(1, Ordering::Relaxed);
+        // The radio owner is the sole writer. Preserve its first complete
+        // rejection oracle so an async diagnostic reader cannot observe a
+        // mixture of fields from two rapidly repeated management attempts.
+        if MANAGEMENT_TX_REJECTION.captured.load(Ordering::Acquire) {
+            return;
+        }
         let mut layout = 0_u16;
         let mut raw_frame_control = 0_u16;
         let mut frame_control = 0_u16;
@@ -690,8 +702,8 @@ mod target {
             .reason
             .store(reason as usize, Ordering::Release);
         MANAGEMENT_TX_REJECTION
-            .count
-            .fetch_add(1, Ordering::Release);
+            .captured
+            .store(true, Ordering::Release);
     }
 
     unsafe fn reject_management_tx(
@@ -1071,6 +1083,7 @@ mod target {
     pub fn management_tx_rejection_snapshot() -> ManagementTxRejectionSnapshot {
         ManagementTxRejectionSnapshot {
             count: MANAGEMENT_TX_REJECTION.count.load(Ordering::Acquire),
+            captured: MANAGEMENT_TX_REJECTION.captured.load(Ordering::Acquire),
             reason: MANAGEMENT_TX_REJECTION.reason.load(Ordering::Acquire) as u32,
             subtype: MANAGEMENT_TX_REJECTION.subtype.load(Ordering::Acquire),
             node: MANAGEMENT_TX_REJECTION.node.load(Ordering::Acquire),
