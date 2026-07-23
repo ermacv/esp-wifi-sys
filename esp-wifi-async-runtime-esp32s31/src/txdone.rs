@@ -985,10 +985,10 @@ unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneErr
 /// The pinned callback performs only software power-save bookkeeping:
 /// `cnx_node_search`, counter updates and a possible `ieee80211_set_tim` call.
 /// Strict AP deliberately has no sleeping-client queues, while WPA2 EAPOL
-/// retransmission is owned by the Rust async state machine. Consequently the
-/// only valid uses of callback slot 12 are the measured AP-to-station WPA2
-/// messages one and three. Ordinary data using this callback would require an
-/// explicit Rust power-save implementation and remains rejected.
+/// retransmission is owned by the Rust async state machine. Callback slot 12
+/// is also attached to ordinary AP group data. In the strict PS-none profile
+/// the measured protected DHCP/ARP layouts have no TIM or sleeping-client
+/// side effect, so they complete as a validated no-op.
 unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError> {
     if frame.is_null() || !crate::esf::is_strict_recyclable_frame(frame) {
         return Err(TxDoneError::NonStaticFrameType(if frame.is_null() {
@@ -1020,6 +1020,23 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
     }
     let frame_control = header.cast::<u16>().read_unaligned();
     let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
+    let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
+    let descriptor_security = descriptor.add(0x10).cast::<u32>().read_unaligned();
+    let buffer_flags = buffer.cast::<u32>().read_unaligned();
+    let protected_group = frame_control == 0x4208
+        && descriptor_flags == 0x0000_200b
+        && descriptor_security == 0x0004_0342
+        && lengths as u16 == 0x0020
+        && matches!(
+            ((lengths >> 16) as u16, layout, buffer_flags),
+            (0x0038, 0x2001, 0xc016_0052)
+                | (0x0038, 0x2003, 0xc016_0052)
+                | (0x0068, 0x2000, 0xc022_0082)
+                | (0x0068, 0x2002, 0xc022_0082)
+        );
+    if protected_group {
+        return Ok(());
+    }
     let Some(llc_offset) = crate::tx_security::strict_ap_eapol_power_save_completion_llc_offset(
         frame_control,
         lengths as u16,

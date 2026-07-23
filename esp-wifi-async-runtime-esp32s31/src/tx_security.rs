@@ -185,6 +185,7 @@ pub const fn strict_tx_security_layout(
                 input.buffer_flags,
             ),
             (0x002c, 1, 0xc011_0052)
+                | (0x002c, 3, 0xc011_0052)
                 | (0x005c, 0, 0xc01d_0082)
                 | (0x005c, 2, 0xc01d_0082)
         );
@@ -959,6 +960,21 @@ mod tests {
                     header_len: 0x0020,
                     remaining_len: 0x0038,
                     layout: 0x2001,
+                    buffer_flags: 0xc016_0052,
+                    metadata_len: 0x0050,
+                },
+            ),
+            (
+                TxSecurityLayoutInput {
+                    remaining_len: 0x002c,
+                    layout: 3,
+                    buffer_flags: 0xc011_0052,
+                    ..measured
+                },
+                TxSecurityLayoutOutput {
+                    header_len: 0x0020,
+                    remaining_len: 0x0038,
+                    layout: 0x2003,
                     buffer_flags: 0xc016_0052,
                     metadata_len: 0x0050,
                 },
