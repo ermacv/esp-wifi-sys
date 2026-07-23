@@ -262,6 +262,22 @@ pub fn rejected_wpa2_ap_events() -> usize {
     REJECTED.load(Ordering::Acquire)
 }
 
+const fn is_bounded_ap_addba_response_layout(
+    subtype: u8,
+    layout: u16,
+    header_len: u16,
+    body_len: u16,
+    category: u8,
+    action: u8,
+) -> bool {
+    subtype == 0xd0
+        && layout == 0
+        && header_len == 24
+        && body_len == 9
+        && category == 3
+        && action == 1
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -616,6 +632,34 @@ mod target {
         }
     }
 
+    unsafe fn is_bounded_ap_addba_response(buffer: *mut u8, subtype: u8) -> bool {
+        if buffer.is_null() {
+            return false;
+        }
+        let layout = buffer.add(0x24).cast::<u16>().read_unaligned();
+        let header_len = buffer.add(0x14).cast::<u16>().read_unaligned();
+        let body_len = buffer.add(0x16).cast::<u16>().read_unaligned();
+        if subtype != 0xd0 || layout != 0 || header_len != 24 || body_len != 9 {
+            return false;
+        }
+        let first_buffer = buffer.add(4).cast::<*mut u8>().read_unaligned();
+        if first_buffer.is_null() {
+            return false;
+        }
+        let header = first_buffer.add(4).cast::<*mut u8>().read_unaligned();
+        if header.is_null() {
+            return false;
+        }
+        is_bounded_ap_addba_response_layout(
+            subtype,
+            layout,
+            header_len,
+            body_len,
+            header.add(24).read(),
+            header.add(25).read(),
+        )
+    }
+
     unsafe fn record_management_tx_rejection(
         reason: ManagementTxRejectionReason,
         subtype: u8,
@@ -796,11 +840,21 @@ mod target {
             }
             return -1;
         }
-        let subtype_allowed = matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
-            || crate::sta_link::is_owned_action_management(buffer, subtype);
-        let rejection = if !crate::critical::on_strict_wifi_hart() {
+        let on_wifi_hart = crate::critical::on_strict_wifi_hart();
+        let in_radio_context = crate::context::in_radio_context();
+        let owned_action = crate::sta_link::is_owned_action_management(buffer, subtype);
+        let ap_addba_response = if on_wifi_hart && in_radio_context && !buffer.is_null() {
+            is_bounded_ap_addba_response(buffer, subtype)
+        } else {
+            false
+        };
+        let subtype_allowed =
+            matches!(subtype, 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 | 0xb0)
+                || owned_action
+                || ap_addba_response;
+        let rejection = if !on_wifi_hart {
             Some(ManagementTxRejectionReason::WrongHart)
-        } else if !crate::context::in_radio_context() {
+        } else if !in_radio_context {
             Some(ManagementTxRejectionReason::OutsideRadioContext)
         } else if node.is_null() {
             Some(ManagementTxRejectionReason::NullNode)
@@ -831,6 +885,14 @@ mod target {
         if mode > 1 {
             return reject_management_tx(
                 ManagementTxRejectionReason::UnsupportedInterfaceMode,
+                subtype,
+                node,
+                buffer,
+            );
+        }
+        if ap_addba_response && mode != 1 {
+            return reject_management_tx(
+                ManagementTxRejectionReason::UnsupportedSubtype,
                 subtype,
                 node,
                 buffer,
@@ -1238,5 +1300,24 @@ mod tests {
         let mut ie = rsn(4, 2, 0);
         ie[8..10].copy_from_slice(&2_u16.to_le_bytes());
         assert_eq!(validate_wpa2_ap_rsn(&ie), Err(Wpa2ApRsnError::Malformed));
+    }
+
+    #[test]
+    fn admits_only_the_measured_ap_addba_response_layout() {
+        assert!(is_bounded_ap_addba_response_layout(
+            0xd0, 0, 24, 9, 3, 1
+        ));
+        assert!(!is_bounded_ap_addba_response_layout(
+            0xd0, 0, 24, 9, 3, 0
+        ));
+        assert!(!is_bounded_ap_addba_response_layout(
+            0xd0, 0, 24, 9, 3, 2
+        ));
+        assert!(!is_bounded_ap_addba_response_layout(
+            0xd0, 0x2000, 24, 9, 3, 1
+        ));
+        assert!(!is_bounded_ap_addba_response_layout(
+            0xd0, 0, 24, 8, 3, 1
+        ));
     }
 }
