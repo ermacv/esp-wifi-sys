@@ -56,6 +56,11 @@ pub(crate) const fn is_ap_group_ccmp_descriptor(descriptor_flags: u32) -> bool {
     matches!(descriptor_flags, 0x0000_200b | 0x0200_200b)
 }
 
+/// The two bounded pre-encryption states observed for AP pairwise-CCMP.
+pub(crate) const fn is_ap_pairwise_ccmp_descriptor(descriptor_flags: u32) -> bool {
+    matches!(descriptor_flags, 0x0000_2009 | 0x0200_2009)
+}
+
 /// Stateless SRAM-resident replacement for the vendor `ppTxProtoProc` leaf.
 ///
 /// # Safety
@@ -122,7 +127,8 @@ unsafe fn trap_invalid_tx_proto() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{
-        admitted_basic_packet_kind, is_ap_group_ccmp_descriptor, strict_tx_proto_flags,
+        admitted_basic_packet_kind, is_ap_group_ccmp_descriptor, is_ap_pairwise_ccmp_descriptor,
+        strict_tx_proto_flags,
     };
 
     #[test]
@@ -165,5 +171,13 @@ mod tests {
         assert!(is_ap_group_ccmp_descriptor(0x0200_200b));
         assert!(!is_ap_group_ccmp_descriptor(0x0200_2009));
         assert!(!is_ap_group_ccmp_descriptor(0x0400_200b));
+    }
+
+    #[test]
+    fn recognizes_only_measured_ap_pairwise_ccmp_descriptors() {
+        assert!(is_ap_pairwise_ccmp_descriptor(0x0000_2009));
+        assert!(is_ap_pairwise_ccmp_descriptor(0x0200_2009));
+        assert!(!is_ap_pairwise_ccmp_descriptor(0x0200_200b));
+        assert!(!is_ap_pairwise_ccmp_descriptor(0x0400_2009));
     }
 }

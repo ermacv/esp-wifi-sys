@@ -58,7 +58,7 @@ const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
 
 const fn is_protected_ap_pairwise_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control != 0x4288
-        || input.descriptor_flags != 0x0000_2009
+        || !crate::tx_proto::is_ap_pairwise_ccmp_descriptor(input.descriptor_flags)
         || input.descriptor_security != 0x0004_0348
         || input.header_len != 0x001a
         || input.remaining_len < 8
@@ -110,7 +110,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
     descriptor_security: u32,
 ) -> bool {
     if frame_control & !0x0800 != 0x4288
-        || descriptor_flags & !0x0000_1100 != 0x0000_2009
+        || descriptor_flags & !(0x0200_0000 | 0x0000_1100) != 0x0000_2009
         || !matches!(
             descriptor_security,
             0x0114_0348 | 0x01a4_0348 | 0x0214_0348 | 0x0414_0348 | 0x04a4_0348
@@ -1164,6 +1164,43 @@ mod tests {
             metadata_len: 0x0052,
         };
         assert_eq!(strict_tx_security_layout(measured), Some(expected));
+        for (remaining_len, layout, buffer_flags, expected) in [
+            (
+                0x005b,
+                2,
+                0xc01d_4081,
+                TxSecurityLayoutOutput {
+                    header_len: 0x0022,
+                    remaining_len: 0x0067,
+                    layout: 0x2002,
+                    buffer_flags: 0xc022_4081,
+                    metadata_len: 0x0081,
+                },
+            ),
+            (
+                0x006d,
+                4,
+                0xc021_c093,
+                TxSecurityLayoutOutput {
+                    header_len: 0x0022,
+                    remaining_len: 0x0079,
+                    layout: 0x2004,
+                    buffer_flags: 0xc026_c093,
+                    metadata_len: 0x0093,
+                },
+            ),
+        ] {
+            assert_eq!(
+                strict_tx_security_layout(TxSecurityLayoutInput {
+                    remaining_len,
+                    layout,
+                    buffer_flags,
+                    descriptor_flags: 0x0200_2009,
+                    ..measured
+                }),
+                Some(expected),
+            );
+        }
         for (frame_control, descriptor_flags, descriptor_security) in [
             (0x4288, 0x0000_2009, 0x0114_0348),
             (0x4288, 0x0000_3009, 0x01a4_0348),
@@ -1176,6 +1213,9 @@ mod tests {
             // exact pairwise CCMP layout and terminal buffer equation remain
             // unchanged.
             (0x4288, 0x0000_3009, 0x04a4_0348),
+            // Android's rate-control state survives through TX success/retry.
+            (0x4288, 0x0200_2009, 0x0114_0348),
+            (0x4a88, 0x0200_2109, 0x0214_0348),
         ] {
             assert!(strict_ap_pairwise_power_save_completion(
                 frame_control,
