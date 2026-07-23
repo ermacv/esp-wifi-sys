@@ -104,6 +104,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
     "wDev_IndicateCtrlFrame",
+    "wDev_IndicateFrame",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
@@ -153,6 +154,7 @@ const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
     "wDev_IndicateCtrlFrame",
+    "wDev_IndicateFrame",
     "wpa_sm_rx_eapol",
     "wpa_ap_rx_eapol",
     "hal_crypto_set_key_entry",
@@ -243,6 +245,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_wDev_isNANPktInValidSlot",
     "__wrap_wDev_AppendRxBlocks",
     "__wrap_wDev_IndicateCtrlFrame",
+    "__wrap_wDev_IndicateFrame",
     "__wrap_wpa_sm_rx_eapol",
     "__wrap_wpa_ap_rx_eapol",
     "__wrap_hal_crypto_set_key_entry",
@@ -305,6 +308,7 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue",
     "wifi_strict_env_is_chip",
     "__wrap_wDev_AppendRxBlocks",
+    "__wrap_wDev_IndicateFrame",
 ];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",

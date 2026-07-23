@@ -417,6 +417,13 @@ walks four-byte frame records with a counter narrowed to `u8`; including the
 zero/wrap case, it executes at most 256 times and never polls hardware or
 external state. Its logging call is still consumed by the mandatory
 `wifi_log` wrapper.
+The flash-resident `wDev_IndicateFrame` copy leaf is guarded separately. Its
+SRAM wrapper revalidates that the current completed descriptor head reaches
+the supplied tail in exactly the Rust-owned count (one through 64), and that
+every descriptor has a payload. A short local interrupt mask makes that
+snapshot atomic; the completed segment then remains owned by the current
+radio continuation until the vendor leaf recycles it. Consequently its two
+linked-copy backedges are finite data traversal, not polling or waiting.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
 posts another event for a captured remainder. `hal_mac_get_txq_complete` is
