@@ -995,7 +995,9 @@ const fn is_strict_ap_group_power_save_completion(
 ) -> bool {
     frame_control == 0x4208
         && descriptor_flags == 0x0000_200b
-        && descriptor_security == 0x0004_0342
+        // The input security leaf sees 0x0004_0342. Successful hardware
+        // completion adds the measured 0x0110_0000 queue/status bits.
+        && descriptor_security == 0x0114_0342
         && header_len == 0x0020
         && layout >= 0x2000
         && layout <= 0x2003
@@ -1376,7 +1378,7 @@ mod tests {
                     layout,
                     buffer_flags,
                     0x0000_200b,
-                    0x0004_0342,
+                    0x0114_0342,
                 ));
             }
         }
@@ -1387,7 +1389,7 @@ mod tests {
             0x2004,
             0xc016_0052,
             0x0000_200b,
-            0x0004_0342,
+            0x0114_0342,
         ));
         assert!(!is_strict_ap_group_power_save_completion(
             0x4208,
@@ -1396,7 +1398,7 @@ mod tests {
             0x2000,
             0xc022_0082,
             0x0000_200b,
-            0x0004_0342,
+            0x0114_0342,
         ));
     }
 
