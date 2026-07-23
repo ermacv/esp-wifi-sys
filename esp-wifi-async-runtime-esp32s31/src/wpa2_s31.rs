@@ -1731,6 +1731,16 @@ mod target {
                             authorized,
                         },
                     }),
+                #[cfg(feature = "hil-rx-ampdu")]
+                Wpa2IoCommand::ExpireRxAmpduGap { generation } => {
+                    let _ = crate::rx::expire_rx_ampdu_gap(generation);
+                    Ok(())
+                }
+                #[cfg(feature = "hil-rx-ampdu")]
+                Wpa2IoCommand::RemoveRxAmpduPeer { peer } => {
+                    crate::rx_ampdu_ap::remove_peer(peer);
+                    Ok(())
+                }
             }
         }
 

@@ -203,6 +203,14 @@ pub enum Wpa2IoCommand<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
         peer: [u8; 6],
         authorized: bool,
     },
+    #[cfg(feature = "hil-rx-ampdu")]
+    ExpireRxAmpduGap {
+        generation: usize,
+    },
+    #[cfg(feature = "hil-rx-ampdu")]
+    RemoveRxAmpduPeer {
+        peer: [u8; 6],
+    },
 }
 
 pub struct Wpa2IoFailure<E, const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
