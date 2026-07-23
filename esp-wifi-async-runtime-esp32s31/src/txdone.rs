@@ -389,18 +389,40 @@ unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneEr
     if layout & 0x2000 != 0 {
         header = header.add(8);
     }
-    if header.add(24).read() != 3
-        || header.add(25).read() != 1
-        || header.add(27).read() != 1
-        || header.add(28).read() != 0
-    {
+    if header.add(24).read() != 3 || header.add(25).read() != 1 {
         return Err(TxDoneError::StrictCallbackFailed);
     }
-    // The pinned vendor callback returns immediately on status one. On
-    // status two it searches the node and stops an RX BA session. This
-    // response carries status code one (declined), so the strict runtime
-    // completes both measured terminal TX outcomes without importing that
-    // vendor BA-state mutation.
+    let response_status =
+        u16::from_le_bytes([header.add(27).read(), header.add(28).read()]);
+    if response_status == 0 {
+        #[cfg(not(feature = "hil-rx-ampdu"))]
+        return Err(TxDoneError::StrictCallbackFailed);
+        #[cfg(feature = "hil-rx-ampdu")]
+        {
+            let parameters =
+                u16::from_le_bytes([header.add(29).read(), header.add(30).read()]);
+            let timeout =
+                u16::from_le_bytes([header.add(31).read(), header.add(32).read()]);
+            let expected_parameters =
+                1_u16 << 1 | crate::rx_ampdu::RX_BLOCK_ACK_MAX_WINDOW << 6;
+            if parameters != expected_parameters || timeout != 0 {
+                return Err(TxDoneError::StrictCallbackFailed);
+            }
+            // A terminal no-ACK result must tear down only this agreement;
+            // it is a recoverable link event and must not stop radio-owner.
+            if descriptor.add(19).read() == 2 {
+                let mut peer = [0_u8; 6];
+                ptr::copy_nonoverlapping(header.add(4), peer.as_mut_ptr(), peer.len());
+                crate::rx_ampdu_ap::rollback_failed_response(peer);
+            }
+        }
+    } else if response_status != 1 {
+        return Err(TxDoneError::StrictCallbackFailed);
+    }
+    // The pinned vendor callback returns immediately on acknowledged TX. A
+    // failed successful response is handled above by the Rust agreement
+    // owner; a declined response owns no BlockAck state. Neither terminal
+    // outcome is fatal to the radio executor.
     Ok(())
 }
 
