@@ -53,7 +53,7 @@ pub const fn strict_persistent_frame_completion_layout(
         && matches!(subtype, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
         && (input.descriptor_flags == PERSISTENT_BIT
             || input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412)
-        && input.descriptor_security == 0x0114_0000;
+        && matches!(input.descriptor_security, 0 | 0x0114_0000);
     let beacon = input.frame_control == 0x0080
         && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
         && input.descriptor_security == 0x0114_0000
@@ -134,7 +134,7 @@ pub const fn strict_tx_security_layout(
     let ap_beacon = input.frame_control == 0x0080
         && input.descriptor_flags == 0x0080_0412
         && input.descriptor_security == 0x0004_0000;
-    let persistent_management_reply = input.descriptor_security == 0x0004_0000
+    let persistent_management_reply = matches!(input.descriptor_security, 0 | 0x0004_0000)
         && matches!(input.frame_control, 0x0010 | 0x0030 | 0x0050 | 0x00b0)
         && matches!(input.descriptor_flags, 0x0080_0000 | 0x0080_0412);
     let trailer_len = if (input.descriptor_security == 0
@@ -440,6 +440,13 @@ mod tests {
             }),
             Some(expected),
         );
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                descriptor_security: 0,
+                ..measured
+            }),
+            Some(expected),
+        );
         for rejected in [
             TxSecurityLayoutInput {
                 frame_control: 0x0040,
@@ -450,7 +457,7 @@ mod tests {
                 ..measured
             },
             TxSecurityLayoutInput {
-                descriptor_security: 0,
+                descriptor_security: 1,
                 ..measured
             },
         ] {
@@ -473,6 +480,13 @@ mod tests {
                 buffer_flags: 0xc01e_8084,
                 descriptor_flags: 0x0000_0412,
             })
+        );
+        assert_eq!(
+            strict_persistent_frame_completion_layout(TxSecurityLayoutInput {
+                descriptor_security: 0,
+                ..completed
+            }),
+            strict_persistent_frame_completion_layout(completed),
         );
 
         for rejected in [
