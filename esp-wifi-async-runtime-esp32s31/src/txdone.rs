@@ -999,8 +999,7 @@ const fn is_strict_ap_group_power_save_completion(
         // completion adds the measured 0x0110_0000 queue/status bits.
         && descriptor_security == 0x0114_0342
         && header_len == 0x0020
-        && layout >= 0x2000
-        && layout <= 0x2003
+        && layout & 0xe000 == 0x2000
         && matches!(
             (remaining_len, buffer_flags),
             (0x0038, 0xc016_0052) | (0x0068, 0xc022_0082)
@@ -1367,7 +1366,7 @@ mod tests {
 
     #[test]
     fn ap_group_completion_accepts_each_static_pool_slot_at_either_measured_size() {
-        for layout in 0x2000..=0x2003 {
+        for layout in [0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x3fff] {
             for (remaining_len, buffer_flags) in
                 [(0x0038, 0xc016_0052), (0x0068, 0xc022_0082)]
             {
@@ -1386,7 +1385,7 @@ mod tests {
             0x4208,
             0x0020,
             0x0038,
-            0x2004,
+            0x4004,
             0xc016_0052,
             0x0000_200b,
             0x0114_0342,

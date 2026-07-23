@@ -178,10 +178,10 @@ pub const fn strict_tx_security_layout(
         && input.descriptor_flags == 0x0000_200b
         && input.descriptor_security == 0x0004_0342
         && input.header_len == 0x0018
-        // The low two layout bits identify the rotating static pool entry;
-        // they do not encode the packet size. Cross-assignments observed on
-        // successive boots demonstrate that size and pool slot are independent.
-        && input.layout <= 3
+        // The low thirteen bits are an opaque identity/layout value preserved
+        // across the security transform. Successive static objects produced
+        // 0, 1, 2, 3 and 4; only the upper ownership bits have semantics here.
+        && input.layout & 0xe000 == 0
         && matches!(
             (input.remaining_len, input.buffer_flags),
             (0x002c, 0xc011_0052) | (0x005c, 0xc01d_0082)
@@ -945,7 +945,7 @@ mod tests {
                 metadata_len: 0x0080,
             }),
         );
-        for layout in 0..=3 {
+        for layout in [0, 1, 2, 3, 4, 0x1fff] {
             for (remaining_len, buffer_flags, output_remaining, output_buffer, metadata_len) in [
                 (0x002c, 0xc011_0052, 0x0038, 0xc016_0052, 0x0050),
                 (0x005c, 0xc01d_0082, 0x0068, 0xc022_0082, 0x0080),

@@ -836,6 +836,13 @@ unsafe fn process_tx_retry(
     }
     let descriptor = descriptor(frame)?;
     let flags = descriptor.cast::<u32>().read();
+    if flags == 0x0000_200b {
+        // AP group frames are broadcast and therefore have no meaningful
+        // ACK retry. A hardware error is local to this descriptor: complete
+        // the existing bounded discard continuation instead of terminating
+        // the radio owner or entering the unicast scheduler state.
+        return discard_tx_hardware_error(queue_state, 0x7f);
+    }
     if flags
         & (TX_FRAME_HE_BIT
             | TX_FRAME_BAR_BIT
