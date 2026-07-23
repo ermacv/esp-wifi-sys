@@ -113,7 +113,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
         || descriptor_flags & !0x0000_1100 != 0x0000_2009
         || !matches!(
             descriptor_security,
-            0x0114_0348 | 0x01a4_0348 | 0x0214_0348 | 0x0414_0348
+            0x0114_0348 | 0x01a4_0348 | 0x0214_0348 | 0x0414_0348 | 0x04a4_0348
         )
         || header_len != 0x0022
         || remaining_len < 20
@@ -1130,6 +1130,11 @@ mod tests {
             (0x4288, 0x0000_3009, 0x0114_0348),
             (0x4a88, 0x0000_3109, 0x0214_0348),
             (0x4a88, 0x0000_2109, 0x0414_0348),
+            // Observed after a Q10 hardware-timeout recovery under concurrent
+            // ICMP and HTTP load. The high status nibble changes while the
+            // exact pairwise CCMP layout and terminal buffer equation remain
+            // unchanged.
+            (0x4288, 0x0000_3009, 0x04a4_0348),
         ] {
             assert!(strict_ap_pairwise_power_save_completion(
                 frame_control,
@@ -1141,6 +1146,15 @@ mod tests {
                 descriptor_security,
             ));
         }
+        assert!(strict_ap_pairwise_power_save_completion(
+            0x4288,
+            0x0022,
+            0x0050,
+            0x237e,
+            0xc01c_806a,
+            0x0000_3009,
+            0x04a4_0348,
+        ));
         for rejected in [
             TxSecurityLayoutInput {
                 descriptor_flags: 0x0000_200b,
