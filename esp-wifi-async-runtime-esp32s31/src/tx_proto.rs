@@ -51,6 +51,11 @@ pub(crate) const fn admitted_basic_packet_kind(
     hardware_queue == 2 && logical_queue == 10
 }
 
+/// The two bounded descriptor states observed for AP group-CCMP traffic.
+pub(crate) const fn is_ap_group_ccmp_descriptor(descriptor_flags: u32) -> bool {
+    matches!(descriptor_flags, 0x0000_200b | 0x0200_200b)
+}
+
 /// Stateless SRAM-resident replacement for the vendor `ppTxProtoProc` leaf.
 ///
 /// # Safety
@@ -116,7 +121,9 @@ unsafe fn trap_invalid_tx_proto() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{admitted_basic_packet_kind, strict_tx_proto_flags};
+    use super::{
+        admitted_basic_packet_kind, is_ap_group_ccmp_descriptor, strict_tx_proto_flags,
+    };
 
     #[test]
     fn propagates_header_flag_and_data_class() {
@@ -150,5 +157,13 @@ mod tests {
         assert!(admitted_basic_packet_kind(0, q8_word, 0x0200_200c));
         assert!(!admitted_basic_packet_kind(0, q8_word, 0x0200_200b));
         assert!(!admitted_basic_packet_kind(1, q8_word, 0x0200_200c));
+    }
+
+    #[test]
+    fn recognizes_only_measured_ap_group_ccmp_descriptors() {
+        assert!(is_ap_group_ccmp_descriptor(0x0000_200b));
+        assert!(is_ap_group_ccmp_descriptor(0x0200_200b));
+        assert!(!is_ap_group_ccmp_descriptor(0x0200_2009));
+        assert!(!is_ap_group_ccmp_descriptor(0x0400_200b));
     }
 }

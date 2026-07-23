@@ -844,7 +844,7 @@ unsafe fn process_tx_retry(
         // producer may already refresh in place.
         return process_tx_success(queue_state, 0x7f);
     }
-    if flags == 0x0000_200b {
+    if crate::tx_proto::is_ap_group_ccmp_descriptor(flags) {
         // AP group frames are broadcast and therefore have no meaningful
         // ACK retry. A hardware error is local to this descriptor: complete
         // the existing bounded discard continuation instead of terminating
@@ -2352,7 +2352,7 @@ unsafe fn process_tx_success(queue_state: *mut u8, response: u8) -> Result<(), L
         .read();
     let flags = descriptor.cast::<u32>().read();
     let ap_beacon = flags == AP_BEACON_SUCCESS_DESCRIPTOR;
-    let classified_ap_group = flags == 0x0000_200b;
+    let classified_ap_group = crate::tx_proto::is_ap_group_ccmp_descriptor(flags);
     if !ap_beacon
         && !classified_ap_group
         && flags & (TX_SUCCESS_CLASSIFY_MASK | TX_SUCCESS_AGGREGATE_STATE_MASK) != 0

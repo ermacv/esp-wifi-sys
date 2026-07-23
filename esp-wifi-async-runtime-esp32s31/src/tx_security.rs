@@ -40,7 +40,7 @@ const AP_PAIRWISE_MAX_MPDU_LEN: u16 = crate::data_tx::WIFI_DATA_TX_FRAME_CAPACIT
 
 const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control != 0x4208
-        || !matches!(input.descriptor_flags, 0x0000_200b | 0x0200_200b)
+        || !crate::tx_proto::is_ap_group_ccmp_descriptor(input.descriptor_flags)
         || input.descriptor_security != 0x0004_0342
         || input.header_len != 0x0018
         || input.remaining_len < 8
@@ -84,7 +84,7 @@ pub(crate) const fn strict_ap_group_power_save_completion(
     descriptor_security: u32,
 ) -> bool {
     if frame_control != 0x4208
-        || descriptor_flags != 0x0000_200b
+        || !crate::tx_proto::is_ap_group_ccmp_descriptor(descriptor_flags)
         || !matches!(descriptor_security, 0x0114_0342 | 0x0414_0342)
         || header_len != 0x0020
         || remaining_len < 20
@@ -1088,16 +1088,18 @@ mod tests {
                         metadata_len,
                     }),
                 );
-                for descriptor_security in [0x0114_0342, 0x0414_0342] {
-                    assert!(strict_ap_group_power_save_completion(
-                        0x4208,
-                        0x0020,
-                        output_remaining,
-                        0x2000 | layout,
-                        output_buffer,
-                        0x0000_200b,
-                        descriptor_security,
-                    ));
+                for descriptor_flags in [0x0000_200b, 0x0200_200b] {
+                    for descriptor_security in [0x0114_0342, 0x0414_0342] {
+                        assert!(strict_ap_group_power_save_completion(
+                            0x4208,
+                            0x0020,
+                            output_remaining,
+                            0x2000 | layout,
+                            output_buffer,
+                            descriptor_flags,
+                            descriptor_security,
+                        ));
+                    }
                 }
             }
         }
