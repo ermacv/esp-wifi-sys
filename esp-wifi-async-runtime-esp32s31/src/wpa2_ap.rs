@@ -289,6 +289,15 @@ const fn is_bounded_ap_addba_response_layout(
         && action == 1
 }
 
+const fn updated_tim_bitmap_byte(current: u8, association_id: u16, set: bool) -> u8 {
+    let mask = 1_u8 << (association_id & 7);
+    if set {
+        current | mask
+    } else {
+        current & !mask
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -538,7 +547,6 @@ mod target {
             tid: u32,
             flags: u32,
         );
-        fn ieee80211_set_tim(node: *mut u8, set: u32) -> i32;
         #[link_name = "ieee80211_set_tx_pti"]
         fn linked_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
         fn __real_ieee80211_set_tx_pti(buffer: *mut u8, packet_type: u32);
@@ -799,7 +807,7 @@ mod target {
             removal_epoch: crate::ap_power_save::removal_epoch(&peer),
         });
         slot.state.store(DEFERRED_SLOT_READY, Ordering::Release);
-        ieee80211_set_tim(node, 1);
+        strict_update_ap_tim(node, true);
         crate::ap_power_save::record_deferred_transmit();
         DEFERRED_AP_MANAGEMENT_CAPTURED.fetch_add(1, Ordering::Relaxed);
         esf_buf_recycle(buffer.cast());
@@ -810,6 +818,37 @@ mod target {
     fn release_deferred_slot(slot: &DeferredApManagementSlot) {
         unsafe { slot.value.get().write(DeferredApManagement::empty()) };
         slot.state.store(DEFERRED_SLOT_EMPTY, Ordering::Release);
+    }
+
+    unsafe fn strict_update_ap_tim(node: *mut u8, set: bool) -> bool {
+        if node.is_null() {
+            return false;
+        }
+
+        // Exact finite body of the pinned `ieee80211_set_tim` leaf. The AID
+        // lives at node+0x26. Its low three bits select a bit in the 2048-byte
+        // virtual TIM bitmap at g_ic+0x1b7; the remaining 11 bits select the
+        // byte. The preceding byte's bit zero mirrors the BSS/self-node TIM.
+        let association_id = node.add(0x26).cast::<u16>().read_unaligned();
+        let bitmap =
+            ptr::addr_of_mut!(g_ic).add(0x1b7 + usize::from((association_id >> 3) & 0x07ff));
+        let previous = bitmap.read();
+        let updated = updated_tim_bitmap_byte(previous, association_id, set);
+        if updated == previous {
+            return false;
+        }
+        bitmap.write(updated);
+
+        let interface = ptr::addr_of_mut!(g_ic)
+            .add(0x14)
+            .cast::<*mut u8>()
+            .read_unaligned();
+        if !interface.is_null() && interface.add(0xec).cast::<*mut u8>().read_unaligned() == node {
+            let bss_tim = ptr::addr_of_mut!(g_ic).add(0x1b6);
+            let flags = bss_tim.read();
+            bss_tim.write(if set { flags | 1 } else { flags & !1 });
+        }
+        true
     }
 
     unsafe fn strict_deferred_ap_action_output(node: *mut u8, buffer: *mut u8) -> i32 {
@@ -905,7 +944,7 @@ mod target {
 
         let result = strict_deferred_ap_action_output(node, buffer);
         if result == 0 {
-            ieee80211_set_tim(node, 0);
+            strict_update_ap_tim(node, false);
             true
         } else {
             false
@@ -1627,5 +1666,15 @@ mod tests {
             0xd0, 0x2000, 24, 9, 3, 1
         ));
         assert!(!is_bounded_ap_addba_response_layout(0xd0, 0, 24, 8, 3, 1));
+    }
+
+    #[test]
+    fn tim_bitmap_update_matches_aid_bit_selection() {
+        assert_eq!(updated_tim_bitmap_byte(0, 0, true), 0x01);
+        assert_eq!(updated_tim_bitmap_byte(0, 7, true), 0x80);
+        assert_eq!(updated_tim_bitmap_byte(0, 8, true), 0x01);
+        assert_eq!(updated_tim_bitmap_byte(0xa5, 10, true), 0xa5);
+        assert_eq!(updated_tim_bitmap_byte(0xa5, 8, false), 0xa4);
+        assert_eq!(updated_tim_bitmap_byte(0xa5, 15, false), 0x25);
     }
 }

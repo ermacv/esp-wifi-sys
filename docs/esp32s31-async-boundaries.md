@@ -817,7 +817,10 @@ continuation reconstructs a fresh fixed-pool management frame, restores the
 pinned callback bit 13, reproduces the finite AP/action header and descriptor
 stores in Rust, and enters `ic_tx_pkt` directly. It neither changes the live
 node power-save bit nor re-enters `ieee80211_mgmt_output`. Repeated requests for
-one peer update the owned dialog body instead of growing a linked queue.
+one peer update the owned dialog body instead of growing a linked queue. TIM
+publication is another finite Rust leaf: the AID at node offset `0x26` selects
+a bit in the virtual bitmap at `g_ic + 0x1b7`, while `g_ic + 0x1b6` bit zero
+mirrors the BSS/self-node state.
 The neighboring `ieee80211_set_tx_pti` wrapper replaces its OSI-table call with
 the exact bounded success operation from the pinned coexistence archive: one
 volatile byte read from exported `coex_pti_tab[48]` and two descriptor stores.
