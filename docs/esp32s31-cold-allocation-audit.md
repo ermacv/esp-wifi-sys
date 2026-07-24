@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 21 allocations, 10 frees and 1,424 requested
+the current image is down to 20 allocations, 9 frees and 1,400 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -346,10 +346,23 @@ The first completed ping, DNS, TCP and HTTP; after the second, 21/21 TX and
 
 Vendor NVS is not part of the target architecture. `nvs_enable=0` remains a
 mandatory initialization invariant, and credentials, country and other
-configuration belong to Rust-owned fixed state. In particular,
-`esp_wifi_set_country` is not qualified by simply calling its complete vendor
-process: that body can reach `wifi_nvs_set`/`wifi_nvs_commit` and, for an
-active radio, synchronous stop/start leaves. Its eventual replacement must
-retain only the regdomain validation and required state/PHY publications,
-with no vendor NVS call and lifecycle changes expressed by the Rust async
-radio owner.
+configuration belong to Rust-owned fixed state. The complete vendor
+`esp_wifi_set_country` process is therefore not reused: it can reach
+`wifi_nvs_set`/`wifi_nvs_commit` and, for an active radio, synchronous
+stop/start leaves.
+
+`rust-direct-set-country-nvs-free` accepts only the pre-start state and
+disabled-NVS configuration. It calls the finite vendor regdomain lookup to
+validate the requested channel window, then publishes the validated country
+fields directly into the fixed Wi-Fi configuration owner. Its one reviewed
+helper loop increments an 8-bit index through the finite regdomain table. The
+wrapper cannot call the vendor country process, NVS, PHY-update, lifecycle or
+ioctl paths; the ELF audit also rejects the original and `__real_` public
+envelopes.
+
+Hardware produced the exact delta from 21 to 20 allocations, 10 to 9 frees
+and 1,424 to 1,400 requested bytes. Two passive-scan, authentication,
+association and WPA2 cycles completed with the allocation snapshot unchanged.
+The first completed ping, DNS, TCP and HTTP; the second returned 21/21 TX and
+19/19 RX owners without queue rejection. The strict whole-ELF no-wait/no-heap
+audit reported zero violations.
