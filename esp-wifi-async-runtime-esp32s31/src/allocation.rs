@@ -328,14 +328,14 @@ mod target {
     #[cfg(feature = "rust-static-rx-buffer-init")]
     const WDEV_RX_DESCRIPTOR_SIZE: usize = 12;
     #[cfg(feature = "rust-static-rx-buffer-init")]
-    const WDEV_RX_DESCRIPTOR_CAPACITY: usize = 48;
+    const WDEV_RX_DESCRIPTOR_CAPACITY: usize = 32;
     #[cfg(feature = "rust-static-rx-buffer-init")]
     const WDEV_RX_DESCRIPTOR_ARENA_SIZE: usize =
         WDEV_RX_DESCRIPTOR_SIZE * WDEV_RX_DESCRIPTOR_CAPACITY;
     #[cfg(feature = "rust-static-rx-buffer-init")]
     const WDEV_RX_PAYLOAD_SIZE: usize = 1704;
     #[cfg(feature = "rust-static-rx-buffer-init")]
-    const WDEV_RX_PAYLOAD_CAPACITY: usize = 48;
+    const WDEV_RX_PAYLOAD_CAPACITY: usize = 32;
     // Return addresses immediately after the pinned S31 allocator callbacks
     // in `wDev_Rxbuf_Init`.
     #[cfg(feature = "rust-static-rx-buffer-init")]

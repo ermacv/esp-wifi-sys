@@ -62,7 +62,9 @@ bounded buffer arrays and are the first replacement target.
 `rust-static-rx-buffer-init` now supplies the pinned `wDev_Rxbuf_Init`
 descriptor arena and payload buffers from 16-byte-aligned internal SRAM. It
 accepts only the audited allocator source, exact return offsets and exact
-1,704-byte payload size. The descriptor count is bounded to 48. Teardown
+1,704-byte payload size. The descriptor count is bounded to the qualified 32;
+the pool can be expanded only after more cold heap storage has been removed.
+Teardown
 recognizes and releases only exact pool addresses. The vendor function still
 performs the finite descriptor construction and hardware list publication.
 
