@@ -76,11 +76,9 @@ impl VirtualPpTask {
     /// Start the logical PP identity without entering the vendor
     /// `pp_create_task` RTOS-style envelope.
     pub fn try_start_static(&self) -> bool {
-        if self
-            .started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+        // One AMO, not an LR/SC retry loop. Cold initialization is serialized;
+        // the old value only detects an accidental second owner.
+        if self.started.swap(true, Ordering::AcqRel) {
             return false;
         }
         self.startup_signal.store(false, Ordering::Release);
