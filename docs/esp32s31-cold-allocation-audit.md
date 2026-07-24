@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 18 allocations, 7 frees and 984 requested
+the current image is down to 16 allocations, 5 frees and 936 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -394,3 +394,42 @@ unchanged, zero failures and zero radio-context allocator calls. The first
 completed ping, DNS, TCP and HTTP; the second returned 21/21 TX and 19/19 RX
 owners without rejection. The strict whole-ELF no-wait/no-heap audit reported
 zero violations.
+
+`esp_wifi_set_protocols` adds another 24-byte allocation and
+`ieee80211_ioctl` transaction per interface update. Its process is not a
+suitable direct leaf: it can synchronously stop and restart an active
+interface and persists protocol fields through `wifi_nvs_get`,
+`wifi_nvs_set` and `wifi_nvs_commit`.
+
+`rust-direct-set-protocols-nvs-free` validates the S31 two-band input, reduces
+the 2.4 GHz bitmap to the pinned primary PHY mode plus LR flag and publishes
+those fields directly into the fixed vendor configuration and interface
+state. Here `g_wifi_nvs` is only the vendor name for that in-memory
+configuration block; no persistent NVS function is reachable. The pinned S31
+HAL capability callback is a constant AX-enabled fact, so the wrapper encodes
+that target fact and retains no indirect OSI call.
+
+The HAL applies the same station configuration once before start and once
+after start to refresh rate-control state. The wrapper therefore accepts an
+active request only when all already-published protocol fields are identical;
+that second call is a pure no-op. A real active-radio protocol change remains
+rejected for an explicit Rust async lifecycle to sequence. A pre-start change
+updates the live interface and invokes `ieee80211_protocol_attach` only when
+the interface object already exists.
+
+The final ELF audit requires a separately retained, call-free and acyclic Rust
+bitmap selector. The wrapper's exact calls are `wifi_init_completed`, that
+selector and `ieee80211_protocol_attach`; process, ioctl, NVS, stop/start,
+`pp_post` and allocator calls are forbidden. The remaining protocol-attach
+dispatcher is checked by exact PHY/HT/HE call and tail-call sets and may not
+contain an internal cycle. Chained compiler return funnels are accepted only
+when every transfer is an unconditional jump ending at `ret`; a unit test
+still rejects an actual jump cycle.
+
+Hardware produced the exact delta from 18 to 16 allocations, 7 to 5 frees and
+984 to 936 requested bytes. Two complete passive-scan, authentication,
+association and WPA2 reconnect cycles passed with an unchanged allocation
+snapshot, zero failures and zero radio-context allocator calls. The first
+completed ping, DNS, TCP and HTTP; both completed the Rust WPA2 handshake and
+post-link data path. The strict whole-ELF no-wait/no-heap audit reported zero
+violations.
