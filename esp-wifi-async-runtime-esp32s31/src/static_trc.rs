@@ -55,9 +55,18 @@ unsafe fn initialize_context(context: *mut u8, identity: u8) {
     let legacy = ptr::addr_of!(rc11BSchedTbl) as u32;
     let primary = ptr::addr_of!(rc11BSchedTbl).add(0x24) as u32;
     let p2p = ptr::addr_of!(rcP2P11GSchedTbl).add(0x54) as u32;
-    for offset in [PRIMARY_RATE_OFFSET, SECONDARY_RATE_OFFSET, FALLBACK_RATE_OFFSET] {
-        context.add(offset).cast::<u32>().write_unaligned(primary);
-    }
+    context
+        .add(PRIMARY_RATE_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(primary);
+    context
+        .add(SECONDARY_RATE_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(primary);
+    context
+        .add(FALLBACK_RATE_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(primary);
     context
         .add(P2P_RATE_OFFSET)
         .cast::<u32>()
@@ -81,28 +90,37 @@ unsafe fn initialize_context(context: *mut u8, identity: u8) {
 ///
 /// The caller must serialize this check with Wi-Fi initialization teardown.
 pub unsafe fn static_trc_contexts_bound() -> bool {
-    (0..TRC_CONTEXT_COUNT).all(|index| {
-        table_slot(TRC_DEFAULT_INDEX + index).read_volatile() == context(index)
-    })
+    table_slot(TRC_DEFAULT_INDEX).read_volatile() == context(0)
+        && table_slot(TRC_DEFAULT_INDEX + 1).read_volatile() == context(1)
+        && table_slot(TRC_DEFAULT_INDEX + 2).read_volatile() == context(2)
 }
 
 /// Replace the three-allocation vendor default-context initializer.
 #[cfg(feature = "rust-static-trc-init-interpose")]
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_trc_init() -> i32 {
-    if (0..TRC_CONTEXT_COUNT)
-        .any(|index| !table_slot(TRC_DEFAULT_INDEX + index).read_volatile().is_null())
+    if !table_slot(TRC_DEFAULT_INDEX).read_volatile().is_null()
+        || !table_slot(TRC_DEFAULT_INDEX + 1)
+            .read_volatile()
+            .is_null()
+        || !table_slot(TRC_DEFAULT_INDEX + 2)
+            .read_volatile()
+            .is_null()
     {
         return ESP_ERR_WIFI_STATE;
     }
     ptr::addr_of_mut!(STATIC_TRC_CONTEXTS)
         .cast::<u8>()
         .write_bytes(0, TRC_CONTEXT_SIZE * TRC_CONTEXT_COUNT);
-    for index in 0..TRC_CONTEXT_COUNT {
-        let context = context(index);
-        initialize_context(context, index as u8);
-        table_slot(TRC_DEFAULT_INDEX + index).write_volatile(context);
-    }
+    let context0 = context(0);
+    let context1 = context(1);
+    let context2 = context(2);
+    initialize_context(context0, 0);
+    initialize_context(context1, 1);
+    initialize_context(context2, 2);
+    table_slot(TRC_DEFAULT_INDEX).write_volatile(context0);
+    table_slot(TRC_DEFAULT_INDEX + 1).write_volatile(context1);
+    table_slot(TRC_DEFAULT_INDEX + 2).write_volatile(context2);
     ESP_OK
 }
 
@@ -116,9 +134,9 @@ pub unsafe extern "C" fn __wrap_trc_deinit() -> i32 {
     if !static_trc_contexts_bound() {
         return ESP_ERR_WIFI_STATE;
     }
-    for index in 0..TRC_CONTEXT_COUNT {
-        table_slot(TRC_DEFAULT_INDEX + index).write_volatile(ptr::null_mut());
-    }
+    table_slot(TRC_DEFAULT_INDEX).write_volatile(ptr::null_mut());
+    table_slot(TRC_DEFAULT_INDEX + 1).write_volatile(ptr::null_mut());
+    table_slot(TRC_DEFAULT_INDEX + 2).write_volatile(ptr::null_mut());
     ESP_OK
 }
 

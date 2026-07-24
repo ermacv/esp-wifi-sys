@@ -77,7 +77,10 @@ impl ColdAllocationTraceSlot {
 #[cfg(feature = "hil-cold-allocation-trace")]
 static COLD_ALLOCATION_TRACE_LENGTH: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "hil-cold-allocation-trace")]
-#[link_section = ".critical.bss.wifi_strict.cold_allocation_trace"]
+// This is a laboratory-only cold-start journal. It is written before the
+// working radio path is handed to the async executor and is never touched by
+// an interrupt handler, so it must not consume the IRQ-critical SRAM arena.
+#[link_section = ".psram.bss.wifi_strict.cold_allocation_trace"]
 static COLD_ALLOCATION_TRACE: [ColdAllocationTraceSlot; COLD_ALLOCATION_TRACE_CAPACITY] =
     [const { ColdAllocationTraceSlot::new() }; COLD_ALLOCATION_TRACE_CAPACITY];
 
