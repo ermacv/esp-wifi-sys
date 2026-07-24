@@ -271,7 +271,8 @@ pub use tx_ampdu::{
 pub use tx_intercept::{
     hil_ampdu_hardware_snapshot, hil_ampdu_intercept_pp_map_tx_queue, hil_ampdu_intercept_snapshot,
     hil_pre_enable_mapper_snapshot, HilAmpduHardwareSnapshot, HilAmpduInterceptSnapshot,
-    HilPreEnableMapperRecord, HilPreEnableMapperSnapshot, HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY,
+    HilPreEnableMapperRecord, HilPreEnableMapperSnapshot, HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY,
+    HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY,
 };
 #[cfg(target_arch = "riscv32")]
 pub use tx_proto::strict_pp_tx_proto_proc;

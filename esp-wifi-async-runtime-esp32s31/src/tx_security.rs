@@ -486,7 +486,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
             .read_unaligned(),
         frame_control: header.cast::<u16>().read_unaligned(),
     };
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::SecurityInput,
         frame,
@@ -503,6 +503,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
         None => {
             #[cfg(feature = "hil-vendor-tx")]
             {
+                #[cfg(feature = "hil-tx-deep-telemetry")]
                 crate::tx_trace::record_descriptor_transition(
                     crate::tx_trace::TxTraceEvent::SecurityRejected,
                     frame,
@@ -514,6 +515,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
                     u32::from(input.layout),
                     input.buffer_flags,
                 );
+                #[cfg(feature = "hil-tx-deep-telemetry")]
                 crate::tx_trace::freeze_tx_trace();
                 record_hil_rejected_tx_security(input);
                 return -1;
@@ -567,7 +569,7 @@ pub unsafe extern "C" fn strict_pp_proc_tx_sec_frame(frame: *mut u8) -> i32 {
     metadata.cast::<u32>().write_unaligned(0);
     metadata.add(4).cast::<u32>().write_unaligned(0);
     metadata.cast::<u32>().write_unaligned(output.metadata_len);
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::SecurityPrepared,
         frame,

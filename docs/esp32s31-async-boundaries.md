@@ -437,10 +437,11 @@ cannot remain as heap-owned objects when the runtime heap gate is armed.
 
 PP event 16 is also replaced. The original `ppProcTxDone` drains the complete
 linked list, iterates callback bitmaps, and ends in power management. The Rust
-state machine performs one dequeue, one classified mode-0 callback, or one
-fixed-pool recycle per continuation. It verifies the callback-table pointer before
-the direct call and fails closed on unknown bits, user TX callbacks,
-fragment/trace descriptors, and frame types outside the strict fixed pools.
+state machine performs one classified mode-0 callback per continuation, while
+callback-free data may load and recycle a fixed prefix of four frames in one
+executor dispatch. It verifies the callback-table pointer before the direct
+call and fails closed on unknown bits, user TX callbacks, fragment/trace
+descriptors, and frame types outside the strict fixed pools.
 The Wi-Fi-only build has the compile-time coexistence feature disabled, making
 the registered `_coex_wifi_release` target an exact no-op; strict recycle omits
 the `pp_coex_tx_release` classifier and its indirect OSI-table tail. The
@@ -571,13 +572,15 @@ The leaf is still not connected to ordinary data submission. Its completion
 side is now installed: strict event 23 recognizes the owned aggregate, reads
 the fixed BlockAck registers before clearing the hardware edge, takes the
 queue's unique owner token, validates and detaches both chains, and schedules
-one private executor continuation. Every continuation mutates exactly one
-acknowledged/retry MPDU. Acknowledged frames enter the existing one-frame
-TX-done/recycle pipeline and explicitly resume the aggregate afterwards;
-missing frames remain in a fixed 32-entry SRAM retry handoff. No call to
-`ppResortTxAMPDU`, linked-list drain, allocation, wait, or rate-control callback
-is made. The remaining boundary is to connect that retry handoff and the
-ordinary prepared-frame stream to a Rust aggregation scheduler.
+one private executor continuation. Every continuation mutates at most four
+acknowledged/retry MPDUs. Acknowledged frames are admitted to the ordinary
+TX-done list only when their raw callback mask is zero, then one event 16
+publishes that finite prefix; missing frames remain in a fixed 32-entry SRAM
+retry handoff. Management, EAPOL, and AP callback-bearing descriptors cannot
+enter the batched path. No call to `ppResortTxAMPDU`, linked-list drain,
+allocation, wait, or rate-control callback is made. The remaining boundary is
+to connect that retry handoff and the ordinary prepared-frame stream to a Rust
+aggregation scheduler.
 
 The opt-in `hil-ampdu-intercept` feature now provides that connection for
 hardware qualification only. Its final-link `ppMapTxQueue` wrapper no longer
@@ -591,6 +594,14 @@ retained retry or assembles/submits one aggregate of at most 20 MPDUs;
 completion schedules the next event rather than recursing. The 20-frame
 laboratory cap guarantees the S31 `0x7fff` aggregate-length limit for 1600-byte
 static TX slots.
+
+The normal HIL throughput profile also separates diagnostics by cost.
+`hil-vendor-tx` retains counters and EAPOL failure evidence, while the
+descriptor flight recorder, complete data-frame snapshots, and their
+per-transition atomic writes require the explicit
+`hil-tx-deep-telemetry` feature. Aggregate size, aggregate bytes, and retained
+queue high-water are counted once per PPDU in fixed atomics and remain
+available without the deep recorder.
 
 The first `ppTxPkt` preparation leaf, `ppTxProtoProc`, is also replaced by an
 SRAM-resident stateless Rust transformation. Its complete recovered decision
@@ -657,8 +668,8 @@ BlockAck remains a separate three-load leaf. It traps after recording a strict
 failure if it observes HE, BAR, or live MPLEN state. A trap is required because the pinned vendor
 caller discards the callee's return value and would otherwise interpret a
 returned error as a completion record. Rust now owns the basic completion
-outcome state machine, including one-MPDU-per-event aggregate disposition,
-while rejecting those unrelated tails.
+outcome state machine, including a four-MPDU bounded aggregate-disposition
+quantum, while rejecting those unrelated tails.
 The independent `hal_mac_tx_get_blockack` leaf is only `0x3e` bytes, contains
 fixed MMIO loads/stores and no calls or cycles, and is the active Rust A-MPDU
 completion input.

@@ -52,6 +52,11 @@ const PHASE_IDLE: u8 = 0;
 const PHASE_LOAD: u8 = 1;
 const PHASE_CALLBACK: u8 = 2;
 const PHASE_RECYCLE: u8 = 3;
+// Ordinary data has no mode-0 callbacks. Drain a finite prefix in one radio
+// executor dispatch so ownership return does not require two wakeups per
+// MPDU. Callback-bearing management/EAPOL frames still stop at the callback
+// boundary and retain the one-callback-per-event contract.
+const CALLBACK_FREE_RECYCLE_QUANTUM: usize = 4;
 
 #[cfg(feature = "hil-vendor-tx")]
 static HIL_EAPOL_TXDONE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -224,6 +229,7 @@ pub enum TxDoneError {
     MissingDescriptor,
     MissingTxDoneTail,
     UnsupportedCallbackBits(u32),
+    UnexpectedAmpduCallbacks(u32),
     UnexpectedBeaconCallbacks(u32),
     InvalidBeaconFrame,
     CallbackRegistryMismatch(u8),
@@ -250,7 +256,6 @@ struct TxDoneState {
     resume_timeout: bool,
     resume_queue: bool,
     resume_event: u8,
-    resume_ampdu: bool,
     resume_intercept: bool,
 }
 
@@ -265,7 +270,6 @@ impl TxDoneState {
             resume_timeout: false,
             resume_queue: false,
             resume_event: 0,
-            resume_ampdu: false,
             resume_intercept: false,
         }
     }
@@ -680,7 +684,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     let first_buffer = frame.add(4).cast::<*mut u8>().read();
     let tail_buffer = frame.add(8).cast::<*mut u8>().read();
     if first_buffer.is_null() || first_buffer != tail_buffer {
-        #[cfg(feature = "hil-vendor-tx")]
+        #[cfg(feature = "hil-tx-deep-telemetry")]
         crate::tx_trace::record_descriptor_transition(
             crate::tx_trace::TxTraceEvent::PipelineRejected,
             frame,
@@ -706,7 +710,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
         Some(metadata.cast::<u32>().read_unaligned())
     };
     if metadata_len != expected_metadata_len {
-        #[cfg(feature = "hil-vendor-tx")]
+        #[cfg(feature = "hil-tx-deep-telemetry")]
         crate::tx_trace::record_descriptor_transition(
             crate::tx_trace::TxTraceEvent::PipelineRejected,
             frame,
@@ -734,7 +738,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     let Some(layout) =
         crate::tx_security::strict_persistent_frame_completion_layout(completion_input)
     else {
-        #[cfg(feature = "hil-vendor-tx")]
+        #[cfg(feature = "hil-tx-deep-telemetry")]
         crate::tx_trace::record_descriptor_transition(
             crate::tx_trace::TxTraceEvent::PipelineRejected,
             frame,
@@ -791,7 +795,7 @@ pub(crate) const fn is_lmac_continuation(kind: u32) -> bool {
 /// timeout/discard path. Mode-1 callbacks are split into separate executor
 /// events before the frame is appended to the vendor TX-done list.
 pub(crate) unsafe fn begin_from_lmac(frame: *mut u8) -> Result<(), TxDoneError> {
-    begin_lmac(frame, true, false, 0, false, false)
+    begin_lmac(frame, true, false, 0, false)
 }
 
 /// Continue a Rust-owned successful LMAC completion. This is the recovered
@@ -802,15 +806,82 @@ pub(crate) unsafe fn begin_from_tx_success(
     hardware_event: u8,
 ) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, true, hardware_event, false, false)
+    begin_lmac(frame, false, true, hardware_event, false)
 }
 
-/// Complete one acknowledged MPDU from a Rust-owned A-MPDU. Queue resumption
-/// must wait until every BlockAck disposition has been consumed, so this path
-/// returns to the aggregate continuation instead of posting the PP queue.
-pub(crate) unsafe fn begin_from_ampdu_success(frame: *mut u8) -> Result<(), TxDoneError> {
+/// Append one acknowledged strict STA data MPDU to the ordinary TX-done list
+/// without posting an event for this individual frame.
+///
+/// A-MPDU interception admits only large QoS data. Requiring the raw callback
+/// mask to be zero keeps management, EAPOL and AP completion policy on the
+/// ordinary staged path. The caller publishes the finite batch with
+/// `publish_callback_free_ampdu_batch` before yielding the radio executor.
+pub(crate) unsafe fn commit_callback_free_ampdu_success(
+    frame: *mut u8,
+) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, false, 0, true, false)
+    let descriptor = descriptor(frame)?;
+    let callbacks = descriptor
+        .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+        .cast::<u32>()
+        .read();
+    if callbacks != 0 {
+        return Err(TxDoneError::UnexpectedAmpduCallbacks(callbacks));
+    }
+    let flags = descriptor.cast::<u32>().read();
+    if flags & DESCRIPTOR_DIRECT_RECYCLE_BIT != 0 {
+        return Err(TxDoneError::UnsupportedLmacDescriptorFlags(flags));
+    }
+    if ptr::addr_of!(g_wifi_menuconfig)
+        .cast::<u8>()
+        .add(0x40)
+        .read()
+        & 0x08
+        != 0
+    {
+        return Err(TxDoneError::TxTimeRecordingEnabled);
+    }
+
+    #[cfg(feature = "hil-tx-deep-telemetry")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::TxDoneBegin,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        u8::MAX,
+        descriptor.add(0x0d).read(),
+        4,
+        0,
+        u32::from(descriptor.add(19).read()),
+    );
+    append_tx_done(txrx()?, frame)?;
+    if flags & DESCRIPTOR_RATE_CONTROL_BIT != 0
+        && flags & DESCRIPTOR_RATE_CONTROL_SKIP_MASK != DESCRIPTOR_RATE_CONTROL_SKIP_VALUE
+    {
+        rcUpdateTxDone(frame.add(0x2c).cast(), descriptor.cast());
+    }
+    #[cfg(feature = "hil-tx-deep-telemetry")]
+    crate::tx_trace::record_descriptor_transition(
+        crate::tx_trace::TxTraceEvent::TxDoneCommit,
+        frame,
+        descriptor,
+        tx_trace_frame_control(frame),
+        u8::MAX,
+        descriptor.add(0x0d).read(),
+        flags,
+        16,
+        u32::from(descriptor.add(19).read()),
+    );
+    Ok(())
+}
+
+/// Publish a previously appended callback-free A-MPDU completion prefix.
+pub(crate) unsafe fn publish_callback_free_ampdu_batch() -> Result<(), TxDoneError> {
+    if pp_post(16, ptr::null_mut()) == 0 {
+        Ok(())
+    } else {
+        Err(TxDoneError::InternalQueueFull)
+    }
 }
 
 /// Complete one Rust-owned directly submitted MPDU and resume its fixed
@@ -818,7 +889,7 @@ pub(crate) unsafe fn begin_from_ampdu_success(frame: *mut u8) -> Result<(), TxDo
 #[cfg(feature = "hil-ampdu-intercept")]
 pub(crate) unsafe fn begin_from_intercept_success(frame: *mut u8) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
-    begin_lmac(frame, false, false, 0, false, true)
+    begin_lmac(frame, false, false, 0, true)
 }
 
 unsafe fn begin_lmac(
@@ -826,7 +897,6 @@ unsafe fn begin_lmac(
     resume_timeout: bool,
     resume_queue: bool,
     resume_event: u8,
-    resume_ampdu: bool,
     resume_intercept: bool,
 ) -> Result<(), TxDoneError> {
     let state = &mut *LMAC_STATE.0.get();
@@ -837,7 +907,7 @@ unsafe fn begin_lmac(
         return Err(TxDoneError::LmacPipelineBusy);
     }
     let descriptor = descriptor(frame)?;
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::TxDoneBegin,
         frame,
@@ -847,8 +917,7 @@ unsafe fn begin_lmac(
         descriptor.add(0x0d).read(),
         u32::from(resume_timeout)
             | (u32::from(resume_queue) << 1)
-            | (u32::from(resume_ampdu) << 2)
-            | (u32::from(resume_intercept) << 3),
+            | (u32::from(resume_intercept) << 2),
         descriptor
             .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
             .cast::<u32>()
@@ -873,7 +942,6 @@ unsafe fn begin_lmac(
     state.resume_timeout = resume_timeout;
     state.resume_queue = resume_queue;
     state.resume_event = resume_event;
-    state.resume_ampdu = resume_ampdu;
     state.resume_intercept = resume_intercept;
     state.phase = if callbacks == 0 {
         PHASE_RECYCLE
@@ -1001,7 +1069,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     {
         rcUpdateTxDone(frame.add(0x2c).cast(), descriptor.cast());
     }
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::RateControlDone,
         frame,
@@ -1023,7 +1091,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     if pp_post(16, ptr::null_mut()) != 0 {
         return Err(TxDoneError::InternalQueueFull);
     }
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::TxDoneCommit,
         frame,
@@ -1043,7 +1111,6 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     let resume_timeout = state.resume_timeout;
     let resume_queue = state.resume_queue;
     let resume_event = state.resume_event;
-    let resume_ampdu = state.resume_ampdu;
     let resume_intercept = state.resume_intercept;
     state.active = false;
     state.phase = PHASE_IDLE;
@@ -1051,7 +1118,6 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     state.resume_timeout = false;
     state.resume_queue = false;
     state.resume_event = 0;
-    state.resume_ampdu = false;
     state.resume_intercept = false;
     if resume_timeout {
         return crate::lmac::resume_after_tx_done().map_err(|_| TxDoneError::InternalQueueFull);
@@ -1075,9 +1141,6 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
             return Err(TxDoneError::InternalQueueFull);
         }
     }
-    if resume_ampdu {
-        return crate::lmac::resume_ampdu_completion().map_err(|_| TxDoneError::InternalQueueFull);
-    }
     if resume_intercept {
         #[cfg(feature = "hil-ampdu-intercept")]
         {
@@ -1092,10 +1155,10 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
 
 unsafe fn begin_from_wrapped_lmac(frame: *mut u8, mode: u32) -> Result<(), TxDoneError> {
     match mode {
-        0 => begin_lmac(frame, false, false, 0, false, false),
+        0 => begin_lmac(frame, false, false, 0, false),
         1 => {
             let hardware_event = hardware_event_for_frame(frame)?;
-            begin_lmac(frame, false, true, hardware_event, false, false)
+            begin_lmac(frame, false, true, hardware_event, false)
         }
         value => Err(TxDoneError::UnsupportedLmacMode(value)),
     }
@@ -1129,7 +1192,7 @@ unsafe fn hardware_event_for_frame(frame: *mut u8) -> Result<u8, TxDoneError> {
 pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
     crate::channel_switch::tx_done_edge();
     if begin_from_wrapped_lmac(frame.cast(), mode).is_err() {
-        #[cfg(feature = "hil-vendor-tx")]
+        #[cfg(feature = "hil-tx-deep-telemetry")]
         {
             let raw_frame = frame.cast::<u8>();
             if !raw_frame.is_null() {
@@ -1160,7 +1223,6 @@ pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
         state.resume_timeout = false;
         state.resume_queue = false;
         state.resume_event = 0;
-        state.resume_ampdu = false;
         state.resume_intercept = false;
         // A wrapper cannot return a Rust error through the vendor C ABI. Post
         // a private event so the radio owner observes `PreviousFailure` and
@@ -1223,7 +1285,7 @@ pub(crate) unsafe fn dispatch_continuation() -> Result<(), TxDoneError> {
 }
 
 unsafe fn run_step(state: &mut TxDoneState) -> Result<(), TxDoneError> {
-    let result = dispatch_step(state);
+    let result = dispatch_quantum(state);
     if result.is_err() {
         state.failed = true;
         state.active = false;
@@ -1232,12 +1294,29 @@ unsafe fn run_step(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     result
 }
 
-unsafe fn dispatch_step(state: &mut TxDoneState) -> Result<(), TxDoneError> {
-    match state.phase {
-        PHASE_LOAD => load_one(state),
-        PHASE_CALLBACK => dispatch_one_callback(state),
-        PHASE_RECYCLE => recycle_one(state),
-        _ => Err(TxDoneError::InvalidPhase),
+unsafe fn dispatch_quantum(state: &mut TxDoneState) -> Result<(), TxDoneError> {
+    let mut recycled = 0_usize;
+    loop {
+        match state.phase {
+            PHASE_LOAD => {
+                load_one(state)?;
+                if !state.active {
+                    return Ok(());
+                }
+                if state.phase == PHASE_CALLBACK {
+                    return enqueue_step();
+                }
+            }
+            PHASE_CALLBACK => return dispatch_one_callback(state),
+            PHASE_RECYCLE => {
+                recycle_one(state)?;
+                recycled += 1;
+                if recycled == CALLBACK_FREE_RECYCLE_QUANTUM {
+                    return enqueue_step();
+                }
+            }
+            _ => return Err(TxDoneError::InvalidPhase),
+        }
     }
 }
 
@@ -1278,7 +1357,7 @@ unsafe fn load_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     } else {
         PHASE_CALLBACK
     };
-    enqueue_step()
+    Ok(())
 }
 
 unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneError> {
@@ -1423,7 +1502,7 @@ unsafe fn strict_ap_power_save_txdone(frame: *mut u8) -> Result<(), TxDoneError>
 unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     let frame = state.frame;
     let descriptor = descriptor(frame)?;
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     if crate::data_tx::owns_hardware_wifi_data_tx(frame) {
         capture_hil_data_tx_done(frame, descriptor)?;
     }
@@ -1437,7 +1516,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
         restore_persistent_frame(frame, descriptor)?;
         state.frame = ptr::null_mut();
         state.phase = PHASE_LOAD;
-        return enqueue_step();
+        return Ok(());
     }
     if ptr::addr_of!(g_tx_done_cb_func).read() != 0 {
         return Err(TxDoneError::UserCallbackInstalled);
@@ -1455,7 +1534,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     // The strict ESF wrapper accepts only its fixed Rust management pool or
     // initialized vendor static free lists; dynamic/cache branches remain
     // unreachable.
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::Recycle,
         frame,
@@ -1472,7 +1551,7 @@ unsafe fn recycle_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
 
     state.frame = ptr::null_mut();
     state.phase = PHASE_LOAD;
-    enqueue_step()
+    Ok(())
 }
 
 unsafe fn restore_persistent_frame(frame: *mut u8, descriptor: *mut u8) -> Result<(), TxDoneError> {
@@ -1540,7 +1619,7 @@ unsafe fn restore_persistent_frame(frame: *mut u8, descriptor: *mut u8) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "hil-vendor-tx")]
+#[cfg(feature = "hil-tx-deep-telemetry")]
 unsafe fn capture_hil_data_tx_done(frame: *mut u8, descriptor: *mut u8) -> Result<(), TxDoneError> {
     let payload_owner = frame.add(4).cast::<*const u8>().read();
     if payload_owner.is_null() {
@@ -1627,7 +1706,7 @@ const fn ieee80211_data_header_len(frame_control: u16) -> usize {
     len
 }
 
-#[cfg(feature = "hil-vendor-tx")]
+#[cfg(feature = "hil-tx-deep-telemetry")]
 unsafe fn store_hil_bytes<const N: usize>(destination: &[AtomicU8; N], source: *const u8) {
     let mut index = 0;
     while index < N {
@@ -1636,7 +1715,7 @@ unsafe fn store_hil_bytes<const N: usize>(destination: &[AtomicU8; N], source: *
     }
 }
 
-#[cfg(feature = "hil-vendor-tx")]
+#[cfg(feature = "hil-tx-deep-telemetry")]
 fn clear_hil_bytes<const N: usize>(destination: &[AtomicU8; N]) {
     let mut index = 0;
     while index < N {

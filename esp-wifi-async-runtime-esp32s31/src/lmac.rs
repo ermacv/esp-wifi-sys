@@ -703,6 +703,7 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
     #[cfg(feature = "hil-vendor-tx")]
     {
         record_tx_complete(queue_state, queue, status, completion[2]);
+        #[cfg(feature = "hil-tx-deep-telemetry")]
         crate::tx_trace::record_descriptor_transition(
             crate::tx_trace::TxTraceEvent::CompletionInterrupt,
             completed_frame,
@@ -849,7 +850,7 @@ unsafe fn process_tx_retry(
     }
     let descriptor = descriptor(frame)?;
     let flags = descriptor.cast::<u32>().read();
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::RetryDecision,
         frame,
@@ -1113,7 +1114,7 @@ unsafe fn submit_basic_retry(
     format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
 
     configure_basic_edca(queue_state, descriptor);
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::RetrySubmit,
         frame,
@@ -1475,10 +1476,10 @@ pub unsafe fn submit_basic_ht_ampdu(
     }
     format_basic_ht_ampdu_ppdu(queue_state, &chain, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     let trace_chain = (chain.first, chain.subframes, chain.aggregate_length);
     install_basic_ht_ampdu_owner(hardware_queue, chain)?;
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::Submit,
         trace_chain.0,
@@ -1581,7 +1582,7 @@ pub unsafe fn submit_basic_non_he_frame(
     }
     format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
     configure_basic_edca(queue_state, descriptor);
-    #[cfg(feature = "hil-vendor-tx")]
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
         crate::tx_trace::TxTraceEvent::Submit,
         frame,
@@ -1691,9 +1692,13 @@ pub(crate) const fn is_ampdu_completion_continuation(kind: u32) -> bool {
     kind == TX_AMPDU_COMPLETION_CONTINUATION
 }
 
-/// Advance exactly one MPDU disposition, or perform the constant-size final
-/// ownership transition after the last acknowledged frame has completed its
-/// TX-done callback/recycle handoff.
+/// Advance a fixed prefix of callback-free data MPDU dispositions, or perform
+/// the constant-size final ownership transition.
+///
+/// Four frames keep the radio-owner dispatch finite while avoiding one A-MPDU
+/// continuation and one PP event-16 publication per acknowledged subframe.
+/// The TX-done leaf rejects any callback-bearing descriptor before admitting
+/// it to this batch.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.tx_ampdu_completion"]
 pub(crate) unsafe fn dispatch_ampdu_completion() -> Result<(), LmacAsyncError> {
@@ -1716,11 +1721,70 @@ pub(crate) unsafe fn dispatch_ampdu_completion() -> Result<(), LmacAsyncError> {
 unsafe fn dispatch_ampdu_completion_step(
     state: &mut AmpduCompletionState,
 ) -> Result<(), LmacAsyncError> {
-    let chain = state
+    const COMPLETION_QUANTUM: u8 = 4;
+    let subframes = state
         .chain
         .as_ref()
-        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
-    if state.next >= chain.subframes {
+        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?
+        .subframes;
+    let mut processed = 0_u8;
+    let mut committed = false;
+
+    while state.next < subframes && processed < COMPLETION_QUANTUM {
+        let chain = state
+            .chain
+            .as_ref()
+            .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+        let index = state.next;
+        let frame = chain
+            .frame(index)
+            .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+        let sequence = chain
+            .sequence(index)
+            .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
+        let acknowledged = state
+            .block_ack
+            .is_some_and(|block_ack| block_ack.acknowledges(sequence));
+        if let Err(error) =
+            crate::tx_ampdu::apply_basic_ht_ampdu_completion(frame, state.response, acknowledged)
+        {
+            if committed {
+                crate::txdone::publish_callback_free_ampdu_batch()
+                    .map_err(LmacAsyncError::TxDone)?;
+            }
+            return Err(LmacAsyncError::TxAmpduFrameCompletion(error));
+        }
+        state.next = state.next.wrapping_add(1);
+        processed = processed.wrapping_add(1);
+
+        if acknowledged {
+            if let Err(error) = crate::txdone::commit_callback_free_ampdu_success(frame) {
+                if committed {
+                    crate::txdone::publish_callback_free_ampdu_batch()
+                        .map_err(LmacAsyncError::TxDone)?;
+                }
+                return Err(LmacAsyncError::TxDone(error));
+            }
+            committed = true;
+        } else {
+            let retry_index = usize::from(state.retry_count);
+            if retry_index >= crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY {
+                if committed {
+                    crate::txdone::publish_callback_free_ampdu_batch()
+                        .map_err(LmacAsyncError::TxDone)?;
+                }
+                return Err(LmacAsyncError::InvalidTxAmpduContinuation);
+            }
+            state.retries[retry_index] = frame;
+            state.retry_sequences[retry_index] = sequence;
+            state.retry_count = state.retry_count.wrapping_add(1);
+        }
+    }
+
+    if committed {
+        crate::txdone::publish_callback_free_ampdu_batch().map_err(LmacAsyncError::TxDone)?;
+    }
+    if state.next >= subframes {
         let resume_event = state.resume_event;
         let retry_count = state.retry_count;
         state.chain = None;
@@ -1735,38 +1799,6 @@ unsafe fn dispatch_ampdu_completion_step(
         }
         return Ok(());
     }
-
-    let index = state.next;
-    let frame = chain
-        .frame(index)
-        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
-    let sequence = chain
-        .sequence(index)
-        .ok_or(LmacAsyncError::InvalidTxAmpduContinuation)?;
-    let acknowledged = state
-        .block_ack
-        .is_some_and(|block_ack| block_ack.acknowledges(sequence));
-    crate::tx_ampdu::apply_basic_ht_ampdu_completion(frame, state.response, acknowledged)
-        .map_err(LmacAsyncError::TxAmpduFrameCompletion)?;
-    state.next = state.next.wrapping_add(1);
-
-    if acknowledged {
-        crate::txdone::begin_from_ampdu_success(frame).map_err(LmacAsyncError::TxDone)
-    } else {
-        let retry_index = usize::from(state.retry_count);
-        if retry_index >= crate::tx_ampdu::TX_AMPDU_SLOT_CAPACITY {
-            return Err(LmacAsyncError::InvalidTxAmpduContinuation);
-        }
-        state.retries[retry_index] = frame;
-        state.retry_sequences[retry_index] = sequence;
-        state.retry_count = state.retry_count.wrapping_add(1);
-        enqueue_ampdu_completion()
-    }
-}
-
-/// Resume the aggregate after one acknowledged MPDU has been transferred to
-/// the ordinary one-frame TX-done pipeline.
-pub(crate) fn resume_ampdu_completion() -> Result<(), LmacAsyncError> {
     enqueue_ampdu_completion()
 }
 
@@ -2906,7 +2938,7 @@ unsafe fn descriptor(frame: *mut u8) -> Result<*mut u8, LmacAsyncError> {
     }
 }
 
-#[cfg(feature = "hil-vendor-tx")]
+#[cfg(feature = "hil-tx-deep-telemetry")]
 #[link_section = ".rwtext.wifi_strict.tx_trace_frame_control"]
 unsafe fn tx_trace_frame_control(frame: *mut u8) -> u16 {
     if frame.is_null() {

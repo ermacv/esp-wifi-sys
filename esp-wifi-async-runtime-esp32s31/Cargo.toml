@@ -19,6 +19,10 @@ strict-no-wait = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []
+# Expensive descriptor flight recorder and per-frame data snapshots. Keep
+# these available for failure localization without charging the throughput
+# profile dozens of atomic SRAM writes for every completed MPDU.
+hil-tx-deep-telemetry = ["hil-vendor-tx"]
 # Laboratory bridge: retain fully prepared MPDUs at ppMapTxQueue and feed the
 # Rust A-MPDU submit/completion path. The vendor mapper remains in the graph.
 hil-ampdu-intercept = ["hil-vendor-tx"]

@@ -34,6 +34,7 @@ const DESCRIPTOR_UNSUPPORTED_MASK: u32 = 0x8060_0000;
 const MIN_HIL_MPDU_LENGTH: u32 = 1_200;
 const HIL_COALESCE_DELAY_US: u32 = 250;
 pub const HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY: usize = 16;
+pub const HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY: usize = MAX_HIL_SUBFRAMES + 1;
 
 unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
@@ -152,6 +153,10 @@ static COALESCE_ARMED: AtomicU32 = AtomicU32::new(0);
 static COALESCE_EXPIRED: AtomicU32 = AtomicU32::new(0);
 static SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static READY: AtomicU32 = AtomicU32::new(0);
+static READY_HIGH_WATER: AtomicU32 = AtomicU32::new(0);
+static AGGREGATE_BYTES: AtomicU32 = AtomicU32::new(0);
+static AGGREGATE_SIZE_HISTOGRAM: [AtomicU32; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY] =
+    [const { AtomicU32::new(0) }; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY];
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
@@ -242,6 +247,11 @@ pub struct HilAmpduInterceptSnapshot {
     pub coalesce_expired: u32,
     pub subframes: u32,
     pub ready: u32,
+    pub ready_high_water: u32,
+    pub aggregate_bytes: u32,
+    /// Index is the number of MPDUs in one submitted A-MPDU. Slots 0 and 1
+    /// remain zero because direct submissions have dedicated counters.
+    pub aggregate_size_histogram: [u32; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY],
     pub failed: bool,
 }
 
@@ -289,6 +299,7 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     let mut last_nonzero_fallback_post = [0_u32; 5];
     let mut last_rate0_a = [0_u32; 8];
     let mut last_rate0_b = [0_u32; 8];
+    let mut aggregate_size_histogram = [0_u32; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY];
     let mut index = 0_usize;
     while index < last_mapper_pre.len() {
         last_mapper_pre[index] = LAST_MAPPER_PRE[index].load(Ordering::Acquire);
@@ -304,6 +315,11 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
     while index < last_rate0_a.len() {
         last_rate0_a[index] = LAST_RATE0_A[index].load(Ordering::Acquire);
         last_rate0_b[index] = LAST_RATE0_B[index].load(Ordering::Acquire);
+        index += 1;
+    }
+    index = 0;
+    while index < aggregate_size_histogram.len() {
+        aggregate_size_histogram[index] = AGGREGATE_SIZE_HISTOGRAM[index].load(Ordering::Acquire);
         index += 1;
     }
     HilAmpduInterceptSnapshot {
@@ -352,6 +368,9 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         coalesce_expired: COALESCE_EXPIRED.load(Ordering::Acquire),
         subframes: SUBFRAMES.load(Ordering::Acquire),
         ready: READY.load(Ordering::Acquire),
+        ready_high_water: READY_HIGH_WATER.load(Ordering::Acquire),
+        aggregate_bytes: AGGREGATE_BYTES.load(Ordering::Acquire),
+        aggregate_size_histogram,
         failed: FAILED.load(Ordering::Acquire),
     }
 }
@@ -895,7 +914,7 @@ unsafe fn push_ready(state: &mut InterceptState, frame: *mut u8) -> Result<(), T
     }
     state.frames[index] = frame;
     state.count = state.count.wrapping_add(1);
-    READY.store(u32::from(state.count), Ordering::Release);
+    record_ready_depth(state.count);
     Ok(())
 }
 
@@ -916,8 +935,25 @@ unsafe fn push_retry_front(
     state.frames[insertion] = frame;
     state.count = state.count.wrapping_add(1);
     state.retry_prefix = state.retry_prefix.wrapping_add(1);
-    READY.store(u32::from(state.count), Ordering::Release);
+    record_ready_depth(state.count);
     Ok(())
+}
+
+#[inline(always)]
+fn record_ready_depth(count: u8) {
+    let count = u32::from(count);
+    READY.store(count, Ordering::Release);
+    let observed = READY_HIGH_WATER.load(Ordering::Relaxed);
+    if count > observed {
+        // Diagnostics never retry. A racing observation may conservatively
+        // retain the larger value already published by the radio/IRQ owner.
+        let _ = READY_HIGH_WATER.compare_exchange(
+            observed,
+            count,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
 }
 
 fn schedule(state: &mut InterceptState) -> Result<(), TxInterceptError> {
@@ -1071,6 +1107,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
         MAX_HIL_AGGREGATE_LENGTH,
     )
     .map_err(TxInterceptError::Aggregate)?;
+    let aggregate_length = chain.aggregate_length;
     if let Err(error) = crate::lmac::submit_basic_ht_ampdu(queue_state, chain) {
         // Submission validates queue/descriptor state before ownership
         // transfer. A failure after preparation is fatal for this laboratory
@@ -1097,6 +1134,8 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     reconcile_coalesce_deadline(state)?;
     SUBMITTED.fetch_add(1, Ordering::Relaxed);
     SUBFRAMES.fetch_add(selected as u32, Ordering::Relaxed);
+    AGGREGATE_BYTES.fetch_add(u32::from(aggregate_length), Ordering::Relaxed);
+    AGGREGATE_SIZE_HISTOGRAM[selected].fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
