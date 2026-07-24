@@ -32,6 +32,9 @@ rx-ba-window-8 = []
 # objects themselves remain in internal SRAM because the Wi-Fi interrupt path
 # owns and fills them.
 large-rx-pool-48 = []
+# Sampled HIL telemetry for locating RX queue and network-consumer latency.
+# One frame out of 256 records cycle timestamps; the normal path is unchanged.
+rx-pipeline-telemetry = []
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 esp-wifi-sys-esp32s31 = { path = "../esp-wifi-sys-esp32s31" }

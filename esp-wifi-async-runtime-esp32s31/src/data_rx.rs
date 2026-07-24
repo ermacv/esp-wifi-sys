@@ -90,8 +90,36 @@ static RX_REJECTED_SLOTS_FULL: AtomicUsize = AtomicUsize::new(0);
 static RX_REJECTED_CHANNEL_CONTENDED: AtomicUsize = AtomicUsize::new(0);
 static RX_OCCUPIED: AtomicUsize = AtomicUsize::new(0);
 static RX_OCCUPIED_HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
+static RX_LATENCY_SAMPLES: AtomicUsize = AtomicUsize::new(0);
+static RX_QUEUE_TICKS_SUM: AtomicUsize = AtomicUsize::new(0);
+static RX_QUEUE_CYCLES_MAX: AtomicUsize = AtomicUsize::new(0);
+static RX_QUEUE_OVER_1MS: AtomicUsize = AtomicUsize::new(0);
+static RX_PROCESSING_TICKS_SUM: AtomicUsize = AtomicUsize::new(0);
+static RX_PROCESSING_CYCLES_MAX: AtomicUsize = AtomicUsize::new(0);
+static RX_PROCESSING_OVER_100US: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_arch = "riscv32")]
 static RX_CALLBACKS_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+const RX_TELEMETRY_SAMPLE_MASK: usize = 255;
+#[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+const S31_CYCLES_PER_MILLISECOND: u32 = 320_000;
+#[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+const S31_CYCLES_PER_100_MICROSECONDS: u32 = 32_000;
+
+#[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+#[inline(always)]
+fn cycle_count() -> u32 {
+    let value: u32;
+    unsafe {
+        core::arch::asm!(
+            "csrr {value}, mcycle",
+            value = out(reg) value,
+            options(nomem, nostack)
+        )
+    };
+    value
+}
 
 fn record_high_water(counter: &AtomicUsize, value: usize) {
     let observed = counter.load(Ordering::Relaxed);
@@ -115,6 +143,15 @@ pub struct WifiDataRxSnapshot {
     pub occupied: usize,
     pub occupied_high_water: usize,
     pub queued: usize,
+    pub latency_samples: usize,
+    /// Sum of sampled callback-to-dequeue latency in 256-cycle ticks.
+    pub queue_ticks_sum: usize,
+    pub queue_cycles_max: usize,
+    pub queue_over_1ms: usize,
+    /// Sum of sampled dequeue-to-release latency in 256-cycle ticks.
+    pub processing_ticks_sum: usize,
+    pub processing_cycles_max: usize,
+    pub processing_over_100us: usize,
 }
 
 pub fn wifi_data_rx_snapshot() -> WifiDataRxSnapshot {
@@ -130,11 +167,20 @@ pub fn wifi_data_rx_snapshot() -> WifiDataRxSnapshot {
         occupied: RX_OCCUPIED.load(Ordering::Acquire),
         occupied_high_water: RX_OCCUPIED_HIGH_WATER.load(Ordering::Acquire),
         queued: RX_CHANNEL.len(),
+        latency_samples: RX_LATENCY_SAMPLES.load(Ordering::Acquire),
+        queue_ticks_sum: RX_QUEUE_TICKS_SUM.load(Ordering::Acquire),
+        queue_cycles_max: RX_QUEUE_CYCLES_MAX.load(Ordering::Acquire),
+        queue_over_1ms: RX_QUEUE_OVER_1MS.load(Ordering::Acquire),
+        processing_ticks_sum: RX_PROCESSING_TICKS_SUM.load(Ordering::Acquire),
+        processing_cycles_max: RX_PROCESSING_CYCLES_MAX.load(Ordering::Acquire),
+        processing_over_100us: RX_PROCESSING_OVER_100US.load(Ordering::Acquire),
     }
 }
 
 enum RxStorage {
-    Copied { index: usize },
+    Copied {
+        index: usize,
+    },
     #[cfg(target_arch = "riscv32")]
     LargeEsf {
         buffer: *mut u8,
@@ -146,6 +192,12 @@ enum RxStorage {
 struct RxSlotToken {
     interface: WifiDataInterface,
     storage: RxStorage,
+    #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+    enqueued_cycle: u32,
+    #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+    dequeued_cycle: u32,
+    #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+    telemetry_sample: bool,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -153,6 +205,15 @@ unsafe impl Send for RxSlotToken {}
 
 impl Drop for RxSlotToken {
     fn drop(&mut self) {
+        #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+        if self.telemetry_sample {
+            let cycles = cycle_count().wrapping_sub(self.dequeued_cycle);
+            RX_PROCESSING_TICKS_SUM.fetch_add((cycles >> 8) as usize, Ordering::Relaxed);
+            record_high_water(&RX_PROCESSING_CYCLES_MAX, cycles as usize);
+            if cycles > S31_CYCLES_PER_100_MICROSECONDS {
+                RX_PROCESSING_OVER_100US.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         match &self.storage {
             RxStorage::Copied { index } => {
                 RX_SLOTS[*index].occupied.store(false, Ordering::Release);
@@ -210,15 +271,15 @@ impl OwnedWifiDataFrame {
 }
 
 pub fn try_receive_wifi_data() -> Option<OwnedWifiDataFrame> {
-    RX_CHANNEL.try_receive().map(|token| {
-        RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    RX_CHANNEL.try_receive().map(|mut token| {
+        record_dequeue(&mut token);
         OwnedWifiDataFrame { token }
     })
 }
 
 pub async fn receive_wifi_data() -> OwnedWifiDataFrame {
-    let token = RX_CHANNEL.receive().await;
-    RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    let mut token = RX_CHANNEL.receive().await;
+    record_dequeue(&mut token);
     OwnedWifiDataFrame { token }
 }
 
@@ -229,10 +290,29 @@ pub async fn receive_wifi_data() -> OwnedWifiDataFrame {
 /// [`receive_wifi_data`].
 pub fn poll_receive_wifi_data(cx: &mut Context<'_>) -> Poll<OwnedWifiDataFrame> {
     let mut receive = RX_CHANNEL.receive();
-    Pin::new(&mut receive).poll(cx).map(|token| {
-        RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    Pin::new(&mut receive).poll(cx).map(|mut token| {
+        record_dequeue(&mut token);
         OwnedWifiDataFrame { token }
     })
+}
+
+fn record_dequeue(token: &mut RxSlotToken) {
+    let sequence = RX_DEQUEUED.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry")))]
+    let _ = (sequence, token);
+    #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+    if sequence & RX_TELEMETRY_SAMPLE_MASK == 0 {
+        let now = cycle_count();
+        let cycles = now.wrapping_sub(token.enqueued_cycle);
+        token.dequeued_cycle = now;
+        token.telemetry_sample = true;
+        RX_LATENCY_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        RX_QUEUE_TICKS_SUM.fetch_add((cycles >> 8) as usize, Ordering::Relaxed);
+        record_high_water(&RX_QUEUE_CYCLES_MAX, cycles as usize);
+        if cycles > S31_CYCLES_PER_MILLISECOND {
+            RX_QUEUE_OVER_1MS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 pub fn rejected_wifi_data_frames() -> usize {
@@ -266,10 +346,22 @@ unsafe fn copy_into_slot(interface: WifiDataInterface, buffer: *const u8, length
     enqueue_token(RxSlotToken {
         interface,
         storage: RxStorage::Copied { index },
+        #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+        enqueued_cycle: 0,
+        #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+        dequeued_cycle: 0,
+        #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+        telemetry_sample: false,
     })
 }
 
-fn enqueue_token(token: RxSlotToken) -> bool {
+fn enqueue_token(mut token: RxSlotToken) -> bool {
+    #[cfg(not(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry")))]
+    let _ = &mut token;
+    #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
+    {
+        token.enqueued_cycle = cycle_count();
+    }
     RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
     let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
     record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
@@ -356,11 +448,7 @@ mod target {
         let length = usize::from(length);
         let owns_large_esf = length <= WIFI_DATA_RX_FRAME_CAPACITY
             && !vendor_buffer.is_null()
-            && crate::esf::owned_large_rx_view_valid(
-                vendor_buffer.cast(),
-                buffer.cast(),
-                length,
-            );
+            && crate::esf::owned_large_rx_view_valid(vendor_buffer.cast(), buffer.cast(), length);
         let accepted = if owns_large_esf {
             // Transfer the live kind-7 object into the bounded safe channel.
             // Its token releases the one Rust pool bit directly on Drop, so
@@ -372,6 +460,12 @@ mod target {
                     length,
                     frame: vendor_buffer.cast(),
                 },
+                #[cfg(feature = "rx-pipeline-telemetry")]
+                enqueued_cycle: 0,
+                #[cfg(feature = "rx-pipeline-telemetry")]
+                dequeued_cycle: 0,
+                #[cfg(feature = "rx-pipeline-telemetry")]
+                telemetry_sample: false,
             };
             if RX_CHANNEL.len() >= WIFI_DATA_RX_ZERO_COPY_LIMIT {
                 reject_owned_token_at_capacity(token)
