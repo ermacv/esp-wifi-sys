@@ -138,6 +138,11 @@ pub use adapter::{
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use allocation::{allow_heap_for_wifi_teardown, patch_allocator_probes};
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-static-supplicant-callback-storage"
+))]
+pub use allocation::static_supplicant_callback_table_bound;
 #[cfg(feature = "hil-cold-allocation-trace")]
 pub use allocation::{
     cold_allocation_trace_entry, cold_allocation_trace_len, cold_allocation_trace_overflow,

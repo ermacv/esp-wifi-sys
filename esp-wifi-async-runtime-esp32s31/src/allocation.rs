@@ -407,6 +407,24 @@ fn classify_static_interface_allocation(
     }
 }
 
+#[cfg(feature = "rust-static-supplicant-callback-storage")]
+const SUPPLICANT_CALLBACK_TABLE_SIZE: usize = 27 * core::mem::size_of::<u32>();
+#[cfg(feature = "rust-static-supplicant-callback-storage")]
+const SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET: usize = 0x26;
+
+#[cfg(feature = "rust-static-supplicant-callback-storage")]
+fn is_static_supplicant_callback_allocation(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    esp_supplicant_init_address: usize,
+) -> bool {
+    source == AllocationSource::DirectCalloc
+        && size == SUPPLICANT_CALLBACK_TABLE_SIZE
+        && caller.wrapping_sub(esp_supplicant_init_address)
+            == SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -418,22 +436,24 @@ mod target {
 
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
-    use super::{AllocationSource, PROBE};
-    #[cfg(feature = "rust-static-interface-storage")]
-    use super::{
-        classify_static_interface_allocation, StaticInterfaceAllocation, WIFI_INTERFACE_PHY_SIZE,
-        WIFI_INTERFACE_STATE_SIZE,
-    };
     #[cfg(feature = "rust-static-function-table-storage")]
     use super::{
         classify_static_function_table, StaticFunctionTable, NET80211_FUNCTION_TABLE_SIZE,
         WDEV_FUNCTION_TABLE_SIZE,
+    };
+    #[cfg(feature = "rust-static-interface-storage")]
+    use super::{
+        classify_static_interface_allocation, StaticInterfaceAllocation, WIFI_INTERFACE_PHY_SIZE,
+        WIFI_INTERFACE_STATE_SIZE,
     };
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     use super::{
         classify_wifi_nvs_static_allocation, WifiNvsStaticAllocation, WIFI_NVS_CFG_ITEMS_SIZE,
         WIFI_NVS_LOAD_SCRATCH_SIZE,
     };
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    use super::{is_static_supplicant_callback_allocation, SUPPLICANT_CALLBACK_TABLE_SIZE};
+    use super::{AllocationSource, PROBE};
 
     type Malloc = unsafe extern "C" fn(usize) -> *mut c_void;
     type Free = unsafe extern "C" fn(*mut c_void);
@@ -653,6 +673,20 @@ mod target {
     #[cfg(feature = "rust-static-interface-storage")]
     unsafe impl<const SIZE: usize> Sync for StaticInterfaceBuffer<SIZE> {}
 
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    #[repr(C, align(4))]
+    struct SupplicantCallbackTable(UnsafeCell<[u8; SUPPLICANT_CALLBACK_TABLE_SIZE]>);
+
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    impl SupplicantCallbackTable {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; SUPPLICANT_CALLBACK_TABLE_SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    unsafe impl Sync for SupplicantCallbackTable {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -740,6 +774,11 @@ mod target {
         StaticInterfaceBuffer::new();
     #[cfg(feature = "rust-static-interface-storage")]
     static WIFI_INTERFACE_PHY_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    #[link_section = ".critical.bss.wifi_strict.supplicant_callbacks"]
+    static SUPPLICANT_CALLBACK_TABLE: SupplicantCallbackTable = SupplicantCallbackTable::new();
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    static SUPPLICANT_CALLBACK_TABLE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -766,6 +805,10 @@ mod target {
         fn wifi_create_sta() -> i32;
         #[cfg(feature = "rust-static-interface-storage")]
         fn wifi_create_softap() -> i32;
+        #[cfg(feature = "rust-static-supplicant-callback-storage")]
+        fn esp_supplicant_init() -> i32;
+        #[cfg(feature = "rust-static-supplicant-callback-storage")]
+        static mut wpa_cb: *mut c_void;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -1408,7 +1451,55 @@ mod target {
         )
     }
 
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    fn claim_static_supplicant_callbacks(
+        source: AllocationSource,
+        size: usize,
+        caller: usize,
+    ) -> Option<*mut c_void> {
+        if !is_static_supplicant_callback_allocation(
+            source,
+            size,
+            caller,
+            esp_supplicant_init as *const () as usize,
+        ) {
+            return None;
+        }
+        SUPPLICANT_CALLBACK_TABLE_CLAIMED
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let table = SUPPLICANT_CALLBACK_TABLE.0.get();
+        unsafe { table.write([0; SUPPLICANT_CALLBACK_TABLE_SIZE]) };
+        Some(table.cast())
+    }
+
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    fn release_static_supplicant_callbacks(pointer: *mut c_void) -> bool {
+        if pointer != SUPPLICANT_CALLBACK_TABLE.0.get().cast()
+            || SUPPLICANT_CALLBACK_TABLE_CLAIMED.swap(0, Ordering::AcqRel) == 0
+        {
+            return false;
+        }
+        unsafe {
+            SUPPLICANT_CALLBACK_TABLE
+                .0
+                .get()
+                .write([0; SUPPLICANT_CALLBACK_TABLE_SIZE])
+        };
+        true
+    }
+
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    pub unsafe fn static_supplicant_callback_table_bound() -> bool {
+        SUPPLICANT_CALLBACK_TABLE_CLAIMED.load(Ordering::Acquire) == 1
+            && core::ptr::addr_of!(wpa_cb).read() == SUPPLICANT_CALLBACK_TABLE.0.get().cast()
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-supplicant-callback-storage")]
+        if release_static_supplicant_callbacks(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-interface-storage")]
         if release_static_interface_storage(ptr) {
             return true;
@@ -1505,6 +1596,31 @@ mod target {
     pub unsafe extern "C" fn __wrap_calloc(count: usize, size: usize) -> *mut c_void {
         let requested = count.saturating_mul(size);
         let caller = caller_address();
+        #[cfg(feature = "rust-static-supplicant-callback-storage")]
+        if is_static_supplicant_callback_allocation(
+            AllocationSource::DirectCalloc,
+            requested,
+            caller,
+            esp_supplicant_init as *const () as usize,
+        ) {
+            let result = claim_static_supplicant_callbacks(
+                AllocationSource::DirectCalloc,
+                requested,
+                caller,
+            )
+            .unwrap_or(core::ptr::null_mut());
+            if result.is_null() {
+                PROBE.record_request_at(
+                    requested,
+                    true,
+                    false,
+                    AllocationSource::DirectCalloc,
+                    caller,
+                    0,
+                );
+            }
+            return result;
+        }
         if heap_forbidden() {
             PROBE.record_request_at(
                 requested,
@@ -1845,8 +1961,18 @@ mod target {
     #[cfg(feature = "rust-static-interface-storage")]
     const _: () =
         assert!(mem::align_of::<StaticInterfaceBuffer<WIFI_INTERFACE_PHY_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    const _: () =
+        assert!(mem::size_of::<SupplicantCallbackTable>() == SUPPLICANT_CALLBACK_TABLE_SIZE);
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    const _: () = assert!(mem::align_of::<SupplicantCallbackTable>() >= 4);
 }
 
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-static-supplicant-callback-storage"
+))]
+pub use target::static_supplicant_callback_table_bound;
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
     allocator_callbacks_patched, direct_heap_link_wrappers_active, forbid_runtime_heap,
@@ -2104,6 +2230,44 @@ mod tests {
                 ),
                 None
             );
+        }
+    }
+
+    #[cfg(feature = "rust-static-supplicant-callback-storage")]
+    #[test]
+    fn static_supplicant_callback_admission_is_exact() {
+        use super::{
+            is_static_supplicant_callback_allocation, AllocationSource,
+            SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET, SUPPLICANT_CALLBACK_TABLE_SIZE,
+        };
+
+        const BASE: usize = 0x4008_2000;
+        assert!(is_static_supplicant_callback_allocation(
+            AllocationSource::DirectCalloc,
+            SUPPLICANT_CALLBACK_TABLE_SIZE,
+            BASE + SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET,
+            BASE,
+        ));
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiCallocInternal,
+                SUPPLICANT_CALLBACK_TABLE_SIZE,
+                BASE + SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::DirectCalloc,
+                SUPPLICANT_CALLBACK_TABLE_SIZE - 4,
+                BASE + SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::DirectCalloc,
+                SUPPLICANT_CALLBACK_TABLE_SIZE,
+                BASE + SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET + 2,
+            ),
+        ] {
+            assert!(!is_static_supplicant_callback_allocation(
+                source, size, caller, BASE,
+            ));
         }
     }
 }

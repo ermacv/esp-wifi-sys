@@ -35,6 +35,10 @@ rust-static-tbtt-adaptive-interpose = []
 # internal-SRAM owner. The strict WPA2 path does not populate vendor PMKSA
 # entries; deinit therefore accepts only the exact empty static cache.
 rust-static-pmksa-cache-interpose = []
+# Supply the 27-slot callback table published by esp_supplicant_init from one
+# exact 108-byte internal-SRAM owner. Admission is pinned to the direct calloc
+# return PC and a second live claim fails closed.
+rust-static-supplicant-callback-storage = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.
