@@ -557,6 +557,7 @@ mod target {
     static ADDBA_DEFERRED_DISPATCHED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
     static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    static OWNED_RX_ADDBA_RESPONSE: AtomicU8 = AtomicU8::new(0);
     static OWNED_RX_ADDBA_ACCEPTED: AtomicU8 = AtomicU8::new(0);
     static PENDING_RX_ADDBA_STATE: AtomicU8 = AtomicU8::new(0);
     #[unsafe(link_section = ".critical.bss.wifi_strict.rx_addba")]
@@ -1080,9 +1081,19 @@ mod target {
     }
 
     pub(crate) unsafe fn complete_owned_action_management(frame: *mut u8) -> bool {
-        if OWNED_ACTION_BUFFER.swap(0, Ordering::AcqRel) == 0 {
+        if frame.is_null()
+            || OWNED_ACTION_BUFFER
+                .compare_exchange(
+                    frame as usize,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
             return false;
         }
+        OWNED_RX_ADDBA_RESPONSE.store(0, Ordering::Release);
         let accepted_rx_addba = OWNED_RX_ADDBA_ACCEPTED.swap(0, Ordering::AcqRel) != 0;
         #[cfg(feature = "hil-rx-ampdu")]
         if accepted_rx_addba {
@@ -1106,6 +1117,7 @@ mod target {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        OWNED_RX_ADDBA_RESPONSE.store(0, Ordering::Release);
         OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
     }
 
@@ -1262,6 +1274,7 @@ mod target {
         );
         #[cfg(not(feature = "hil-rx-ampdu"))]
         let rx_ampdu_accepted = false;
+        OWNED_RX_ADDBA_RESPONSE.store(1, Ordering::Release);
         if rx_ampdu_accepted {
             OWNED_RX_ADDBA_ACCEPTED.store(1, Ordering::Release);
         }
@@ -1331,6 +1344,17 @@ mod target {
         ADDBA_DEFERRED_DISPATCHED.fetch_add(1, Ordering::Relaxed);
     }
 
+    unsafe fn complete_tx_addba_request_ownership() {
+        if OWNED_RX_ADDBA_RESPONSE.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        if OWNED_ACTION_BUFFER.swap(0, Ordering::AcqRel) == 0 {
+            return;
+        }
+        OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
+        dispatch_deferred_rx_addba();
+    }
+
     /// Consume a peer ADDBA request before it can enter the vendor BlockAck
     /// state machine. Until Rust owns reorder buffers, it emits one explicit
     /// standards-level decline using the fixed management pool.
@@ -1376,6 +1400,7 @@ mod target {
                 }
                 Err(_) => {}
             }
+            unsafe { complete_tx_addba_request_ownership() };
             return true;
         }
         if frame[25] != crate::tx_ampdu::ADDBA_REQUEST_ACTION {
@@ -1906,6 +1931,7 @@ mod target {
         #[cfg(feature = "hil-rx-ampdu")]
         crate::rx_ampdu_ap::remove_peer(associated_peer);
         OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
+        OWNED_RX_ADDBA_RESPONSE.store(0, Ordering::Release);
         PENDING_RX_ADDBA_STATE.store(0, Ordering::Release);
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
