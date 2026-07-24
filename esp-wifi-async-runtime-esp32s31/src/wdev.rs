@@ -18,7 +18,6 @@ pub enum WdevRxContinuationError {
     WrongHart,
     ResetStateUnavailable,
     MissingLastDescriptor,
-    CurrentDescriptorMismatch,
     MissingRxMetadata,
     DescriptorCountOverflow,
     DescriptorChainTooLong,
@@ -786,6 +785,7 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
 
     let interrupt_state = crate::critical::strict_wifi_int_disable();
     let mut descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+    let mut unit_head = descriptor;
     let mut subframe_count = 0_u32;
     let mut descriptors_seen = 0_usize;
     while !descriptor.is_null() {
@@ -822,11 +822,6 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
         };
 
         if descriptor.cast::<u32>().read_unaligned() & (1 << 30) != 0 {
-            let published = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
-            if published != descriptor {
-                crate::critical::strict_wifi_int_restore(interrupt_state);
-                return Err(WdevRxContinuationError::CurrentDescriptorMismatch);
-            }
             INDICATE_FRAME_PROBE.calls.fetch_add(1, Ordering::Relaxed);
             INDICATE_FRAME_PROBE
                 .validated
@@ -835,7 +830,12 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
                 .max_descriptors
                 .fetch_max(subframe_count as usize, Ordering::Relaxed);
             crate::critical::strict_wifi_int_restore(interrupt_state);
-            wDev_ProcessRxSucData(descriptor, subframe_count);
+            // Match the pinned vendor outer walk exactly: the decoder receives
+            // the first descriptor in the complete RX unit plus the number of
+            // linked descriptors ending at this bit-30 marker. Passing the
+            // tail happens to work for one-descriptor frames but corrupts a
+            // multi-descriptor unit after reconnect or under large RX input.
+            wDev_ProcessRxSucData(unit_head, subframe_count);
             subframe_count = 0;
             if descriptor == last {
                 let latest = hal_mac_rx_get_last_dscr();
@@ -853,14 +853,14 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
                     return Err(WdevRxContinuationError::MissingLastDescriptor);
                 }
             }
-            // The per-unit decoder advances `wDevCtrl.head` before recycling
-            // the completed descriptor. Reading that publication after the
-            // callback is stronger than the pre-callback `next` snapshot when
-            // MAC advanced while the decoder was running.
-            descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
+            // The decoder may recycle the completed unit and mutate its
+            // descriptor links. Continue from the bounded pre-callback
+            // snapshot, as the pinned vendor walk does.
+            descriptor = next;
             if descriptor.is_null() {
                 return Ok(());
             }
+            unit_head = descriptor;
             // Match the vendor outer walk: only the pointer publication is
             // protected; the per-unit decoder executes with interrupts on.
             let new_interrupt_state = crate::critical::strict_wifi_int_disable();
