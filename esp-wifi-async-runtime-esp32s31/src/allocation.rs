@@ -1471,6 +1471,12 @@ mod target {
             }
             _ => {}
         }
+        #[cfg(feature = "rust-static-rate-table-storage")]
+        if source == AllocationSource::OsiWifiZalloc {
+            if let Some(scratch) = claim_rate_table_scratch(size, caller) {
+                return scratch;
+            }
+        }
         if heap_forbidden() {
             if source == AllocationSource::OsiWifiMalloc {
                 if let Some(node) = claim_blacklist_node(size, caller) {

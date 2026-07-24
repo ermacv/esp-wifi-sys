@@ -48,6 +48,9 @@ rust-static-wifi-nvs-storage = []
 # internal-SRAM owners. Both tables are populated by finite vendor stores and
 # are read from interrupt/radio paths after publication.
 rust-static-function-table-storage = []
+# Admit the exact `ieee80211_setup_ratetable` 212-byte temporary owner during
+# cold init as well as after strict heap lockout.
+rust-static-rate-table-storage = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
