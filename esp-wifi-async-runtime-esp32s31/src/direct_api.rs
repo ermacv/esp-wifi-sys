@@ -92,6 +92,13 @@ static SET_PROTOCOLS_PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_LAST_BITMAPS: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_IDEMPOTENT_SUCCESSES: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_TRANSITION_REJECTIONS: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_LAST_REQUESTED: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_LAST_STATE: AtomicU32 = AtomicU32::new(0);
+static SET_PROMISCUOUS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct WifiCountry {
@@ -267,6 +274,18 @@ pub struct DirectSetProtocolsSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for the idempotent promiscuous-mode boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectPromiscuousSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub idempotent_successes: u32,
+    pub transition_rejections: u32,
+    pub last_requested: bool,
+    pub last_state: u8,
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -378,6 +397,19 @@ pub fn direct_set_protocols_snapshot() -> DirectSetProtocolsSnapshot {
     }
 }
 
+/// Return the current idempotent promiscuous-mode counters.
+pub fn direct_promiscuous_snapshot() -> DirectPromiscuousSnapshot {
+    DirectPromiscuousSnapshot {
+        calls: SET_PROMISCUOUS_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_PROMISCUOUS_NOT_INITIALIZED.load(Ordering::Relaxed),
+        idempotent_successes: SET_PROMISCUOUS_IDEMPOTENT_SUCCESSES.load(Ordering::Relaxed),
+        transition_rejections: SET_PROMISCUOUS_TRANSITION_REJECTIONS.load(Ordering::Relaxed),
+        last_requested: SET_PROMISCUOUS_LAST_REQUESTED.load(Ordering::Relaxed) != 0,
+        last_state: SET_PROMISCUOUS_LAST_STATE.load(Ordering::Relaxed) as u8,
+        last_result: SET_PROMISCUOUS_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -475,13 +507,22 @@ fn select_2_4_ghz_protocol(
     Ok((primary, u8::from(bitmap & PROTOCOL_LR != 0)))
 }
 
+fn classify_promiscuous_request(requested: bool, current: u8) -> i32 {
+    if current == u8::from(requested) {
+        ESP_OK
+    } else {
+        ESP_ERR_WIFI_STATE
+    }
+}
+
 #[cfg(all(
     target_arch = "riscv32",
     any(
         feature = "rust-direct-cold-stop",
         feature = "rust-direct-set-max-tx-power",
         feature = "rust-direct-set-country-nvs-free",
-        feature = "rust-direct-set-protocols-nvs-free"
+        feature = "rust-direct-set-protocols-nvs-free",
+        feature = "rust-direct-promiscuous-idempotent"
     )
 ))]
 unsafe extern "C" {
@@ -518,7 +559,8 @@ unsafe extern "C" {
         feature = "rust-direct-reg-mgmt-frame",
         feature = "rust-direct-set-max-tx-power",
         feature = "rust-direct-set-country-nvs-free",
-        feature = "rust-direct-set-protocols-nvs-free"
+        feature = "rust-direct-set-protocols-nvs-free",
+        feature = "rust-direct-promiscuous-idempotent"
     )
 ))]
 unsafe extern "C" {
@@ -1056,6 +1098,42 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_protocols(
     ESP_OK
 }
 
+/// Admit only an already-satisfied promiscuous-mode request.
+///
+/// The vendor process starts/stops Wi-Fi hardware and changes the virtual
+/// interface when this byte changes. Those synchronous lifecycle operations
+/// are outside this compatibility ABI. The strict AP/STA profile asks only to
+/// confirm the already-disabled state, so the wrapper preserves the public
+/// initialization guard, reads the exact state byte and fails closed on a
+/// requested transition.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-direct-promiscuous-idempotent"
+))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous(requested: bool) -> i32 {
+    const WIFI_PROMISCUOUS_OFFSET: usize = 0x1f7;
+
+    SET_PROMISCUOUS_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_PROMISCUOUS_LAST_REQUESTED.store(u32::from(requested), Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_PROMISCUOUS_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_PROMISCUOUS_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    let current =
+        core::ptr::read_volatile(core::ptr::addr_of!(g_ic).add(WIFI_PROMISCUOUS_OFFSET));
+    SET_PROMISCUOUS_LAST_STATE.store(u32::from(current), Ordering::Relaxed);
+    let result = classify_promiscuous_request(requested, current);
+    if result == ESP_OK {
+        SET_PROMISCUOUS_IDEMPOTENT_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        SET_PROMISCUOUS_TRANSITION_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    SET_PROMISCUOUS_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,6 +1238,24 @@ mod tests {
         assert!(interface_enabled_by_mode(2, 4));
         assert!(interface_enabled_by_mode(2, 6));
         assert!(!interface_enabled_by_mode(3, 3));
+    }
+
+    #[test]
+    fn promiscuous_boundary_accepts_only_an_already_satisfied_request() {
+        assert_eq!(classify_promiscuous_request(false, 0), ESP_OK);
+        assert_eq!(classify_promiscuous_request(true, 1), ESP_OK);
+        assert_eq!(
+            classify_promiscuous_request(true, 0),
+            ESP_ERR_WIFI_STATE
+        );
+        assert_eq!(
+            classify_promiscuous_request(false, 1),
+            ESP_ERR_WIFI_STATE
+        );
+        assert_eq!(
+            classify_promiscuous_request(false, 2),
+            ESP_ERR_WIFI_STATE
+        );
     }
 
     #[test]

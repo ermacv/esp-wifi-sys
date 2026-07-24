@@ -90,6 +90,10 @@ rust-direct-set-config = []
 # STA/AP/NAN protocol directly into fixed state. Active-radio changes, NVS,
 # stop/start, allocator and ioctl paths are deliberately unreachable.
 rust-direct-set-protocols-nvs-free = []
+# Replace the strict profile's promiscuous-disable ioctl with an idempotence
+# check against the pinned control byte. Any actual hardware-mode transition
+# is rejected for an explicit async lifecycle owner.
+rust-direct-promiscuous-idempotent = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
