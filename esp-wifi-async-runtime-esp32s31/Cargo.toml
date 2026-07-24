@@ -23,6 +23,10 @@ rust-static-bindings-interpose = []
 # Replace the single 0x44-byte PM callback-table allocation and its paired
 # deallocation with fixed internal-SRAM ownership.
 rust-static-pm-init-interpose = []
+# Replace the three 0x98-byte default rate-control contexts created by
+# trc_init with exact fixed internal-SRAM owners. The paired deinitializer
+# accepts only those three publications and never enters the allocator.
+rust-static-trc-init-interpose = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.

@@ -73,6 +73,8 @@ mod static_cold_init;
 mod static_misc_nvs;
 #[cfg(target_arch = "riscv32")]
 mod static_pm;
+#[cfg(target_arch = "riscv32")]
+mod static_trc;
 pub mod strict;
 pub mod task;
 mod tbtt;
@@ -287,6 +289,8 @@ pub use static_bindings::{
 pub use static_misc_nvs::static_misc_nvs_bound;
 #[cfg(target_arch = "riscv32")]
 pub use static_pm::static_pm_functions_bound;
+#[cfg(target_arch = "riscv32")]
+pub use static_trc::static_trc_contexts_bound;
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, RuntimeTimerSnapshot, TIMER_CONTEXT_EVENT};
