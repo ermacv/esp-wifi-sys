@@ -202,7 +202,17 @@ pub(crate) fn parse_he20_peer_state(
 ))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum He20HardwareError {
+    InvalidAssociationId,
     UnsupportedRtsThreshold,
+}
+
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+unsafe extern "C" {
+    static mut g_bss_color_collision_detection_enabled: u8;
 }
 
 /// Program only the finite HE20 receive-side MMIO leaves reached by the pinned
@@ -227,6 +237,7 @@ pub(crate) unsafe fn program_he20_peer_hardware(
     }
 
     const HE_BSS_COLOR: *mut u32 = 0x2010_4020 as *mut u32;
+    const HE_BSS_COLOR_BITMAP_CONTROL: *mut u32 = 0x2010_4048 as *mut u32;
     const HE_ERSU_ACK_RATE: *mut u32 = 0x2010_4404 as *mut u32;
     const HE_ERSU_CONTROL: *mut u32 = 0x2010_4c7c as *mut u32;
     const HE_DEFAULT_PE: *mut u32 = 0x2010_4c80 as *mut u32;
@@ -253,6 +264,13 @@ pub(crate) unsafe fn program_he20_peer_hardware(
         }
         HE_BSS_COLOR.write_volatile(bss_color);
     }
+    // Collision reporting eventually allocates and sends a vendor robust
+    // management action. Until that Rust-owned action path exists, disable
+    // its interface-0 producer exactly as the pinned ioctl leaf does and
+    // clear the accumulated hardware bitmap. Ordinary BSS-color filtering
+    // above remains enabled.
+    core::ptr::addr_of_mut!(g_bss_color_collision_detection_enabled).write(0);
+    HE_BSS_COLOR_BITMAP_CONTROL.write_volatile(HE_BSS_COLOR_BITMAP_CONTROL.read_volatile() | 0x01);
 
     let mut default_pe = HE_DEFAULT_PE.read_volatile();
     default_pe = default_pe & !0x07 | (state.operation_parameters & 0x07);
@@ -280,6 +298,51 @@ pub(crate) unsafe fn program_he20_peer_hardware(
         HE_ERSU_ACK_RATE.write_volatile(0x8080_8080);
     }
     HE_ERSU_CONTROL.write_volatile(ersu);
+    Ok(())
+}
+
+/// Install the finite interface-0 HE association register state normally
+/// written by `hal_he_set_mmss_and_aid`.
+///
+/// `minimum_mpdu_start_spacing` is the three-bit HT A-MPDU density already
+/// negotiated into the static peer. `bssid_index` is zero for an ordinary
+/// single-BSSID AP. No vendor rate-control or connection routine is entered.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+#[link_section = ".rwtext.wifi_strict.he_peer"]
+pub(crate) unsafe fn program_he20_association_hardware(
+    association_id: u16,
+    minimum_mpdu_start_spacing: u8,
+    bssid_index: u8,
+) -> Result<(), He20HardwareError> {
+    if association_id == 0 || association_id > 0x07ff {
+        return Err(He20HardwareError::InvalidAssociationId);
+    }
+
+    const HE_STA_CONFIG: *mut u32 = 0x2010_4004 as *mut u32;
+    const HE_BROADCAST_RU0: *mut u32 = 0x2010_4038 as *mut u32;
+    const HE_BROADCAST_RU1: *mut u32 = 0x2010_403c as *mut u32;
+
+    let mut station = HE_STA_CONFIG.read_volatile();
+    station = station & !0x3800_0000 | (u32::from(minimum_mpdu_start_spacing & 0x07) << 27);
+    station = station & !0x07ff_0000 | (u32::from(association_id) << 16);
+    HE_STA_CONFIG.write_volatile(station);
+
+    let mut broadcast_ru0 = HE_BROADCAST_RU0.read_volatile();
+    broadcast_ru0 = broadcast_ru0 & !0x0000_07ff | u32::from(association_id);
+    broadcast_ru0 |= 0x0040_0000;
+    broadcast_ru0 = broadcast_ru0 & !0x003f_f800 | (u32::from(bssid_index) << 11);
+    HE_BROADCAST_RU0.write_volatile(broadcast_ru0);
+
+    let mut broadcast_ru1 = HE_BROADCAST_RU1.read_volatile();
+    broadcast_ru1 |= 0x0000_0800;
+    broadcast_ru1 &= !0x0000_07ff;
+    broadcast_ru1 |= 0x0080_0000;
+    broadcast_ru1 &= !0x007f_f000;
+    HE_BROADCAST_RU1.write_volatile(broadcast_ru1);
     Ok(())
 }
 

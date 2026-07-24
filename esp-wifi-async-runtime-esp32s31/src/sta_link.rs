@@ -1646,7 +1646,7 @@ mod target {
             let Some((he_capability, he_operation)) = he_capability.zip(he_operation) else {
                 return false;
             };
-            if !apply_static_he_peer_state(node, he_capability, he_operation) {
+            if !apply_static_he_peer_state(node, association_id, he_capability, he_operation) {
                 return false;
             }
             ASSOC_HE_PEER_STATE_APPLIED.store(1, Ordering::Release);
@@ -1678,6 +1678,7 @@ mod target {
     #[link_section = ".rwtext.wifi_strict.he_peer"]
     unsafe fn apply_static_he_peer_state(
         node: *mut u8,
+        association_id: u16,
         capability: &[u8],
         operation: &[u8],
     ) -> bool {
@@ -1685,6 +1686,17 @@ mod target {
             return false;
         };
         if crate::he::program_he20_peer_hardware(state).is_err() {
+            return false;
+        }
+        let minimum_mpdu_start_spacing = node.add(0x15e).read() >> 2 & 0x07;
+        let bssid_index = node.add(0x383).read();
+        if crate::he::program_he20_association_hardware(
+            association_id,
+            minimum_mpdu_start_spacing,
+            bssid_index,
+        )
+        .is_err()
+        {
             return false;
         }
 
