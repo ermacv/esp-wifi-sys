@@ -56,6 +56,8 @@ static INVALID_PP_POST_CALLS: AtomicUsize = AtomicUsize::new(0);
 unsafe extern "C" {
     static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
     static mut g_intr_lock_mux: *mut c_void;
+    static mut g_wifi_global_lock: *mut c_void;
+    static mut mac_list_lock: *mut c_void;
     static mut pp_sig_cnt: [u8; 36];
     static mut pp_task_hdl: *mut c_void;
     static mut s_pp_task_create_sem: *mut c_void;
@@ -262,7 +264,33 @@ impl MutexSlot {
             depth: AtomicU32::new(0),
         }
     }
+
+    const fn new_reserved(recursive: bool) -> Self {
+        Self {
+            allocated: AtomicBool::new(true),
+            recursive: AtomicBool::new(recursive),
+            owner: AtomicUsize::new(0),
+            depth: AtomicU32::new(0),
+        }
+    }
+
+    fn reset_reserved(&self, recursive: bool) -> bool {
+        if self.owner.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        self.recursive.store(recursive, Ordering::Release);
+        self.depth.store(0, Ordering::Release);
+        self.allocated.store(true, Ordering::Release);
+        true
+    }
 }
+
+#[link_section = ".critical.data.wifi_strict.init_global_lock"]
+static INIT_GLOBAL_LOCK: MutexSlot = MutexSlot::new_reserved(true);
+#[link_section = ".critical.data.wifi_strict.init_mac_list_lock"]
+static INIT_MAC_LIST_LOCK: MutexSlot = MutexSlot::new_reserved(false);
+#[link_section = ".critical.bss.wifi_strict.init_interrupt_lock"]
+static mut INIT_INTERRUPT_LOCK: u32 = 0;
 
 struct MutexPool<const N: usize> {
     slots: [MutexSlot; N],
@@ -292,6 +320,12 @@ impl<const N: usize> MutexPool<N> {
     }
 
     fn slot(&self, handle: *mut c_void) -> Option<&MutexSlot> {
+        if ptr::from_ref(&INIT_GLOBAL_LOCK).cast::<c_void>() == handle.cast_const() {
+            return Some(&INIT_GLOBAL_LOCK);
+        }
+        if ptr::from_ref(&INIT_MAC_LIST_LOCK).cast::<c_void>() == handle.cast_const() {
+            return Some(&INIT_MAC_LIST_LOCK);
+        }
         self.slots
             .iter()
             .find(|slot| ptr::from_ref(*slot).cast::<c_void>() == handle.cast_const())
@@ -304,6 +338,12 @@ impl<const N: usize> MutexPool<N> {
         };
         if slot.owner.load(Ordering::Acquire) != 0 {
             return false;
+        }
+        if ptr::eq(slot, &INIT_GLOBAL_LOCK) {
+            return slot.reset_reserved(true);
+        }
+        if ptr::eq(slot, &INIT_MAC_LIST_LOCK) {
+            return slot.reset_reserved(false);
         }
         slot.allocated.store(false, Ordering::Release);
         true
@@ -543,6 +583,69 @@ pub fn configure_wifi_runtime_clock(now: fn() -> u64) -> bool {
 #[cfg(target_arch = "riscv32")]
 pub(crate) fn virtual_pp_task_started() -> bool {
     STATE.virtual_task.is_started()
+}
+
+fn init_interrupt_lock_handle() -> *mut c_void {
+    ptr::addr_of_mut!(INIT_INTERRUPT_LOCK).cast()
+}
+
+fn init_global_lock_handle() -> *mut c_void {
+    ptr::from_ref(&INIT_GLOBAL_LOCK).cast_mut().cast()
+}
+
+fn init_mac_list_lock_handle() -> *mut c_void {
+    ptr::from_ref(&INIT_MAC_LIST_LOCK).cast_mut().cast()
+}
+
+/// Verify the three fixed lock publications used by cold initialization.
+///
+/// # Safety
+///
+/// Wi-Fi initialization/deinitialization must not mutate the publication
+/// cells concurrently.
+#[cfg(target_arch = "riscv32")]
+pub unsafe fn static_wifi_init_locks_bound() -> bool {
+    ptr::addr_of!(g_intr_lock_mux).read_volatile() == init_interrupt_lock_handle()
+        && ptr::addr_of!(g_wifi_global_lock).read_volatile() == init_global_lock_handle()
+        && ptr::addr_of!(mac_list_lock).read_volatile() == init_mac_list_lock_handle()
+        && INIT_GLOBAL_LOCK.allocated.load(Ordering::Acquire)
+        && INIT_MAC_LIST_LOCK.allocated.load(Ordering::Acquire)
+}
+
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn bind_static_wifi_init_locks() -> bool {
+    let interrupt = init_interrupt_lock_handle();
+    let global = init_global_lock_handle();
+    let mac_list = init_mac_list_lock_handle();
+    let current_interrupt = ptr::addr_of!(g_intr_lock_mux).read_volatile();
+    let current_global = ptr::addr_of!(g_wifi_global_lock).read_volatile();
+    let current_mac_list = ptr::addr_of!(mac_list_lock).read_volatile();
+    if (!current_interrupt.is_null() && current_interrupt != interrupt)
+        || (!current_global.is_null() && current_global != global)
+        || (!current_mac_list.is_null() && current_mac_list != mac_list)
+        || !INIT_GLOBAL_LOCK.reset_reserved(true)
+        || !INIT_MAC_LIST_LOCK.reset_reserved(false)
+    {
+        return false;
+    }
+    ptr::addr_of_mut!(g_intr_lock_mux).write_volatile(interrupt);
+    ptr::addr_of_mut!(g_wifi_global_lock).write_volatile(global);
+    ptr::addr_of_mut!(mac_list_lock).write_volatile(mac_list);
+    true
+}
+
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn unbind_static_wifi_init_locks() -> bool {
+    if !static_wifi_init_locks_bound()
+        || !INIT_GLOBAL_LOCK.reset_reserved(true)
+        || !INIT_MAC_LIST_LOCK.reset_reserved(false)
+    {
+        return false;
+    }
+    ptr::addr_of_mut!(g_intr_lock_mux).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(g_wifi_global_lock).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(mac_list_lock).write_volatile(ptr::null_mut());
+    true
 }
 
 /// Verify the exact fixed queue and logical task publications used by the
@@ -1568,6 +1671,26 @@ mod tests {
         assert!(!pool.lock(recursive, 2));
         assert!(pool.unlock(recursive, 1));
         assert!(pool.lock(recursive, 2));
+    }
+
+    #[test]
+    fn fixed_init_mutexes_are_directly_addressable_and_fail_fast() {
+        let pool = MutexPool::<0>::new();
+        let global = super::init_global_lock_handle();
+        let mac_list = super::init_mac_list_lock_handle();
+
+        assert!(pool.lock(global, 1));
+        assert!(pool.lock(global, 1));
+        assert!(!pool.lock(global, 2));
+        assert!(pool.unlock(global, 1));
+        assert!(pool.unlock(global, 1));
+        assert!(pool.delete(global));
+
+        assert!(pool.lock(mac_list, 1));
+        assert!(!pool.lock(mac_list, 1));
+        assert!(!pool.lock(mac_list, 2));
+        assert!(pool.unlock(mac_list, 1));
+        assert!(pool.delete(mac_list));
     }
 
     #[test]

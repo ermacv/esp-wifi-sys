@@ -466,6 +466,15 @@ with a zeroed fixed internal-SRAM block and direct `g_misc_nvs` publication.
 `static_misc_nvs_bound` verifies that publication. This replacement is valid
 only for the non-persistent configuration established by
 `disable_vendor_nvs`.
+The surrounding `wifi_init_in_caller_task` previously obtained its interrupt
+lock token and two mutexes through three indirect OSI create callbacks. The
+`rust-static-wifi-init-interpose` feature publishes three dedicated Rust
+objects instead and directly sequences only `wifi_menuconfig_init`, the static
+misc-NVS boundary, the taskless PP boundary, and `ieee80211_ioctl_init`.
+The menuconfig and ioctl leaves independently pass the strict archive audit.
+The two fixed mutexes fail immediately on ownership contention; they never
+wait or scan the general mutex pool. `static_wifi_init_locks_bound` verifies
+all three ROM-ABI publication cells.
 The next `ic_create_wifi_task` leaf is only a tail call into
 `pp_create_task`. That vendor envelope creates a queue and startup semaphore,
 invokes the OSI task-create callback, takes the semaphore with an infinite

@@ -27,6 +27,13 @@ rust-static-pm-init-interpose = []
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.
 rust-static-misc-nvs-init-interpose = []
+# Replace wifi_init_in_caller_task/wifi_deinit_in_caller_task with a direct
+# serialized Rust cold-init sequence and fixed lock publications. The retained
+# menuconfig and ioctl leaves are separately audited and finite.
+rust-static-wifi-init-interpose = [
+    "rust-static-misc-nvs-init-interpose",
+    "rust-static-pp-task-init-interpose",
+]
 # Replace pp_create_task/pp_delete_task with direct publication of the fixed
 # Rust queue and logical task identity. No OSI task, semaphore, queue-create,
 # delay, or task-delete callback is entered.
