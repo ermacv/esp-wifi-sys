@@ -81,13 +81,23 @@ The test image reduced its temporary bootstrap heap from 128 KiB to 80 KiB.
 It used 72,292 bytes and retained 9,628 bytes after handoff, proving that the
 new SRAM pool replaced rather than duplicated the old heap ownership.
 
-`rust-static-esf-buffer-init` now supplies the three ROM ESF classes from
-separate 16-byte-aligned internal-SRAM arrays. Admission requires the fixed
-ECO0 implementation return address `0x2f832460` plus the exact allocator
-source and size pair observed above. Each class has its exact observed
-capacity, and teardown recognizes only aligned slot bases in those arrays.
-An unexpected ROM revision, source, size or extra request therefore falls
-back to the traced bootstrap allocator instead of aliasing storage.
+The independent experimental `rust-static-esf-buffer-init` boundary supplies
+the three ROM ESF classes from separate 16-byte-aligned internal-SRAM arrays.
+Admission requires the fixed ECO0 implementation return address `0x2f832460`
+plus the exact allocator source and size pair observed above. Each class has
+its exact observed capacity, and teardown recognizes only aligned slot bases
+in those arrays. An unexpected ROM revision, source, size or extra request
+therefore falls back to the traced bootstrap allocator instead of aliasing
+storage.
+
+One complete scan/association/WPA2/network cycle reduced cold allocation from
+82 calls / 74,072 requested bytes to 40 calls / 11,376 requested bytes.
+Reconnect then exposed `g_phyFuns == 0x00040000` before the second scan's PHY
+channel change. The arrays do not overlap that symbol in the final ELF, so
+this boundary is deliberately not implied by
+`rust-static-wifi-init-interpose` until pointer lifetime and the corrupting
+writer are identified. The qualified static lower-MAC RX boundary remains
+enabled independently.
 
 After those pools, the next high-value leaf is `wifi_nvs_cfg_init` plus
 `wifi_nvs_load`; the numerous 24-byte entries are API command envelopes and

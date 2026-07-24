@@ -470,7 +470,10 @@ The surrounding `wifi_init_in_caller_task` previously obtained its interrupt
 lock token and two mutexes through three indirect OSI create callbacks. The
 `rust-static-wifi-init-interpose` feature publishes three dedicated Rust
 objects instead and directly sequences only `wifi_menuconfig_init`, the static
-misc-NVS boundary, the taskless PP boundary, and `ieee80211_ioctl_init`.
+misc-NVS boundary, the taskless PP boundary, and `ieee80211_ioctl_init`. It
+also selects the hardware-qualified static lower-MAC RX arena. The independent
+`rust-static-esf-buffer-init` boundary remains HIL-only while its reconnect
+lifetime is diagnosed.
 The menuconfig and ioctl leaves independently pass the strict archive audit.
 The two fixed mutexes fail immediately on ownership contention; they never
 wait or scan the general mutex pool. `static_wifi_init_locks_bound` verifies

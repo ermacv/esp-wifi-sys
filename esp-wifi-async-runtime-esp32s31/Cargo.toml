@@ -31,14 +31,14 @@ rust-static-misc-nvs-init-interpose = []
 # serialized Rust cold-init sequence and fixed lock publications. The retained
 # menuconfig and ioctl leaves are separately audited and finite.
 rust-static-wifi-init-interpose = [
-    "rust-static-esf-buffer-init",
     "rust-static-rx-buffer-init",
     "rust-static-misc-nvs-init-interpose",
     "rust-static-pp-task-init-interpose",
 ]
-# Replace the three bounded ROM `esf_buf_alloc_dynamic` pools with exact
-# internal-SRAM arrays. The pinned ECO0 implementation return address and each
-# allocator source/size class are validated before a static slot is returned.
+# Experimental HIL boundary for replacing the three bounded ROM
+# `esf_buf_alloc_dynamic` pools with exact internal-SRAM arrays. This remains
+# independent from `rust-static-wifi-init-interpose` until reconnect lifetime
+# and layout are qualified on hardware.
 rust-static-esf-buffer-init = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator

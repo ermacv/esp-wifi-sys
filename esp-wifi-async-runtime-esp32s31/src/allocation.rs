@@ -47,6 +47,7 @@ pub struct ColdAllocationTraceEntry {
     pub source: AllocationSource,
     pub caller: usize,
     pub size: usize,
+    pub pointer: usize,
     pub realloc: bool,
     pub failed: bool,
 }
@@ -56,6 +57,7 @@ struct ColdAllocationTraceSlot {
     source: AtomicUsize,
     caller: AtomicUsize,
     size: AtomicUsize,
+    pointer: AtomicUsize,
     flags: AtomicUsize,
 }
 
@@ -66,6 +68,7 @@ impl ColdAllocationTraceSlot {
             source: AtomicUsize::new(0),
             caller: AtomicUsize::new(0),
             size: AtomicUsize::new(0),
+            pointer: AtomicUsize::new(0),
             flags: AtomicUsize::new(0),
         }
     }
@@ -83,6 +86,7 @@ fn record_cold_allocation(
     source: AllocationSource,
     caller: usize,
     size: usize,
+    pointer: usize,
     realloc: bool,
     failed: bool,
 ) {
@@ -93,6 +97,7 @@ fn record_cold_allocation(
     slot.source.store(source as usize, Ordering::Relaxed);
     slot.caller.store(caller, Ordering::Relaxed);
     slot.size.store(size, Ordering::Relaxed);
+    slot.pointer.store(pointer, Ordering::Relaxed);
     slot.flags.store(
         4 | usize::from(realloc) | (usize::from(failed) << 1),
         Ordering::Release,
@@ -127,6 +132,7 @@ pub fn cold_allocation_trace_entry(index: usize) -> Option<ColdAllocationTraceEn
         source: AllocationSource::from_raw(slot.source.load(Ordering::Relaxed)),
         caller: slot.caller.load(Ordering::Relaxed),
         size: slot.size.load(Ordering::Relaxed),
+        pointer: slot.pointer.load(Ordering::Relaxed),
         realloc: flags & 1 != 0,
         failed: flags & 2 != 0,
     })
@@ -168,7 +174,7 @@ impl AllocationProbe {
     }
 
     fn record_request(&self, size: usize, failed: bool, realloc: bool) {
-        self.record_request_at(size, failed, realloc, AllocationSource::None, 0);
+        self.record_request_at(size, failed, realloc, AllocationSource::None, 0, 0);
     }
 
     fn record_request_at(
@@ -178,6 +184,7 @@ impl AllocationProbe {
         realloc: bool,
         source: AllocationSource,
         caller: usize,
+        pointer: usize,
     ) {
         if realloc {
             self.reallocations.fetch_add(1, Ordering::Relaxed);
@@ -197,7 +204,7 @@ impl AllocationProbe {
             self.radio_context_calls.fetch_add(1, Ordering::Relaxed);
         }
         #[cfg(feature = "hil-cold-allocation-trace")]
-        record_cold_allocation(source, caller, size, realloc, failed);
+        record_cold_allocation(source, caller, size, pointer, realloc, failed);
     }
 
     fn record_free(&self) {
@@ -1031,7 +1038,14 @@ mod target {
             if let Some(slot) = claim_wpa_ie_slot(size, caller) {
                 return slot;
             }
-            PROBE.record_request_at(size, true, false, AllocationSource::DirectMalloc, caller);
+            PROBE.record_request_at(
+                size,
+                true,
+                false,
+                AllocationSource::DirectMalloc,
+                caller,
+                0,
+            );
             return core::ptr::null_mut();
         }
         let result = __real_malloc(size);
@@ -1041,6 +1055,7 @@ mod target {
             false,
             AllocationSource::DirectMalloc,
             caller,
+            result as usize,
         );
         result
     }
@@ -1057,6 +1072,7 @@ mod target {
                 false,
                 AllocationSource::DirectCalloc,
                 caller,
+                0,
             );
             return core::ptr::null_mut();
         }
@@ -1067,6 +1083,7 @@ mod target {
             false,
             AllocationSource::DirectCalloc,
             caller,
+            result as usize,
         );
         result
     }
@@ -1076,7 +1093,14 @@ mod target {
     pub unsafe extern "C" fn __wrap_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         let caller = caller_address();
         if heap_forbidden() {
-            PROBE.record_request_at(size, true, true, AllocationSource::DirectRealloc, caller);
+            PROBE.record_request_at(
+                size,
+                true,
+                true,
+                AllocationSource::DirectRealloc,
+                caller,
+                0,
+            );
             return core::ptr::null_mut();
         }
         let result = __real_realloc(ptr, size);
@@ -1086,6 +1110,7 @@ mod target {
             true,
             AllocationSource::DirectRealloc,
             caller,
+            result as usize,
         );
         result
     }
@@ -1172,12 +1197,19 @@ mod target {
                     return scratch;
                 }
             }
-            PROBE.record_request_at(size, true, false, source, caller);
+            PROBE.record_request_at(size, true, false, source, caller, 0);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Malloc>(saved.load(Ordering::Acquire));
         let result = original(size);
-        PROBE.record_request_at(size, result.is_null(), false, source, caller);
+        PROBE.record_request_at(
+            size,
+            result.is_null(),
+            false,
+            source,
+            caller,
+            result as usize,
+        );
         result
     }
 
@@ -1189,12 +1221,19 @@ mod target {
         caller: usize,
     ) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request_at(size, true, true, source, caller);
+            PROBE.record_request_at(size, true, true, source, caller, 0);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Realloc>(saved.load(Ordering::Acquire));
         let result = original(ptr, size);
-        PROBE.record_request_at(size, result.is_null() && size != 0, true, source, caller);
+        PROBE.record_request_at(
+            size,
+            result.is_null() && size != 0,
+            true,
+            source,
+            caller,
+            result as usize,
+        );
         result
     }
 
@@ -1206,7 +1245,14 @@ mod target {
         caller: usize,
     ) -> *mut c_void {
         if heap_forbidden() {
-            PROBE.record_request_at(count.saturating_mul(size), true, false, source, caller);
+            PROBE.record_request_at(
+                count.saturating_mul(size),
+                true,
+                false,
+                source,
+                caller,
+                0,
+            );
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Calloc>(saved.load(Ordering::Acquire));
@@ -1217,6 +1263,7 @@ mod target {
             false,
             source,
             caller,
+            result as usize,
         );
         result
     }
@@ -1364,6 +1411,7 @@ mod tests {
                     source: super::AllocationSource::None,
                     caller: 0,
                     size: 16,
+                    pointer: 0,
                     realloc: false,
                     failed: false,
                 })
@@ -1374,6 +1422,7 @@ mod tests {
                     source: super::AllocationSource::None,
                     caller: 0,
                     size: 48,
+                    pointer: 0,
                     realloc: true,
                     failed: true,
                 })

@@ -2,7 +2,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 };
 
 use crate::adapter::schedule_internal_timer;
@@ -20,6 +20,7 @@ unsafe extern "C" {
     static mut g_mac_deinit_count: u32;
     static mut g_mac_deinit_rxing: u8;
     static mut g_mac_deinit_txing: u8;
+    static mut g_phyFuns: *const c_void;
 
     fn chm_start_op(
         channel: *const u8,
@@ -58,6 +59,7 @@ pub enum ChannelSwitchError {
     TimerUnavailable = 5,
     MacDidNotBecomeIdle = 6,
     LegacyDwellRejected = 7,
+    PhyFunctionTableChanged = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +68,8 @@ pub struct ChannelSwitchSnapshot {
     pub completed: u32,
     pub failed: ChannelSwitchError,
     pub mac_status: u32,
+    pub phy_function_table_expected: usize,
+    pub phy_function_table_current: usize,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -108,6 +112,8 @@ static STATE: StateCell = StateCell(UnsafeCell::new(State::new()));
 static FAILURE: AtomicU32 = AtomicU32::new(ChannelSwitchError::None as u32);
 static MAC_FAILURE_STATUS: AtomicU32 = AtomicU32::new(0);
 static LEGACY_DWELL_ACCEPTED: AtomicBool = AtomicBool::new(false);
+static PHY_FUNCTION_TABLE_EXPECTED: AtomicUsize = AtomicUsize::new(0);
+static PHY_FUNCTION_TABLE_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn link_wrappers_active() -> bool {
     core::ptr::eq(chm_start_op as *const (), __wrap_chm_start_op as *const ())
@@ -124,6 +130,8 @@ pub fn channel_switch_snapshot() -> ChannelSwitchSnapshot {
         completed: state.completed,
         failed: decode_error(FAILURE.load(Ordering::Acquire)),
         mac_status: MAC_FAILURE_STATUS.load(Ordering::Acquire),
+        phy_function_table_expected: PHY_FUNCTION_TABLE_EXPECTED.load(Ordering::Acquire),
+        phy_function_table_current: PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire),
     }
 }
 
@@ -141,6 +149,7 @@ const fn decode_error(raw: u32) -> ChannelSwitchError {
         5 => ChannelSwitchError::TimerUnavailable,
         6 => ChannelSwitchError::MacDidNotBecomeIdle,
         7 => ChannelSwitchError::LegacyDwellRejected,
+        8 => ChannelSwitchError::PhyFunctionTableChanged,
         _ => ChannelSwitchError::None,
     }
 }
@@ -298,6 +307,27 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
     let state = &mut *STATE.0.get();
     if !state.active {
         fail(ChannelSwitchError::Busy, 0);
+        return;
+    }
+
+    let current_phy_function_table = ptr::addr_of!(g_phyFuns).read_volatile() as usize;
+    PHY_FUNCTION_TABLE_CURRENT.store(current_phy_function_table, Ordering::Release);
+    let expected_phy_function_table = match PHY_FUNCTION_TABLE_EXPECTED.compare_exchange(
+        0,
+        current_phy_function_table,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => current_phy_function_table,
+        Err(expected) => expected,
+    };
+    if current_phy_function_table == 0
+        || current_phy_function_table != expected_phy_function_table
+    {
+        fail(
+            ChannelSwitchError::PhyFunctionTableChanged,
+            current_phy_function_table as u32,
+        );
         return;
     }
 
