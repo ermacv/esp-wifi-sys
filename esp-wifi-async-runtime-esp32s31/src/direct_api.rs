@@ -140,9 +140,13 @@ impl ApiRequest {
 }
 
 impl ConfigRequest {
-    unsafe fn new(interface: u8, config: *const core::ffi::c_void) -> core::mem::MaybeUninit<Self> {
-        let mut request = core::mem::MaybeUninit::<Self>::zeroed();
+    unsafe fn initialize(
+        request: &mut core::mem::MaybeUninit<Self>,
+        interface: u8,
+        config: *const core::ffi::c_void,
+    ) {
         let bytes = request.as_mut_ptr().cast::<u8>();
+        bytes.write_bytes(0, CONFIG_REQUEST_SIZE);
         bytes.write(11);
         bytes.add(API_REQUEST_ARGUMENT_OFFSET).write(interface);
         core::ptr::copy_nonoverlapping(
@@ -150,7 +154,6 @@ impl ConfigRequest {
             bytes.add(CONFIG_REQUEST_PAYLOAD_OFFSET),
             WIFI_CONFIG_SIZE,
         );
-        request
     }
 }
 
@@ -758,7 +761,8 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_config(
         return ESP_ERR_INVALID_ARG;
     }
 
-    let mut request = ConfigRequest::new(interface as u8, config);
+    let mut request = core::mem::MaybeUninit::<ConfigRequest>::uninit();
+    ConfigRequest::initialize(&mut request, interface as u8, config);
     let result = wifi_set_config_process(request.as_mut_ptr().cast());
     SET_CONFIG_LAST_RESULT.store(result as u32, Ordering::Relaxed);
     result
@@ -804,7 +808,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<ConfigRequest>(), CONFIG_REQUEST_SIZE);
         assert_eq!(core::mem::align_of::<ConfigRequest>(), 4);
         let config = [0x5au8; WIFI_CONFIG_SIZE];
-        let request = unsafe { ConfigRequest::new(2, config.as_ptr().cast()) };
+        let mut request = core::mem::MaybeUninit::<ConfigRequest>::uninit();
+        unsafe { ConfigRequest::initialize(&mut request, 2, config.as_ptr().cast()) };
         let bytes = unsafe {
             core::slice::from_raw_parts(request.as_ptr().cast::<u8>(), CONFIG_REQUEST_SIZE)
         };
