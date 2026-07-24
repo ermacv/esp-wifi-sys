@@ -20,8 +20,10 @@ const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
 const WIFI_STATE_OFFSET: usize = 0x1f5;
 const WIFI_STATE_STARTED: u8 = 2;
 const ESP_OK: i32 = 0;
+const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_WIFI_NOT_INIT: i32 = 0x3001;
 const ESP_ERR_WIFI_NOT_STARTED: i32 = 0x3002;
+const MAX_PS_TYPE: u32 = 2;
 
 static CALLS: AtomicU32 = AtomicU32::new(0);
 static PRESTART_SUCCESSES: AtomicU32 = AtomicU32::new(0);
@@ -31,6 +33,11 @@ static SET_MODE_CALLS: AtomicU32 = AtomicU32::new(0);
 static SET_MODE_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
 static SET_MODE_LAST_MODE: AtomicU32 = AtomicU32::new(0);
 static SET_MODE_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_PS_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_PS_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_PS_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_PS_LAST_TYPE: AtomicU32 = AtomicU32::new(0);
+static SET_PS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C, align(4))]
 struct ApiRequest {
@@ -67,6 +74,16 @@ pub struct DirectSetModeSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for direct power-save process calls.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetPsSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub invalid_arguments: u32,
+    pub last_ps_type: u8,
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -87,6 +104,17 @@ pub fn direct_set_mode_snapshot() -> DirectSetModeSnapshot {
     }
 }
 
+/// Return the current direct power-save counters.
+pub fn direct_set_ps_snapshot() -> DirectSetPsSnapshot {
+    DirectSetPsSnapshot {
+        calls: SET_PS_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_PS_NOT_INITIALIZED.load(Ordering::Relaxed),
+        invalid_arguments: SET_PS_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        last_ps_type: SET_PS_LAST_TYPE.load(Ordering::Relaxed) as u8,
+        last_result: SET_PS_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -95,15 +123,35 @@ fn classify_cold_stop(state: u8) -> i32 {
     }
 }
 
+fn validate_ps_type(ps_type: u32) -> Result<u8, i32> {
+    if ps_type <= MAX_PS_TYPE {
+        Ok(ps_type as u8)
+    } else {
+        Err(ESP_ERR_INVALID_ARG)
+    }
+}
+
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-cold-stop"))]
 unsafe extern "C" {
     static g_ic: u8;
 }
 
-#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-mode"))]
+#[cfg(all(
+    target_arch = "riscv32",
+    any(feature = "rust-direct-set-mode", feature = "rust-direct-set-ps")
+))]
 unsafe extern "C" {
     fn wifi_init_completed() -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-mode"))]
+unsafe extern "C" {
     fn wifi_set_mode_process(request: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-ps"))]
+unsafe extern "C" {
+    fn wifi_set_ps_process(request: *mut core::ffi::c_void) -> i32;
 }
 
 /// Replace only the qualified pre-start use of `esp_wifi_stop`.
@@ -148,6 +196,35 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_mode(mode: u32) -> i32 {
     result
 }
 
+/// Invoke the pinned power-save process with its exact request layout on stack.
+///
+/// The process reads only byte 8 and delegates finite state changes and timer
+/// rearming to the already patched asynchronous OSI timer table. Valid values
+/// are the vendor ABI's NONE, MIN_MODEM and MAX_MODEM variants (`0..=2`).
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-ps"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_ps(ps_type: u32) -> i32 {
+    SET_PS_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_PS_LAST_TYPE.store(ps_type, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_PS_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_PS_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    let ps_type = match validate_ps_type(ps_type) {
+        Ok(ps_type) => ps_type,
+        Err(error) => {
+            SET_PS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+            SET_PS_LAST_RESULT.store(error as u32, Ordering::Relaxed);
+            return error;
+        }
+    };
+    let mut request = ApiRequest::with_byte_argument(ps_type);
+    let result = wifi_set_ps_process(request.as_mut_ptr().cast());
+    SET_PS_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +258,14 @@ mod tests {
             },
             3
         );
+    }
+
+    #[test]
+    fn power_save_type_matches_the_vendor_public_validation() {
+        assert_eq!(validate_ps_type(0), Ok(0));
+        assert_eq!(validate_ps_type(1), Ok(1));
+        assert_eq!(validate_ps_type(2), Ok(2));
+        assert_eq!(validate_ps_type(3), Err(ESP_ERR_INVALID_ARG));
+        assert_eq!(validate_ps_type(u32::MAX), Err(ESP_ERR_INVALID_ARG));
     }
 }

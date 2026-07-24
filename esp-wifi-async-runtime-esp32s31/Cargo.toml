@@ -61,6 +61,10 @@ rust-direct-cold-stop = []
 # Construct the pinned 24-byte set-mode request on the caller stack and invoke
 # its finite process leaf directly, bypassing allocator and ioctl dispatch.
 rust-direct-set-mode = []
+# Construct the pinned 24-byte power-save request on the caller stack and
+# invoke its finite process leaf directly, bypassing allocator and ioctl
+# dispatch. Timer state changes remain delegated to the async OSI timer table.
+rust-direct-set-ps = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
