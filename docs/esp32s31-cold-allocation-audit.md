@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 22 allocations, 11 frees and 1,448 requested
+the current image is down to 21 allocations, 10 frees and 1,424 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -321,3 +321,35 @@ authentication, association and WPA2 four-way-handshake cycles passed with
 post-link data and no TX/RX rejection. The first also completed ping, DNS,
 TCP and HTTP. Allocation counters remained unchanged after handoff, and the
 strict whole-ELF no-wait/no-heap audit reported zero violations.
+
+`esp_wifi_set_max_tx_power` adds one 24-byte envelope after checking
+initialization, radio state at least STARTED and the public power range
+8 through 84. Its request contains only the signed power byte at offset 8.
+The pinned `wifi_set_max_tpw` process calls ROM `phy_set_most_tpw`, then
+`hal_init_tx_pwr`. The latter has one bounded table loop: a counter starts at
+zero, increments once per iteration and exits at exactly 43 entries. It then
+calls the three finite TB, immediate-response and TB-RU table leaves. There
+is no hardware-status poll, retry, delay or wait.
+
+`rust-direct-set-max-tx-power` preserves all three public guards and invokes
+the process with the one proven stack request byte. The ELF audit rejects the
+original envelope, checks both process calls by exact address and requires
+the lower table builder to retain its exact four call targets, one `0..43`
+counter loop and final tail call. Linker relaxation to direct `jal` or tail
+`j` is decoded explicitly rather than admitted as an unknown transfer.
+
+Hardware produced the exact delta from 22 to 21 allocations, 11 to 10 frees
+and 1,448 to 1,424 requested bytes. Two passive-scan, authentication,
+association and WPA2 cycles completed with an unchanged allocation snapshot.
+The first completed ping, DNS, TCP and HTTP; after the second, 21/21 TX and
+18/18 RX owners had returned with no rejection.
+
+Vendor NVS is not part of the target architecture. `nvs_enable=0` remains a
+mandatory initialization invariant, and credentials, country and other
+configuration belong to Rust-owned fixed state. In particular,
+`esp_wifi_set_country` is not qualified by simply calling its complete vendor
+process: that body can reach `wifi_nvs_set`/`wifi_nvs_commit` and, for an
+active radio, synchronous stop/start leaves. Its eventual replacement must
+retain only the regdomain validation and required state/PHY publications,
+with no vendor NVS call and lifecycle changes expressed by the Rust async
+radio owner.
