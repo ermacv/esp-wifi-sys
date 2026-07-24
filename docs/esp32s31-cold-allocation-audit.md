@@ -133,3 +133,24 @@ profile now includes this boundary.
 The numerous remaining 24-byte entries are API command envelopes and should
 disappear when the upper initialization/configuration state machine is called
 directly instead of being replaced by generic allocator exceptions.
+
+The `wdev_funcs_init` and `net80211_funcs_init` callback tables are the next
+qualified persistent owners. `rust-static-function-table-storage` admits only
+`OsiCallocInternal` requests of exactly 1,560 bytes returning at
+`wdev_funcs_init + 0x34`, or exactly 332 bytes returning at
+`net80211_funcs_init + 0x30`. Both owners are separately 16-byte aligned in
+internal SRAM, claimed with one non-retrying CAS, zeroed before publication,
+and recognized by exact base address during teardown. The vendor constructors
+remain finite direct function-pointer stores; their corresponding deinitializers
+free the same published bases.
+
+This reduces cold allocation to 36 calls / 3,832 requested bytes and the
+largest request to 1,296 bytes. The unchanged 8 KiB bootstrap heap measured
+2,896 bytes used / 5,296 free. A two-cycle A/B run and a promoted six-cycle
+run both completed scan, authentication, association, WPA2 M1-M4 and post-link
+traffic without changing the allocation snapshot. The six-cycle run ended
+with 70/70 channel switches, 55/55 TX owners and 57/57 RX owners, no queue
+rejection, no allocation failure, no radio-context allocator call and an
+unchanged PHY function-table pointer. The application static cold-init profile
+now includes this boundary; its explicit feature name is retained only as a
+compatibility alias.
