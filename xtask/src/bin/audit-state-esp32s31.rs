@@ -384,7 +384,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(&mut report, "");
     pushln(
         &mut report,
-        "| ROM ABI cell | address | fixed backing | bytes | placement |",
+        "| published pointer cell | address | fixed backing | bytes | placement |",
     );
     pushln(&mut report, "|---|---:|---|---:|---|");
     for (cell, backing) in ROM_ABI_BACKINGS {
