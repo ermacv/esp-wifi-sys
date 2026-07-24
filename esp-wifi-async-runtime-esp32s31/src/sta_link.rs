@@ -34,7 +34,50 @@ const HT20_CAPABILITY_IE: [u8; crate::scan::STRICT_SCAN_HT_CAPABILITY_IE_LEN] = 
     0, 0, 0, 0, 0, 0, 0,
 ];
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+const HE20_MCS9_CAPABILITY_IE: [u8; 24] = [
+    255,
+    22,
+    crate::he::HE_CAPABILITIES_EXTENSION_ID,
+    // Exact vendor-oracle HE MAC capability bytes.
+    0x03,
+    0x18,
+    0x9c,
+    0xca,
+    0x10,
+    0x80,
+    // Exact one-stream, 20 MHz HE PHY capability bytes.
+    0x00,
+    0x10,
+    0x8a,
+    0x1b,
+    0x0d,
+    0xc0,
+    0x1f,
+    0x00,
+    0x02,
+    0x82,
+    0x01,
+    // RX/TX: NSS1 HE MCS0-9; NSS2-8 unsupported.
+    0xfd,
+    0xff,
+    0xfd,
+    0xff,
+];
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
 const WMM_INFORMATION_IE: [u8; 9] = [221, 7, 0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00];
+
+#[cfg(feature = "hil-he-association-oracle")]
+fn request_he20_mcs9(access_point: &crate::scan::StrictScanRecord) -> bool {
+    access_point.ht_capability_ie_present
+        && crate::he::parse_he20_capabilities(access_point.he_capability_ie_bytes())
+            .ok()
+            .is_some_and(|capability| capability.supports_bidirectional_mcs9())
+}
+
+#[cfg(not(feature = "hil-he-association-oracle"))]
+fn request_he20_mcs9(_access_point: &crate::scan::StrictScanRecord) -> bool {
+    false
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StaAssocSecurityError {
@@ -102,6 +145,7 @@ pub struct StaAssocSnapshot {
     pub wmm_negotiated: bool,
     pub ht_mcs_count: u8,
     pub fixed_ht20_rate: Option<u8>,
+    pub he_requested: bool,
     pub he_capability_len: u16,
     pub he_operation_len: u16,
     pub he_bidirectional_mcs9: bool,
@@ -479,6 +523,7 @@ mod target {
     static ASSOC_WMM_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HT_MCS_COUNT: AtomicU32 = AtomicU32::new(0);
     static ASSOC_FIXED_HT20_RATE: AtomicU32 = AtomicU32::new(u32::MAX);
+    static ASSOC_HE_REQUESTED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HE_CAPABILITY_LEN: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HE_OPERATION_LEN: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HE_BIDIRECTIONAL_MCS9: AtomicU32 = AtomicU32::new(0);
@@ -621,6 +666,7 @@ mod target {
                 u32::MAX => None,
                 rate => Some(rate as u8),
             },
+            he_requested: ASSOC_HE_REQUESTED.load(Ordering::Acquire) != 0,
             he_capability_len: ASSOC_HE_CAPABILITY_LEN.load(Ordering::Acquire) as u16,
             he_operation_len: ASSOC_HE_OPERATION_LEN.load(Ordering::Acquire) as u16,
             he_bidirectional_mcs9: ASSOC_HE_BIDIRECTIONAL_MCS9.load(Ordering::Acquire) != 0,
@@ -910,11 +956,14 @@ mod target {
             .checked_add(if extended == 0 { 0 } else { 2 + extended })?
             .checked_add(usize::from(selected_rsn.len))
             .and_then(|length| {
-                access_point
+                let ht_length = access_point
                     .ht_capability_ie_present
                     .then_some(HT20_CAPABILITY_IE.len() + WMM_INFORMATION_IE.len())
-                    .unwrap_or(0)
-                    .checked_add(length)
+                    .unwrap_or(0);
+                let he_length = request_he20_mcs9(access_point)
+                    .then_some(HE20_MCS9_CAPABILITY_IE.len())
+                    .unwrap_or(0);
+                ht_length.checked_add(he_length)?.checked_add(length)
             })
             .filter(|length| *length <= ASSOC_BODY_CAPACITY)
     }
@@ -969,6 +1018,14 @@ mod target {
                 HT20_CAPABILITY_IE.len(),
             );
             offset += HT20_CAPABILITY_IE.len();
+            if request_he20_mcs9(&config.access_point) {
+                ptr::copy_nonoverlapping(
+                    HE20_MCS9_CAPABILITY_IE.as_ptr(),
+                    body.add(offset),
+                    HE20_MCS9_CAPABILITY_IE.len(),
+                );
+                offset += HE20_MCS9_CAPABILITY_IE.len();
+            }
             ptr::copy_nonoverlapping(
                 WMM_INFORMATION_IE.as_ptr(),
                 body.add(offset),
@@ -1248,6 +1305,10 @@ mod target {
         };
         ASSOC_HT_REQUESTED.store(
             u32::from(config.access_point.ht_capability_ie_present),
+            Ordering::Relaxed,
+        );
+        ASSOC_HE_REQUESTED.store(
+            u32::from(request_he20_mcs9(&config.access_point)),
             Ordering::Relaxed,
         );
         ASSOC_HT_NEGOTIATED.store(0, Ordering::Relaxed);
@@ -1632,6 +1693,7 @@ mod target {
         ASSOC_WMM_NEGOTIATED.store(0, Ordering::Release);
         ASSOC_HT_MCS_COUNT.store(0, Ordering::Release);
         ASSOC_FIXED_HT20_RATE.store(u32::MAX, Ordering::Release);
+        ASSOC_HE_REQUESTED.store(0, Ordering::Release);
         ASSOC_HE_CAPABILITY_LEN.store(0, Ordering::Release);
         ASSOC_HE_OPERATION_LEN.store(0, Ordering::Release);
         ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Release);
@@ -1811,6 +1873,17 @@ mod tests {
                 .bss_color,
             5
         );
+    }
+
+    #[test]
+    fn vendor_oracle_he20_capability_is_one_stream_mcs9() {
+        let capability = crate::he::parse_he20_capabilities(&HE20_MCS9_CAPABILITY_IE).unwrap();
+        assert_eq!(capability.receive_nss1, crate::he::HeMcsNssSupport::Mcs0To9);
+        assert_eq!(
+            capability.transmit_nss1,
+            crate::he::HeMcsNssSupport::Mcs0To9
+        );
+        assert!(capability.supports_bidirectional_mcs9());
     }
 
     #[test]

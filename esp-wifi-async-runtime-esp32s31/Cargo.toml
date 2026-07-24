@@ -29,6 +29,11 @@ hil-ampdu-intercept = ["hil-vendor-tx"]
 # Laboratory RX BlockAck bring-up. This accepts one SoftAP TID-0 agreement
 # through Rust-owned fixed state and the recovered finite MAC register leaf.
 hil-rx-ampdu = []
+# Laboratory-only association oracle. This advertises the exact bounded HE20
+# MCS0-9 capability element observed from the pinned vendor STA, while the
+# qualified strict data-TX policy deliberately remains HT until peer/descriptor
+# HE state is reconstructed independently.
+hil-he-association-oracle = []
 # HIL profile which trades reorder depth for a larger zero-copy network
 # ownership budget while keeping the same 32 internal-SRAM ESF objects.
 rx-ba-window-8 = []

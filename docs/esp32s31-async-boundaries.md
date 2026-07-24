@@ -223,12 +223,26 @@ instead of allocating or accepting a prefix. The stateless HE parser validates
 the complete element length, extracts the mandatory <=80-MHz RX/TX MCS/NSS
 maps for NSS1, and records BSS color. Association-response observation exposes
 the received HE element lengths, bidirectional MCS9 support, and BSS color
-through atomics in `StaAssocSnapshot`. This is deliberately observational:
-the strict association request still advertises HT20 only, the peer mutation
-still installs only the recovered HT state, and the descriptor/completion
-gates continue to reject HE. HE transmission must not be enabled until its
-association request, peer state, HE-SIG construction, retry schedule, and
-completion layouts have each been recovered and admitted as bounded leaves.
+through atomics in `StaAssocSnapshot`.
+
+An external channel-11 monitor capture of the pinned vendor STA recorded its
+single association request and the successful response 5.17 ms later. The
+request carries one 24-byte HE Capabilities extension:
+`ff 16 23 03 18 9c ca 10 80 00 10 8a 1b 0d c0 1f 00 02 82 01 fd ff fd ff`.
+The final four bytes advertise RX and TX NSS1 MCS0-9 and reject NSS2-8. The
+vendor link reported HE20, proving that no 40-MHz capability is needed for the
+qualified AP.
+
+`hil-he-association-oracle` may append exactly that bounded element after the
+HT capability, but only when scan parsing already proved that the selected AP
+supports bidirectional MCS9. It is an association oracle, not a production HE
+claim: peer mutation still installs only recovered HT state, the qualified TX
+policy remains HT MCS7, and descriptor/completion gates continue to reject HE.
+The ordinary strict profile therefore remains HT-only. HE transmission must
+not be enabled until the vendor element's optional MAC/PHY claims have been
+narrowed to Rust-owned behavior and its peer state, HE-SIG construction, retry
+schedule, and completion layouts have each been recovered and admitted as
+bounded leaves.
 
 The strict RX boundary obtains the complete 14-bit MPDU length from S31
 `sig_len` rather than the one-byte length of the first hardware block. It
