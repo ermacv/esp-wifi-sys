@@ -31,6 +31,10 @@ rust-static-trc-init-interpose = []
 # qualified one-interface STA/AP cold profile. Attach/deattach accept only the
 # exact fixed publication and never enter the allocator.
 rust-static-tbtt-adaptive-interpose = []
+# Replace the empty 20-byte STA PMKSA cache header with an exact fixed
+# internal-SRAM owner. The strict WPA2 path does not populate vendor PMKSA
+# entries; deinit therefore accepts only the exact empty static cache.
+rust-static-pmksa-cache-interpose = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.

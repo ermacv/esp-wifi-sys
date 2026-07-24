@@ -74,6 +74,8 @@ mod static_misc_nvs;
 #[cfg(target_arch = "riscv32")]
 mod static_pm;
 #[cfg(target_arch = "riscv32")]
+mod static_pmksa;
+#[cfg(target_arch = "riscv32")]
 mod static_tbtt;
 #[cfg(target_arch = "riscv32")]
 mod static_trc;
@@ -291,6 +293,8 @@ pub use static_bindings::{
 pub use static_misc_nvs::static_misc_nvs_bound;
 #[cfg(target_arch = "riscv32")]
 pub use static_pm::static_pm_functions_bound;
+#[cfg(target_arch = "riscv32")]
+pub use static_pmksa::static_pmksa_cache_bound;
 #[cfg(target_arch = "riscv32")]
 pub use static_tbtt::static_tbtt_adaptive_bound;
 #[cfg(target_arch = "riscv32")]
