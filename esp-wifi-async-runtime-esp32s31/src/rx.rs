@@ -19,6 +19,9 @@ const LOCAL_ADDRESS_OFFSET: usize = 0x21a;
 // 0x38 and 0x39 of the internal RX control block before decapsulation.
 const RX_CONTROL_SIGNAL_LENGTH_OFFSET: usize = 0x38;
 const RX_CONTROL_SIGNAL_LENGTH_MASK: u16 = 0x3fff;
+// S31 `wifi_pkt_rx_ctrl_t::sig_len` includes the trailing 802.11 FCS. None of
+// the Rust protocol parsers consume that hardware-validated trailer.
+const RX_FRAME_CHECK_SEQUENCE_LEN: usize = 4;
 
 type RxCallback = unsafe extern "C" fn(*mut u8, i32, u32);
 
@@ -324,7 +327,13 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
     // Unlike the per-block byte count at +20, sig_len covers the complete MPDU
     // and therefore also admits the larger pairwise message 3.
     let mut raw_frame = unsafe { rx_control.add(64) };
-    let mut raw_length = unsafe { rx_signal_length(rx_control) };
+    let Some(mut raw_length) =
+        unsafe { rx_signal_length(rx_control) }.checked_sub(RX_FRAME_CHECK_SEQUENCE_LEN)
+    else {
+        COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
+        unsafe { ppRecycleRxPkt(packet) };
+        return;
+    };
     if unsafe { packet.add(36).cast::<u16>().read_unaligned() } & 0x2000 != 0 {
         if raw_length < 8 {
             COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
