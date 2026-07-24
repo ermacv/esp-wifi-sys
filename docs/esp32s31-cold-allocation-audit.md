@@ -154,3 +154,17 @@ rejection, no allocation failure, no radio-context allocator call and an
 unchanged PHY function-table pointer. The application static cold-init profile
 now includes this boundary; its explicit feature name is retained only as a
 compatibility alias.
+
+The existing fixed 212-byte `ieee80211_setup_ratetable` scratch owner is now
+also admitted during cold init, not only after heap lockout. The admission
+still requires `OsiWifiZalloc`, the exact size and the pinned
+`ieee80211_setup_ratetable + 0x26` return address. The vendor leaf serializes
+use and frees the scratch before returning; the Rust release path wipes it and
+clears its one-shot claim without retrying.
+
+This removes one allocation and its matching free: the qualified two-cycle
+run measured 35 allocations, 22 frees and 3,620 requested bytes, with the
+largest request unchanged at 1,296 bytes. Both WPA2 connections and post-link
+traffic completed with an unchanged runtime snapshot, zero allocation failure
+and zero radio-context allocator calls. Heap occupancy remains 2,896 bytes
+because the former heap scratch was already transient.
