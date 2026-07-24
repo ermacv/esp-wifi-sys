@@ -239,6 +239,10 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_pm_on_data_tx",
     "__wrap_pm_on_coex_schm_status_config",
     "__wrap_pm_set_beacon_duration",
+    "__wrap_cnx_check_bssid_in_blacklist",
+    "__wrap_cnx_add_to_blacklist",
+    "__wrap_cnx_remove_from_blacklist",
+    "__wrap_cnx_clear_blacklist",
     "__wrap_dbg_read_tx_ppdu",
     "__wrap_dbg_dump_rx_ppdu",
     "__wrap_dbg_dump_rx_sigb",
@@ -323,6 +327,10 @@ const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "pp_coex_tx_release",
     "pm_on_coex_schm_status_config",
     "pm_set_beacon_duration",
+    "cnx_check_bssid_in_blacklist",
+    "cnx_add_to_blacklist",
+    "cnx_remove_from_blacklist",
+    "cnx_clear_blacklist",
 ];
 const INTERNAL_SRAM_START: u64 = 0x2f00_0000;
 const INTERNAL_SRAM_END: u64 = 0x3000_0000;

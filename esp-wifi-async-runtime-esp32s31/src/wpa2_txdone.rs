@@ -16,6 +16,10 @@ use crate::wpa2::EapolKeyFrame;
 pub const WPA2_STA_TX_DONE_CAPACITY: usize = 8;
 #[cfg(any(test, target_arch = "riscv32"))]
 const MAX_EAPOL_TX_FRAME: usize = 512;
+#[cfg(any(test, target_arch = "riscv32"))]
+const CCMP_HEADER_LEN: usize = 8;
+#[cfg(any(test, target_arch = "riscv32"))]
+const LLC_SNAP_EAPOL: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Wpa2StaTxDone {
@@ -80,12 +84,12 @@ pub fn async_wpa2_sta_tx_done_installed() -> bool {
 }
 
 #[cfg(any(test, target_arch = "riscv32"))]
-fn ingest(frame: *const u8, length: usize, failed: bool) {
+fn ingest(frame: *const u8, length: usize, failed: bool) -> bool {
     if frame.is_null()
         || !(crate::wpa2::EAPOL_KEY_PACKET_LEN..=MAX_EAPOL_TX_FRAME).contains(&length)
     {
         REJECTED.fetch_add(1, Ordering::Relaxed);
-        return;
+        return false;
     }
     let bytes = unsafe { core::slice::from_raw_parts(frame, length) };
     #[cfg(feature = "hil-vendor-tx")]
@@ -100,7 +104,7 @@ fn ingest(frame: *const u8, length: usize, failed: bool) {
     }
     let Ok(key) = EapolKeyFrame::parse(bytes) else {
         REJECTED.fetch_add(1, Ordering::Relaxed);
-        return;
+        return false;
     };
     let message = key.message();
     if !matches!(
@@ -108,7 +112,7 @@ fn ingest(frame: *const u8, length: usize, failed: bool) {
         EapolKeyMessage::PairwiseMessage2 | EapolKeyMessage::PairwiseMessage4
     ) {
         REJECTED.fetch_add(1, Ordering::Relaxed);
-        return;
+        return false;
     }
     if EVENTS
         .try_send(Wpa2StaTxDone {
@@ -119,7 +123,99 @@ fn ingest(frame: *const u8, length: usize, failed: bool) {
         .is_err()
     {
         REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
     }
+    true
+}
+
+#[cfg(any(test, target_arch = "riscv32"))]
+fn completed_sta_eapol(packet: &[u8]) -> Option<&[u8]> {
+    let frame_control = u16::from_le_bytes(packet.get(..2)?.try_into().ok()?);
+    if frame_control & 0x008c != 0x0088 {
+        return None;
+    }
+    let mut header_len = if frame_control & 0x0300 == 0x0300 {
+        30
+    } else {
+        24
+    };
+    header_len += 2; // QoS Control.
+    if frame_control & 0x8000 != 0 {
+        header_len += 4;
+    }
+    if frame_control & 0x4000 != 0 {
+        header_len += CCMP_HEADER_LEN;
+    }
+    if packet.get(header_len..header_len + LLC_SNAP_EAPOL.len())? != LLC_SNAP_EAPOL {
+        return None;
+    }
+    let eapol = packet.get(header_len + LLC_SNAP_EAPOL.len()..)?;
+    let body_len = usize::from(u16::from_be_bytes(eapol.get(2..4)?.try_into().ok()?));
+    let eapol_len = body_len.checked_add(4)?;
+    if eapol_len > MAX_EAPOL_TX_FRAME {
+        return None;
+    }
+    eapol.get(..eapol_len)
+}
+
+/// Deliver one completed STA EAPOL MPDU without entering the vendor
+/// connection-manager callback.
+///
+/// The stock `sta_eapol_txdone_cb` gates the registered callback on its own
+/// association state and performs a stateful key-table lookup for protected
+/// M4. Strict association is Rust-owned, so that gate can silently discard an
+/// otherwise successful completion. The owned TX buffer already exposes the
+/// finite QoS/CCMP/LLC layout; validate it and copy only parsed EAPOL metadata
+/// into the bounded channel.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn ingest_completed_sta_frame(frame: *mut u8, failed: bool) -> bool {
+    const FRAME_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_LAYOUT_OFFSET: usize = 0x24;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const PP_PREFIX_LEN: usize = 8;
+
+    if frame.is_null() {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let buffer = unsafe {
+        frame
+            .add(FRAME_BUFFER_OFFSET)
+            .cast::<*mut u8>()
+            .read_unaligned()
+    };
+    if buffer.is_null() {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let mut packet = unsafe {
+        buffer
+            .add(BUFFER_DATA_OFFSET)
+            .cast::<*mut u8>()
+            .read_unaligned()
+    };
+    let layout = unsafe {
+        frame
+            .add(FRAME_LAYOUT_OFFSET)
+            .cast::<u16>()
+            .read_unaligned()
+    };
+    if packet.is_null() || layout & 0x2000 == 0 {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let mpdu_len = unsafe { packet.cast::<u32>().read_unaligned() as usize } & 0x3fff;
+    packet = unsafe { packet.add(PP_PREFIX_LEN) };
+    if mpdu_len < 24 + LLC_SNAP_EAPOL.len() + crate::wpa2::EAPOL_KEY_PACKET_LEN {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let packet = unsafe { core::slice::from_raw_parts(packet, mpdu_len) };
+    let Some(eapol) = completed_sta_eapol(packet) else {
+        REJECTED.fetch_add(1, Ordering::Relaxed);
+        return false;
+    };
+    ingest(eapol.as_ptr(), eapol.len(), failed)
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -138,7 +234,7 @@ unsafe extern "C" fn __esp_wifi_async_wpa2_sta_txdone(
     length: usize,
     failed: bool,
 ) {
-    ingest(frame, length, failed);
+    let _ = ingest(frame, length, failed);
 }
 
 /// Replace the stock STA `eapol_txcb` state transition after Wi-Fi setup.
@@ -188,6 +284,44 @@ pub unsafe fn uninstall_async_wpa2_sta_tx_done() -> Result<(), Wpa2TxDoneInstall
 mod tests {
     use super::*;
     use crate::wpa2_frames::Wpa2TxFrame;
+
+    fn qos_eapol_mpdu(eapol: &[u8], protected: bool) -> std::vec::Vec<u8> {
+        let mut packet = std::vec![0_u8; 26 + usize::from(protected) * CCMP_HEADER_LEN];
+        packet[..2].copy_from_slice(&(0x0188_u16 | u16::from(protected) << 14).to_le_bytes());
+        packet.extend_from_slice(&LLC_SNAP_EAPOL);
+        packet.extend_from_slice(eapol);
+        packet
+    }
+
+    #[test]
+    fn completed_mpdu_parser_accepts_plain_m2_and_ccmp_m4() {
+        let m2 = Wpa2TxFrame::<128>::message2(
+            [1; 6],
+            7,
+            [2; 32],
+            &crate::wpa2_frames::OwnedRsnIe::<2>::try_copy(&[0x30, 0]).unwrap(),
+        )
+        .unwrap();
+        let plain = qos_eapol_mpdu(m2.as_bytes(), false);
+        assert_eq!(completed_sta_eapol(&plain), Some(m2.as_bytes()));
+
+        let m4 = Wpa2TxFrame::<128>::message4([1; 6], 8).unwrap();
+        let protected = qos_eapol_mpdu(m4.as_bytes(), true);
+        assert_eq!(completed_sta_eapol(&protected), Some(m4.as_bytes()));
+    }
+
+    #[test]
+    fn completed_mpdu_parser_rejects_wrong_llc_and_declared_length() {
+        let m4 = Wpa2TxFrame::<128>::message4([1; 6], 8).unwrap();
+        let mut packet = qos_eapol_mpdu(m4.as_bytes(), true);
+        packet[26 + CCMP_HEADER_LEN] ^= 1;
+        assert_eq!(completed_sta_eapol(&packet), None);
+
+        let mut packet = qos_eapol_mpdu(m4.as_bytes(), true);
+        let eapol_offset = 26 + CCMP_HEADER_LEN + LLC_SNAP_EAPOL.len();
+        packet[eapol_offset + 2..eapol_offset + 4].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(completed_sta_eapol(&packet), None);
+    }
 
     #[test]
     fn callback_copies_only_valid_sta_handshake_metadata() {

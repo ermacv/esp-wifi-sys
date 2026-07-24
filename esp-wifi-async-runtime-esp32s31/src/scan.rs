@@ -9,6 +9,18 @@ use core::{
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 use crate::interrupt::InterruptSignal;
 
+#[cfg(target_arch = "riscv32")]
+unsafe extern "C" {
+    #[link_name = "cnx_check_bssid_in_blacklist"]
+    fn vendor_cnx_check_bssid_in_blacklist(bssid: *const u8) -> i32;
+    #[link_name = "cnx_add_to_blacklist"]
+    fn vendor_cnx_add_to_blacklist(bssid: *const u8);
+    #[link_name = "cnx_remove_from_blacklist"]
+    fn vendor_cnx_remove_from_blacklist(bssid: *const u8);
+    #[link_name = "cnx_clear_blacklist"]
+    fn vendor_cnx_clear_blacklist();
+}
+
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) const SCAN_CHANNEL_EVENT: u32 = u32::MAX - 11;
 pub const STRICT_SCAN_RECORD_CAPACITY: usize = 32;
@@ -18,6 +30,54 @@ pub const STRICT_SCAN_EXTENDED_RATES_CAPACITY: usize = 16;
 pub const STRICT_SCAN_HT_CAPABILITY_IE_LEN: usize = 28;
 pub const STRICT_SCAN_HT_OPERATION_IE_LEN: usize = 24;
 pub const STRICT_SCAN_WMM_IE_CAPACITY: usize = 26;
+
+/// Verify that the strict final link cannot re-enter the vendor connection
+/// manager's allocation-backed BSSID blacklist.
+#[cfg(target_arch = "riscv32")]
+pub(crate) fn connection_blacklist_link_wrappers_active() -> bool {
+    core::ptr::eq(
+        vendor_cnx_check_bssid_in_blacklist as *const (),
+        __wrap_cnx_check_bssid_in_blacklist as *const (),
+    ) && core::ptr::eq(
+        vendor_cnx_add_to_blacklist as *const (),
+        __wrap_cnx_add_to_blacklist as *const (),
+    ) && core::ptr::eq(
+        vendor_cnx_remove_from_blacklist as *const (),
+        __wrap_cnx_remove_from_blacklist as *const (),
+    ) && core::ptr::eq(
+        vendor_cnx_clear_blacklist as *const (),
+        __wrap_cnx_clear_blacklist as *const (),
+    )
+}
+
+/// The strict Rust scanner/association state machine owns candidate
+/// suppression. A vendor blacklist lookup is therefore always false.
+///
+/// The stock function follows an allocation-backed linked list and was
+/// observed dereferencing a stale pre-handoff node during WPA2 association.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.connection_blacklist"]
+pub unsafe extern "C" fn __wrap_cnx_check_bssid_in_blacklist(_bssid: *const u8) -> i32 {
+    0
+}
+
+/// Discard vendor reconnect bookkeeping; Rust owns reconnect policy and its
+/// fixed-capacity scan records.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.connection_blacklist"]
+pub unsafe extern "C" fn __wrap_cnx_add_to_blacklist(_bssid: *const u8) {}
+
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.connection_blacklist"]
+pub unsafe extern "C" fn __wrap_cnx_remove_from_blacklist(_bssid: *const u8) {}
+
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.connection_blacklist"]
+pub unsafe extern "C" fn __wrap_cnx_clear_blacklist() {}
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 const SESSION_IDLE: u8 = 0;

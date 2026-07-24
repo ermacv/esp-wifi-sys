@@ -25,7 +25,8 @@ This document complements the generated symbol inventory in
 | WPA2 M1-M4/GTK framing | Yes, above blob | Fixed owned builders/parser, exact lengths, replay/nonce context binding |
 | WPA2 TX/key command ownership | Yes, above blob | `Wpa2IoQueue`, aligned CCMP keys, fixed key table, one fail-fast backend attempt |
 | WPA2 retransmission scheduling | Yes, above blob | Finite generation-tagged one-shot alarms; one action per alarm edge |
-| STA EAPOL TX completion | Yes, opt-in replacement | Registered fixed-channel callback copies only M2/M4 metadata |
+| STA EAPOL TX completion | Yes, required replacement | Rust parses the completed QoS/optional-CCMP MPDU and copies only M2/M4 metadata into a fixed channel |
+| Connection blacklist | Yes, required replacement | Rust scan/reconnect policy owns candidates; allocation-backed vendor add/remove/check/clear entries are final-link no-ops |
 | STA link notifications | Yes, required replacement | Connected/disconnected events use a fixed channel; the four-way query is Rust-owned state |
 | S31 static TX/pairwise key backend | Partial | Static-pool TX and stable `0xb8` CCMP objects implemented; GTK/authorization fail closed |
 | WPA2-Personal crypto callback table | Only synchronously | Precompute PBKDF2 asynchronously with `WpaPskJob`; replace remaining handshake transitions above this ABI |

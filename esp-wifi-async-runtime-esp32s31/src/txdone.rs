@@ -924,6 +924,13 @@ unsafe fn dispatch_one_lmac_callback(state: &mut TxDoneState) -> Result<(), TxDo
 
     if bit == CALLBACK_ADDBA_RESPONSE {
         strict_ap_addba_response_txdone(state.frame)?;
+    } else if bit == CALLBACK_STA_EAPOL {
+        if !crate::wpa2_txdone::ingest_completed_sta_frame(
+            state.frame,
+            descriptor(state.frame)?.add(19).read() != 1,
+        ) {
+            return Err(TxDoneError::StrictCallbackFailed);
+        }
     } else {
         callback(state.frame.cast());
         if STRICT_CALLBACK_FAILED.load(Ordering::Acquire) {

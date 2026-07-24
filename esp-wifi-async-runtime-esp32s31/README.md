@@ -179,6 +179,10 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=wDev_record_ftm_data
 -Wl,--wrap=pm_on_coex_schm_status_config
 -Wl,--wrap=pm_set_beacon_duration
+-Wl,--wrap=cnx_check_bssid_in_blacklist
+-Wl,--wrap=cnx_add_to_blacklist
+-Wl,--wrap=cnx_remove_from_blacklist
+-Wl,--wrap=cnx_clear_blacklist
 -Wl,--wrap=wDev_ftm_set_t1t4
 -Wl,--wrap=wDev_isNANPktInValidSlot
 -Wl,--wrap=dbg_read_tx_ppdu
@@ -490,16 +494,23 @@ RTOS queue receive-loop and completion semaphore. Hardware reachability tests
 are still required for EAP methods and failure paths used by a product.
 Accordingly `strict-no-wait` and `wpa-async-eap` are compile-time incompatible.
 
-This restriction does not by itself certify WPA2-Personal. The pinned stock
-`sta_eapol_txdone_cb` slot normally resolves to `eapol_txcb` (`0x182`), whose
-reachable state transitions contain `calloc/free` for eloop timeouts and a
-deauthenticate path to `ets_delay_us`. Strict integration must call
-`install_async_wpa2_sta_tx_done` after setup. Its callback validates M2/M4 and
-copies only message kind, replay counter, and status into a fixed channel; it
-does not enter the stock WPA state. The stock callback is restored only under
-exclusive teardown ownership. Installation is permitted during serialized
-initialization before IRQ/executor start, and `prepare_strict_runtime` refuses
-to issue its proof until it is complete.
+The pinned stock `sta_eapol_txdone_cb` slot normally resolves to `eapol_txcb`
+(`0x182`), whose reachable state transitions contain `calloc/free` for eloop
+timeouts and a deauthenticate path to `ets_delay_us`. Strict integration must
+call `install_async_wpa2_sta_tx_done` after setup. TX completion validates the
+owned QoS/optional-CCMP/LLC MPDU directly and copies only M2/M4 message kind,
+replay counter, and status into a fixed channel; it never calls the vendor
+connection-manager callback. The registered callback identity remains a
+handoff invariant and is restored only under exclusive teardown ownership.
+Installation is permitted during serialized initialization before
+IRQ/executor start, and `prepare_strict_runtime` refuses to issue its proof
+until it is complete.
+
+The Rust scanner and association state machine also own reconnect candidate
+selection. Four mandatory final-link wrappers therefore make the vendor
+allocation-backed BSSID blacklist unreachable. Lookup always reports no
+vendor entry and add/remove/clear are no-ops; reconnect policy remains in the
+fixed-capacity Rust scan records.
 
 `Wpa2Ingress` is connected directly to the pinned STA and AP RX callbacks by
 `--wrap=wpa_sm_rx_eapol` and `--wrap=wpa_ap_rx_eapol`. Both callbacks validate
@@ -679,13 +690,13 @@ let io = unsafe { S31StaticWpa2Io::new(&KEY_STORAGE, &proof)? };
 let handler = Wpa2IoHandler::new(io);
 ```
 
-This still does not prove an on-air strict WPA2 handshake. The implemented
-target backend covers static-pool submission, pairwise/group CCMP, and a
-Rust-owned AP controlled-port gate. The downstream PP transmit/completion graph
-still needs final classification and the application data path must enforce the
-gate for every non-EAPOL frame.
-Until those branches are connected and final-ELF-audited, WPA2-Personal is
-deliberately not reported as strict-ready.
+The target backend covers static-pool submission, pairwise/group CCMP, and a
+Rust-owned AP controlled-port gate. On-air taskless STA qualification now
+covers scan, authentication, association, M1-M4, ADDBA, DHCP, DNS, TCP/HTTP,
+and sustained UDP through the Rust TX/RX pools. This runtime evidence does not
+replace the final-ELF audit: an integration must still retain every required
+wrapper and SRAM section and must enforce the controlled-port gate for every
+non-EAPOL frame.
 
 The crypto callbacks embedded in `wifi_init_config_t` are replaceable but have
 a strictly synchronous ABI. They can select Rust or hardware crypto, but cannot

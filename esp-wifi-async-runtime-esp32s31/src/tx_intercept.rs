@@ -253,26 +253,31 @@ pub struct HilPreEnableMapperSnapshot {
     pub records: [HilPreEnableMapperRecord; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
 }
 
-/// The qualification table is written only before `ENABLED` is published with Release and
-/// read only after its Acquire observation. It is therefore immutable while
-/// this cross-hart snapshot copies its dedicated SRAM cell.
+/// Snapshot the bounded mapper oracle with local interrupt exclusion.
+///
+/// Before A-MPDU activation the TX callback can still append records, so the
+/// old "read only after enabled" rule hid precisely the evidence needed when
+/// a pre-ADDBA frame failed. Strict Wi-Fi callbacks and this diagnostic run on
+/// the configured radio hart; masking local MIE makes the finite copy
+/// race-free without a lock, spin, wait, or other-core stall. After activation
+/// the table is immutable and the same operation remains harmless.
 pub fn hil_pre_enable_mapper_snapshot() -> HilPreEnableMapperSnapshot {
-    let enabled = ENABLED.load(Ordering::Acquire);
-    if !enabled {
-        return HilPreEnableMapperSnapshot {
-            calls: 0,
-            count: 0,
-            overflow: 0,
-            records: [HilPreEnableMapperRecord::EMPTY; HIL_PRE_ENABLE_MAPPER_RECORD_CAPACITY],
-        };
-    }
+    #[cfg(target_arch = "riscv32")]
+    let interrupt_state = unsafe { crate::critical::strict_wifi_int_disable() };
+    compiler_fence(Ordering::Acquire);
     let oracle = unsafe { &*PRE_ENABLE_MAPPER_ORACLE.0.get() };
-    HilPreEnableMapperSnapshot {
+    let snapshot = HilPreEnableMapperSnapshot {
         calls: oracle.calls,
         count: oracle.count,
         overflow: oracle.overflow,
         records: oracle.records,
+    };
+    compiler_fence(Ordering::Release);
+    #[cfg(target_arch = "riscv32")]
+    unsafe {
+        crate::critical::strict_wifi_int_restore(interrupt_state);
     }
+    snapshot
 }
 
 pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {

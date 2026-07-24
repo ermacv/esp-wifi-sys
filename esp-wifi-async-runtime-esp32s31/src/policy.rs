@@ -77,6 +77,7 @@ pub enum StrictRuntimeError {
     DebugLinkWrappersMissing,
     Wpa2RxLinkWrappersMissing,
     Wpa2KeyLinkWrapperMissing,
+    ConnectionBlacklistLinkWrappersMissing,
     Wpa2ApCallbacksNotPatched,
     Wpa2StaTxDoneNotPatched,
     Wpa2StaCallbacksNotPatched,
@@ -437,6 +438,10 @@ pub unsafe fn prepare_strict_runtime(
     #[cfg(feature = "strict-no-wait")]
     if !crate::wpa2_s31::runtime_key_link_wrapper_active() {
         return Err(StrictRuntimeError::Wpa2KeyLinkWrapperMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::scan::connection_blacklist_link_wrappers_active() {
+        return Err(StrictRuntimeError::ConnectionBlacklistLinkWrappersMissing);
     }
     #[cfg(feature = "strict-no-wait")]
     if !crate::wpa2_ap::async_wpa2_ap_callbacks_installed() {
