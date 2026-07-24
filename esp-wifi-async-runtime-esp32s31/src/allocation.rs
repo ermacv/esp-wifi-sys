@@ -446,6 +446,52 @@ fn is_static_pp_bar_allocation(
         && caller.wrapping_sub(pp_attach_address) == PP_BAR_RETURN_OFFSET
 }
 
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+const COLD_API_ENVELOPE_SIZE: usize = 24;
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+const COLD_API_ENVELOPE_CAPACITY: usize = 2;
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+const WIFI_INIT_ENVELOPE_RETURN_OFFSET: usize = 0xd6;
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+const WIFI_START_ENVELOPE_RETURN_OFFSET: usize = 0x1a;
+
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColdApiEnvelopeKind {
+    Init,
+    Start,
+}
+
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+impl ColdApiEnvelopeKind {
+    const fn index(self) -> usize {
+        match self {
+            Self::Init => 0,
+            Self::Start => 1,
+        }
+    }
+}
+
+#[cfg(feature = "rust-static-cold-api-envelope-storage")]
+fn classify_static_cold_api_envelope(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    esp_wifi_init_internal_address: usize,
+    esp_wifi_start_address: usize,
+) -> Option<ColdApiEnvelopeKind> {
+    if source != AllocationSource::OsiWifiZalloc || size != COLD_API_ENVELOPE_SIZE {
+        return None;
+    }
+    if caller.wrapping_sub(esp_wifi_init_internal_address) == WIFI_INIT_ENVELOPE_RETURN_OFFSET {
+        Some(ColdApiEnvelopeKind::Init)
+    } else if caller.wrapping_sub(esp_wifi_start_address) == WIFI_START_ENVELOPE_RETURN_OFFSET {
+        Some(ColdApiEnvelopeKind::Start)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -470,6 +516,11 @@ mod target {
     #[cfg(feature = "rust-static-pp-bar-storage")]
     use super::{
         is_static_pp_bar_allocation, PP_BAR_CAPACITY, PP_BAR_SIZE,
+    };
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    use super::{
+        classify_static_cold_api_envelope, ColdApiEnvelopeKind, COLD_API_ENVELOPE_CAPACITY,
+        COLD_API_ENVELOPE_SIZE,
     };
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     use super::{
@@ -726,6 +777,20 @@ mod target {
     #[cfg(feature = "rust-static-pp-bar-storage")]
     unsafe impl Sync for PpBar {}
 
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    #[repr(C, align(4))]
+    struct ColdApiEnvelope(UnsafeCell<[u8; COLD_API_ENVELOPE_SIZE]>);
+
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    impl ColdApiEnvelope {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; COLD_API_ENVELOPE_SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    unsafe impl Sync for ColdApiEnvelope {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -825,6 +890,19 @@ mod target {
     #[cfg(feature = "rust-static-pp-bar-storage")]
     static PP_BAR_CLAIMS: [AtomicUsize; PP_BAR_CAPACITY] =
         [const { AtomicUsize::new(0) }; PP_BAR_CAPACITY];
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    #[link_section = ".critical.bss.wifi_strict.cold_api_envelopes"]
+    static COLD_API_ENVELOPES: [ColdApiEnvelope; COLD_API_ENVELOPE_CAPACITY] =
+        [const { ColdApiEnvelope::new() }; COLD_API_ENVELOPE_CAPACITY];
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    static COLD_API_ENVELOPE_CLAIMS: [AtomicUsize; COLD_API_ENVELOPE_CAPACITY] =
+        [const { AtomicUsize::new(0) }; COLD_API_ENVELOPE_CAPACITY];
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    static COLD_API_ENVELOPE_USES: [AtomicUsize; COLD_API_ENVELOPE_CAPACITY] =
+        [const { AtomicUsize::new(0) }; COLD_API_ENVELOPE_CAPACITY];
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    static COLD_API_ENVELOPE_RELEASES: [AtomicUsize; COLD_API_ENVELOPE_CAPACITY] =
+        [const { AtomicUsize::new(0) }; COLD_API_ENVELOPE_CAPACITY];
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -859,6 +937,10 @@ mod target {
         fn pp_attach(config: *mut c_void) -> i32;
         #[cfg(feature = "rust-static-pp-bar-storage")]
         static mut s_bars: [*mut c_void; PP_BAR_CAPACITY];
+        #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+        fn esp_wifi_init_internal(config: *mut c_void) -> i32;
+        #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+        fn esp_wifi_start() -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -1596,7 +1678,57 @@ mod target {
         })
     }
 
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    fn claim_static_cold_api_envelope(kind: ColdApiEnvelopeKind) -> Option<*mut c_void> {
+        let index = kind.index();
+        COLD_API_ENVELOPE_CLAIMS[index]
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let pointer = COLD_API_ENVELOPES[index].0.get();
+        unsafe { pointer.write([0; COLD_API_ENVELOPE_SIZE]) };
+        COLD_API_ENVELOPE_USES[index].fetch_add(1, Ordering::Relaxed);
+        Some(pointer.cast())
+    }
+
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    fn release_static_cold_api_envelope(pointer: *mut c_void) -> bool {
+        let base = COLD_API_ENVELOPES.as_ptr() as usize;
+        let address = pointer as usize;
+        let stride = mem::size_of::<ColdApiEnvelope>();
+        let Some(offset) = address.checked_sub(base) else {
+            return false;
+        };
+        if offset % stride != 0 {
+            return false;
+        }
+        let index = offset / stride;
+        if index >= COLD_API_ENVELOPE_CAPACITY {
+            return false;
+        }
+        if COLD_API_ENVELOPE_CLAIMS[index].swap(0, Ordering::AcqRel) != 0 {
+            unsafe { COLD_API_ENVELOPES[index].0.get().write([0; COLD_API_ENVELOPE_SIZE]) };
+            COLD_API_ENVELOPE_RELEASES[index].fetch_add(1, Ordering::Relaxed);
+        }
+        // An exact pool address never belongs to the captured heap. Consume
+        // duplicate frees rather than forwarding static SRAM to it.
+        true
+    }
+
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    pub fn static_cold_api_envelope_storage_quiescent() -> bool {
+        (0..COLD_API_ENVELOPE_CAPACITY).all(|index| {
+            let uses = COLD_API_ENVELOPE_USES[index].load(Ordering::Acquire);
+            COLD_API_ENVELOPE_CLAIMS[index].load(Ordering::Acquire) == 0
+                && uses != 0
+                && COLD_API_ENVELOPE_RELEASES[index].load(Ordering::Acquire) == uses
+        })
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+        if release_static_cold_api_envelope(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-pp-bar-storage")]
         if release_static_pp_bar(ptr) {
             return true;
@@ -1823,6 +1955,21 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+        if let Some(kind) = classify_static_cold_api_envelope(
+            source,
+            size,
+            caller,
+            esp_wifi_init_internal as *const () as usize,
+            esp_wifi_start as *const () as usize,
+        ) {
+            let result =
+                claim_static_cold_api_envelope(kind).unwrap_or(core::ptr::null_mut());
+            if result.is_null() {
+                PROBE.record_request_at(size, true, false, source, caller, 0);
+            }
+            return result;
+        }
         #[cfg(feature = "rust-static-pp-bar-storage")]
         if is_static_pp_bar_allocation(
             source,
@@ -2088,8 +2235,17 @@ mod target {
     const _: () = assert!(mem::size_of::<PpBar>() == PP_BAR_SIZE);
     #[cfg(feature = "rust-static-pp-bar-storage")]
     const _: () = assert!(mem::align_of::<PpBar>() >= 4);
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    const _: () = assert!(mem::size_of::<ColdApiEnvelope>() == COLD_API_ENVELOPE_SIZE);
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    const _: () = assert!(mem::align_of::<ColdApiEnvelope>() >= 4);
 }
 
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-static-cold-api-envelope-storage"
+))]
+pub use target::static_cold_api_envelope_storage_quiescent;
 #[cfg(all(target_arch = "riscv32", feature = "rust-static-pp-bar-storage"))]
 pub use target::static_pp_bar_storage_bound;
 #[cfg(all(
@@ -2429,6 +2585,61 @@ mod tests {
             assert!(!is_static_pp_bar_allocation(
                 source, size, caller, BASE,
             ));
+        }
+    }
+
+    #[cfg(feature = "rust-static-cold-api-envelope-storage")]
+    #[test]
+    fn static_cold_api_envelope_admission_is_exact() {
+        use super::{
+            classify_static_cold_api_envelope, AllocationSource, ColdApiEnvelopeKind,
+            COLD_API_ENVELOPE_SIZE, WIFI_INIT_ENVELOPE_RETURN_OFFSET,
+            WIFI_START_ENVELOPE_RETURN_OFFSET,
+        };
+
+        const INIT: usize = 0x4007_1000;
+        const START: usize = 0x4007_2000;
+        assert_eq!(
+            classify_static_cold_api_envelope(
+                AllocationSource::OsiWifiZalloc,
+                COLD_API_ENVELOPE_SIZE,
+                INIT + WIFI_INIT_ENVELOPE_RETURN_OFFSET,
+                INIT,
+                START,
+            ),
+            Some(ColdApiEnvelopeKind::Init)
+        );
+        assert_eq!(
+            classify_static_cold_api_envelope(
+                AllocationSource::OsiWifiZalloc,
+                COLD_API_ENVELOPE_SIZE,
+                START + WIFI_START_ENVELOPE_RETURN_OFFSET,
+                INIT,
+                START,
+            ),
+            Some(ColdApiEnvelopeKind::Start)
+        );
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiWifiMalloc,
+                COLD_API_ENVELOPE_SIZE,
+                INIT + WIFI_INIT_ENVELOPE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                COLD_API_ENVELOPE_SIZE - 4,
+                INIT + WIFI_INIT_ENVELOPE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                COLD_API_ENVELOPE_SIZE,
+                START + WIFI_START_ENVELOPE_RETURN_OFFSET + 2,
+            ),
+        ] {
+            assert_eq!(
+                classify_static_cold_api_envelope(source, size, caller, INIT, START),
+                None
+            );
         }
     }
 }

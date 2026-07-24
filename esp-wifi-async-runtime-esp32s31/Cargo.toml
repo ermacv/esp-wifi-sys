@@ -43,6 +43,11 @@ rust-static-supplicant-callback-storage = []
 # internal-SRAM pool. Admission is pinned to pp_attach's OSI malloc return PC;
 # pp_deattach releases and wipes each exact slot.
 rust-static-pp-bar-storage = []
+# Supply the two 24-byte command envelopes used by esp_wifi_init_internal and
+# esp_wifi_start from exact internal-SRAM owners. Both commands execute inline
+# under the published logical Wi-Fi identity and release their owner before
+# returning; unexpected overlap fails closed.
+rust-static-cold-api-envelope-storage = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.
