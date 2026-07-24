@@ -41,10 +41,14 @@ pub enum Wpa2FrameError {
     MalformedKeyData,
     UnsupportedKeyData,
     DuplicateRsnIe,
+    DuplicateRsnxe,
     DuplicateGtk,
     MissingRsnIe,
+    MissingRsnxe,
+    UnexpectedRsnxe,
     MissingGtk,
     RsnIeMismatch,
+    RsnxeMismatch,
     UnexpectedTransmitAction,
 }
 
@@ -224,9 +228,14 @@ impl<const N: usize> Drop for Wpa2PlainKeyData<N> {
     }
 }
 
-pub fn parse_gtk_key_data(bytes: &[u8], expected_rsn_ie: &[u8]) -> Result<Wpa2Gtk, Wpa2FrameError> {
+pub fn parse_gtk_key_data(
+    bytes: &[u8],
+    expected_rsn_ie: &[u8],
+    expected_rsnxe: &[u8],
+) -> Result<Wpa2Gtk, Wpa2FrameError> {
     let mut offset = 0;
     let mut saw_rsn = false;
+    let mut saw_rsnxe = false;
     let mut gtk = None;
 
     while offset < bytes.len() {
@@ -253,6 +262,18 @@ pub fn parse_gtk_key_data(bytes: &[u8], expected_rsn_ie: &[u8]) -> Result<Wpa2Gt
                     return Err(Wpa2FrameError::RsnIeMismatch);
                 }
                 saw_rsn = true;
+            }
+            RSNXE_ELEMENT_ID => {
+                if saw_rsnxe {
+                    return Err(Wpa2FrameError::DuplicateRsnxe);
+                }
+                if expected_rsnxe.is_empty() {
+                    return Err(Wpa2FrameError::UnexpectedRsnxe);
+                }
+                if element != expected_rsnxe {
+                    return Err(Wpa2FrameError::RsnxeMismatch);
+                }
+                saw_rsnxe = true;
             }
             VENDOR_ELEMENT_ID => {
                 if element.len() != 24
@@ -281,6 +302,9 @@ pub fn parse_gtk_key_data(bytes: &[u8], expected_rsn_ie: &[u8]) -> Result<Wpa2Gt
 
     if !saw_rsn {
         return Err(Wpa2FrameError::MissingRsnIe);
+    }
+    if !expected_rsnxe.is_empty() && !saw_rsnxe {
+        return Err(Wpa2FrameError::MissingRsnxe);
     }
     gtk.ok_or(Wpa2FrameError::MissingGtk)
 }
@@ -557,7 +581,7 @@ mod tests {
         let gtk = Wpa2Gtk::new(2, false, [0x5a; 16]).unwrap();
         let data = Wpa2PlainKeyData::<64>::build(&rsn, &gtk).unwrap();
         assert_eq!(data.as_bytes().len() % 8, 0);
-        let parsed = parse_gtk_key_data(data.as_bytes(), rsn.as_bytes()).unwrap();
+        let parsed = parse_gtk_key_data(data.as_bytes(), rsn.as_bytes(), &[]).unwrap();
         assert_eq!(parsed.key_id(), 2);
         assert!(!parsed.transmit());
         assert_eq!(parsed.key(), &[0x5a; 16]);
@@ -638,7 +662,7 @@ mod tests {
         other[1] = 20;
         other[2] = 1;
         assert_eq!(
-            parse_gtk_key_data(data.as_bytes(), &other).err(),
+            parse_gtk_key_data(data.as_bytes(), &other, &[]).err(),
             Some(Wpa2FrameError::RsnIeMismatch)
         );
 
@@ -647,8 +671,41 @@ mod tests {
         duplicate[..46].copy_from_slice(&source[..46]);
         duplicate[46..70].copy_from_slice(&source[22..46]);
         assert_eq!(
-            parse_gtk_key_data(&duplicate, rsn.as_bytes()).err(),
+            parse_gtk_key_data(&duplicate, rsn.as_bytes(), &[]).err(),
             Some(Wpa2FrameError::DuplicateGtk)
+        );
+    }
+
+    #[test]
+    fn parser_validates_authenticator_rsnxe_without_ignoring_unknown_elements() {
+        let rsn = rsn_ie();
+        let gtk = Wpa2Gtk::new(1, false, [7; 16]).unwrap();
+        let data = Wpa2PlainKeyData::<64>::build(&rsn, &gtk).unwrap();
+        let rsnxe = [RSNXE_ELEMENT_ID, 2, 0x20, 0x00];
+        let mut with_rsnxe = [0; 64];
+        let source = data.as_bytes();
+        with_rsnxe[..22].copy_from_slice(&source[..22]);
+        with_rsnxe[22..26].copy_from_slice(&rsnxe);
+        with_rsnxe[26..50].copy_from_slice(&source[22..46]);
+        with_rsnxe[50] = VENDOR_ELEMENT_ID;
+
+        let parsed = parse_gtk_key_data(&with_rsnxe, rsn.as_bytes(), &rsnxe).unwrap();
+        assert_eq!(parsed.key_id(), 1);
+        assert_eq!(parsed.key(), &[7; 16]);
+
+        assert_eq!(
+            parse_gtk_key_data(&with_rsnxe, rsn.as_bytes(), &[]).err(),
+            Some(Wpa2FrameError::UnexpectedRsnxe)
+        );
+        assert_eq!(
+            parse_gtk_key_data(source, rsn.as_bytes(), &rsnxe).err(),
+            Some(Wpa2FrameError::MissingRsnxe)
+        );
+
+        let changed = [RSNXE_ELEMENT_ID, 2, 0x21, 0x00];
+        assert_eq!(
+            parse_gtk_key_data(&with_rsnxe, rsn.as_bytes(), &changed).err(),
+            Some(Wpa2FrameError::RsnxeMismatch)
         );
     }
 }
