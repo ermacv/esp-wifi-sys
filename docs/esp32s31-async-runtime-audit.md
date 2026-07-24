@@ -101,6 +101,16 @@ The pinned STA TX completion dispatcher normally calls `eapol_txcb` (`0x182`). S
 
 The STA connected/disconnected callbacks and four-way-handshake query are also replaced after `esp_supplicant_init`. Linker aliases pin the original local callback sizes (`0x08` and `0xc0`) before the function-table slots are changed. The Rust callbacks copy link events into a fixed channel and maintain an explicit atomic handshake flag; disconnect can no longer enter the stock eloop timeout cancellation path ending in `free`.
 
+Strict STA reconnect does not call that stock disconnect path. After a
+generation-counted async TX drain, `ResetStaLink` runs on the existing radio
+owner, rejects foreign/live ownership before mutation, deauthorizes the peer,
+clears and wipes the fixed PTK/GTK slots, and resets the static node plus Rust
+BlockAck/A-MPDU session. Its completion is another exact async signal edge.
+Hardware qualification on 2026-07-24 completed two consecutive
+scan/authentication/association/WPA2 handshakes with fresh SNonces and protected
+IPv4 traffic after the second association. Allocation stayed at 116 calls and
+all blocking and delay probes stayed zero.
+
 Ordinary STA/AP data RX is registered to Rust callbacks before runtime. They copy one frame into an eight-slot, 1600-byte static pool, transfer a slot token through a producer-woken channel, and recycle the vendor RX object immediately. No arbitrary netstack callback executes on the radio stack, and exhaustion returns without retry. The separate promiscuous event 13 is rejected before its optional sniffer callback and OSI-owned payload/envelope frees.
 
 Application TX has a matching fixed-slot channel. Its radio-owner method performs one direct static-buffer submission attempt; AP frames recheck the live Rust controlled port immediately before the peer lookup, while STA uses the same bounded lower path.

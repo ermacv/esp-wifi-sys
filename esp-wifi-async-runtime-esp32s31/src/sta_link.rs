@@ -422,6 +422,7 @@ mod target {
     static ASSOC_PHASE: AtomicU8 = AtomicU8::new(PHASE_IDLE);
     static ASSOC_RESULT: AtomicU32 = AtomicU32::new(RESULT_PENDING);
     static ASSOC_SIGNAL: InterruptSignal = InterruptSignal::new();
+    static RESET_SIGNAL: InterruptSignal = InterruptSignal::new();
     static ASSOC_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     static ASSOC_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_TX_DONE: AtomicU32 = AtomicU32::new(0);
@@ -444,6 +445,7 @@ mod target {
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
     static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
     static TX_ADDBA_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static TX_ADDBA_SESSION_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_RESPONSES: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_ACCEPTED: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_REJECTED: AtomicU32 = AtomicU32::new(0);
@@ -964,7 +966,7 @@ mod target {
             // A retry is driven exclusively by this expired async timer edge.
             // There is no delay loop or polling path, and the fixed attempt
             // bound keeps a non-responsive peer from retaining work forever.
-            if TX_ADDBA_SUBMITTED.load(Ordering::Acquire) < TX_ADDBA_MAX_ATTEMPTS {
+            if TX_ADDBA_SESSION_ATTEMPTS.load(Ordering::Acquire) < TX_ADDBA_MAX_ATTEMPTS {
                 let _ = start_sta_tx_block_ack();
             }
         }
@@ -979,7 +981,7 @@ mod target {
             || !crate::context::in_radio_context()
             || ASSOC_HT_NEGOTIATED.load(Ordering::Acquire) == 0
             || ASSOC_WMM_NEGOTIATED.load(Ordering::Acquire) == 0
-            || TX_ADDBA_SUBMITTED.load(Ordering::Acquire) >= TX_ADDBA_MAX_ATTEMPTS
+            || TX_ADDBA_SESSION_ATTEMPTS.load(Ordering::Acquire) >= TX_ADDBA_MAX_ATTEMPTS
             || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0
         {
             return false;
@@ -1043,6 +1045,7 @@ mod target {
         }
         TX_ADDBA_ALARM_GENERATION.store(request.alarm.generation, Ordering::Release);
         TX_ADDBA_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        TX_ADDBA_SESSION_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         if !crate::adapter::schedule_internal_timer(
             TX_BLOCK_ACK_TIMER.0.get().cast(),
             tx_addba_timeout,
@@ -1525,6 +1528,81 @@ mod target {
         interface.add(0x98).cast::<u32>().write(5);
         true
     }
+
+    /// Validate the non-key half of the strict STA teardown before the radio
+    /// owner mutates any hardware key state.
+    pub(crate) unsafe fn can_reset_static_sta_link() -> bool {
+        if !crate::critical::on_strict_wifi_hart()
+            || !crate::context::in_radio_context()
+            || PHASE.load(Ordering::Acquire) != PHASE_IDLE
+            || ASSOC_PHASE.load(Ordering::Acquire) != PHASE_IDLE
+            || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0
+        {
+            return false;
+        }
+        #[cfg(feature = "hil-ampdu-intercept")]
+        if !crate::tx_intercept::can_reset_sta_link() {
+            return false;
+        }
+        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        if interface.is_null() {
+            return false;
+        }
+        let node = interface.add(0xe4).cast::<*mut u8>().read();
+        node.is_null() || node == NODE.0.get().cast::<u8>()
+    }
+
+    /// Clear the Rust-owned association state after key ownership preflight.
+    ///
+    /// # Safety
+    /// `can_reset_static_sta_link` must have returned true in the same
+    /// serialized radio-owner command and all STA hardware keys must already
+    /// be disabled.
+    pub(crate) unsafe fn reset_static_sta_link() {
+        debug_assert!(can_reset_static_sta_link());
+        let _ = crate::adapter::cancel_internal_timer(TIMER.0.get().cast());
+        let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
+        let _ = crate::adapter::cancel_internal_timer(TX_BLOCK_ACK_TIMER.0.get().cast());
+        (*TX_BLOCK_ACK_SESSION.0.get()).stop();
+        #[cfg(feature = "hil-ampdu-intercept")]
+        crate::tx_intercept::reset_sta_link();
+        TX_ADDBA_SESSION_ATTEMPTS.store(0, Ordering::Release);
+        TX_ADDBA_LAST_STATUS.store(0, Ordering::Release);
+        TX_ADDBA_WINDOW.store(0, Ordering::Release);
+        TX_ADDBA_ALARM_GENERATION.store(0, Ordering::Release);
+        ASSOC_HT_REQUESTED.store(0, Ordering::Release);
+        ASSOC_HT_NEGOTIATED.store(0, Ordering::Release);
+        ASSOC_WMM_NEGOTIATED.store(0, Ordering::Release);
+        ASSOC_HT_MCS_COUNT.store(0, Ordering::Release);
+        ASSOC_FIXED_HT20_RATE.store(u32::MAX, Ordering::Release);
+        CONFIG.0.get().write(AuthConfig::EMPTY);
+        ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
+
+        let ic = ptr::addr_of_mut!(g_ic);
+        let interface = ic.add(0x10).cast::<*mut u8>().read();
+        let node = interface.add(0xe4).cast::<*mut u8>().read();
+        interface
+            .add(0xe4)
+            .cast::<*mut u8>()
+            .write(ptr::null_mut());
+        interface.add(0x98).cast::<u32>().write(0);
+        ptr::write_bytes(interface.add(0x9c), 0, 6);
+        if node == NODE.0.get().cast::<u8>() {
+            ptr::write_bytes(node, 0, VENDOR_NODE_LEN);
+        }
+        RESET_SIGNAL.notify_from_isr();
+    }
+
+    /// Snapshot the reset completion generation before enqueueing
+    /// `Wpa2IoCommand::ResetStaLink`.
+    pub fn sta_link_reset_generation() -> usize {
+        RESET_SIGNAL.generation()
+    }
+
+    /// Await the exact radio-owner reset completion edge without polling.
+    pub async fn wait_sta_link_reset_after(observed: usize) {
+        RESET_SIGNAL.wait_after(observed).await;
+    }
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
@@ -1532,9 +1610,13 @@ pub use target::associate_sta;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::authenticate_open;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub(crate) use target::{can_reset_static_sta_link, reset_static_sta_link};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::sta_assoc_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::sta_auth_snapshot;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use target::{sta_link_reset_generation, wait_sta_link_reset_after};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) use target::{
     complete_owned_action_management, dispatch_assoc_tx, dispatch_auth_tx,

@@ -277,6 +277,22 @@ fn unregister_static_vendor_key_slot(slot: &StaticVendorKeySlot) {
     }
 }
 
+#[cfg(target_arch = "riscv32")]
+unsafe fn static_vendor_key_object_is_owned(hardware_index: u8, pointer: *mut c_void) -> bool {
+    if pointer.is_null() || hardware_index > MAX_VENDOR_KEY_INDEX {
+        return false;
+    }
+    let slot_address =
+        STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].load(Ordering::Acquire);
+    if slot_address == 0 {
+        return false;
+    }
+    let slot = &*(slot_address as *const StaticVendorKeySlot);
+    slot.claimed.load(Ordering::Acquire)
+        && slot.hardware_index.load(Ordering::Acquire) == hardware_index
+        && core::ptr::eq(slot.object.get().cast::<c_void>(), pointer)
+}
+
 /// Consume the vendor `free` performed after `ic_del_key` for a Rust-owned
 /// static key object. The software-key table is cleared by the caller directly
 /// after this callback returns; this only wipes and releases the backing slot.
@@ -348,6 +364,8 @@ pub enum S31Wpa2IoError {
     StaPeerUnauthorized,
     ApPeerUnauthorized,
     AuthorizationSlotsFull,
+    StaPeerMismatch,
+    StaLinkResetBusy,
     InternalOwnershipMismatch,
     DataTxCreditMismatch,
 }
@@ -1254,6 +1272,85 @@ mod target {
             }
         }
 
+        fn reset_sta_link(&mut self, peer: [u8; 6]) -> Result<(), S31Wpa2IoError> {
+            if self.sta_authorized_peer.is_some_and(|authorized| authorized != peer) {
+                return Err(S31Wpa2IoError::StaPeerMismatch);
+            }
+            if !unsafe { crate::sta_link::can_reset_static_sta_link() } {
+                return Err(S31Wpa2IoError::StaLinkResetBusy);
+            }
+
+            // Preflight every software-key pointer before changing the
+            // controlled port or hardware. This prevents a foreign key object
+            // from turning teardown into a partially committed transaction.
+            for index in 0..K {
+                let Some(key) = self.keys.get(index) else {
+                    continue;
+                };
+                if key.interface() != Wpa2Interface::Station {
+                    continue;
+                }
+                if key.peer() != &peer && key.kind() == Wpa2KeyKind::Pairwise {
+                    return Err(S31Wpa2IoError::StaPeerMismatch);
+                }
+                let hardware_index = match key.kind() {
+                    Wpa2KeyKind::Pairwise => STA_PAIRWISE_HARDWARE_INDEX,
+                    Wpa2KeyKind::Group { .. } => STA_GROUP_HARDWARE_INDEX,
+                };
+                let registered = unsafe { software_key_slot(hardware_index).unwrap().read() };
+                if registered.is_null()
+                    || !unsafe { static_vendor_key_object_is_owned(hardware_index, registered) }
+                {
+                    return Err(S31Wpa2IoError::ForeignSoftwareKeyPresent);
+                }
+            }
+
+            self.sta_authorized_peer = None;
+            for index in 0..K {
+                let Some(key) = self.keys.get(index) else {
+                    continue;
+                };
+                if key.interface() != Wpa2Interface::Station {
+                    continue;
+                }
+                let hardware_index = match key.kind() {
+                    Wpa2KeyKind::Pairwise => STA_PAIRWISE_HARDWARE_INDEX,
+                    Wpa2KeyKind::Group { .. } => STA_GROUP_HARDWARE_INDEX,
+                };
+                unsafe {
+                    ic_del_key(hardware_index.into());
+                    let slot = software_key_slot(hardware_index).unwrap();
+                    let object = slot.read();
+                    slot.write(ptr::null_mut());
+                    let released = release_static_vendor_key_object(object);
+                    debug_assert!(released);
+                }
+                drop(self.keys.remove(index));
+            }
+
+            unsafe {
+                let station = sta_interface_state();
+                let node = sta_interface_node();
+                if !station.is_null() {
+                    let privacy = station.add(0xa4).cast::<u32>();
+                    privacy.write(privacy.read() & !0x10);
+                    station.add(0x140).write(0);
+                }
+                if !node.is_null() {
+                    node.add(0x134).write(0);
+                    node.add(0x135).write(0);
+                    ptr::write_bytes(node.add(0x137), 0, 4);
+                    let flags = node.add(0x0c).cast::<u32>();
+                    flags.write(flags.read() & !(1 | 0x40 | 0x8000));
+                    node.add(0x24).write(0);
+                }
+                ptr::addr_of_mut!(g_ic).add(0x274).write(0);
+                ptr::addr_of_mut!(g_sta_connected_flag).write(0);
+                crate::sta_link::reset_static_sta_link();
+            }
+            Ok(())
+        }
+
         #[inline(never)]
         fn activate_sta_ptk(&self) -> Result<(), S31Wpa2IoError> {
             let station = unsafe { sta_interface_state() };
@@ -1731,6 +1828,12 @@ mod target {
                             authorized,
                         },
                     }),
+                Wpa2IoCommand::ResetStaLink { peer } => {
+                    self.reset_sta_link(peer).map_err(|error| Wpa2IoFailure {
+                        error,
+                        command: Wpa2IoCommand::ResetStaLink { peer },
+                    })
+                }
                 #[cfg(feature = "hil-rx-ampdu")]
                 Wpa2IoCommand::ExpireRxAmpduGap { generation } => {
                     let _ = crate::rx::expire_rx_ampdu_gap(generation);

@@ -203,6 +203,15 @@ pub enum Wpa2IoCommand<const N: usize = WPA2_TX_ETHERNET_CAPACITY> {
         peer: [u8; 6],
         authorized: bool,
     },
+    /// Close the STA controlled port and remove every Rust-owned key and
+    /// association fact for `peer`.
+    ///
+    /// The S31 backend executes this as one bounded radio-owner transaction.
+    /// Callers must first stop producing data and await the fixed TX ownership
+    /// drain; this command never waits for outstanding hardware work.
+    ResetStaLink {
+        peer: [u8; 6],
+    },
     #[cfg(feature = "hil-rx-ampdu")]
     ExpireRxAmpduGap {
         generation: usize,

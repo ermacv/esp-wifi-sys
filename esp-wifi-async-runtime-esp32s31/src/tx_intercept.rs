@@ -464,6 +464,29 @@ pub(crate) unsafe fn enable(window: u16) {
     ENABLED.store(true, Ordering::Release);
 }
 
+pub(crate) unsafe fn can_reset_sta_link() -> bool {
+    let state = &*STATE.0.get();
+    state.count == 0
+        && state.retry_prefix == 0
+        && !state.event_pending
+        && !state.waiting_hardware
+        && !state.coalesce_armed
+        && !state.coalesce_due
+        && state.direct_frame.is_null()
+        && state.frames.iter().all(|frame| frame.is_null())
+}
+
+/// Disable the HIL aggregation bridge after every owned TX frame has returned.
+///
+/// This is part of the strict STA teardown transaction. Diagnostic counters
+/// intentionally remain cumulative across associations.
+pub(crate) unsafe fn reset_sta_link() {
+    debug_assert!(can_reset_sta_link());
+    let _ = crate::adapter::cancel_internal_timer(COALESCE_TIMER.0.get().cast());
+    *STATE.0.get() = InterceptState::new();
+    ENABLED.store(false, Ordering::Release);
+}
+
 /// GNU-ld wrapper around the last vendor preparation leaf used by `ppTxPkt`.
 /// Returning a value other than 0/1/2 makes `ppTxPkt` return without inserting
 /// the frame into any vendor PP list or recycling it.

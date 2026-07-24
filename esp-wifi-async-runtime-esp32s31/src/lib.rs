@@ -240,6 +240,8 @@ pub use scan::{passive_scan_2_4ghz, tune_home_channel};
 pub use sta_link::{associate_sta, authenticate_open};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use sta_link::{sta_assoc_snapshot, sta_auth_snapshot};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use sta_link::{sta_link_reset_generation, wait_sta_link_reset_after};
 pub use sta_link::{
     StaAssocError, StaAssocSecurityError, StaAssocSnapshot, StaAssociation, StaAuthError,
     StaAuthSnapshot, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US,

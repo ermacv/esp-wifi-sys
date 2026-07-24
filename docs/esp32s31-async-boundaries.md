@@ -343,9 +343,17 @@ The remaining STA runtime notification slots are patched after
 copy bounded metadata into a fixed channel, and the four-way-handshake query
 reads an explicit Rust-owned atomic flag. This removes the stock disconnect
 edge through `wpa_sm_notify_disassoc -> eloop_cancel_timeout -> free` from the
-active strict graph. The normal connect request remains a serialized
-initialization/control operation; automatic reconnect is not part of the
-strict runtime profile.
+active strict graph. `Wpa2IoCommand::ResetStaLink` now provides the bounded
+local teardown half of reconnect: after the application closes its network
+link and awaits the fixed TX ownership drain, the radio owner preflights every
+software-key pointer, closes the controlled port, clears both STA hardware
+keys, wipes/releases their static objects, stops the Rust BlockAck session,
+and removes the static node/association facts. Completion is published through
+one generation-counted async signal. A foreign key pointer or any live
+management/A-MPDU owner rejects the command before mutation. This supports
+Rust-owned reassociation without entering the vendor disconnect path; emitting
+a standards-level deauthentication frame and automatic reconnect policy remain
+separate work.
 
 Indirect calls are also part of the protocol ABI: EAP method `process`
 pointers, WPA crypto tables, callbacks, eloop timeouts, and PP registered
@@ -843,6 +851,15 @@ queue enable are Rust-owned; the terminal PLCP/HTSIG/PHY leaves and connection
 paths are not yet fully Rust-owned. Key installation additionally
 requires no live RX fragment from the old key, because the stock cleanup path
 can call `wifi_log`.
+
+The same ownership rule applies to local STA teardown. The command is accepted
+only after data TX reports zero queued/occupied/hardware-credit owners. It
+deletes hardware slots 4 and 1 through the recovered finite `ic_del_key` leaf,
+clears only software pointers proven to reference `S31StaticKeyStorage`, and
+volatile-wipes both key objects. The Rust TX BlockAck retry budget is
+per-association while its diagnostics remain cumulative. When the laboratory
+A-MPDU intercept is present, teardown additionally requires its fixed frame
+array and direct/coalesce state to be empty before disabling the intercept.
 
 The strict WPA2 AP boundary now patches the complete callback group before AP
 start. Stock `hostap_init/deinit`, station join/remove, RSN lookup, and peer-SPP
