@@ -67,6 +67,8 @@ pub enum StrictRuntimeError {
     RuntimeCallbacksNotPatched,
     PpTaskHandoffIncomplete,
     PpPostLinkWrapperMissing,
+    Net80211TxLinkWrapperMissing,
+    Net80211TxMailboxNotEmpty,
     Net80211TimerLinkWrapperMissing,
     ChannelSwitchLinkWrappersMissing,
     EsfBufferLinkWrappersMissing,
@@ -400,6 +402,14 @@ pub unsafe fn prepare_strict_runtime(
     }
     if !crate::adapter::pp_post_link_wrapper_active() {
         return Err(StrictRuntimeError::PpPostLinkWrapperMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::net80211_tx::link_wrapper_active() {
+        return Err(StrictRuntimeError::Net80211TxLinkWrapperMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::net80211_tx::vendor_mailbox_empty() {
+        return Err(StrictRuntimeError::Net80211TxMailboxNotEmpty);
     }
     #[cfg(feature = "strict-no-wait")]
     if !crate::net80211_timer::timer_process_link_wrapper_active() {

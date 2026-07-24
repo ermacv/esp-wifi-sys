@@ -9,7 +9,10 @@ use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
-use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
+use strict_policy::{
+    REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
+    WRAPPED_VENDOR_BOUNDARIES,
+};
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wdevProcessRxSucDataAll",
@@ -204,13 +207,6 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
 // These ROM exports cannot use GNU --wrap because the ROM linker script would
 // also assign the generated wrapper name. The late linker fragment aliases the
 // public symbol directly to a uniquely named Rust function instead.
-const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
-    ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
-    ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
-    ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
-    ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
-];
-
 // This is the one-action, fail-closed replacement reached by strict PP events
 // 0..=4. It must remain executable from internal SRAM, and the final image must
 // not contain an instruction which transfers control to the absolute ROM

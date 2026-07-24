@@ -144,14 +144,15 @@ localize.
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
 symbols do not describe fields. This is intentionally conservative; it does
 not mean that all 788 bytes are needed by the strict runtime. Relocation and
-instruction inspection of the original three strict vendor referrers gives
-the narrower initial graph:
+instruction inspection of the original three strict vendor referrers, plus
+the event-5 consumer called directly by Rust, gives the narrower graph:
 
 | vendor leaf | `g_ic` fields read | current purpose | status |
 |---|---|---|---|
 | `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
 | `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
-| `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | disabled policy proven; leaf remains |
+| `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | replaced; ordinary STA/AP queue publication is Rust |
+| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | event-5 consumer remains to be split |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -181,7 +182,8 @@ strict AP beacon completion now obtain interface identities from this
 registry. The pre-handoff AP-start probe deliberately retains its separate
 cold read because the registry is not published yet.
 
-The same handoff rejects active mesh state and the vendor cached-TX mode.
+The same handoff rejects active mesh state, a non-empty `g_ic+0x1ac`
+pending-frame queue, and the vendor cached-TX mode.
 Those are immutable strict-profile invariants, not flags polled on each
 runtime operation. Under the non-mesh invariant the pinned
 `ieee80211_hostapd_data_txcb` returns before reading its frame, so the strict
@@ -195,6 +197,27 @@ hardware through passive scan, WPA2 association, DHCP, ping, DNS, TCP, and
 post-link data with zero recorded allocations. The final ELF still passes the
 strict no-wait/no-heap audit with zero violations.
 
-After the two remaining vendor leaves above have Rust replacements, the linked-state
-audit should no longer report `g_ic` as strict-vendor-reachable even while cold
-initialization still retains its backing.
+The Rust replacement validates the descriptor interface, appends through the
+recovered `frame+0x30` intrusive link, and posts PP event 5. It contains no
+allocation, wait, retry, indirect call, or `g_ic` access. The eight-byte
+`s_tx_cacheq` object deliberately remains a vendor-layout mailbox because the
+current event-5 consumer is still `ieee80211_output_process`. Migrating that
+consumer one frame per async continuation is the next ownership boundary; it
+must precede removal of the queue binding itself.
+
+This consumer is not a leaf. An explicit strict-auditor probe with
+`ieee80211_output_process` as the sole root currently finds 23 control-flow
+cycles and 14 indirect calls. Several branches are expected to be unreachable
+under the no-cache/no-AMSDU/no-power-save profile, but that expectation is not
+a proof and the consumer must not be described as fully strict yet. The next
+slice therefore takes ownership of the queue, presents at most one frame to a
+temporary compatibility stage, and replaces each remaining reachable
+classification, encryption, and hardware-submit branch explicitly. Only after
+that work should `ieee80211_set_tx_desc` become the final `g_ic` leaf.
+
+After the event-5 consumer and the remaining descriptor leaf have Rust
+replacements, the linked-state audit should no longer report `g_ic` as
+strict-vendor-reachable even while cold initialization still retains its
+backing. Until the consumer is added to the enforced graph, the generated
+linked-state table intentionally describes only the current declared vendor
+roots and is narrower than the complete Rust-to-vendor runtime graph.

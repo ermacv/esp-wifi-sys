@@ -25,7 +25,6 @@ pub const ROOTS: &[&str] = &[
     "ppDequeueRxq_Locked",
     "ppRxProtoProc",
     "ppRecycleRxPkt",
-    "ieee80211_post_hmac_tx",
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
@@ -75,6 +74,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wifi_log",
     "wifi_assert",
     "pp_post",
+    "ieee80211_post_hmac_tx",
     "ieee80211_timer_process",
     "chm_start_op",
     "chm_return_home_channel",
@@ -88,4 +88,21 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "rcGetSched",
     "ppTxProtoProc",
     "ppProcTxSecFrame",
+];
+
+/// Public runtime entry points which must resolve to an exact Rust symbol.
+///
+/// Some ESP32-S31 ROM linker exports cannot use ordinary GNU `--wrap`: the
+/// generated `__wrap_*` name is itself captured by the absolute ROM alias.
+/// Keep these pairs shared by the enforcing and reporting audits so a direct
+/// alias cannot disappear from the linked-state report.
+pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
+    ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
+    ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
+    (
+        "ieee80211_post_hmac_tx",
+        "wifi_strict_ieee80211_post_hmac_tx",
+    ),
+    ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
+    ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];

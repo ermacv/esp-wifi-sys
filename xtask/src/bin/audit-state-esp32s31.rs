@@ -9,7 +9,10 @@ use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
-use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
+use strict_policy::{
+    REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
+    WRAPPED_VENDOR_BOUNDARIES,
+};
 
 // Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
 // wdev_data_init (remaining 31) disassemblies.
@@ -472,6 +475,40 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
             &format!(
                 "| `{public_name}` | `0x{:08x}` | {mode} | {real_target} |",
                 wrapper.address
+            ),
+        );
+    }
+    for (public_name, replacement_name) in REQUIRED_RUNTIME_ALIASES {
+        if replacement_name.starts_with("__wrap_") {
+            continue;
+        }
+        let public = final_symbols
+            .get(*public_name)
+            .with_context(|| format!("missing required public alias {public_name}"))?;
+        let replacement = final_symbols
+            .get(*replacement_name)
+            .with_context(|| format!("missing required replacement {replacement_name}"))?;
+        let real_name = format!("__real_{public_name}");
+        let real_target = final_symbols.get(&real_name).map_or_else(
+            || "-".to_owned(),
+            |symbol| {
+                format!(
+                    "`0x{:08x}` ({})",
+                    symbol.address,
+                    target_placement(symbol.address)
+                )
+            },
+        );
+        let mode = if public.address == replacement.address {
+            "direct public alias"
+        } else {
+            "ERROR: public/replacement mismatch"
+        };
+        pushln(
+            &mut report,
+            &format!(
+                "| `{public_name}` | `0x{:08x}` | {mode} | {real_target} |",
+                replacement.address
             ),
         );
     }

@@ -18,6 +18,8 @@ const AP_INTERFACE_OFFSET: usize = 0x14;
 #[cfg(target_arch = "riscv32")]
 const MESH_STATE_OFFSET: usize = 0x74;
 #[cfg(target_arch = "riscv32")]
+const PENDING_TX_HEAD_OFFSET: usize = 0x1ac;
+#[cfg(target_arch = "riscv32")]
 const CACHED_TX_ENABLED_OFFSET: usize = 0x258;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +29,7 @@ pub enum Net80211StateAdoptionError {
     MisalignedStationInterface,
     MisalignedAccessPointInterface,
     MeshModeActive,
+    PendingTxActive,
     CachedTxEnabled,
 }
 
@@ -79,6 +82,7 @@ impl Net80211InterfaceRegistry {
         station: usize,
         access_point: usize,
         mesh_state: usize,
+        pending_tx_head: usize,
         cached_tx_enabled: bool,
     ) -> Result<(), Net80211StateAdoptionError> {
         if station == 0 && access_point == 0 {
@@ -95,6 +99,9 @@ impl Net80211InterfaceRegistry {
         }
         if mesh_state != 0 {
             return Err(Net80211StateAdoptionError::MeshModeActive);
+        }
+        if pending_tx_head != 0 {
+            return Err(Net80211StateAdoptionError::PendingTxActive);
         }
         if cached_tx_enabled {
             return Err(Net80211StateAdoptionError::CachedTxEnabled);
@@ -178,8 +185,18 @@ pub(crate) unsafe fn adopt_vendor_interface_registry() -> Result<(), Net80211Sta
         .add(MESH_STATE_OFFSET)
         .cast::<usize>()
         .read_unaligned();
+    let pending_tx_head = state
+        .add(PENDING_TX_HEAD_OFFSET)
+        .cast::<usize>()
+        .read_unaligned();
     let cached_tx_enabled = state.add(CACHED_TX_ENABLED_OFFSET).read() != 0;
-    INTERFACES.adopt(station, access_point, mesh_state, cached_tx_enabled)
+    INTERFACES.adopt(
+        station,
+        access_point,
+        mesh_state,
+        pending_tx_head,
+        cached_tx_enabled,
+    )
 }
 
 #[cfg(test)]
@@ -189,7 +206,7 @@ mod tests {
     #[test]
     fn publication_is_role_checked_and_null_role_remains_absent() {
         let registry = Net80211InterfaceRegistry::new();
-        registry.adopt(0x1000, 0, 0, false).unwrap();
+        registry.adopt(0x1000, 0, 0, 0, false).unwrap();
 
         let station = registry.interface(Net80211InterfaceRole::Station).unwrap();
         assert_eq!(station.role(), Net80211InterfaceRole::Station);
@@ -201,29 +218,33 @@ mod tests {
     fn invalid_publication_is_not_observable() {
         let registry = Net80211InterfaceRegistry::new();
         assert_eq!(
-            registry.adopt(0, 0, 0, false),
+            registry.adopt(0, 0, 0, 0, false),
             Err(Net80211StateAdoptionError::MissingInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1001, 0, 0, false),
+            registry.adopt(0x1001, 0, 0, 0, false),
             Err(Net80211StateAdoptionError::MisalignedStationInterface)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0x1000, 0, false),
+            registry.adopt(0x1000, 0x1000, 0, 0, false),
             Err(Net80211StateAdoptionError::AliasedInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0, 0x2000, false),
+            registry.adopt(0x1000, 0, 0x2000, 0, false),
             Err(Net80211StateAdoptionError::MeshModeActive)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, true),
+            registry.adopt(0x1000, 0, 0, 0x2000, false),
+            Err(Net80211StateAdoptionError::PendingTxActive)
+        );
+        assert_eq!(
+            registry.adopt(0x1000, 0, 0, 0, true),
             Err(Net80211StateAdoptionError::CachedTxEnabled)
         );
         assert!(!registry.snapshot().adopted);

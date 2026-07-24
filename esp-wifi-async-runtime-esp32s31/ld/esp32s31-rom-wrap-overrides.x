@@ -13,6 +13,13 @@ ieee80211_set_tx_pti = __wrap_ieee80211_set_tx_pti;
 __real_ieee80211_search_node = 0x2f800ca8;
 ieee80211_search_node = __wrap_ieee80211_search_node;
 
+/* GNU --wrap cannot be used for this ROM export: it aliases the generated
+ * __wrap symbol itself to 0x2f800cc0. Keep a separate pre-strict entry and
+ * route the public name to the uniquely named Rust runtime boundary. */
+__real_ieee80211_post_hmac_tx = 0x2f800cc0;
+EXTERN(wifi_strict_ieee80211_post_hmac_tx);
+ieee80211_post_hmac_tx = wifi_strict_ieee80211_post_hmac_tx;
+
 __real_ets_delay_us = 0x2f80003c;
 ets_delay_us = __wrap_ets_delay_us;
 
