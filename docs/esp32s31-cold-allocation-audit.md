@@ -4,7 +4,9 @@ This inventory covers the taskless strict STA cold-start path through
 `prepare_strict_runtime`. It was captured on hardware with
 `hil-cold-allocation-trace`, after the direct Rust
 `wifi_init_in_caller_task` replacement was enabled. The fixed trace itself
-uses only internal SRAM and performs no allocation.
+uses a fixed laboratory-only PSRAM journal and performs no allocation. The
+journal is never accessed by an interrupt handler or after cold handoff, so it
+does not consume the IRQ-critical SRAM arena.
 
 The qualified run observed 115 allocations, no reallocations, 24 frees and
 128,984 requested bytes. The allocation count and byte count remained
@@ -13,7 +15,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 12 allocations, 2 frees and 796 requested
+the current image is down to 9 allocations, 2 frees and 340 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -512,3 +514,35 @@ persistent and had not yet reached its deinitializer there. Two complete
 scan/authentication/association/WPA2 cycles passed with the snapshot fixed at
 12/2/796. The first also completed ping, DNS, TCP and HTTP; all strict ELF
 audits reported zero violations.
+
+The pinned `trc_init` was the next persistent owner. It allocated three
+zeroed 0x98-byte default transmit-rate-control contexts and published them in
+`g_per_conn_trc[19]`, `[20]` and `[21]`. Reverse inspection recovered the
+complete initialized subset: the three primary schedule pointers at offsets
+0x64, 0x68 and 0x6c, P2P and legacy schedule pointers at 0x70 and 0x74, flags
+0x80 at offset 0x0c, zero current/final state at 0x28/0x87 and identities
+0, 1 and 2 at offset 0x85.
+
+`rust-static-trc-init-interpose` replaces those allocations with one exact
+3-by-0x98 arena in internal SRAM. Initialization first fails if any of the
+three table cells is already owned, clears the arena, writes the recovered
+fields with a straight-line finite sequence and publishes the three exact
+pointers. Deinitialization is deliberately narrower than the vendor loop: it
+accepts only those three exact publications, clears them and never scans or
+frees an unknown pointer.
+
+The final ELF audit rejects the original and `__real_` TRC constructors,
+requires the exact 456-byte aligned SRAM section, proves the initializer has
+no cycle and calls only `memset`, and verifies the three-pointer call-free
+deinitializer. When the cold allocation journal is enabled, the same audit
+requires its 2,560-byte fixed object to reside in PSRAM. This preserves
+18,768 bytes of CPU0 stack without moving any rate-control or interrupt-owned
+state out of SRAM.
+
+Hardware removed exactly three allocations and 456 requested bytes, producing
+9 allocations, 2 observed frees and 340 requested bytes. The first complete
+scan/authentication/association/WPA2 cycle reached DHCP and completed ping,
+DNS, TCP and HTTP. Teardown and a second scan/WPA2/post-link-data cycle also
+completed with the snapshot fixed at 9/2/340, zero allocation failure and
+zero radio-context allocator calls. The strict whole-ELF no-wait/no-heap
+audit reported zero violations.
