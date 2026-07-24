@@ -36,9 +36,9 @@ mod eap;
 mod esf;
 pub mod event;
 pub mod event_bridge;
-pub mod he;
 #[cfg(target_arch = "riscv32")]
 mod handoff;
+pub mod he;
 pub mod interrupt;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod lmac;
@@ -53,7 +53,6 @@ pub mod radio;
 pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;
-mod rx_descriptor;
 pub mod rx_ampdu;
 #[cfg(all(
     target_arch = "riscv32",
@@ -62,8 +61,11 @@ pub mod rx_ampdu;
 ))]
 mod rx_ampdu_ap;
 pub mod rx_ampdu_hw;
+mod rx_descriptor;
 pub mod scan;
 mod sta_link;
+#[cfg(target_arch = "riscv32")]
+mod static_bindings;
 pub mod strict;
 pub mod task;
 mod tbtt;
@@ -88,8 +90,7 @@ pub mod vendor;
 mod wdev;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use wdev::{
-    indicate_frame_snapshot, rx_recycle_snapshot, WdevIndicateFrameSnapshot,
-    WdevRxRecycleSnapshot,
+    indicate_frame_snapshot, rx_recycle_snapshot, WdevIndicateFrameSnapshot, WdevRxRecycleSnapshot,
 };
 pub mod wpa2;
 pub mod wpa2_aes;
@@ -169,16 +170,16 @@ pub use event::{PpAction, PpEvent};
 #[cfg(target_arch = "riscv32")]
 pub use event_bridge::patch_async_event_post;
 pub use event_bridge::{EventCopyError, OwnedWifiEvent, WifiEventBridge, WIFI_EVENT_BASE_CAPACITY};
-pub use he::{
-    parse_he20_capabilities, parse_he20_operation, He20Capabilities, He20Operation,
-    HeElementError, HeMcsNssSupport, HE_CAPABILITIES_EXTENSION_ID, HE_CAPABILITIES_IE_MIN_LEN,
-    HE_OPERATION_EXTENSION_ID, HE_OPERATION_IE_MIN_LEN,
-};
 #[cfg(target_arch = "riscv32")]
 pub use handoff::{
     arm_pp_task_handoff, begin_pp_task_handoff, install_pp_task_handoff,
     request_armed_pp_task_handoff, PpTaskHandoff, PpTaskHandoffError, PpTaskHandoffInstallError,
     TaskDeleteCompletionRegistrar,
+};
+pub use he::{
+    parse_he20_capabilities, parse_he20_operation, He20Capabilities, He20Operation, HeElementError,
+    HeMcsNssSupport, HE_CAPABILITIES_EXTENSION_ID, HE_CAPABILITIES_IE_MIN_LEN,
+    HE_OPERATION_EXTENSION_ID, HE_OPERATION_IE_MIN_LEN,
 };
 pub use interrupt::{InterruptSignal, WaitForInterrupt};
 #[cfg(all(
@@ -211,30 +212,30 @@ pub use policy::{
 pub use queue::{PushError, RadioQueue, RadioQueueSnapshot};
 pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
 pub use runtime::WifiRuntimeFuture;
-pub use rx_ampdu::{
-    write_successful_addba_response, RxAddbaResponseError, RxAmpduError, RxAmpduMpdu,
-    RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY, RX_BLOCK_ACK_MAX_WINDOW,
-};
-pub use rx_ampdu_hw::{S31RxBlockAckAgreement, S31RxBlockAckAgreementError};
-#[cfg(all(
-    target_arch = "riscv32",
-    feature = "strict-no-wait",
-    feature = "hil-rx-ampdu"
-))]
-pub use rx_ampdu_ap::{
-    remove_peer as remove_rx_ampdu_peer, wait_for_gap as wait_for_rx_ampdu_gap,
-    snapshot as rx_ampdu_ap_snapshot, RxAmpduApSnapshot, RxAmpduGapFuture,
-};
-#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use rx::{
-    block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
-};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
     feature = "hil-rx-ampdu"
 ))]
 pub use rx::expire_rx_ampdu_gap;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use rx::{
+    block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
+};
+pub use rx_ampdu::{
+    write_successful_addba_response, RxAddbaResponseError, RxAmpduError, RxAmpduMpdu,
+    RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY, RX_BLOCK_ACK_MAX_WINDOW,
+};
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-rx-ampdu"
+))]
+pub use rx_ampdu_ap::{
+    remove_peer as remove_rx_ampdu_peer, snapshot as rx_ampdu_ap_snapshot,
+    wait_for_gap as wait_for_rx_ampdu_gap, RxAmpduApSnapshot, RxAmpduGapFuture,
+};
+pub use rx_ampdu_hw::{S31RxBlockAckAgreement, S31RxBlockAckAgreementError};
 pub use scan::{
     best_matching_ssid, StrictScanError, StrictScanRecord, StrictScanSummary,
     STRICT_SCAN_EXTENDED_RATES_CAPACITY, STRICT_SCAN_HE_CAPABILITY_IE_CAPACITY,
@@ -253,6 +254,11 @@ pub use sta_link::{
     StaAssocError, StaAssocSecurityError, StaAssocSnapshot, StaAssociation, StaAuthError,
     StaAuthSnapshot, OPEN_AUTH_DEFAULT_ATTEMPTS, OPEN_AUTH_DEFAULT_TIMEOUT_US,
     STA_ASSOC_DEFAULT_ATTEMPTS, STA_ASSOC_DEFAULT_TIMEOUT_US,
+};
+#[cfg(target_arch = "riscv32")]
+pub use static_bindings::{
+    bind_static_vendor_state, validate_static_vendor_bindings, StaticVendorBindingError,
+    StaticVendorBindings,
 };
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;

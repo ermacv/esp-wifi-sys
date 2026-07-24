@@ -434,6 +434,11 @@ archive relocations with the final ELF to report the exact live mutable blob
 objects, ROM ABI cells, Rust strict sections, wrappers, direct aliases, and
 retained `__real_*` ROM oracles. Its generated snapshot is
 [`../docs/esp32s31-linked-state-audit.md`](../docs/esp32s31-linked-state-audit.md).
+`bind_static_vendor_state` exposes those two leaves as a serialized cold-init
+operation for a future Rust-owned bring-up. The ordinary vendor bring-up is
+still used today; before handoff, `prepare_strict_runtime_before_handoff`
+independently verifies that `pTxRx`, `wDevCtrl_ptr`, `g_ic_ptr`, and `g_chm`
+refer to their exact fixed backing objects.
 The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
 that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
 walks four-byte frame records with a counter narrowed to `u8`; including the

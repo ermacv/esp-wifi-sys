@@ -61,6 +61,7 @@ pub struct StrictRuntimePreparation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StrictRuntimeError {
     Config(StrictConfigError),
+    StaticVendorBindings(crate::static_bindings::StaticVendorBindingError),
     RuntimeCallbacksNotPatched,
     PpTaskHandoffIncomplete,
     PpPostLinkWrapperMissing,
@@ -258,6 +259,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     };
 
     validate_strict_basic_config(config).map_err(StrictRuntimeError::Config)?;
+    crate::static_bindings::validate_static_vendor_bindings()
+        .map_err(StrictRuntimeError::StaticVendorBindings)?;
     STRICT_PREPARATION_STAGE.store(1, Ordering::Release);
     let result = esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
     STRICT_PREPARATION_STAGE.store(2, Ordering::Release);
