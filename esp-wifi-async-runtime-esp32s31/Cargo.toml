@@ -38,6 +38,9 @@ rust-static-wifi-init-interpose = [
 # Rust queue and logical task identity. No OSI task, semaphore, queue-create,
 # delay, or task-delete callback is entered.
 rust-static-pp-task-init-interpose = []
+# HIL-only fixed trace of allocator source, caller and size during cold init.
+# The trace owns no dynamic memory and is read only after initialization.
+hil-cold-allocation-trace = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []

@@ -38,6 +38,100 @@ pub struct AllocationSnapshot {
     pub last_free_caller: usize,
 }
 
+#[cfg(feature = "hil-cold-allocation-trace")]
+pub const COLD_ALLOCATION_TRACE_CAPACITY: usize = 128;
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ColdAllocationTraceEntry {
+    pub source: AllocationSource,
+    pub caller: usize,
+    pub size: usize,
+    pub realloc: bool,
+    pub failed: bool,
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+struct ColdAllocationTraceSlot {
+    source: AtomicUsize,
+    caller: AtomicUsize,
+    size: AtomicUsize,
+    flags: AtomicUsize,
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+impl ColdAllocationTraceSlot {
+    const fn new() -> Self {
+        Self {
+            source: AtomicUsize::new(0),
+            caller: AtomicUsize::new(0),
+            size: AtomicUsize::new(0),
+            flags: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+static COLD_ALLOCATION_TRACE_LENGTH: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "hil-cold-allocation-trace")]
+#[link_section = ".critical.bss.wifi_strict.cold_allocation_trace"]
+static COLD_ALLOCATION_TRACE: [ColdAllocationTraceSlot; COLD_ALLOCATION_TRACE_CAPACITY] =
+    [const { ColdAllocationTraceSlot::new() }; COLD_ALLOCATION_TRACE_CAPACITY];
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+fn record_cold_allocation(
+    source: AllocationSource,
+    caller: usize,
+    size: usize,
+    realloc: bool,
+    failed: bool,
+) {
+    let index = COLD_ALLOCATION_TRACE_LENGTH.fetch_add(1, Ordering::AcqRel);
+    let Some(slot) = COLD_ALLOCATION_TRACE.get(index) else {
+        return;
+    };
+    slot.source.store(source as usize, Ordering::Relaxed);
+    slot.caller.store(caller, Ordering::Relaxed);
+    slot.size.store(size, Ordering::Relaxed);
+    slot.flags.store(
+        4 | usize::from(realloc) | (usize::from(failed) << 1),
+        Ordering::Release,
+    );
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+pub fn cold_allocation_trace_len() -> usize {
+    COLD_ALLOCATION_TRACE_LENGTH
+        .load(Ordering::Acquire)
+        .min(COLD_ALLOCATION_TRACE_CAPACITY)
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+pub fn cold_allocation_trace_overflow() -> usize {
+    COLD_ALLOCATION_TRACE_LENGTH
+        .load(Ordering::Acquire)
+        .saturating_sub(COLD_ALLOCATION_TRACE_CAPACITY)
+}
+
+#[cfg(feature = "hil-cold-allocation-trace")]
+pub fn cold_allocation_trace_entry(index: usize) -> Option<ColdAllocationTraceEntry> {
+    let slot = COLD_ALLOCATION_TRACE.get(index)?;
+    if index >= cold_allocation_trace_len() {
+        return None;
+    }
+    let flags = slot.flags.load(Ordering::Acquire);
+    if flags & 4 == 0 {
+        return None;
+    }
+    Some(ColdAllocationTraceEntry {
+        source: AllocationSource::from_raw(slot.source.load(Ordering::Relaxed)),
+        caller: slot.caller.load(Ordering::Relaxed),
+        size: slot.size.load(Ordering::Relaxed),
+        realloc: flags & 1 != 0,
+        failed: flags & 2 != 0,
+    })
+}
+
 /// Counters shared by OSI allocator callbacks and final-link `__wrap_*`
 /// guards for direct C allocator references in vendor archives.
 pub struct AllocationProbe {
@@ -102,6 +196,8 @@ impl AllocationProbe {
         if in_radio_context() {
             self.radio_context_calls.fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(feature = "hil-cold-allocation-trace")]
+        record_cold_allocation(source, caller, size, realloc, failed);
     }
 
     fn record_free(&self) {
@@ -314,11 +410,7 @@ mod target {
         ) -> i32;
         fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
         fn rc_enable_trc(interface: u32, peer: *const u8, index: u32, mode: u32) -> *mut c_void;
-        fn ieee80211_setup_ratetable(
-            interface: *mut c_void,
-            mode: u32,
-            phy_mode: u32,
-        ) -> i32;
+        fn ieee80211_setup_ratetable(interface: *mut c_void, mode: u32, phy_mode: u32) -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -655,8 +747,8 @@ mod target {
     /// Requires `-Wl,--wrap=malloc` in the firmware link.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_malloc(size: usize) -> *mut c_void {
+        let caller = caller_address();
         if heap_forbidden() {
-            let caller = caller_address();
             if let Some(slot) = claim_wpa_ie_slot(size, caller) {
                 return slot;
             }
@@ -664,7 +756,13 @@ mod target {
             return core::ptr::null_mut();
         }
         let result = __real_malloc(size);
-        PROBE.record_request(size, result.is_null(), false);
+        PROBE.record_request_at(
+            size,
+            result.is_null(),
+            false,
+            AllocationSource::DirectMalloc,
+            caller,
+        );
         result
     }
 
@@ -672,36 +770,44 @@ mod target {
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_calloc(count: usize, size: usize) -> *mut c_void {
         let requested = count.saturating_mul(size);
+        let caller = caller_address();
         if heap_forbidden() {
             PROBE.record_request_at(
                 requested,
                 true,
                 false,
                 AllocationSource::DirectCalloc,
-                caller_address(),
+                caller,
             );
             return core::ptr::null_mut();
         }
         let result = __real_calloc(count, size);
-        PROBE.record_request(requested, result.is_null(), false);
+        PROBE.record_request_at(
+            requested,
+            result.is_null(),
+            false,
+            AllocationSource::DirectCalloc,
+            caller,
+        );
         result
     }
 
     /// Final-link guard for direct C `realloc` references.
     #[no_mangle]
     pub unsafe extern "C" fn __wrap_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
+        let caller = caller_address();
         if heap_forbidden() {
-            PROBE.record_request_at(
-                size,
-                true,
-                true,
-                AllocationSource::DirectRealloc,
-                caller_address(),
-            );
+            PROBE.record_request_at(size, true, true, AllocationSource::DirectRealloc, caller);
             return core::ptr::null_mut();
         }
         let result = __real_realloc(ptr, size);
-        PROBE.record_request(size, result.is_null() && size != 0, true);
+        PROBE.record_request_at(
+            size,
+            result.is_null() && size != 0,
+            true,
+            AllocationSource::DirectRealloc,
+            caller,
+        );
         result
     }
 
@@ -774,7 +880,7 @@ mod target {
         }
         let original = mem::transmute::<usize, Malloc>(saved.load(Ordering::Acquire));
         let result = original(size);
-        PROBE.record_request(size, result.is_null(), false);
+        PROBE.record_request_at(size, result.is_null(), false, source, caller);
         result
     }
 
@@ -791,7 +897,7 @@ mod target {
         }
         let original = mem::transmute::<usize, Realloc>(saved.load(Ordering::Acquire));
         let result = original(ptr, size);
-        PROBE.record_request(size, result.is_null() && size != 0, true);
+        PROBE.record_request_at(size, result.is_null() && size != 0, true, source, caller);
         result
     }
 
@@ -808,7 +914,13 @@ mod target {
         }
         let original = mem::transmute::<usize, Calloc>(saved.load(Ordering::Acquire));
         let result = original(count, size);
-        PROBE.record_request(count.saturating_mul(size), result.is_null(), false);
+        PROBE.record_request_at(
+            count.saturating_mul(size),
+            result.is_null(),
+            false,
+            source,
+            caller,
+        );
         result
     }
 
@@ -923,6 +1035,8 @@ mod tests {
 
     #[test]
     fn allocation_probe_tracks_requests() {
+        #[cfg(feature = "hil-cold-allocation-trace")]
+        let trace_before = super::cold_allocation_trace_len();
         let probe = AllocationProbe::new();
         probe.record_request(16, false, false);
         probe.record_request(48, true, true);
@@ -934,5 +1048,29 @@ mod tests {
         assert_eq!(snapshot.requested_bytes, 64);
         assert_eq!(snapshot.largest_request, 48);
         assert_eq!(snapshot.failures, 1);
+        #[cfg(feature = "hil-cold-allocation-trace")]
+        {
+            assert_eq!(super::cold_allocation_trace_len(), trace_before + 2);
+            assert_eq!(
+                super::cold_allocation_trace_entry(trace_before),
+                Some(super::ColdAllocationTraceEntry {
+                    source: super::AllocationSource::None,
+                    caller: 0,
+                    size: 16,
+                    realloc: false,
+                    failed: false,
+                })
+            );
+            assert_eq!(
+                super::cold_allocation_trace_entry(trace_before + 1),
+                Some(super::ColdAllocationTraceEntry {
+                    source: super::AllocationSource::None,
+                    caller: 0,
+                    size: 48,
+                    realloc: true,
+                    failed: true,
+                })
+            );
+        }
     }
 }
