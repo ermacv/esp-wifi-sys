@@ -273,3 +273,24 @@ to 16 frees and 1,616 to 1,568 requested bytes. Two scan, authentication,
 association, WPA2 handshake and post-link data cycles passed with an unchanged
 runtime allocation snapshot. The first also completed ping, DNS, TCP and HTTP;
 the second returned 22/22 TX and 20/20 RX owners without queue rejection.
+
+`esp_wifi_internal_reg_rxcb` contributed four more 24-byte allocation and
+ioctl envelopes. Its request contains only the interface byte at offset 8 and
+the callback word at offset 12. The pinned `wifi_set_rxcb_process` dispatches
+interfaces 0, 1 and 2 to `wifi_sta_reg_rxcb`, `wifi_ap_reg_rxcb` and
+`wifi_nan_reg_rxcb`; each target leaf is exactly one callback-pointer store
+followed by return.
+
+`rust-direct-reg-rxcb` preserves the initialization and interface-range checks,
+constructs those two request fields on stack and calls the finite dispatcher
+directly. The ELF audit rejects the original public envelope, verifies the
+wrapper's exact two calls, disassembles the process over its complete sized
+symbol range so local assembler labels cannot hide AP or NAN branches, and
+requires all three target leaves to contain exactly one store and no call or
+control-flow cycle.
+
+The allocation delta was exact: 27 to 23 calls, 16 to 12 frees and 1,568 to
+1,472 requested bytes. Two complete scan, authentication, association, WPA2
+handshake and post-link data cycles passed with the allocation snapshot
+unchanged. The first also completed ping, DNS, TCP and HTTP. The second
+returned 22/22 TX and 21/21 RX owners without queue rejection.
