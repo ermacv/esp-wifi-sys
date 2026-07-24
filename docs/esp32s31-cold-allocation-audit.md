@@ -12,6 +12,11 @@ unchanged through scan, open authentication, association, WPA2 M1-M4,
 network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
+After the qualified static owners and direct API boundaries documented below,
+the current image is down to 22 allocations, 11 frees and 1,448 requested
+bytes. These are still cold-bootstrap observations, not accepted final
+runtime dependencies.
+
 Addresses below are expressed as a function-relative return offset so that
 the audit does not depend on application link layout. `esf_buf_alloc_dynamic`
 is a ROM implementation address and is identified by its ROM symbol rather
@@ -294,3 +299,25 @@ The allocation delta was exact: 27 to 23 calls, 16 to 12 frees and 1,568 to
 handshake and post-link data cycles passed with the allocation snapshot
 unchanged. The first also completed ping, DNS, TCP and HTTP. The second
 returned 22/22 TX and 21/21 RX owners without queue rejection.
+
+`esp_wifi_register_mgmt_frame_internal` was the next single 24-byte ioctl
+envelope. Its public body checks `wifi_init_completed`, writes the first
+argument at request word offset 12 and the second at word offset 20, and
+dispatches `wifi_register_mgmt_frame`. That process is a finite publication
+leaf: it loads exactly those two words, stores them at `g_ic + 0x27c` and
+`g_ic + 0x280`, then returns zero. It contains no callback invocation,
+critical section, wait, cycle or dynamic dispatch.
+
+`rust-direct-reg-mgmt-frame` preserves the initialization error and builds
+only the two proven request fields in a stack-resident `MaybeUninit` owner.
+The ELF audit rejects the original and `__real_` envelopes, permits only
+`wifi_init_completed` and `wifi_register_mgmt_frame` calls from the wrapper,
+and requires the vendor process to remain exactly two loads, two stores,
+return, no calls and no control-flow cycle.
+
+Hardware produced the exact expected delta: 23 to 22 allocations, 12 to 11
+frees and 1,472 to 1,448 requested bytes. Two complete passive-scan, open
+authentication, association and WPA2 four-way-handshake cycles passed with
+post-link data and no TX/RX rejection. The first also completed ping, DNS,
+TCP and HTTP. Allocation counters remained unchanged after handoff, and the
+strict whole-ELF no-wait/no-heap audit reported zero violations.
