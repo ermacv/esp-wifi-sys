@@ -154,6 +154,8 @@ pub struct StaAssocSnapshot {
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
     pub addba_accepted_submitted: u32,
+    pub addba_deferred: u32,
+    pub addba_deferred_dispatched: u32,
     pub action_tx_done: u32,
     pub tx_addba_submitted: u32,
     pub tx_addba_responses: u32,
@@ -462,6 +464,22 @@ mod target {
     struct TxBlockAckCell(UnsafeCell<TxBlockAckSession>);
     unsafe impl Sync for TxBlockAckCell {}
 
+    #[derive(Clone, Copy)]
+    struct PendingRxAddba {
+        peer: [u8; 6],
+        body: [u8; crate::tx_ampdu::ADDBA_ACTION_BODY_LEN],
+    }
+
+    impl PendingRxAddba {
+        const EMPTY: Self = Self {
+            peer: [0; 6],
+            body: [0; crate::tx_ampdu::ADDBA_ACTION_BODY_LEN],
+        };
+    }
+
+    struct PendingRxAddbaCell(UnsafeCell<PendingRxAddba>);
+    unsafe impl Sync for PendingRxAddbaCell {}
+
     static CONFIG: ConfigCell = ConfigCell(UnsafeCell::new(AuthConfig::EMPTY));
     static ASSOC_CONFIG: AssocConfigCell = AssocConfigCell(UnsafeCell::new(AssocConfig::EMPTY));
     #[unsafe(link_section = ".critical.bss.wifi_strict.sta_node")]
@@ -535,9 +553,15 @@ mod target {
     static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ADDBA_ACCEPTED_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static ADDBA_DEFERRED: AtomicU32 = AtomicU32::new(0);
+    static ADDBA_DEFERRED_DISPATCHED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
     static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
     static OWNED_RX_ADDBA_ACCEPTED: AtomicU8 = AtomicU8::new(0);
+    static PENDING_RX_ADDBA_STATE: AtomicU8 = AtomicU8::new(0);
+    #[unsafe(link_section = ".critical.bss.wifi_strict.rx_addba")]
+    static PENDING_RX_ADDBA: PendingRxAddbaCell =
+        PendingRxAddbaCell(UnsafeCell::new(PendingRxAddba::EMPTY));
     static TX_ADDBA_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_SESSION_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_RESPONSES: AtomicU32 = AtomicU32::new(0);
@@ -684,6 +708,8 @@ mod target {
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
             addba_accepted_submitted: ADDBA_ACCEPTED_SUBMITTED.load(Ordering::Acquire),
+            addba_deferred: ADDBA_DEFERRED.load(Ordering::Acquire),
+            addba_deferred_dispatched: ADDBA_DEFERRED_DISPATCHED.load(Ordering::Acquire),
             action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
             tx_addba_submitted: TX_ADDBA_SUBMITTED.load(Ordering::Acquire),
             tx_addba_responses: TX_ADDBA_RESPONSES.load(Ordering::Acquire),
@@ -1069,6 +1095,7 @@ mod target {
         #[cfg(not(feature = "hil-rx-ampdu"))]
         let _ = (frame, accepted_rx_addba);
         ACTION_TX_DONE.fetch_add(1, Ordering::Relaxed);
+        dispatch_deferred_rx_addba();
         true
     }
 
@@ -1255,6 +1282,55 @@ mod target {
         true
     }
 
+    unsafe fn defer_rx_addba(peer: [u8; 6], request: &[u8]) -> bool {
+        if request.len() < 33
+            || PENDING_RX_ADDBA_STATE
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        let pending = &mut *PENDING_RX_ADDBA.0.get();
+        pending.peer = peer;
+        pending
+            .body
+            .copy_from_slice(&request[24..24 + crate::tx_ampdu::ADDBA_ACTION_BODY_LEN]);
+        PENDING_RX_ADDBA_STATE.store(2, Ordering::Release);
+        ADDBA_DEFERRED.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    unsafe fn dispatch_deferred_rx_addba() {
+        if PENDING_RX_ADDBA_STATE
+            .compare_exchange(2, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let pending = *PENDING_RX_ADDBA.0.get();
+        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let node = if interface.is_null() {
+            ptr::null_mut()
+        } else {
+            interface.add(0xe4).cast::<*mut u8>().read()
+        };
+        PENDING_RX_ADDBA_STATE.store(0, Ordering::Release);
+        let request = {
+            let mut frame = [0_u8; 24 + crate::tx_ampdu::ADDBA_ACTION_BODY_LEN];
+            frame[24..].copy_from_slice(&pending.body);
+            frame
+        };
+        if node != NODE.0.get().cast::<u8>()
+            || !send_addba_response(node, pending.peer, &request)
+        {
+            let pending_slot = &mut *PENDING_RX_ADDBA.0.get();
+            *pending_slot = pending;
+            PENDING_RX_ADDBA_STATE.store(2, Ordering::Release);
+            return;
+        }
+        ADDBA_DEFERRED_DISPATCHED.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Consume a peer ADDBA request before it can enter the vendor BlockAck
     /// state machine. Until Rust owns reorder buffers, it emits one explicit
     /// standards-level decline using the fixed management pool.
@@ -1314,7 +1390,11 @@ mod target {
         if node != NODE.0.get().cast::<u8>() {
             return true;
         }
-        let _ = unsafe { send_addba_response(node, config.access_point.bssid, frame) };
+        if OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0 {
+            let _ = unsafe { defer_rx_addba(config.access_point.bssid, frame) };
+        } else if !unsafe { send_addba_response(node, config.access_point.bssid, frame) } {
+            let _ = unsafe { defer_rx_addba(config.access_point.bssid, frame) };
+        }
         true
     }
 
@@ -1826,6 +1906,7 @@ mod target {
         #[cfg(feature = "hil-rx-ampdu")]
         crate::rx_ampdu_ap::remove_peer(associated_peer);
         OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
+        PENDING_RX_ADDBA_STATE.store(0, Ordering::Release);
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
 
