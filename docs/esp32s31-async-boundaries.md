@@ -589,8 +589,8 @@ observed management, EAPOL, Action and fixed-rate QoS state table and applies
 the recovered descriptor-byte treatment directly. After ADDBA it retains only
 guarded basic-HT QoS data in a fixed 32-pointer SRAM queue and returns `3`,
 which makes `ppTxPkt` skip every vendor queue insertion. Unknown mapper states
-trap; there is no vendor fallback. A private executor event moves at most one
-retained retry or assembles/submits one aggregate of at most 20 MPDUs;
+trap; there is no vendor fallback. A private executor event moves at most four
+retained retries or assembles/submits one aggregate of at most 20 MPDUs;
 completion schedules the next event rather than recursing. The 20-frame
 laboratory cap guarantees the S31 `0x7fff` aggregate-length limit for 1600-byte
 static TX slots.
@@ -599,9 +599,23 @@ The normal HIL throughput profile also separates diagnostics by cost.
 `hil-vendor-tx` retains counters and EAPOL failure evidence, while the
 descriptor flight recorder, complete data-frame snapshots, and their
 per-transition atomic writes require the explicit
-`hil-tx-deep-telemetry` feature. Aggregate size, aggregate bytes, and retained
-queue high-water are counted once per PPDU in fixed atomics and remain
-available without the deep recorder.
+`hil-tx-deep-telemetry` feature. The hardware-submit register snapshot and
+detailed successful-completion invariant recorder are also deep-only; the
+ordinary profile does not read those diagnostic MMIO registers for every
+PPDU. Aggregate size, aggregate bytes, retained queue high-water, and bounded
+submit/completion cadence are counted in fixed atomics and remain available
+without the deep recorder.
+
+The cadence recorder uses `mcycle` at three owned boundaries: hardware submit,
+completion-edge decode, and completion handoff. It stores service,
+edge-to-handoff, and handoff-to-next-submit sums in 256-cycle units, plus
+sample counts and maxima. Maximum updates get one compare/exchange attempt and
+never spin. Missing BlockAck bits and the resulting retry submissions are
+counted separately. A completion continuation transfers at most four detached
+retry frames per executor action before rescheduling. This fixed quantum
+preserves finite execution and ownership while avoiding one private event for
+each missing bit in a partial BlockAck; it neither waits nor recursively
+submits.
 
 The first `ppTxPkt` preparation leaf, `ppTxProtoProc`, is also replaced by an
 SRAM-resident stateless Rust transformation. Its complete recovered decision

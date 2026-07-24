@@ -716,6 +716,10 @@ pub(crate) unsafe fn process_tx_complete() -> Result<(), LmacAsyncError> {
             auxiliary[1],
         );
     }
+    #[cfg(feature = "hil-ampdu-intercept")]
+    if aggregate || crate::tx_intercept::owns_direct_hardware_frame(completed_frame) {
+        crate::tx_intercept::record_hardware_completion_edge();
+    }
 
     let block_ack = if aggregate && status == 0 {
         Some(
@@ -1792,7 +1796,7 @@ unsafe fn dispatch_ampdu_completion_step(
         state.active = false;
         state.next = 0;
         #[cfg(feature = "hil-ampdu-intercept")]
-        crate::tx_intercept::on_hardware_completion()
+        crate::tx_intercept::on_hardware_completion(retry_count)
             .map_err(|_| LmacAsyncError::InternalQueueFull)?;
         if retry_count == 0 && pp_post(u32::from(resume_event), ptr::null_mut()) != 0 {
             return Err(LmacAsyncError::InternalQueueFull);
@@ -2530,6 +2534,23 @@ unsafe fn record_tx_complete(queue_state: *mut u8, queue: u8, status: u8, respon
         return;
     }
 
+    #[cfg(not(feature = "hil-tx-deep-telemetry"))]
+    {
+        let _ = (queue_state, queue, response);
+        return;
+    }
+
+    #[cfg(feature = "hil-tx-deep-telemetry")]
+    record_tx_complete_details(counters, queue_state, queue, response);
+}
+
+#[cfg(all(feature = "hil-vendor-tx", feature = "hil-tx-deep-telemetry"))]
+unsafe fn record_tx_complete_details(
+    counters: &TxCompleteCounters,
+    queue_state: *mut u8,
+    queue: u8,
+    response: u8,
+) {
     let queue_kind = queue_state.add(TX_QUEUE_KIND_OFFSET).read();
     let txop_outstanding = queue_state.add(TX_QUEUE_TXOP_OUTSTANDING_OFFSET).read();
     let frame = queue_state.cast::<*mut u8>().read();

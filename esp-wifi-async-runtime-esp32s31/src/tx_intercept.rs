@@ -24,6 +24,7 @@ const MAX_HIL_AGGREGATE_LENGTH: u16 = 0x7fff;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
+#[cfg(feature = "hil-tx-deep-telemetry")]
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
 const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
 const FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
@@ -157,6 +158,21 @@ static READY_HIGH_WATER: AtomicU32 = AtomicU32::new(0);
 static AGGREGATE_BYTES: AtomicU32 = AtomicU32::new(0);
 static AGGREGATE_SIZE_HISTOGRAM: [AtomicU32; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY] =
     [const { AtomicU32::new(0) }; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY];
+static LAST_SUBMIT_CYCLE: AtomicU32 = AtomicU32::new(0);
+static LAST_COMPLETION_EDGE_CYCLE: AtomicU32 = AtomicU32::new(0);
+static LAST_COMPLETION_HANDOFF_CYCLE: AtomicU32 = AtomicU32::new(0);
+static HARDWARE_SERVICE_SAMPLES: AtomicU32 = AtomicU32::new(0);
+static HARDWARE_SERVICE_TICKS_SUM: AtomicU32 = AtomicU32::new(0);
+static HARDWARE_SERVICE_CYCLES_MAX: AtomicU32 = AtomicU32::new(0);
+static COMPLETION_DISPATCH_SAMPLES: AtomicU32 = AtomicU32::new(0);
+static COMPLETION_DISPATCH_TICKS_SUM: AtomicU32 = AtomicU32::new(0);
+static COMPLETION_DISPATCH_CYCLES_MAX: AtomicU32 = AtomicU32::new(0);
+static REFILL_GAP_SAMPLES: AtomicU32 = AtomicU32::new(0);
+static REFILL_GAP_TICKS_SUM: AtomicU32 = AtomicU32::new(0);
+static REFILL_GAP_CYCLES_MAX: AtomicU32 = AtomicU32::new(0);
+static RETRY_SUBMITS: AtomicU32 = AtomicU32::new(0);
+static RETRY_SUBFRAMES: AtomicU32 = AtomicU32::new(0);
+static MISSING_BLOCK_ACK_SUBFRAMES: AtomicU32 = AtomicU32::new(0);
 static ENABLED_CALLS: AtomicU32 = AtomicU32::new(0);
 static MAPPER_BYPASSED: AtomicU32 = AtomicU32::new(0);
 static MAPPER_ALREADY_PREPARED: AtomicU32 = AtomicU32::new(0);
@@ -252,6 +268,19 @@ pub struct HilAmpduInterceptSnapshot {
     /// Index is the number of MPDUs in one submitted A-MPDU. Slots 0 and 1
     /// remain zero because direct submissions have dedicated counters.
     pub aggregate_size_histogram: [u32; HIL_AMPDU_SIZE_HISTOGRAM_CAPACITY],
+    /// One tick is 256 CPU cycles. S31 runs at 320 MHz in this profile.
+    pub hardware_service_samples: u32,
+    pub hardware_service_ticks_sum: u32,
+    pub hardware_service_cycles_max: u32,
+    pub completion_dispatch_samples: u32,
+    pub completion_dispatch_ticks_sum: u32,
+    pub completion_dispatch_cycles_max: u32,
+    pub refill_gap_samples: u32,
+    pub refill_gap_ticks_sum: u32,
+    pub refill_gap_cycles_max: u32,
+    pub retry_submits: u32,
+    pub retry_subframes: u32,
+    pub missing_block_ack_subframes: u32,
     pub failed: bool,
 }
 
@@ -371,6 +400,18 @@ pub fn hil_ampdu_intercept_snapshot() -> HilAmpduInterceptSnapshot {
         ready_high_water: READY_HIGH_WATER.load(Ordering::Acquire),
         aggregate_bytes: AGGREGATE_BYTES.load(Ordering::Acquire),
         aggregate_size_histogram,
+        hardware_service_samples: HARDWARE_SERVICE_SAMPLES.load(Ordering::Acquire),
+        hardware_service_ticks_sum: HARDWARE_SERVICE_TICKS_SUM.load(Ordering::Acquire),
+        hardware_service_cycles_max: HARDWARE_SERVICE_CYCLES_MAX.load(Ordering::Acquire),
+        completion_dispatch_samples: COMPLETION_DISPATCH_SAMPLES.load(Ordering::Acquire),
+        completion_dispatch_ticks_sum: COMPLETION_DISPATCH_TICKS_SUM.load(Ordering::Acquire),
+        completion_dispatch_cycles_max: COMPLETION_DISPATCH_CYCLES_MAX.load(Ordering::Acquire),
+        refill_gap_samples: REFILL_GAP_SAMPLES.load(Ordering::Acquire),
+        refill_gap_ticks_sum: REFILL_GAP_TICKS_SUM.load(Ordering::Acquire),
+        refill_gap_cycles_max: REFILL_GAP_CYCLES_MAX.load(Ordering::Acquire),
+        retry_submits: RETRY_SUBMITS.load(Ordering::Acquire),
+        retry_subframes: RETRY_SUBFRAMES.load(Ordering::Acquire),
+        missing_block_ack_subframes: MISSING_BLOCK_ACK_SUBFRAMES.load(Ordering::Acquire),
         failed: FAILED.load(Ordering::Acquire),
     }
 }
@@ -444,6 +485,7 @@ unsafe fn read_hardware_registers() -> [u32; 11] {
     ]
 }
 
+#[cfg(feature = "hil-tx-deep-telemetry")]
 unsafe fn record_hardware_submit(queue_state: *mut u8) {
     let frame = queue_state.cast::<*mut u8>().read();
     let descriptor = if frame.is_null() {
@@ -956,6 +998,72 @@ fn record_ready_depth(count: u8) {
     }
 }
 
+#[inline(always)]
+fn cycle_count() -> u32 {
+    let value: u32;
+    unsafe {
+        core::arch::asm!(
+            "csrr {value}, mcycle",
+            value = out(reg) value,
+            options(nomem, nostack)
+        )
+    };
+    value
+}
+
+#[inline(always)]
+fn record_cycle_max(counter: &AtomicU32, value: u32) {
+    let observed = counter.load(Ordering::Relaxed);
+    if value > observed {
+        // Telemetry gets one attempt and never introduces a CAS retry loop.
+        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+#[link_section = ".rwtext.wifi_strict.hil_ampdu_cadence"]
+pub(crate) fn record_hardware_completion_edge() {
+    let now = cycle_count();
+    let submitted = LAST_SUBMIT_CYCLE.swap(0, Ordering::AcqRel);
+    if submitted != 0 {
+        let cycles = now.wrapping_sub(submitted);
+        HARDWARE_SERVICE_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        HARDWARE_SERVICE_TICKS_SUM.fetch_add(cycles >> 8, Ordering::Relaxed);
+        record_cycle_max(&HARDWARE_SERVICE_CYCLES_MAX, cycles);
+    }
+    LAST_COMPLETION_EDGE_CYCLE.store(now, Ordering::Release);
+}
+
+#[inline(always)]
+fn record_completion_handoff(retry_count: u8) {
+    let now = cycle_count();
+    let completed = LAST_COMPLETION_EDGE_CYCLE.swap(0, Ordering::AcqRel);
+    if completed != 0 {
+        let cycles = now.wrapping_sub(completed);
+        COMPLETION_DISPATCH_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        COMPLETION_DISPATCH_TICKS_SUM.fetch_add(cycles >> 8, Ordering::Relaxed);
+        record_cycle_max(&COMPLETION_DISPATCH_CYCLES_MAX, cycles);
+    }
+    MISSING_BLOCK_ACK_SUBFRAMES.fetch_add(u32::from(retry_count), Ordering::Relaxed);
+    LAST_COMPLETION_HANDOFF_CYCLE.store(now, Ordering::Release);
+}
+
+#[inline(always)]
+fn record_submit_cadence(retry_subframes: u8) {
+    let now = cycle_count();
+    let completed = LAST_COMPLETION_HANDOFF_CYCLE.swap(0, Ordering::AcqRel);
+    if completed != 0 {
+        let cycles = now.wrapping_sub(completed);
+        REFILL_GAP_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        REFILL_GAP_TICKS_SUM.fetch_add(cycles >> 8, Ordering::Relaxed);
+        record_cycle_max(&REFILL_GAP_CYCLES_MAX, cycles);
+    }
+    if retry_subframes != 0 {
+        RETRY_SUBMITS.fetch_add(1, Ordering::Relaxed);
+        RETRY_SUBFRAMES.fetch_add(u32::from(retry_subframes), Ordering::Relaxed);
+    }
+    LAST_SUBMIT_CYCLE.store(now, Ordering::Release);
+}
+
 fn schedule(state: &mut InterceptState) -> Result<(), TxInterceptError> {
     if state.event_pending {
         return Ok(());
@@ -1030,11 +1138,20 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     let state = &mut *STATE.0.get();
     state.event_pending = false;
 
-    // Completion transfers at most one retry into this queue per executor
-    // event. The following event either transfers another or submits a batch.
-    if let Some(retry) = crate::lmac::take_basic_ht_ampdu_retry() {
+    // Move a fixed prefix of detached retries per executor action. This keeps
+    // the action finite while avoiding one private event for every missing
+    // BlockAck bit in a large partial-ACK aggregate.
+    const RETRY_TRANSFER_QUANTUM: u8 = 4;
+    let mut transferred = 0_u8;
+    while transferred < RETRY_TRANSFER_QUANTUM {
+        let Some(retry) = crate::lmac::take_basic_ht_ampdu_retry() else {
+            break;
+        };
         let _sequence = retry.sequence;
         push_retry_front(state, retry.frame)?;
+        transferred = transferred.wrapping_add(1);
+    }
+    if transferred != 0 {
         reconcile_coalesce_deadline(state)?;
         schedule(state)?;
         return Ok(());
@@ -1108,12 +1225,15 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
     )
     .map_err(TxInterceptError::Aggregate)?;
     let aggregate_length = chain.aggregate_length;
+    let retry_subframes = state.retry_prefix.min(selected as u8);
     if let Err(error) = crate::lmac::submit_basic_ht_ampdu(queue_state, chain) {
         // Submission validates queue/descriptor state before ownership
         // transfer. A failure after preparation is fatal for this laboratory
         // bridge; silently falling back would duplicate frame ownership.
         return fail(TxInterceptError::Submit(error));
     }
+    record_submit_cadence(retry_subframes);
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     record_hardware_submit(queue_state);
 
     let remaining = count - selected;
@@ -1141,8 +1261,9 @@ pub(crate) unsafe fn dispatch() -> Result<(), TxInterceptError> {
 
 /// Called by the Rust BlockAck completion after it has retained every missing
 /// MPDU. It only posts a private executor event; it never submits recursively.
-pub(crate) fn on_hardware_completion() -> Result<(), TxInterceptError> {
+pub(crate) fn on_hardware_completion(retry_count: u8) -> Result<(), TxInterceptError> {
     let state = unsafe { &mut *STATE.0.get() };
+    record_completion_handoff(retry_count);
     state.waiting_hardware = false;
     COMPLETED.fetch_add(1, Ordering::Relaxed);
     schedule(state)
@@ -1179,7 +1300,7 @@ pub(crate) fn on_direct_hardware_completion() -> Result<(), TxInterceptError> {
     if direct_queue == 0 {
         LEGACY_DIRECT_COMPLETED.fetch_add(1, Ordering::Relaxed);
     }
-    on_hardware_completion()
+    on_hardware_completion(0)
 }
 
 unsafe fn submit_one(
@@ -1196,6 +1317,8 @@ unsafe fn submit_one(
         state.direct_queue = u8::MAX;
         return Err(TxInterceptError::Submit(error));
     }
+    record_submit_cadence(state.retry_prefix.min(1));
+    #[cfg(feature = "hil-tx-deep-telemetry")]
     record_hardware_submit(queue_state);
 
     let mut source = 1_usize;
