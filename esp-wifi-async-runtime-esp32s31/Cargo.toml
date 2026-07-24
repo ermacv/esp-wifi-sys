@@ -54,6 +54,10 @@ rust-static-rate-table-storage = []
 # Supply one AP-or-STA interface state and its PHY state from exact fixed
 # internal-SRAM owners. A simultaneous AP+STA second claim fails closed.
 rust-static-interface-storage = []
+# Replace the cold pre-start `esp_wifi_stop` API envelope with one bounded
+# state check. An active-radio stop is rejected; it must be driven by the Rust
+# asynchronous lifecycle state machine instead of the vendor delay loop.
+rust-direct-cold-stop = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
