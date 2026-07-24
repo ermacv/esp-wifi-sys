@@ -170,7 +170,10 @@ pub use data_tx::{
     try_send_wifi_data, wifi_data_tx_snapshot, OwnedWifiDataTxFrame, WifiDataTxEnqueueError,
     WifiDataTxSnapshot, WIFI_DATA_TX_CAPACITY, WIFI_DATA_TX_FRAME_CAPACITY,
 };
-pub use direct_api::{direct_cold_stop_snapshot, DirectColdStopSnapshot};
+pub use direct_api::{
+    direct_cold_stop_snapshot, direct_set_mode_snapshot, DirectColdStopSnapshot,
+    DirectSetModeSnapshot,
+};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use delay::{
     direct_delay_snapshot, DirectDelaySiteSnapshot, DirectDelaySnapshot, DIRECT_DELAY_SITE_CAPACITY,
