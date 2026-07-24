@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 20 allocations, 9 frees and 1,400 requested
+the current image is down to 18 allocations, 7 frees and 984 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -366,3 +366,31 @@ association and WPA2 cycles completed with the allocation snapshot unchanged.
 The first completed ping, DNS, TCP and HTTP; the second returned 21/21 TX and
 19/19 RX owners without queue rejection. The strict whole-ELF no-wait/no-heap
 audit reported zero violations.
+
+`esp_wifi_set_config` allocates a 208-byte command for every invocation. It
+copies the complete 184-byte STA/AP/NAN union at offset 20, then enters
+`ieee80211_ioctl`. The strict STA cold path invokes it twice, accounting for
+the two largest remaining API-envelope allocations and 416 requested bytes.
+
+`rust-direct-set-config` instead owns one zeroed, four-byte-aligned 208-byte
+command on the caller stack, copies the configuration into that owner and
+invokes the pinned run-to-completion `wifi_set_config_process` directly. The
+wrapper retains the public initialization, interface and null-pointer guards.
+Its qualified ELF has a 240-byte total stack frame, no control-flow cycle and
+only `wifi_init_completed`, ROM `memset`/`memcpy` and the process call. The
+original and `__real_` envelopes are rejected, as are allocator and
+`ieee80211_ioctl` calls from the wrapper.
+
+This is an allocation boundary, not the final configuration-ownership
+boundary. The process still publishes into `g_wifi_nvs` and reaches the
+disabled-NVS accessor leaves. Those fixed-state writes must be mapped and
+moved behind the Rust radio owner before the vendor process and NVS vocabulary
+can be removed from the target graph.
+
+Hardware produced the exact delta from 20 to 18 allocations, 9 to 7 frees and
+1,400 to 984 requested bytes. Two complete passive-scan, authentication,
+association and WPA2 reconnect cycles passed with the allocation snapshot
+unchanged, zero failures and zero radio-context allocator calls. The first
+completed ping, DNS, TCP and HTTP; the second returned 21/21 TX and 19/19 RX
+owners without rejection. The strict whole-ELF no-wait/no-heap audit reported
+zero violations.
