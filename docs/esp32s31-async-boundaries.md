@@ -230,6 +230,13 @@ gates continue to reject HE. HE transmission must not be enabled until its
 association request, peer state, HE-SIG construction, retry schedule, and
 completion layouts have each been recovered and admitted as bounded leaves.
 
+The strict RX boundary obtains the complete 14-bit MPDU length from S31
+`sig_len` rather than the one-byte length of the first hardware block. It
+subtracts the documented four-byte FCS before constructing the shared protocol
+slice. Scan, association, power-save observation, and EAPOL classification
+therefore see one identical bounded frame and cannot parse FCS bytes as an
+additional information element.
+
 ## Heap and indirect calls
 
 Setting dynamic RX, dynamic TX, and cache TX counts to zero removes only the

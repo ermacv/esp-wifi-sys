@@ -554,9 +554,9 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
             break;
         };
         if end > frame.len() {
-            // S31's RX metadata exposes a bounded management-frame prefix.
+            // Keep the parser valid for any deliberately bounded capture.
             // BSSID, capabilities, and all preceding complete IEs remain
-            // trustworthy even when a long vendor/HE tail is truncated.
+            // trustworthy even when a later element is truncated.
             record.information_elements_truncated = true;
             break;
         }
