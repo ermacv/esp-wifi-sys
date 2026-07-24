@@ -1,45 +1,197 @@
 //! Fixed-storage vendor-state bindings used by ESP32-S31 ROM leaves.
 //!
 //! The pinned `net80211_data_ptr_init` and `wdev_data_init` bodies contain
-//! only direct stores of archive-static addresses into ROM ABI cells. The
-//! strict archive audit treats them as separate cold-init roots and proves
-//! that they contain no allocation, wait, indirect call, or control-flow
-//! cycle.
+//! exactly 43 direct stores of archive-static addresses into ROM ABI cells.
+//! The strict archive audit treats them as separate cold-init roots and proves
+//! that they contain no allocation, wait, indirect call, or unbounded control
+//! flow. This module also provides an equivalent Rust-owned implementation of
+//! those stores.
 
 use core::ptr;
 
+/// One fixed backing-object binding recovered from the two pinned vendor
+/// cold-init leaves.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StaticVendorBindingError {
-    TxRxContext,
-    WdevControl,
-    Net80211Interface,
+pub enum StaticVendorBinding {
+    WifiNvs,
+    Scan,
     ChannelManager,
+    Net80211Interface,
+    HmacCounters,
+    TxCacheQueue,
+    MacSleepEnabled,
+    MeshQuickFunctions,
+    MeshInitialPowerSaveType,
+    MeshStarted,
+    MeshRoot,
+    MeshTopology,
+    TxRxContext,
+    LmacConfig,
+    WdevControl,
+    WdevMacSleep,
+    LmacCounters,
+    PpSignalCounters,
+    WifiMenuConfig,
+    EsfBufferLists,
+    Fragment,
+    InterfaceControl,
+    ApNoLongRange,
+    LoraRateSchedule,
+    Dot11nRateSchedule,
+    Dot11bRateSchedule,
+    BasicOfdmRateSchedule,
+    TrcControl,
+    PowerManagementConfig,
+    PowerManagement,
+    TxopQueueStatus,
+    PowerManagementCounters,
+    PpTimerInfo,
+    RtsThresholds,
+    PowerManagementTwt,
+    HeMaxApepLengths,
+    WdevRxDebug,
+    PowerManagementBeaconOffset,
+    PowerManagementBeaconOffsetConfig,
+    TbttStart,
+    OffchannelTxProgress,
+    OffchannelPacketLifetime,
+    SendWakeNullTimer,
 }
 
-/// Evidence that the four state objects used directly by strict runtime leaves
-/// are backed by the pinned fixed archive storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StaticVendorBindingError {
+    binding: StaticVendorBinding,
+}
+
+impl StaticVendorBindingError {
+    pub const fn binding(self) -> StaticVendorBinding {
+        self.binding
+    }
+}
+
+/// Evidence that all 43 ROM ABI cells refer to their exact fixed archive
+/// backing objects.
 pub struct StaticVendorBindings {
     _private: (),
 }
 
 unsafe extern "C" {
     fn net80211_data_ptr_init();
-    fn wdev_data_init();
-
-    static mut TxRxCxt: u8;
-    static mut pTxRx: *mut u8;
-
-    static mut wDevCtrl: u8;
-    static mut wDevCtrl_ptr: *mut u8;
-
-    static mut g_ic: u8;
-    static mut g_ic_ptr: *mut u8;
-
-    static mut gChmCxt: u8;
-    static mut g_chm: *mut u8;
+    fn wdev_data_init() -> i32;
 }
 
-/// Run the two audited fixed-storage binding leaves.
+macro_rules! fixed_bindings {
+    (
+        net80211 { $($net_binding:ident: $net_cell:ident => $net_backing:ident),+ $(,)? }
+        wdev { $($wdev_binding:ident: $wdev_cell:ident => $wdev_backing:ident),+ $(,)? }
+    ) => {
+        unsafe extern "C" {
+            $(
+                static mut $net_cell: *mut u8;
+                static mut $net_backing: u8;
+            )+
+            $(
+                static mut $wdev_cell: *mut u8;
+                static mut $wdev_backing: u8;
+            )+
+        }
+
+        unsafe fn write_net80211_fixed_bindings() {
+            $(
+                ptr::addr_of_mut!($net_cell).write_volatile(
+                    ptr::addr_of_mut!($net_backing).cast::<u8>(),
+                );
+            )+
+        }
+
+        unsafe fn write_wdev_fixed_bindings() {
+            $(
+                ptr::addr_of_mut!($wdev_cell).write_volatile(
+                    ptr::addr_of_mut!($wdev_backing).cast::<u8>(),
+                );
+            )+
+        }
+
+        unsafe fn validate_fixed_bindings(
+        ) -> Result<StaticVendorBindings, StaticVendorBindingError> {
+            $(
+                if ptr::addr_of!($net_cell).read_volatile()
+                    != ptr::addr_of_mut!($net_backing).cast::<u8>()
+                {
+                    return Err(StaticVendorBindingError {
+                        binding: StaticVendorBinding::$net_binding,
+                    });
+                }
+            )+
+            $(
+                if ptr::addr_of!($wdev_cell).read_volatile()
+                    != ptr::addr_of_mut!($wdev_backing).cast::<u8>()
+                {
+                    return Err(StaticVendorBindingError {
+                        binding: StaticVendorBinding::$wdev_binding,
+                    });
+                }
+            )+
+            Ok(StaticVendorBindings { _private: () })
+        }
+    };
+}
+
+// The order mirrors the pinned disassembly: first
+// net80211_data_ptr_init (12 stores), then wdev_data_init (31 stores).
+fixed_bindings! {
+    net80211 {
+        WifiNvs: g_wifi_nvs => s_wifi_nvs,
+        Scan: g_scan => gScanStruct,
+        ChannelManager: g_chm => gChmCxt,
+        Net80211Interface: g_ic_ptr => g_ic,
+        HmacCounters: g_hmac_cnt_ptr => g_hmac_cnt,
+        TxCacheQueue: g_tx_cacheq_ptr => s_tx_cacheq,
+        MacSleepEnabled: g_mac_sleep_en_ptr => g_mac_sleep_en,
+        MeshQuickFunctions: g_esp_mesh_quick_funcs_ptr => esp_mesh_quick_funcs,
+        MeshInitialPowerSaveType: g_mesh_init_ps_type_ptr => g_mesh_init_ps_type,
+        MeshStarted: g_mesh_is_started_ptr => g_mesh_is_started,
+        MeshRoot: g_mesh_is_root_ptr => g_mesh_is_root,
+        MeshTopology: g_mesh_topology_ptr => g_mesh_topology,
+    }
+    wdev {
+        TxRxContext: pTxRx => TxRxCxt,
+        LmacConfig: lmacConfMib_ptr => lmacConfMib,
+        WdevControl: wDevCtrl_ptr => wDevCtrl,
+        WdevMacSleep: wDevMacSleep_ptr => wDevMacSleep,
+        LmacCounters: g_lmac_cnt_ptr => g_lmac_cnt,
+        PpSignalCounters: pp_sig_cnt_ptr => pp_sig_cnt,
+        WifiMenuConfig: g_wifi_menuconfig_ptr => g_wifi_menuconfig,
+        EsfBufferLists: g_eb_list_desc_ptr => g_eb_list_desc,
+        Fragment: s_fragment_ptr => s_fragment,
+        InterfaceControl: if_ctrl_ptr => if_ctrl,
+        ApNoLongRange: ap_no_lr_ptr => ap_no_lr,
+        LoraRateSchedule: rcLoRaSchedTbl_ptr => rcLoRaSchedTbl,
+        Dot11nRateSchedule: rc11NSchedTbl_ptr => rc11NSchedTbl,
+        Dot11bRateSchedule: rc11BSchedTbl_ptr => rc11BSchedTbl,
+        BasicOfdmRateSchedule: BasicOFDMSched_ptr => BasicOFDMSched,
+        TrcControl: trc_ctl_ptr => trc_ctl,
+        PowerManagementConfig: g_pm_cfg_ptr => g_pm_cfg,
+        PowerManagement: g_pm_ptr => g_pm,
+        TxopQueueStatus: g_txop_queue_status_ptr => g_txop_queue_status,
+        PowerManagementCounters: g_pm_cnt_ptr => g_pm_cnt,
+        PpTimerInfo: g_pp_timer_info_ptr => g_pp_timer_info,
+        RtsThresholds: g_rts_threshold_bytes_ptr => g_rts_threshold_bytes,
+        PowerManagementTwt: g_pm_twt_ptr => g_pm_twt,
+        HeMaxApepLengths: g_he_max_apep_length_tab_ptr => g_he_max_apep_length_tab,
+        WdevRxDebug: g_wdev_dbg_rx_ptr => g_wdev_dbg_rx,
+        PowerManagementBeaconOffset: s_pm_beacon_offset_ptr => s_pm_beacon_offset,
+        PowerManagementBeaconOffsetConfig:
+            s_pm_beacon_offset_config_ptr => s_pm_beacon_offset_config,
+        TbttStart: s_tbttstart_ptr => s_tbttstart,
+        OffchannelTxProgress: s_offchan_tx_progress_in_ptr => offchan_tx_progress_in,
+        OffchannelPacketLifetime:
+            g_offchan_packet_lifetime_ptr => g_offchan_packet_lifetime,
+        SendWakeNullTimer: g_send_wake_null_timer_ptr => send_wake_null_timer,
+    }
+}
+
+/// Run the two audited vendor fixed-storage binding leaves.
 ///
 /// This is intentionally narrower than vendor Wi-Fi initialization: it does
 /// not initialize PHY/MAC hardware, allocate buffers, create a task, or start
@@ -52,12 +204,28 @@ unsafe extern "C" {
 /// ROM or vendor code reads the affected cells concurrently.
 pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticVendorBindingError> {
     net80211_data_ptr_init();
-    wdev_data_init();
+    let _ = wdev_data_init();
     validate_static_vendor_bindings()
 }
 
-/// Validate the strict runtime's direct fixed-state dependencies without
-/// changing any state.
+/// Publish all 43 fixed backing-object addresses directly from Rust.
+///
+/// Unlike the vendor net80211 leaf, this has no hidden one-shot guard: the
+/// stores are idempotent and serialized ownership is an explicit caller
+/// precondition. It performs no calls, allocation, waiting, or hardware access.
+///
+/// # Safety
+///
+/// The caller must serialize this with Wi-Fi initialization and ensure that no
+/// ROM or vendor code reads or writes the affected cells concurrently.
+pub unsafe fn bind_static_vendor_state_in_rust(
+) -> Result<StaticVendorBindings, StaticVendorBindingError> {
+    write_net80211_fixed_bindings();
+    write_wdev_fixed_bindings();
+    validate_static_vendor_bindings()
+}
+
+/// Validate every recovered fixed-state binding without changing any state.
 ///
 /// # Safety
 ///
@@ -65,17 +233,20 @@ pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticV
 /// teardown.
 pub unsafe fn validate_static_vendor_bindings(
 ) -> Result<StaticVendorBindings, StaticVendorBindingError> {
-    if ptr::addr_of!(pTxRx).read_volatile() != ptr::addr_of_mut!(TxRxCxt).cast::<u8>() {
-        return Err(StaticVendorBindingError::TxRxContext);
-    }
-    if ptr::addr_of!(wDevCtrl_ptr).read_volatile() != ptr::addr_of_mut!(wDevCtrl).cast::<u8>() {
-        return Err(StaticVendorBindingError::WdevControl);
-    }
-    if ptr::addr_of!(g_ic_ptr).read_volatile() != ptr::addr_of_mut!(g_ic).cast::<u8>() {
-        return Err(StaticVendorBindingError::Net80211Interface);
-    }
-    if ptr::addr_of!(g_chm).read_volatile() != ptr::addr_of_mut!(gChmCxt).cast::<u8>() {
-        return Err(StaticVendorBindingError::ChannelManager);
-    }
-    Ok(StaticVendorBindings { _private: () })
+    validate_fixed_bindings()
+}
+
+/// Link-time replacement for the guarded net80211 pointer publisher.
+#[cfg(feature = "rust-static-bindings-interpose")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_net80211_data_ptr_init() {
+    write_net80211_fixed_bindings();
+}
+
+/// Link-time replacement for the PP/WDEV pointer publisher.
+#[cfg(feature = "rust-static-bindings-interpose")]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_wdev_data_init() -> i32 {
+    write_wdev_fixed_bindings();
+    0
 }

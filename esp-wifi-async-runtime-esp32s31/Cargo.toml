@@ -16,6 +16,10 @@ wpa-async-mic = []
 wpa-async-eap = []
 wpa-async = ["wpa-async-mic", "wpa-async-eap"]
 strict-no-wait = []
+# Replace the two audited static pointer-publishing vendor leaves with the
+# equivalent 43 direct Rust stores. The final link must additionally pass
+# --wrap=net80211_data_ptr_init and --wrap=wdev_data_init.
+rust-static-bindings-interpose = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []

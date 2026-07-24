@@ -257,8 +257,8 @@ pub use sta_link::{
 };
 #[cfg(target_arch = "riscv32")]
 pub use static_bindings::{
-    bind_static_vendor_state, validate_static_vendor_bindings, StaticVendorBindingError,
-    StaticVendorBindings,
+    bind_static_vendor_state, bind_static_vendor_state_in_rust, validate_static_vendor_bindings,
+    StaticVendorBinding, StaticVendorBindingError, StaticVendorBindings,
 };
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;

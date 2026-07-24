@@ -11,7 +11,53 @@ use anyhow::{bail, Context, Result};
 mod strict_policy;
 use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
 
-const ROM_ABI_BACKINGS: &[(&str, &str)] = &[("pTxRx", "TxRxCxt"), ("g_chm", "gChmCxt")];
+// Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
+// wdev_data_init (remaining 31) disassemblies.
+const ROM_ABI_BACKINGS: &[(&str, &str)] = &[
+    ("g_wifi_nvs", "s_wifi_nvs"),
+    ("g_scan", "gScanStruct"),
+    ("g_chm", "gChmCxt"),
+    ("g_ic_ptr", "g_ic"),
+    ("g_hmac_cnt_ptr", "g_hmac_cnt"),
+    ("g_tx_cacheq_ptr", "s_tx_cacheq"),
+    ("g_mac_sleep_en_ptr", "g_mac_sleep_en"),
+    ("g_esp_mesh_quick_funcs_ptr", "esp_mesh_quick_funcs"),
+    ("g_mesh_init_ps_type_ptr", "g_mesh_init_ps_type"),
+    ("g_mesh_is_started_ptr", "g_mesh_is_started"),
+    ("g_mesh_is_root_ptr", "g_mesh_is_root"),
+    ("g_mesh_topology_ptr", "g_mesh_topology"),
+    ("pTxRx", "TxRxCxt"),
+    ("lmacConfMib_ptr", "lmacConfMib"),
+    ("wDevCtrl_ptr", "wDevCtrl"),
+    ("wDevMacSleep_ptr", "wDevMacSleep"),
+    ("g_lmac_cnt_ptr", "g_lmac_cnt"),
+    ("pp_sig_cnt_ptr", "pp_sig_cnt"),
+    ("g_wifi_menuconfig_ptr", "g_wifi_menuconfig"),
+    ("g_eb_list_desc_ptr", "g_eb_list_desc"),
+    ("s_fragment_ptr", "s_fragment"),
+    ("if_ctrl_ptr", "if_ctrl"),
+    ("ap_no_lr_ptr", "ap_no_lr"),
+    ("rcLoRaSchedTbl_ptr", "rcLoRaSchedTbl"),
+    ("rc11NSchedTbl_ptr", "rc11NSchedTbl"),
+    ("rc11BSchedTbl_ptr", "rc11BSchedTbl"),
+    ("BasicOFDMSched_ptr", "BasicOFDMSched"),
+    ("trc_ctl_ptr", "trc_ctl"),
+    ("g_pm_cfg_ptr", "g_pm_cfg"),
+    ("g_pm_ptr", "g_pm"),
+    ("g_txop_queue_status_ptr", "g_txop_queue_status"),
+    ("g_pm_cnt_ptr", "g_pm_cnt"),
+    ("g_pp_timer_info_ptr", "g_pp_timer_info"),
+    ("g_rts_threshold_bytes_ptr", "g_rts_threshold_bytes"),
+    ("g_pm_twt_ptr", "g_pm_twt"),
+    ("g_he_max_apep_length_tab_ptr", "g_he_max_apep_length_tab"),
+    ("g_wdev_dbg_rx_ptr", "g_wdev_dbg_rx"),
+    ("s_pm_beacon_offset_ptr", "s_pm_beacon_offset"),
+    ("s_pm_beacon_offset_config_ptr", "s_pm_beacon_offset_config"),
+    ("s_tbttstart_ptr", "s_tbttstart"),
+    ("s_offchan_tx_progress_in_ptr", "offchan_tx_progress_in"),
+    ("g_offchan_packet_lifetime_ptr", "g_offchan_packet_lifetime"),
+    ("g_send_wake_null_timer_ptr", "send_wake_null_timer"),
+];
 
 #[derive(Clone)]
 struct Symbol {
@@ -178,6 +224,12 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
         .iter()
         .map(|section| section.size)
         .sum::<u64>();
+    let live_static_bindings = ROM_ABI_BACKINGS
+        .iter()
+        .filter(|(cell, backing)| {
+            final_symbols.contains_key(*cell) && final_symbols.contains_key(*backing)
+        })
+        .count();
 
     let mut report = String::new();
     pushln(
@@ -225,6 +277,13 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
             "- ROM-ABI mutable indirection cells reached by strict leaves: {} cells / {} inferred bytes",
             runtime_indirections.len(),
             runtime_indirections.len() * 4
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
+            "- fixed cold-init bindings live in this ELF: {live_static_bindings} / {}",
+            ROM_ABI_BACKINGS.len()
         ),
     );
     pushln(
@@ -311,6 +370,38 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
                     .as_ref()
                     .map_or_else(|| cell_role(name).to_owned(), |name| format!("`{name}`")),
                 code_set(referrers, 5)
+            ),
+        );
+    }
+
+    pushln(&mut report, "");
+    pushln(&mut report, "## Fixed cold-init state bindings");
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "These are the exact direct stores recovered from the two separately audited cold-init leaves. The Rust interposition path publishes the same backing addresses without calling either vendor body.",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "| ROM ABI cell | address | fixed backing | bytes | placement |",
+    );
+    pushln(&mut report, "|---|---:|---|---:|---|");
+    for (cell, backing) in ROM_ABI_BACKINGS {
+        let Some(cell_symbol) = final_symbols.get(*cell) else {
+            continue;
+        };
+        let Some(backing_symbol) = final_symbols.get(*backing) else {
+            continue;
+        };
+        pushln(
+            &mut report,
+            &format!(
+                "| `{cell}` | `0x{:08x}` | `{backing}` | {} | `{}` / `{}` |",
+                cell_symbol.address,
+                backing_symbol.size,
+                placement(backing_symbol.address),
+                section_name(backing_symbol.address, &sections),
             ),
         );
     }
@@ -769,7 +860,23 @@ fn text(output: Output) -> Result<String> {
 mod tests {
     use super::{
         definition_name, parse_archive_symbol, parse_posix_symbols, parse_sections, placement,
+        ROM_ABI_BACKINGS,
     };
+
+    #[test]
+    fn pinned_cold_init_has_43_unique_bindings() {
+        assert_eq!(ROM_ABI_BACKINGS.len(), 43);
+        let cells = ROM_ABI_BACKINGS
+            .iter()
+            .map(|(cell, _)| *cell)
+            .collect::<std::collections::BTreeSet<_>>();
+        let backings = ROM_ABI_BACKINGS
+            .iter()
+            .map(|(_, backing)| *backing)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(cells.len(), ROM_ABI_BACKINGS.len());
+        assert_eq!(backings.len(), ROM_ABI_BACKINGS.len());
+    }
 
     #[test]
     fn parses_archive_posix_symbol() {
