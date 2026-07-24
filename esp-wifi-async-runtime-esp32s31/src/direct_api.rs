@@ -38,10 +38,14 @@ struct ApiRequest {
 }
 
 impl ApiRequest {
-    const fn with_byte_argument(argument: u8) -> Self {
-        let mut bytes = [0; API_REQUEST_SIZE];
-        bytes[API_REQUEST_ARGUMENT_OFFSET] = argument;
-        Self { bytes }
+    unsafe fn with_byte_argument(argument: u8) -> core::mem::MaybeUninit<Self> {
+        let mut request = core::mem::MaybeUninit::<Self>::uninit();
+        request
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(API_REQUEST_ARGUMENT_OFFSET)
+            .write(argument);
+        request
     }
 }
 
@@ -139,7 +143,7 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_mode(mode: u32) -> i32 {
         return ESP_ERR_WIFI_NOT_INIT;
     }
     let mut request = ApiRequest::with_byte_argument(mode as u8);
-    let result = wifi_set_mode_process(core::ptr::addr_of_mut!(request).cast());
+    let result = wifi_set_mode_process(request.as_mut_ptr().cast());
     SET_MODE_LAST_RESULT.store(result as u32, Ordering::Relaxed);
     result
 }
@@ -162,15 +166,20 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_request_has_exact_zeroed_vendor_layout() {
-        let request = ApiRequest::with_byte_argument(3);
+    fn set_mode_request_has_exact_vendor_layout() {
         assert_eq!(core::mem::size_of::<ApiRequest>(), API_REQUEST_SIZE);
         assert_eq!(core::mem::align_of::<ApiRequest>(), 4);
-        assert_eq!(request.bytes[API_REQUEST_ARGUMENT_OFFSET], 3);
-        assert!(request
-            .bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| index == API_REQUEST_ARGUMENT_OFFSET || *byte == 0));
+        assert_eq!(core::mem::offset_of!(ApiRequest, bytes), 0);
+        let request = unsafe { ApiRequest::with_byte_argument(3) };
+        assert_eq!(
+            unsafe {
+                request
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(API_REQUEST_ARGUMENT_OFFSET)
+                    .read()
+            },
+            3
+        );
     }
 }
