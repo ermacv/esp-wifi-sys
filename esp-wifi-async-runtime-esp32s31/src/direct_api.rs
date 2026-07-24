@@ -38,6 +38,11 @@ static SET_PS_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
 static SET_PS_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
 static SET_PS_LAST_TYPE: AtomicU32 = AtomicU32::new(0);
 static SET_PS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static REG_RXCB_CALLS: AtomicU32 = AtomicU32::new(0);
+static REG_RXCB_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static REG_RXCB_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
+static REG_RXCB_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
+static REG_RXCB_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C, align(4))]
 struct ApiRequest {
@@ -52,6 +57,17 @@ impl ApiRequest {
             .cast::<u8>()
             .add(API_REQUEST_ARGUMENT_OFFSET)
             .write(argument);
+        request
+    }
+
+    unsafe fn with_rx_callback(interface: u8, callback: u32) -> core::mem::MaybeUninit<Self> {
+        let mut request = Self::with_byte_argument(interface);
+        request
+            .as_mut_ptr()
+            .cast::<u8>()
+            .add(12)
+            .cast::<u32>()
+            .write_unaligned(callback);
         request
     }
 }
@@ -81,6 +97,16 @@ pub struct DirectSetPsSnapshot {
     pub not_initialized: u32,
     pub invalid_arguments: u32,
     pub last_ps_type: u8,
+    pub last_result: i32,
+}
+
+/// Observation counters for direct RX callback registration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectRegRxcbSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub invalid_interfaces: u32,
+    pub last_interface: u8,
     pub last_result: i32,
 }
 
@@ -115,6 +141,17 @@ pub fn direct_set_ps_snapshot() -> DirectSetPsSnapshot {
     }
 }
 
+/// Return the current direct RX callback registration counters.
+pub fn direct_reg_rxcb_snapshot() -> DirectRegRxcbSnapshot {
+    DirectRegRxcbSnapshot {
+        calls: REG_RXCB_CALLS.load(Ordering::Relaxed),
+        not_initialized: REG_RXCB_NOT_INITIALIZED.load(Ordering::Relaxed),
+        invalid_interfaces: REG_RXCB_INVALID_INTERFACES.load(Ordering::Relaxed),
+        last_interface: REG_RXCB_LAST_INTERFACE.load(Ordering::Relaxed) as u8,
+        last_result: REG_RXCB_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -138,10 +175,19 @@ unsafe extern "C" {
 
 #[cfg(all(
     target_arch = "riscv32",
-    any(feature = "rust-direct-set-mode", feature = "rust-direct-set-ps")
+    any(
+        feature = "rust-direct-set-mode",
+        feature = "rust-direct-set-ps",
+        feature = "rust-direct-reg-rxcb"
+    )
 ))]
 unsafe extern "C" {
     fn wifi_init_completed() -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-rxcb"))]
+unsafe extern "C" {
+    fn wifi_set_rxcb_process(request: *mut core::ffi::c_void) -> i32;
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-mode"))]
@@ -225,6 +271,31 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_ps(ps_type: u32) -> i32 {
     result
 }
 
+/// Register an RX callback through the pinned finite interface dispatcher.
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-rxcb"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_internal_reg_rxcb(interface: u32, callback: usize) -> i32 {
+    const MAX_INTERFACE: u32 = 2;
+    const ESP_ERR_WIFI_IF: i32 = 0x3004;
+
+    REG_RXCB_CALLS.fetch_add(1, Ordering::Relaxed);
+    REG_RXCB_LAST_INTERFACE.store(interface, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        REG_RXCB_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        REG_RXCB_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    if interface > MAX_INTERFACE {
+        REG_RXCB_INVALID_INTERFACES.fetch_add(1, Ordering::Relaxed);
+        REG_RXCB_LAST_RESULT.store(ESP_ERR_WIFI_IF as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_IF;
+    }
+    let mut request = ApiRequest::with_rx_callback(interface as u8, callback as u32);
+    let result = wifi_set_rxcb_process(request.as_mut_ptr().cast());
+    REG_RXCB_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +338,16 @@ mod tests {
         assert_eq!(validate_ps_type(2), Ok(2));
         assert_eq!(validate_ps_type(3), Err(ESP_ERR_INVALID_ARG));
         assert_eq!(validate_ps_type(u32::MAX), Err(ESP_ERR_INVALID_ARG));
+    }
+
+    #[test]
+    fn rx_callback_request_has_exact_vendor_fields() {
+        let request = unsafe { ApiRequest::with_rx_callback(2, 0x1234_5678) };
+        let bytes = request.as_ptr().cast::<u8>();
+        assert_eq!(unsafe { bytes.add(API_REQUEST_ARGUMENT_OFFSET).read() }, 2);
+        assert_eq!(
+            unsafe { bytes.add(12).cast::<u32>().read_unaligned() },
+            0x1234_5678
+        );
     }
 }
