@@ -483,7 +483,6 @@ mod target {
     const STA_NODE_OFFSET: usize = 0xe4;
     const NODE_FLAGS_OFFSET: usize = 0x0c;
     const NODE_ASSOCIATION_ID_OFFSET: usize = 0x26;
-    const TX_CACHE_ENABLED_OFFSET: usize = 0x258;
     const MAX_CONNECTION_INDEX_OFFSET: usize = 0x3f6;
     const AP_NODE_LEN: usize = 0x510;
     const AP_NODE_HARDWARE_INDEX_OFFSET: usize = 0x134;
@@ -684,11 +683,7 @@ mod target {
         frame: *const u8,
         error: *mut u32,
     ) -> *mut u8 {
-        if ptr::addr_of_mut!(g_ic)
-            .add(TX_CACHE_ENABLED_OFFSET)
-            .read_volatile()
-            != 0
-        {
+        if !crate::net80211_state::ordinary_sta_ap_profile() {
             set_search_error(error, SEARCH_ERROR_CACHED_TX_ENABLED);
             return ptr::null_mut();
         }
@@ -1531,7 +1526,7 @@ mod target {
                 }
                 self.ap_retry_armed = false;
             }
-            if unsafe { core::ptr::addr_of_mut!(g_ic).add(0x258).read() } != 0 {
+            if !crate::net80211_state::ordinary_sta_ap_profile() {
                 return Err(S31Wpa2IoError::CachedTxRuntimeEnabled);
             }
 

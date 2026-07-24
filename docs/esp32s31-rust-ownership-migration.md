@@ -144,14 +144,14 @@ localize.
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
 symbols do not describe fields. This is intentionally conservative; it does
 not mean that all 788 bytes are needed by the strict runtime. Relocation and
-instruction inspection of the three remaining strict vendor referrers gives
+instruction inspection of the original three strict vendor referrers gives
 the narrower initial graph:
 
-| vendor leaf | `g_ic` fields read | current purpose | intended Rust owner |
+| vendor leaf | `g_ic` fields read | current purpose | status |
 |---|---|---|---|
-| `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry |
-| `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and reject mesh mode | AP peer/activity owner and mode policy |
-| `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | fixed TX queue policy |
+| `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
+| `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
+| `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | disabled policy proven; leaf remains |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -181,6 +181,13 @@ strict AP beacon completion now obtain interface identities from this
 registry. The pre-handoff AP-start probe deliberately retains its separate
 cold read because the registry is not published yet.
 
+The same handoff rejects active mesh state and the vendor cached-TX mode.
+Those are immutable strict-profile invariants, not flags polled on each
+runtime operation. Under the non-mesh invariant the pinned
+`ieee80211_hostapd_data_txcb` returns before reading its frame, so the strict
+TX callback table now installs the exact Rust no-op instead. This removes that
+function as a strict vendor root.
+
 Node tables and interface contents remain separate owners: publishing an
 interface does not grant arbitrary mutable access to every field behind its
 pointer. The registry adds 12 bytes of internal SRAM and was verified on S31
@@ -188,6 +195,6 @@ hardware through passive scan, WPA2 association, DHCP, ping, DNS, TCP, and
 post-link data with zero recorded allocations. The final ELF still passes the
 strict no-wait/no-heap audit with zero violations.
 
-After the three vendor leaves above have Rust replacements, the linked-state
+After the two remaining vendor leaves above have Rust replacements, the linked-state
 audit should no longer report `g_ic` as strict-vendor-reachable even while cold
 initialization still retains its backing.

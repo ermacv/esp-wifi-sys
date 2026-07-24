@@ -1271,7 +1271,7 @@ mod target {
             || node.is_null()
             || buffer.is_null()
             || node.add(4).read() & 1 != 0
-            || ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0
+            || !crate::net80211_state::ordinary_sta_ap_profile()
             || !is_at_home_channel()
         {
             if !buffer.is_null() {
@@ -1612,7 +1612,7 @@ mod target {
             Some(ManagementTxRejectionReason::NullBuffer)
         } else if !subtype_allowed {
             Some(ManagementTxRejectionReason::UnsupportedSubtype)
-        } else if ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0 {
+        } else if !crate::net80211_state::ordinary_sta_ap_profile() {
             Some(ManagementTxRejectionReason::MeshEnabled)
         } else if !is_at_home_channel() {
             Some(ManagementTxRejectionReason::OffHomeChannel)

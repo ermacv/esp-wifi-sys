@@ -5,7 +5,6 @@
 pub const ROOTS: &[&str] = &[
     "wDev_ProcessRxSucData",
     "hal_mac_rx_get_last_dscr",
-    "ieee80211_hostapd_data_txcb",
     "hal_mac_tx_set_cca",
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",

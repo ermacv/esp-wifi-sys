@@ -207,7 +207,6 @@ unsafe extern "C" {
     #[cfg(target_arch = "riscv32")]
     #[link_name = "__real_ieee80211_hostapd_beacon_txcb"]
     fn initialization_hostapd_beacon_txcb(frame: *mut c_void);
-    fn ieee80211_hostapd_data_txcb(frame: *mut c_void);
     fn ieee80211_hostapd_ps_txcb(frame: *mut c_void);
     #[link_name = "__esp_s31_addba_response_txcb"]
     fn addba_response_txcb(frame: *mut c_void);
@@ -590,8 +589,7 @@ pub unsafe extern "C" fn __wrap_ieee80211_tx_mgt_cb(frame: *mut c_void) {
 unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     const STRICT_AP_BEACON_INTERVAL_US: u32 = 100 * 1_024;
 
-    let ic = ptr::addr_of_mut!(g_ic).cast::<u8>();
-    if TmpSTAAPCloseAP != 0 || ic.add(0x74).cast::<usize>().read() != 0 {
+    if TmpSTAAPCloseAP != 0 || !crate::net80211_state::ordinary_sta_ap_profile() {
         return Err(());
     }
     let interface = crate::net80211_state::access_point_interface()
@@ -1781,11 +1779,16 @@ unsafe fn descriptor_queue(descriptor: *mut u8) -> u8 {
     ((descriptor.add(0x10).cast::<u32>().read() >> 20) & 0x0f) as u8
 }
 
+/// The pinned callback reads `g_ic+0x14`, then returns immediately when
+/// `g_ic+0x74` is zero. Strict handoff proves that ordinary non-mesh profile,
+/// so its exact reachable behavior has no frame side effect.
+unsafe extern "C" fn strict_ap_data_txdone(_frame: *mut c_void) {}
+
 fn callback_for_bit(bit: u8) -> Option<TxCallback> {
     match bit {
         CALLBACK_MGMT => Some(__wrap_ieee80211_tx_mgt_cb),
         CALLBACK_AP_BEACON => Some(__wrap_ieee80211_hostapd_beacon_txcb),
-        CALLBACK_AP_DATA => Some(ieee80211_hostapd_data_txcb),
+        CALLBACK_AP_DATA => Some(strict_ap_data_txdone),
         CALLBACK_AP_POWER_SAVE => Some(ieee80211_hostapd_ps_txcb),
         _ => None,
     }
