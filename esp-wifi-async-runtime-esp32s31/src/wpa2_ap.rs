@@ -1254,10 +1254,9 @@ mod target {
         }
         bitmap.write(updated);
 
-        let interface = ptr::addr_of_mut!(g_ic)
-            .add(0x14)
-            .cast::<*mut u8>()
-            .read_unaligned();
+        let interface = crate::net80211_state::access_point_interface()
+            .map(|interface| interface.as_ptr())
+            .unwrap_or(ptr::null_mut());
         if !interface.is_null() && interface.add(0xec).cast::<*mut u8>().read_unaligned() == node {
             let bss_tim = ptr::addr_of_mut!(g_ic).add(0x1b6);
             let flags = bss_tim.read();

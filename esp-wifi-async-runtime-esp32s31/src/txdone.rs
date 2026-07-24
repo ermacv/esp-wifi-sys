@@ -594,7 +594,9 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     if TmpSTAAPCloseAP != 0 || ic.add(0x74).cast::<usize>().read() != 0 {
         return Err(());
     }
-    let interface = ic.add(0x14).cast::<*mut u8>().read();
+    let interface = crate::net80211_state::access_point_interface()
+        .map(|interface| interface.as_ptr())
+        .unwrap_or(ptr::null_mut());
     if !interface.is_null()
         && BEACON_DTIM_SEND_MC != 0
         && !interface.add(0xec).cast::<*mut u8>().read().is_null()

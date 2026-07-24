@@ -48,6 +48,7 @@ mod lmac;
 pub mod michael;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_timer;
+mod net80211_state;
 pub mod osi;
 pub mod policy;
 pub mod queue;
@@ -247,6 +248,11 @@ pub use michael::{
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use net80211_timer::{
     rejected_net80211_timer_events, request_initial_ap_beacon, Net80211TimerError,
+};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use net80211_state::{
+    net80211_interface_registry_snapshot, Net80211InterfaceRegistrySnapshot,
+    Net80211InterfaceRole, Net80211StateAdoptionError,
 };
 pub use osi::{OsiPpQueue, RawQueueError};
 #[cfg(target_arch = "riscv32")]

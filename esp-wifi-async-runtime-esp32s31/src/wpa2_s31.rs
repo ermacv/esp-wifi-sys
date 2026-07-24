@@ -478,8 +478,6 @@ mod target {
     const SEARCH_ERROR_INTERFACE_MISSING: u32 = 0x3007;
     const SEARCH_ERROR_NODE_MISSING: u32 = 0x3015;
     const SEARCH_ERROR_TX_DISALLOWED: u32 = 0x3016;
-    const AP_INTERFACE_OFFSET: usize = 0x14;
-    const STA_INTERFACE_OFFSET: usize = 0x10;
     const INTERFACE_STATE_OFFSET: usize = 0x98;
     const INTERFACE_PRIMARY_NODE_OFFSET: usize = 0xec;
     const STA_NODE_OFFSET: usize = 0xe4;
@@ -498,6 +496,18 @@ mod target {
     const AP_FIRST_PEER_RATE_CONTEXT: usize = 1;
     const AP_LAST_PEER_RATE_CONTEXT: usize = 16;
     const AP_DEFAULT_RATE_CONTEXT: usize = 20;
+
+    fn station_interface() -> *mut u8 {
+        crate::net80211_state::station_interface()
+            .map(|interface| interface.as_ptr())
+            .unwrap_or(ptr::null_mut())
+    }
+
+    fn access_point_interface() -> *mut u8 {
+        crate::net80211_state::access_point_interface()
+            .map(|interface| interface.as_ptr())
+            .unwrap_or(ptr::null_mut())
+    }
 
     #[repr(C, align(4))]
     struct StaticApNode {
@@ -536,10 +546,7 @@ mod target {
         if peer.is_null() {
             return ptr::null_mut();
         }
-        let interface = ptr::addr_of_mut!(g_ic)
-            .add(AP_INTERFACE_OFFSET)
-            .cast::<*mut u8>()
-            .read_volatile();
+        let interface = access_point_interface();
         if interface.is_null() {
             return ptr::null_mut();
         }
@@ -607,10 +614,7 @@ mod target {
         {
             return ptr::null_mut();
         }
-        let interface = ptr::addr_of_mut!(g_ic)
-            .add(AP_INTERFACE_OFFSET)
-            .cast::<*mut u8>()
-            .read_volatile();
+        let interface = access_point_interface();
         let config = ptr::addr_of_mut!(g_wifi_nvs).read_volatile();
         if interface.is_null() || config.is_null() {
             return ptr::null_mut();
@@ -689,15 +693,9 @@ mod target {
             return ptr::null_mut();
         }
         let interface_state = if interface == wifi_interface_t_WIFI_IF_STA {
-            ptr::addr_of_mut!(g_ic)
-                .add(STA_INTERFACE_OFFSET)
-                .cast::<*mut u8>()
-                .read_volatile()
+            station_interface()
         } else if interface == wifi_interface_t_WIFI_IF_AP {
-            ptr::addr_of_mut!(g_ic)
-                .add(AP_INTERFACE_OFFSET)
-                .cast::<*mut u8>()
-                .read_volatile()
+            access_point_interface()
         } else {
             set_search_error(error, SEARCH_ERROR_INVALID_INTERFACE);
             return ptr::null_mut();
@@ -846,7 +844,7 @@ mod target {
         let node = match interface {
             Wpa2Interface::AccessPoint => cnx_node_search(peer),
             Wpa2Interface::Station => {
-                let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+                let interface = station_interface();
                 if interface.is_null() {
                     return 0;
                 }
@@ -861,7 +859,7 @@ mod target {
     }
 
     unsafe fn sta_interface_state() -> *mut u8 {
-        ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read()
+        station_interface()
     }
 
     unsafe fn sta_interface_node() -> *mut u8 {
@@ -1441,11 +1439,12 @@ mod target {
                 let mut peer_error = 0_u32;
                 let diagnostic_node =
                     unsafe { ieee80211_search_node(interface, frame.as_ptr(), &mut peer_error) };
-                let diagnostic_interface = unsafe {
-                    ptr::addr_of_mut!(g_ic)
-                        .add(0x10 + usize::try_from(interface).unwrap_or(0) * 4)
-                        .cast::<*mut u8>()
-                        .read()
+                let diagnostic_interface = if interface == wifi_interface_t_WIFI_IF_STA {
+                    station_interface()
+                } else if interface == wifi_interface_t_WIFI_IF_AP {
+                    access_point_interface()
+                } else {
+                    ptr::null_mut()
                 };
                 unsafe {
                     ets_printf(

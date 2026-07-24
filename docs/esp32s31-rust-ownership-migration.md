@@ -138,3 +138,56 @@ Public `ieee80211` and supplicant crates should remain behind adapters for now.
 Adopting them before the hardware/state boundaries are stable would combine a
 protocol migration with an ownership migration and make regressions harder to
 localize.
+
+## In-progress slice: `g_ic`
+
+The linked-state audit reports the complete 788-byte `g_ic` object because ELF
+symbols do not describe fields. This is intentionally conservative; it does
+not mean that all 788 bytes are needed by the strict runtime. Relocation and
+instruction inspection of the three remaining strict vendor referrers gives
+the narrower initial graph:
+
+| vendor leaf | `g_ic` fields read | current purpose | intended Rust owner |
+|---|---|---|---|
+| `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry |
+| `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and reject mesh mode | AP peer/activity owner and mode policy |
+| `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | fixed TX queue policy |
+
+The reference objects are pinned
+`libnet80211.a[ieee80211_output.o]` and
+`libnet80211.a[ieee80211_hostap.o]`. The offsets above are instruction
+operands or relocation addends, not inferred names.
+
+Rust code currently touches additional `g_ic` fields because it already
+reproduces finite pieces of vendor STA/AP behavior. They must be migrated by
+meaning rather than collected into a Rust byte-for-byte `g_ic` clone:
+
+- interface publications at `0x10` and `0x14`;
+- mesh-mode gate at `0x74`;
+- software-key pointer slots beginning at `0x148`;
+- AP TIM state beginning at `0x1b6`;
+- lifecycle/promiscuous state at `0x1f5` and `0x1f7`;
+- crypto gate and AP/STA MAC addresses at `0x210`, `0x214`, and `0x21a`;
+- configuration-dirty state at `0x226`;
+- cached-TX policy at `0x258`;
+- STA authorization state at `0x274`;
+- protocol selection at `0x2be` and `0x2c0`;
+- RX-policy selector at `0x2cc`.
+
+The first implementation step is complete: an interface registry adopts the
+STA/AP publications during cold handoff and exposes role-checked handles, not
+raw `g_ic` offsets. STA link, WPA2 STA/AP node lookup, AP TIM handling, and the
+strict AP beacon completion now obtain interface identities from this
+registry. The pre-handoff AP-start probe deliberately retains its separate
+cold read because the registry is not published yet.
+
+Node tables and interface contents remain separate owners: publishing an
+interface does not grant arbitrary mutable access to every field behind its
+pointer. The registry adds 12 bytes of internal SRAM and was verified on S31
+hardware through passive scan, WPA2 association, DHCP, ping, DNS, TCP, and
+post-link data with zero recorded allocations. The final ELF still passes the
+strict no-wait/no-heap audit with zero violations.
+
+After the three vendor leaves above have Rust replacements, the linked-state
+audit should no longer report `g_ic` as strict-vendor-reachable even while cold
+initialization still retains its backing.

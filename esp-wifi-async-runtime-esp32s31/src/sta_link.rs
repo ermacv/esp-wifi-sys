@@ -597,6 +597,12 @@ mod target {
     }
     const PHY_RATE_MCS7_SGI: u32 = 0x21;
 
+    fn station_interface() -> *mut u8 {
+        crate::net80211_state::station_interface()
+            .map(|interface| interface.as_ptr())
+            .unwrap_or(ptr::null_mut())
+    }
+
     unsafe fn set_default_sta_fixed_rate(rate: u8) -> bool {
         // `trc_init` installs the three allocation-backed default contexts at
         // g_per_conn_trc + 0x4c/0x50/0x54. Strict takeover happens only after
@@ -904,7 +910,7 @@ mod target {
 
     unsafe fn initialize_static_node(config: AuthConfig) -> Option<*mut u8> {
         let ic = ptr::addr_of_mut!(g_ic);
-        let interface = ic.add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         if interface.is_null() || interface.add(0x138).cast::<u32>().read() != 0 {
             return None;
         }
@@ -1152,7 +1158,7 @@ mod target {
         {
             return false;
         }
-        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         if interface.is_null() {
             return false;
         }
@@ -1321,7 +1327,7 @@ mod target {
             return;
         }
         let pending = *PENDING_RX_ADDBA.0.get();
-        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         let node = if interface.is_null() {
             ptr::null_mut()
         } else {
@@ -1407,7 +1413,7 @@ mod target {
             return false;
         }
         ADDBA_REQUESTS.fetch_add(1, Ordering::Relaxed);
-        let interface = unsafe { ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read() };
+        let interface = station_interface();
         if interface.is_null() {
             return true;
         }
@@ -1760,7 +1766,7 @@ mod target {
         if association_id == 0 || association_id > 0x3fff {
             return false;
         }
-        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         if interface.is_null() {
             return false;
         }
@@ -1890,7 +1896,7 @@ mod target {
         if !crate::tx_intercept::can_reset_sta_link() {
             return false;
         }
-        let interface = ptr::addr_of_mut!(g_ic).add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         if interface.is_null() {
             return false;
         }
@@ -1936,8 +1942,7 @@ mod target {
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
 
-        let ic = ptr::addr_of_mut!(g_ic);
-        let interface = ic.add(0x10).cast::<*mut u8>().read();
+        let interface = station_interface();
         let node = interface.add(0xe4).cast::<*mut u8>().read();
         interface.add(0xe4).cast::<*mut u8>().write(ptr::null_mut());
         interface.add(0x98).cast::<u32>().write(0);
