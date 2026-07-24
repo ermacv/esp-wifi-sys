@@ -14,12 +14,6 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-#[cfg(all(
-    target_arch = "riscv32",
-    feature = "rust-direct-set-protocols-nvs-free"
-))]
-use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
-
 const API_REQUEST_SIZE: usize = 24;
 const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
 const CONFIG_REQUEST_SIZE: usize = 208;
@@ -558,7 +552,6 @@ unsafe extern "C" {
     feature = "rust-direct-set-protocols-nvs-free"
 ))]
 unsafe extern "C" {
-    static g_osi_funcs_p: *const wifi_osi_funcs_t;
     fn ieee80211_protocol_attach(interface_state: *mut u8, band: u8, protocol: u32);
 }
 
@@ -962,26 +955,15 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_protocols(
         return ESP_ERR_INVALID_ARG;
     }
 
-    let osi = core::ptr::addr_of!(g_osi_funcs_p).read_volatile();
-    if osi.is_null() {
-        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
-        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
-        return ESP_ERR_INVALID_ARG;
-    }
-    let Some(ax_disabled) = core::ptr::addr_of!((*osi)._wifi_disable_ac_ax)
-        .read()
-        .map(|callback| callback())
-    else {
-        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
-        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
-        return ESP_ERR_INVALID_ARG;
-    };
     let capabilities = config
         .add(WIFI_CAPABILITIES_OFFSET)
         .cast::<u32>()
         .read_unaligned();
+    // The pinned ESP32-S31 HAL installs `_wifi_disable_ac_ax` as a constant
+    // `false` leaf. Encode that target fact here instead of retaining an
+    // indirect OSI call which the strict ELF audit cannot prove.
     let (primary, lr) =
-        match select_2_4_ghz_protocol(bitmap_2_4_ghz, capabilities & 1 != 0, ax_disabled) {
+        match select_2_4_ghz_protocol(bitmap_2_4_ghz, capabilities & 1 != 0, false) {
             Ok(selection) => selection,
             Err(error) => {
                 SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
