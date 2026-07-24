@@ -227,3 +227,28 @@ frees and 1,712 to 1,688 requested bytes. Two complete WPA2 scan,
 authentication, association, handshake and post-link cycles then passed with
 the allocation snapshot unchanged, 22/22 TX owners and 20/20 RX owners
 returned, and no queue rejection.
+
+The public `esp_wifi_set_mode` wrapper is another allocation-only API
+envelope. It first calls `wifi_init_completed`, allocates a 24-byte request,
+writes the requested mode at byte offset 8, and dispatches
+`wifi_set_mode_process`. The pinned process reads that one byte and performs
+the existing finite mode transition; it does not consume any other request
+field.
+
+`rust-direct-set-mode` preserves that initialization check and calls the
+vendor process with a stack-resident request of exact size 24 and alignment 4.
+Only byte offset 8 is initialized. The remaining bytes deliberately stay
+uninitialized because the reviewed process does not read them. An initial
+implementation cleared the whole request, but the compiler lowered that
+clear to a ROM `memset`; the ELF audit detected the unexpected third call and
+the implementation was changed to `MaybeUninit`.
+
+The final ELF audit rejects linked `esp_wifi_set_mode` or
+`__real_esp_wifi_set_mode` envelopes. It requires the direct wrapper's only
+calls to be `wifi_init_completed` followed by `wifi_set_mode_process`, and
+rejects a control-flow cycle. Hardware observed three calls, zero
+not-initialized returns, mode 1 and result 0. The exact allocation delta was
+32 to 29 calls, 21 to 18 frees and 1,688 to 1,616 requested bytes. Two
+complete scan, authentication, association, WPA2 handshake and post-link
+network cycles passed with no runtime allocation delta, allocation failure,
+radio-context allocator call or TX/RX owner leak.
