@@ -27,6 +27,10 @@ rust-static-pm-init-interpose = []
 # trc_init with exact fixed internal-SRAM owners. The paired deinitializer
 # accepts only those three publications and never enters the allocator.
 rust-static-trc-init-interpose = []
+# Replace the single four-byte adaptive-TBTT data allocation used by the
+# qualified one-interface STA/AP cold profile. Attach/deattach accept only the
+# exact fixed publication and never enter the allocator.
+rust-static-tbtt-adaptive-interpose = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.
