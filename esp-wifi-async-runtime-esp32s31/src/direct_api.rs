@@ -16,7 +16,13 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 const API_REQUEST_SIZE: usize = 24;
 const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
-#[cfg(all(target_arch = "riscv32", feature = "rust-direct-cold-stop"))]
+#[cfg(all(
+    target_arch = "riscv32",
+    any(
+        feature = "rust-direct-cold-stop",
+        feature = "rust-direct-set-max-tx-power"
+    )
+))]
 const WIFI_STATE_OFFSET: usize = 0x1f5;
 const WIFI_STATE_STARTED: u8 = 2;
 const ESP_OK: i32 = 0;
@@ -48,6 +54,12 @@ static REG_MGMT_FRAME_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
 static REG_MGMT_FRAME_LAST_MASK: AtomicU32 = AtomicU32::new(0);
 static REG_MGMT_FRAME_LAST_CONTEXT: AtomicU32 = AtomicU32::new(0);
 static REG_MGMT_FRAME_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_NOT_STARTED: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_LAST_POWER: AtomicU32 = AtomicU32::new(0);
+static SET_MAX_TX_POWER_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C, align(4))]
 struct ApiRequest {
@@ -139,6 +151,17 @@ pub struct DirectRegMgmtFrameSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for direct maximum-TX-power changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetMaxTxPowerSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub not_started: u32,
+    pub invalid_arguments: u32,
+    pub last_power: i8,
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -192,6 +215,18 @@ pub fn direct_reg_mgmt_frame_snapshot() -> DirectRegMgmtFrameSnapshot {
     }
 }
 
+/// Return the current direct maximum-TX-power counters.
+pub fn direct_set_max_tx_power_snapshot() -> DirectSetMaxTxPowerSnapshot {
+    DirectSetMaxTxPowerSnapshot {
+        calls: SET_MAX_TX_POWER_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_MAX_TX_POWER_NOT_INITIALIZED.load(Ordering::Relaxed),
+        not_started: SET_MAX_TX_POWER_NOT_STARTED.load(Ordering::Relaxed),
+        invalid_arguments: SET_MAX_TX_POWER_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        last_power: SET_MAX_TX_POWER_LAST_POWER.load(Ordering::Relaxed) as u8 as i8,
+        last_result: SET_MAX_TX_POWER_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -208,7 +243,25 @@ fn validate_ps_type(ps_type: u32) -> Result<u8, i32> {
     }
 }
 
-#[cfg(all(target_arch = "riscv32", feature = "rust-direct-cold-stop"))]
+fn validate_max_tx_power(power: i8) -> Result<u8, i32> {
+    const MIN_POWER: u8 = 8;
+    const MAX_POWER: u8 = 84;
+
+    let power = power as u8;
+    if (MIN_POWER..=MAX_POWER).contains(&power) {
+        Ok(power)
+    } else {
+        Err(ESP_ERR_INVALID_ARG)
+    }
+}
+
+#[cfg(all(
+    target_arch = "riscv32",
+    any(
+        feature = "rust-direct-cold-stop",
+        feature = "rust-direct-set-max-tx-power"
+    )
+))]
 unsafe extern "C" {
     static g_ic: u8;
 }
@@ -219,7 +272,8 @@ unsafe extern "C" {
         feature = "rust-direct-set-mode",
         feature = "rust-direct-set-ps",
         feature = "rust-direct-reg-rxcb",
-        feature = "rust-direct-reg-mgmt-frame"
+        feature = "rust-direct-reg-mgmt-frame",
+        feature = "rust-direct-set-max-tx-power"
     )
 ))]
 unsafe extern "C" {
@@ -234,6 +288,11 @@ unsafe extern "C" {
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-mgmt-frame"))]
 unsafe extern "C" {
     fn wifi_register_mgmt_frame(request: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-max-tx-power"))]
+unsafe extern "C" {
+    fn wifi_set_max_tpw(request: *mut core::ffi::c_void) -> i32;
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-mode"))]
@@ -367,6 +426,41 @@ pub unsafe extern "C" fn __wrap_esp_wifi_register_mgmt_frame_internal(
     result
 }
 
+/// Set maximum TX power through the pinned finite PHY process.
+///
+/// The public initialization, started-state and value-range checks are
+/// preserved. The process reads only byte 8, publishes the PHY limit and
+/// rebuilds the fixed 43-entry hardware power table.
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-max-tx-power"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_max_tx_power(power: i8) -> i32 {
+    SET_MAX_TX_POWER_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_MAX_TX_POWER_LAST_POWER.store(power as u8 as u32, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_MAX_TX_POWER_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_MAX_TX_POWER_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    let state = core::ptr::read_volatile(core::ptr::addr_of!(g_ic).add(WIFI_STATE_OFFSET));
+    if state < WIFI_STATE_STARTED {
+        SET_MAX_TX_POWER_NOT_STARTED.fetch_add(1, Ordering::Relaxed);
+        SET_MAX_TX_POWER_LAST_RESULT.store(ESP_ERR_WIFI_NOT_STARTED as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_STARTED;
+    }
+    let power = match validate_max_tx_power(power) {
+        Ok(power) => power,
+        Err(error) => {
+            SET_MAX_TX_POWER_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+            SET_MAX_TX_POWER_LAST_RESULT.store(error as u32, Ordering::Relaxed);
+            return error;
+        }
+    };
+    let mut request = ApiRequest::with_byte_argument(power);
+    let result = wifi_set_max_tpw(request.as_mut_ptr().cast());
+    SET_MAX_TX_POWER_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +503,16 @@ mod tests {
         assert_eq!(validate_ps_type(2), Ok(2));
         assert_eq!(validate_ps_type(3), Err(ESP_ERR_INVALID_ARG));
         assert_eq!(validate_ps_type(u32::MAX), Err(ESP_ERR_INVALID_ARG));
+    }
+
+    #[test]
+    fn maximum_tx_power_matches_the_vendor_public_validation() {
+        assert_eq!(validate_max_tx_power(7), Err(ESP_ERR_INVALID_ARG));
+        assert_eq!(validate_max_tx_power(8), Ok(8));
+        assert_eq!(validate_max_tx_power(84), Ok(84));
+        assert_eq!(validate_max_tx_power(85), Err(ESP_ERR_INVALID_ARG));
+        assert_eq!(validate_max_tx_power(-1), Err(ESP_ERR_INVALID_ARG));
+        assert_eq!(validate_max_tx_power(i8::MIN), Err(ESP_ERR_INVALID_ARG));
     }
 
     #[test]

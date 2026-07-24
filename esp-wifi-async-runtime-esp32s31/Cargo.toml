@@ -73,6 +73,10 @@ rust-direct-reg-rxcb = []
 # and invoke its finite process leaf directly. The leaf publishes only the
 # frame-subtype mask and callback context in the vendor control block.
 rust-direct-reg-mgmt-frame = []
+# Construct the pinned 24-byte maximum-TX-power request on stack after
+# preserving the public started-state and 8..=84 range checks. The process
+# performs finite PHY publication and a fixed 43-entry table rebuild.
+rust-direct-set-max-tx-power = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
