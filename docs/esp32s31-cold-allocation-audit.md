@@ -64,9 +64,22 @@ descriptor arena and payload buffers from 16-byte-aligned internal SRAM. It
 accepts only the audited allocator source, exact return offsets and exact
 1,704-byte payload size. The descriptor count is bounded to the qualified 32;
 the pool can be expanded only after more cold heap storage has been removed.
-Teardown
-recognizes and releases only exact pool addresses. The vendor function still
+Teardown recognizes and releases only exact pool addresses. The vendor function still
 performs the finite descriptor construction and hardware list publication.
+
+Hardware qualification of this first replacement produced the exact expected
+delta:
+
+- allocator calls: 115 to 82;
+- requested heap bytes: 128,984 to 74,072;
+- `wDev_Rxbuf_Init` heap sites: both absent from the trace;
+- first and second scan/association/WPA2/network cycles: successful;
+- post-handoff allocations, reallocations and allocation failures: zero;
+- radio-context allocator calls and blocking-probe hits: zero.
+
+The test image reduced its temporary bootstrap heap from 128 KiB to 80 KiB.
+It used 72,292 bytes and retained 9,628 bytes after handoff, proving that the
+new SRAM pool replaced rather than duplicated the old heap ownership.
 
 The ROM ESF pools are deliberately kept separate until their implementation
 return address, object classes, alignment and teardown ownership are pinned.
