@@ -89,7 +89,13 @@ pub unsafe extern "C" fn __wrap_pmksa_cache_deinit(cache: *mut u8) {
     if cache.cast::<u32>() != static_cache || !cache_is_empty(static_cache) {
         return;
     }
-    static_cache.write_bytes(0, CACHE_WORDS);
+    static_cache.add(ENTRY_HEAD_WORD).write_volatile(0);
+    static_cache.add(ENTRY_COUNT_WORD).write_volatile(0);
+    static_cache.add(WPA_SM_WORD).write_volatile(0);
+    static_cache.add(FREE_CALLBACK_WORD).write_volatile(0);
+    static_cache
+        .add(CALLBACK_CONTEXT_WORD)
+        .write_volatile(0);
 }
 
 #[cfg(test)]
