@@ -457,6 +457,15 @@ and `__wrap_pm_funcs_deinit` withdraws the pointer without entering `free`.
 `static_pm_functions_bound` verifies the live publication before strict
 handoff. This removes one cold-init allocation; it does not yet replace the
 surrounding vendor initialization sequence.
+Even with vendor persistence disabled, `misc_nvs_init` unconditionally
+allocates and clears a 0x3c-byte settings block before observing
+`nvs_enable == 0`. In that branch it performs no NVS operation; the linked
+consumers only use its WPS type/status words at offsets 4 and 8. The
+`rust-static-misc-nvs-init-interpose` feature replaces the init/deinit pair
+with a zeroed fixed internal-SRAM block and direct `g_misc_nvs` publication.
+`static_misc_nvs_bound` verifies that publication. This replacement is valid
+only for the non-persistent configuration established by
+`disable_vendor_nvs`.
 The next `ic_create_wifi_task` leaf is only a tail call into
 `pp_create_task`. That vendor envelope creates a queue and startup semaphore,
 invokes the OSI task-create callback, takes the semaphore with an infinite
