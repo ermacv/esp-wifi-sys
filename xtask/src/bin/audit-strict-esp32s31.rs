@@ -315,7 +315,7 @@ const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
 // not contain an instruction which transfers control to the absolute ROM
 // `ppProcessTxQ` export.
 const REQUIRED_SRAM_CODE: &[&str] = &[
-    "esp_wifi_async_runtime_esp32s31::tx_queue::process_tx_queue",
+    "process_tx_queue",
     "wifi_strict_env_is_chip",
     "__wrap_wDev_AppendRxBlocks",
 ];

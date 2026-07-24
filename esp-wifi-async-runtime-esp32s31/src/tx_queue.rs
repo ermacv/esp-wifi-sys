@@ -175,6 +175,7 @@ fn load_array(counters: &[AtomicU32; 5]) -> [u32; 5] {
 ///
 /// Must run under the same single radio owner as the original PP dispatcher.
 #[cfg(feature = "hil-vendor-tx")]
+#[no_mangle]
 #[link_section = ".rwtext.wifi_strict.tx_queue_process_hil"]
 pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessError> {
     let input = usize::from(queue);
@@ -298,6 +299,7 @@ unsafe fn stamp_ap_beacon(frame: *mut u8) -> Result<(), TxQueueProcessError> {
 }
 
 #[cfg(not(feature = "hil-vendor-tx"))]
+#[no_mangle]
 #[link_section = ".rwtext.wifi_strict.tx_queue_process"]
 pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessError> {
     if queue > 3 {
