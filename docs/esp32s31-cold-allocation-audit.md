@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 16 allocations, 5 frees and 936 requested
+the current image is down to 15 allocations, 4 frees and 912 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -433,3 +433,30 @@ snapshot, zero failures and zero radio-context allocator calls. The first
 completed ping, DNS, TCP and HTTP; both completed the Rust WPA2 handshake and
 post-link data path. The strict whole-ELF no-wait/no-heap audit reported zero
 violations.
+
+The strict handoff also calls `esp_wifi_set_promiscuous(false)` once and reads
+the state back before arming the ordinary AP/STA RX roots. The public setter
+allocates a 24-byte ioctl command even when promiscuous mode is already
+disabled. Its process cannot be admitted as a synchronous leaf: a real state
+change calls `wifi_hw_start` or `wifi_hw_stop` and reconfigures the virtual
+interface through `ic_set_vif`.
+
+`rust-direct-promiscuous-idempotent` preserves the initialization guard and
+reads the exact `g_ic + 0x1f7` control byte used by the public getter and
+process. It succeeds only when the requested boolean already equals that
+byte. Any actual transition, including a malformed control value, returns
+`ESP_ERR_WIFI_STATE`; changing optional RX mode belongs to an explicit Rust
+async lifecycle rather than this compatibility ABI.
+
+The final ELF audit rejects the original and `__real_` public envelopes. The
+wrapper must call only `wifi_init_completed`, contain no indirect transfer or
+cycle and cannot reach the vendor process, ioctl, hardware start/stop,
+`ic_set_vif`, `pp_post` or any allocator.
+
+Hardware produced the exact delta from 16 to 15 allocations, 5 to 4 frees and
+936 to 912 requested bytes. Two complete passive-scan, authentication,
+association and WPA2 reconnect cycles passed with an unchanged allocation
+snapshot, zero failures and zero radio-context allocator calls. The first
+completed ping, DNS, TCP and HTTP; after the second, 22/22 TX and 20/20 RX
+owners had returned without rejection. The strict whole-ELF no-wait/no-heap
+audit reported zero violations.
