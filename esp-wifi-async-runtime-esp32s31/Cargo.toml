@@ -86,6 +86,10 @@ rust-direct-set-country-nvs-free = []
 # This removes the allocator/ioctl envelope; Rust ownership of the configuration
 # globals is a separately audited follow-up boundary.
 rust-direct-set-config = []
+# Reduce the 2.4 GHz protocol bitmap and publish the selected pre-start
+# STA/AP/NAN protocol directly into fixed state. Active-radio changes, NVS,
+# stop/start, allocator and ioctl paths are deliberately unreachable.
+rust-direct-set-protocols-nvs-free = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.

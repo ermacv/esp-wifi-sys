@@ -14,6 +14,12 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-direct-set-protocols-nvs-free"
+))]
+use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
+
 const API_REQUEST_SIZE: usize = 24;
 const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
 const CONFIG_REQUEST_SIZE: usize = 208;
@@ -36,6 +42,7 @@ const ESP_ERR_WIFI_NOT_STARTED: i32 = 0x3002;
 const ESP_ERR_WIFI_IF: i32 = 0x3004;
 const ESP_ERR_WIFI_STATE: i32 = 0x3006;
 const ESP_ERR_WIFI_NVS: i32 = 0x3008;
+const ESP_ERR_NOT_SUPPORTED: i32 = 0x106;
 const MAX_PS_TYPE: u32 = 2;
 
 static CALLS: AtomicU32 = AtomicU32::new(0);
@@ -81,6 +88,15 @@ static SET_CONFIG_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
 static SET_CONFIG_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
 static SET_CONFIG_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
 static SET_CONFIG_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_ACTIVE_REJECTIONS: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_LAST_BITMAPS: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct WifiCountry {
@@ -240,6 +256,21 @@ pub struct DirectSetConfigSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for NVS-free pre-start protocol publication.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetProtocolsSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub active_rejections: u32,
+    pub invalid_interfaces: u32,
+    pub invalid_arguments: u32,
+    pub publications: u32,
+    pub last_interface: u8,
+    pub last_2_4_ghz_bitmap: u16,
+    pub last_5_ghz_bitmap: u16,
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -332,6 +363,23 @@ pub fn direct_set_config_snapshot() -> DirectSetConfigSnapshot {
     }
 }
 
+/// Return the current NVS-free protocol-publication counters.
+pub fn direct_set_protocols_snapshot() -> DirectSetProtocolsSnapshot {
+    let bitmaps = SET_PROTOCOLS_LAST_BITMAPS.load(Ordering::Relaxed);
+    DirectSetProtocolsSnapshot {
+        calls: SET_PROTOCOLS_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_PROTOCOLS_NOT_INITIALIZED.load(Ordering::Relaxed),
+        active_rejections: SET_PROTOCOLS_ACTIVE_REJECTIONS.load(Ordering::Relaxed),
+        invalid_interfaces: SET_PROTOCOLS_INVALID_INTERFACES.load(Ordering::Relaxed),
+        invalid_arguments: SET_PROTOCOLS_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        publications: SET_PROTOCOLS_PUBLICATIONS.load(Ordering::Relaxed),
+        last_interface: SET_PROTOCOLS_LAST_INTERFACE.load(Ordering::Relaxed) as u8,
+        last_2_4_ghz_bitmap: bitmaps as u16,
+        last_5_ghz_bitmap: (bitmaps >> 16) as u16,
+        last_result: SET_PROTOCOLS_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -379,12 +427,59 @@ fn normalized_operating_class(value: u8) -> u8 {
     }
 }
 
+fn interface_enabled_by_mode(interface: u32, mode: u8) -> bool {
+    match interface {
+        0 => mode & !2 == 1,
+        1 => matches!(mode, 2 | 3),
+        2 => mode & !2 == 4,
+        _ => false,
+    }
+}
+
+fn select_2_4_ghz_protocol(
+    bitmap: u16,
+    supports_2_4_ghz: bool,
+    ax_disabled: bool,
+) -> Result<(u8, u8), i32> {
+    const PROTOCOL_11B: u16 = 1 << 0;
+    const PROTOCOL_11G: u16 = 1 << 1;
+    const PROTOCOL_11N: u16 = 1 << 2;
+    const PROTOCOL_LR: u16 = 1 << 3;
+    const PROTOCOL_11A_OR_11AC: u16 = (1 << 4) | (1 << 5);
+    const PROTOCOL_11AX: u16 = 1 << 6;
+    const KNOWN_PROTOCOLS: u16 = 0x7f;
+
+    if bitmap == 0
+        || (supports_2_4_ghz
+            && (bitmap & PROTOCOL_11A_OR_11AC != 0 || bitmap & !KNOWN_PROTOCOLS != 0))
+        || (ax_disabled && bitmap & PROTOCOL_11AX != 0)
+    {
+        return Err(ESP_ERR_INVALID_ARG);
+    }
+
+    let primary = if bitmap & PROTOCOL_11AX != 0 {
+        7
+    } else if bitmap & PROTOCOL_11N != 0 {
+        3
+    } else if bitmap & PROTOCOL_11G != 0 {
+        2
+    } else if bitmap & PROTOCOL_11B != 0 {
+        1
+    } else if bitmap == PROTOCOL_LR {
+        4
+    } else {
+        return Err(ESP_ERR_INVALID_ARG);
+    };
+    Ok((primary, u8::from(bitmap & PROTOCOL_LR != 0)))
+}
+
 #[cfg(all(
     target_arch = "riscv32",
     any(
         feature = "rust-direct-cold-stop",
         feature = "rust-direct-set-max-tx-power",
-        feature = "rust-direct-set-country-nvs-free"
+        feature = "rust-direct-set-country-nvs-free",
+        feature = "rust-direct-set-protocols-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -393,7 +488,6 @@ unsafe extern "C" {
 
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-country-nvs-free"))]
 unsafe extern "C" {
-    static mut g_wifi_nvs: *mut u8;
     static g_wifi_menuconfig: u8;
     fn ieee80211_regdomain_get_country_info(
         requested: *const WifiCountry,
@@ -405,12 +499,24 @@ unsafe extern "C" {
 #[cfg(all(
     target_arch = "riscv32",
     any(
+        feature = "rust-direct-set-country-nvs-free",
+        feature = "rust-direct-set-protocols-nvs-free"
+    )
+))]
+unsafe extern "C" {
+    static mut g_wifi_nvs: *mut u8;
+}
+
+#[cfg(all(
+    target_arch = "riscv32",
+    any(
         feature = "rust-direct-set-mode",
         feature = "rust-direct-set-ps",
         feature = "rust-direct-reg-rxcb",
         feature = "rust-direct-reg-mgmt-frame",
         feature = "rust-direct-set-max-tx-power",
-        feature = "rust-direct-set-country-nvs-free"
+        feature = "rust-direct-set-country-nvs-free",
+        feature = "rust-direct-set-protocols-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -445,6 +551,15 @@ unsafe extern "C" {
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-config"))]
 unsafe extern "C" {
     fn wifi_set_config_process(request: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-direct-set-protocols-nvs-free"
+))]
+unsafe extern "C" {
+    static g_osi_funcs_p: *const wifi_osi_funcs_t;
+    fn ieee80211_protocol_attach(interface_state: *mut u8, band: u8, protocol: u32);
 }
 
 /// Replace only the qualified pre-start use of `esp_wifi_stop`.
@@ -768,6 +883,168 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_config(
     result
 }
 
+/// Publish the selected 2.4 GHz protocol before radio start without NVS/ioctl.
+///
+/// The pinned public API reduces the bitmap to one primary PHY mode plus the
+/// LR flag, then enters an allocator-backed ioctl whose process may stop and
+/// restart an active interface and persists the same fields through NVS.
+/// Strict initialization needs only the pre-start branch. Rust therefore owns
+/// the validation and fixed-state publication, rejects active-radio changes,
+/// and calls the finite protocol attach leaf only when the live interface
+/// state actually changed.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-direct-set-protocols-nvs-free"
+))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_protocols(
+    interface: u32,
+    protocols: *mut core::ffi::c_void,
+) -> i32 {
+    const MAX_INTERFACE: u32 = 2;
+    const WIFI_CAPABILITIES_OFFSET: usize = 0x59c;
+    const WIFI_STA_PROTOCOL_OFFSET: usize = 0x9c;
+    const WIFI_AP_PROTOCOL_OFFSET: usize = 0x3fa;
+    const WIFI_NAN_PROTOCOL_OFFSET: usize = 0x51c;
+    const WIFI_STA_LR_OFFSET: usize = 0x475;
+    const WIFI_AP_LR_OFFSET: usize = 0x511;
+    const WIFI_STA_STATE_OFFSET: usize = 0x10;
+    const WIFI_AP_STATE_OFFSET: usize = 0x14;
+    const WIFI_INTERFACE_PROTOCOL_OFFSET: usize = 0x154;
+    const WIFI_IC_STA_PROTOCOL_OFFSET: usize = 0x2c0;
+    const WIFI_IC_AP_PROTOCOL_OFFSET: usize = 0x2be;
+    const WIFI_CONFIG_CHANGED_OFFSET: usize = 0x226;
+
+    SET_PROTOCOLS_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_PROTOCOLS_LAST_INTERFACE.store(interface, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_PROTOCOLS_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    if interface > MAX_INTERFACE {
+        SET_PROTOCOLS_INVALID_INTERFACES.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_IF as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_IF;
+    }
+    if protocols.is_null() {
+        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    let bitmaps = protocols.cast::<u32>().read_unaligned();
+    SET_PROTOCOLS_LAST_BITMAPS.store(bitmaps, Ordering::Relaxed);
+    let bitmap_2_4_ghz = bitmaps as u16;
+    let bitmap_5_ghz = (bitmaps >> 16) as u16;
+    if bitmap_5_ghz != 0 {
+        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_NOT_SUPPORTED as u32, Ordering::Relaxed);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    let state = core::ptr::read_volatile(core::ptr::addr_of!(g_ic).add(WIFI_STATE_OFFSET));
+    if state >= WIFI_STATE_STARTED {
+        SET_PROTOCOLS_ACTIVE_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_STATE as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_STATE;
+    }
+
+    let config = core::ptr::addr_of!(g_wifi_nvs).read_volatile();
+    if config.is_null() {
+        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_NVS as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NVS;
+    }
+    if !interface_enabled_by_mode(interface, config.read_volatile()) {
+        SET_PROTOCOLS_INVALID_INTERFACES.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    let osi = core::ptr::addr_of!(g_osi_funcs_p).read_volatile();
+    if osi.is_null() {
+        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+    let Some(ax_disabled) = core::ptr::addr_of!((*osi)._wifi_disable_ac_ax)
+        .read()
+        .map(|callback| callback())
+    else {
+        SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    };
+    let capabilities = config
+        .add(WIFI_CAPABILITIES_OFFSET)
+        .cast::<u32>()
+        .read_unaligned();
+    let (primary, lr) =
+        match select_2_4_ghz_protocol(bitmap_2_4_ghz, capabilities & 1 != 0, ax_disabled) {
+            Ok(selection) => selection,
+            Err(error) => {
+                SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+                SET_PROTOCOLS_LAST_RESULT.store(error as u32, Ordering::Relaxed);
+                return error;
+            }
+        };
+
+    let ic = core::ptr::addr_of!(g_ic);
+    match interface {
+        0 => {
+            let protocol_changed = config.add(WIFI_STA_PROTOCOL_OFFSET).read() != primary
+                || ic.add(WIFI_IC_STA_PROTOCOL_OFFSET).read() != primary
+                || config.add(WIFI_STA_LR_OFFSET).read() != lr;
+            config.add(WIFI_STA_PROTOCOL_OFFSET).write(primary);
+            config.add(WIFI_STA_LR_OFFSET).write(lr);
+            ic.add(WIFI_IC_STA_PROTOCOL_OFFSET)
+                .cast_mut()
+                .write(primary);
+            if protocol_changed {
+                let interface_state = ic
+                    .add(WIFI_STA_STATE_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_unaligned();
+                if !interface_state.is_null() {
+                    interface_state
+                        .add(WIFI_INTERFACE_PROTOCOL_OFFSET)
+                        .write(primary);
+                    ieee80211_protocol_attach(interface_state, 1, u32::from(primary));
+                }
+            }
+        }
+        1 => {
+            let protocol_changed = config.add(WIFI_AP_PROTOCOL_OFFSET).read() != primary
+                || ic.add(WIFI_IC_AP_PROTOCOL_OFFSET).read() != primary
+                || config.add(WIFI_AP_LR_OFFSET).read() != lr;
+            config.add(WIFI_AP_PROTOCOL_OFFSET).write(primary);
+            config.add(WIFI_AP_LR_OFFSET).write(lr);
+            ic.add(WIFI_IC_AP_PROTOCOL_OFFSET).cast_mut().write(primary);
+            if protocol_changed {
+                let interface_state = ic
+                    .add(WIFI_AP_STATE_OFFSET)
+                    .cast::<*mut u8>()
+                    .read_unaligned();
+                if !interface_state.is_null() {
+                    interface_state
+                        .add(WIFI_INTERFACE_PROTOCOL_OFFSET)
+                        .write(primary);
+                    ieee80211_protocol_attach(interface_state, 1, u32::from(primary));
+                }
+            }
+        }
+        2 => config.add(WIFI_NAN_PROTOCOL_OFFSET).write(primary),
+        _ => unreachable!(),
+    }
+    ic.add(WIFI_CONFIG_CHANGED_OFFSET)
+        .cast_mut()
+        .write_volatile(1);
+    SET_PROTOCOLS_PUBLICATIONS.fetch_add(1, Ordering::Relaxed);
+    SET_PROTOCOLS_LAST_RESULT.store(ESP_OK as u32, Ordering::Relaxed);
+    ESP_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +1107,48 @@ mod tests {
         assert!(bytes[CONFIG_REQUEST_PAYLOAD_OFFSET + WIFI_CONFIG_SIZE..]
             .iter()
             .all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn protocol_bitmap_selection_matches_the_pinned_priority() {
+        assert_eq!(select_2_4_ghz_protocol(0x47, true, false), Ok((7, 0)));
+        assert_eq!(select_2_4_ghz_protocol(0x0f, true, false), Ok((3, 1)));
+        assert_eq!(select_2_4_ghz_protocol(0x03, true, false), Ok((2, 0)));
+        assert_eq!(select_2_4_ghz_protocol(0x01, true, false), Ok((1, 0)));
+        assert_eq!(select_2_4_ghz_protocol(0x08, true, false), Ok((4, 1)));
+    }
+
+    #[test]
+    fn protocol_bitmap_validation_rejects_unsupported_shapes() {
+        assert_eq!(
+            select_2_4_ghz_protocol(0, true, false),
+            Err(ESP_ERR_INVALID_ARG)
+        );
+        assert_eq!(
+            select_2_4_ghz_protocol(0x10, true, false),
+            Err(ESP_ERR_INVALID_ARG)
+        );
+        assert_eq!(
+            select_2_4_ghz_protocol(0x40, true, true),
+            Err(ESP_ERR_INVALID_ARG)
+        );
+        assert_eq!(
+            select_2_4_ghz_protocol(0x80, true, false),
+            Err(ESP_ERR_INVALID_ARG)
+        );
+    }
+
+    #[test]
+    fn protocol_interfaces_follow_the_selected_wifi_mode() {
+        assert!(interface_enabled_by_mode(0, 1));
+        assert!(interface_enabled_by_mode(0, 3));
+        assert!(!interface_enabled_by_mode(0, 2));
+        assert!(interface_enabled_by_mode(1, 2));
+        assert!(interface_enabled_by_mode(1, 3));
+        assert!(!interface_enabled_by_mode(1, 1));
+        assert!(interface_enabled_by_mode(2, 4));
+        assert!(interface_enabled_by_mode(2, 6));
+        assert!(!interface_enabled_by_mode(3, 3));
     }
 
     #[test]
