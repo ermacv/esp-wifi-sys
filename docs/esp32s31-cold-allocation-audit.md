@@ -15,7 +15,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 9 allocations, 2 frees and 340 requested
+the current image is down to 8 allocations, 2 frees and 336 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -546,3 +546,38 @@ DNS, TCP and HTTP. Teardown and a second scan/WPA2/post-link-data cycle also
 completed with the snapshot fixed at 9/2/340, zero allocation failure and
 zero radio-context allocator calls. The strict whole-ELF no-wait/no-heap
 audit reported zero violations.
+
+`pm_extend_tbtt_adaptive_attach` was the next persistent allocation boundary.
+Reverse inspection recovered a data size of
+`(interface[0x2a2] + 1) * sizeof(u32)`. The qualified STA/AP cold path has a
+zero value at that halfword, so the attachment owns exactly one zeroed
+32-bit word. The function publishes the interface through offset 0 of the
+singleton returned by the call-free `pm_extend_tbtt_adaptive_instance`,
+publishes that singleton at interface offset 0x430 and stores the allocated
+data pointer at singleton offset 0x0c. The vendor deattachment frees the data
+pointer and clears the two singleton fields.
+
+`rust-static-tbtt-adaptive-interpose` now supplies that exact word from an
+aligned internal-SRAM section. Attachment fails closed on a null interface,
+on a nonzero audited count halfword or if either publication is already
+owned. It then zeros the word and performs only the recovered publications.
+Deattachment accepts only the exact static pointer, zeros it and clears the
+singleton publications without entering a deallocator. This intentionally
+does not generalize the boundary to an unqualified variable-sized adaptive
+array.
+
+The final ELF audit requires the exact four-byte SRAM section, rejects the
+original and `__real_` attach/deattach implementations and proves the
+singleton accessor is the expected call-free address materialization. The
+attach wrapper must contain exactly six stores, the deattach wrapper exactly
+four, both must be acyclic, and their only call target may be the singleton
+accessor.
+
+Hardware removed exactly one allocation and four requested bytes, producing
+8 allocations, 2 observed frees and 336 requested bytes. The first strict
+WPA2 cycle completed passive scan, authentication, association, M1-M4, DHCP,
+ping, DNS, TCP and HTTP. Teardown and the second scan/authentication/
+association/WPA2 cycle completed post-link traffic with the allocation
+snapshot fixed at 8/2/336, zero failures, zero radio-context allocator calls
+and no TX/RX queue rejection. The strict whole-ELF no-wait/no-heap audit
+again reported zero violations.
