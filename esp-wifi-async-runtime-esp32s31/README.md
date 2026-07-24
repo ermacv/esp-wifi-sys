@@ -435,6 +435,9 @@ archive relocations with the final ELF to report the exact live mutable blob
 objects, ROM ABI cells, Rust strict sections, wrappers, direct aliases, and
 retained `__real_*` ROM oracles. Its generated snapshot is
 [`../docs/esp32s31-linked-state-audit.md`](../docs/esp32s31-linked-state-audit.md).
+The ownership model, reverse-engineering evidence, completed channel-manager
+slice, and next state-migration priorities are maintained in
+[`../docs/esp32s31-rust-ownership-migration.md`](../docs/esp32s31-rust-ownership-migration.md).
 The two leaves contain exactly 43 pointer publications: 12 net80211 bindings
 and 31 PP/WDEV bindings. `bind_static_vendor_state` exposes the audited vendor
 leaves as a serialized cold-init operation, while

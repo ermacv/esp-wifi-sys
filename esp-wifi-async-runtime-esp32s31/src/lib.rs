@@ -17,6 +17,7 @@ pub mod adapter;
 pub mod allocation;
 mod ap_power_save;
 pub mod channel;
+mod channel_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod channel_switch;
 pub mod command;
@@ -158,7 +159,12 @@ pub use allocation::{
 pub use ap_power_save::{ap_power_save_snapshot, ApPowerSaveSnapshot};
 pub use channel::{BoundedChannel, Receive, TrySendError};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use channel_switch::{channel_switch_snapshot, ChannelSwitchError, ChannelSwitchSnapshot};
+pub use channel_state::ChannelStateAdoptionError;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use channel_switch::{
+    channel_state_snapshot, channel_switch_snapshot, ChannelStateSnapshot, ChannelSwitchError,
+    ChannelSwitchSnapshot,
+};
 pub use command::{
     PendingCommandAction, RadioCommandHandler, RadioCommandQueue, RadioCommandReady,
     RadioCommandSnapshot, RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,

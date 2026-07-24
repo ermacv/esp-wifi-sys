@@ -2,10 +2,14 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
-use crate::adapter::schedule_internal_timer;
+use crate::{
+    adapter::schedule_internal_timer,
+    channel_state::{ChannelState, ChannelStateAdoptionError, CHANNEL_COUNT, CHANNEL_INFO_BYTES},
+    timer::RawOsiTimer,
+};
 
 const MAC_CONTROL: *mut u32 = 0x2010_4cac as *mut u32;
 const MAC_STOP_MASK: u32 = 0x00ff_1000;
@@ -40,12 +44,10 @@ unsafe extern "C" {
     ) -> i32;
     fn chm_return_home_channel();
     fn __real_chm_return_home_channel();
-    fn chm_get_chan_info(primary: u8) -> *const u8;
     fn ic_set_current_channel(channel: *const u8);
     fn phy_change_channel(frequency_mhz: u16, init: u32, noise_floor: u32, cbw: u32);
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
-    fn __esp_scan_op_end(context: *mut c_void, result: u32);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +74,13 @@ pub struct ChannelSwitchSnapshot {
     pub phy_function_table_current: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChannelStateSnapshot {
+    pub adopted: bool,
+    pub home: Option<[u8; 2]>,
+    pub current: Option<[u8; 2]>,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Completion {
     Operation,
@@ -82,10 +91,16 @@ enum Completion {
 struct State {
     active: bool,
     waiting_for_mac_edge: bool,
+    operation_active: bool,
     channel: [u8; 2],
     frequency_mhz: u16,
     cbw: u8,
     completion: Completion,
+    first_dwell_ms: u32,
+    final_dwell_ms: u32,
+    start: Option<ChannelCallback>,
+    end: Option<ChannelCallback>,
+    context: *mut c_void,
     started: u32,
     completed: u32,
 }
@@ -95,23 +110,72 @@ impl State {
         Self {
             active: false,
             waiting_for_mac_edge: false,
+            operation_active: false,
             channel: [0; 2],
             frequency_mhz: 0,
             cbw: 0,
             completion: Completion::Operation,
+            first_dwell_ms: 0,
+            final_dwell_ms: 0,
+            start: None,
+            end: None,
+            context: ptr::null_mut(),
             started: 0,
             completed: 0,
         }
     }
+
+    fn clear_operation(&mut self) {
+        self.operation_active = false;
+        self.first_dwell_ms = 0;
+        self.final_dwell_ms = 0;
+        self.start = None;
+        self.end = None;
+        self.context = ptr::null_mut();
+    }
 }
 
-struct StateCell(UnsafeCell<State>);
-unsafe impl Sync for StateCell {}
+struct ChannelResources {
+    machine: UnsafeCell<State>,
+    channels: UnsafeCell<ChannelState>,
+    first_timer: UnsafeCell<RawOsiTimer>,
+    final_timer: UnsafeCell<RawOsiTimer>,
+}
 
-static STATE: StateCell = StateCell(UnsafeCell::new(State::new()));
+impl ChannelResources {
+    const fn new() -> Self {
+        Self {
+            machine: UnsafeCell::new(State::new()),
+            channels: UnsafeCell::new(ChannelState::new()),
+            first_timer: UnsafeCell::new(RawOsiTimer {
+                next: ptr::null_mut(),
+                expire: 0,
+                period: 0,
+                callback: None,
+                argument: ptr::null_mut(),
+            }),
+            final_timer: UnsafeCell::new(RawOsiTimer {
+                next: ptr::null_mut(),
+                expire: 0,
+                period: 0,
+                callback: None,
+                argument: ptr::null_mut(),
+            }),
+        }
+    }
+}
+
+// Machine access is serialized by the single strict radio owner. Home/current
+// selectors use atomic publication so synchronous readers need neither an
+// interrupt mask nor a critical section. The timers are stable-address
+// identities registered in Rust's fixed timer pool; they are not vendor
+// `gChmCxt` timer objects.
+unsafe impl Sync for ChannelResources {}
+
+#[link_section = ".critical.bss.wifi_strict.channel_resources"]
+static RESOURCES: ChannelResources = ChannelResources::new();
 static FAILURE: AtomicU32 = AtomicU32::new(ChannelSwitchError::None as u32);
 static MAC_FAILURE_STATUS: AtomicU32 = AtomicU32::new(0);
-static LEGACY_DWELL_ACCEPTED: AtomicBool = AtomicBool::new(false);
 static PHY_FUNCTION_TABLE_EXPECTED: AtomicUsize = AtomicUsize::new(0);
 static PHY_FUNCTION_TABLE_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
@@ -125,12 +189,11 @@ pub(crate) fn link_wrappers_active() -> bool {
 
 pub fn channel_switch_snapshot() -> ChannelSwitchSnapshot {
     #[cfg(target_arch = "riscv32")]
-    let live_phy_function_table =
-        unsafe { ptr::addr_of!(g_phyFuns).read_volatile() as usize };
+    let live_phy_function_table = unsafe { ptr::addr_of!(g_phyFuns).read_volatile() as usize };
     #[cfg(not(target_arch = "riscv32"))]
     let live_phy_function_table = PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire);
     PHY_FUNCTION_TABLE_CURRENT.store(live_phy_function_table, Ordering::Release);
-    let state = unsafe { &*STATE.0.get() };
+    let state = unsafe { &*RESOURCES.machine.get() };
     ChannelSwitchSnapshot {
         started: state.started,
         completed: state.completed,
@@ -139,6 +202,57 @@ pub fn channel_switch_snapshot() -> ChannelSwitchSnapshot {
         phy_function_table_expected: PHY_FUNCTION_TABLE_EXPECTED.load(Ordering::Acquire),
         phy_function_table_current: PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire),
     }
+}
+
+pub fn channel_state_snapshot() -> ChannelStateSnapshot {
+    let channels = unsafe { &*RESOURCES.channels.get() };
+    ChannelStateSnapshot {
+        adopted: channels.adopted(),
+        home: channels.home(),
+        current: channels.current(),
+    }
+}
+
+pub(crate) fn home_channel() -> Option<[u8; 2]> {
+    unsafe { (&*RESOURCES.channels.get()).home() }
+}
+
+pub(crate) fn is_at_home_channel() -> bool {
+    let channels = unsafe { &*RESOURCES.channels.get() };
+    matches!(
+        (channels.home(), channels.current()),
+        (Some(home), Some(current)) if home == current
+    )
+}
+
+/// Copy the finite channel-manager state needed after strict handoff.
+///
+/// This is the only permitted read of the vendor `g_chm` pointer in the
+/// strict implementation. The source is cold state initialized by pinned
+/// `wl_chm.o`; all later transitions use [`RESOURCES`].
+///
+/// # Safety
+/// The vendor Wi-Fi instance must be initialized, its channel operation must
+/// be idle, and no radio handler may execute concurrently.
+pub(crate) unsafe fn adopt_vendor_channel_state() -> Result<(), ChannelStateAdoptionError> {
+    let source = g_chm;
+    if source.is_null() {
+        return Err(ChannelStateAdoptionError::StateUnavailable);
+    }
+    if source.add(4).read() != u8::MAX {
+        return Err(ChannelStateAdoptionError::OperationInProgress);
+    }
+
+    let home = [source.add(80).read(), source.add(81).read()];
+    let current = [source.add(82).read(), source.add(83).read()];
+    let mut records = [[0_u8; CHANNEL_INFO_BYTES]; CHANNEL_COUNT];
+    for (index, destination) in records.iter_mut().enumerate() {
+        let record = source.add(84 + index * CHANNEL_INFO_BYTES);
+        for (offset, byte) in destination.iter_mut().enumerate() {
+            *byte = record.add(offset).read();
+        }
+    }
+    (&mut *RESOURCES.channels.get()).adopt(home, current, records)
 }
 
 pub(crate) fn failure() -> Option<ChannelSwitchError> {
@@ -160,70 +274,37 @@ const fn decode_error(raw: u32) -> ChannelSwitchError {
     }
 }
 
-/// Complete the single scan dwell that may already be armed when the cold
-/// handoff enters strict mode. Its callback identity and `g_chm` state are
-/// checked before rejecting its vendor-owned callback. Every later
-/// scan operation is created through `__wrap_chm_start_op` instead.
+/// A vendor-owned dwell cannot cross the ownership handoff. The cold adoption
+/// step rejects a busy `gChmCxt`, so this compatibility entry always fails
+/// closed and never executes a vendor callback.
 pub(crate) unsafe fn complete_legacy_scan_dwell(which: usize) -> Result<(), ChannelSwitchError> {
     if which > 1 || !crate::critical::on_strict_wifi_hart() {
         return Err(ChannelSwitchError::LegacyDwellRejected);
     }
-    let chm = g_chm;
-    if chm.is_null()
-        || chm.add(4).read() == u8::MAX
-        || (*STATE.0.get()).active
-        || chm
-            .add(24)
-            .cast::<Option<ChannelCallback>>()
-            .read_unaligned()
-            .is_none_or(|callback| callback as *const () != __esp_scan_op_end as *const ())
-        || LEGACY_DWELL_ACCEPTED
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-    {
-        return Err(ChannelSwitchError::LegacyDwellRejected);
-    }
-    let _ = which;
     Err(ChannelSwitchError::LegacyDwellRejected)
 }
 
 unsafe fn fail(error: ChannelSwitchError, detail: u32) {
-    let state = &mut *STATE.0.get();
+    let state = &mut *RESOURCES.machine.get();
     state.active = false;
     state.waiting_for_mac_edge = false;
+    state.clear_operation();
     MAC_FAILURE_STATUS.store(detail, Ordering::Relaxed);
     FAILURE.store(error as u32, Ordering::Release);
     crate::scan::channel_switch_failed(error as u32);
 }
 
 unsafe fn first_timer() -> *mut c_void {
-    g_chm.add(36).cast()
+    RESOURCES.first_timer.get().cast()
 }
 
 unsafe fn final_timer() -> *mut c_void {
-    g_chm.add(56).cast()
+    RESOURCES.final_timer.get().cast()
 }
 
 unsafe fn prepare_channel(channel: [u8; 2]) -> Option<(u16, u8)> {
-    let info = chm_get_chan_info(channel[0]);
-    if info.is_null() {
-        return None;
-    }
-    let mut frequency = info.add(2).cast::<u16>().read_unaligned();
-    let cbw = match channel[1] {
-        2 if (5..=13).contains(&channel[0]) => {
-            frequency = frequency.checked_sub(10)?;
-            3
-        }
-        1 if (1..=9).contains(&channel[0]) => {
-            frequency = frequency.checked_add(10)?;
-            2
-        }
-        // `_env_is_chip()` is true for the only supported target: real S31
-        // silicon. The alternate value is an emulator-only PHY convention.
-        _ => 0,
-    };
-    Some((frequency, cbw))
+    let prepared = (&*RESOURCES.channels.get()).prepare(channel)?;
+    Some((prepared.frequency_mhz, prepared.cbw))
 }
 
 unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelSwitchError> {
@@ -233,7 +314,7 @@ unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelS
     if failure().is_some() {
         return Err(ChannelSwitchError::Busy);
     }
-    let state = &mut *STATE.0.get();
+    let state = &mut *RESOURCES.machine.get();
     if state.active {
         return Err(ChannelSwitchError::Busy);
     }
@@ -274,7 +355,7 @@ unsafe extern "C" fn mac_command_settled(_argument: *mut c_void) {
 }
 
 unsafe fn try_finish_mac_stop() {
-    let state = &mut *STATE.0.get();
+    let state = &mut *RESOURCES.machine.get();
     if !state.active {
         return;
     }
@@ -305,14 +386,17 @@ pub(crate) unsafe fn tx_done_edge() {
     if !crate::critical::strict_wifi_hart_armed() || !crate::critical::on_strict_wifi_hart() {
         return;
     }
-    if (*STATE.0.get()).waiting_for_mac_edge {
+    if (*RESOURCES.machine.get()).waiting_for_mac_edge {
         try_finish_mac_stop();
     }
 }
 
 unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
-    let state = &mut *STATE.0.get();
-    if !state.active {
+    let (frequency_mhz, cbw, channel) = {
+        let state = &*RESOURCES.machine.get();
+        (state.frequency_mhz, state.cbw, state.channel)
+    };
+    if !(*RESOURCES.machine.get()).active {
         fail(ChannelSwitchError::Busy, 0);
         return;
     }
@@ -328,9 +412,7 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
         Ok(_) => current_phy_function_table,
         Err(expected) => expected,
     };
-    if current_phy_function_table == 0
-        || current_phy_function_table != expected_phy_function_table
-    {
+    if current_phy_function_table == 0 || current_phy_function_table != expected_phy_function_table {
         fail(
             ChannelSwitchError::PhyFunctionTableChanged,
             current_phy_function_table as u32,
@@ -338,44 +420,49 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
         return;
     }
 
-    phy_change_channel(state.frequency_mhz, 1, 0, u32::from(state.cbw));
-    hal_mac_set_csi_cbw(u32::from(state.cbw));
+    phy_change_channel(frequency_mhz, 1, 0, u32::from(cbw));
+    hal_mac_set_csi_cbw(u32::from(cbw));
     let _ = ic_mac_init();
 
-    let chm = g_chm;
-    if chm.is_null() {
+    let set_current = (&*RESOURCES.channels.get()).set_current(channel);
+    if set_current.is_err() {
         fail(ChannelSwitchError::StateUnavailable, 0);
         return;
     }
-    let interrupt_state = crate::critical::strict_wifi_int_disable();
-    chm.add(82).write(state.channel[0]);
-    chm.add(83).write(state.channel[1]);
-    crate::critical::strict_wifi_int_restore(interrupt_state);
 
-    let completion = state.completion;
-    state.active = false;
-    state.waiting_for_mac_edge = false;
-    state.completed = state.completed.wrapping_add(1);
+    let completion = {
+        let state = &mut *RESOURCES.machine.get();
+        let completion = state.completion;
+        state.active = false;
+        state.waiting_for_mac_edge = false;
+        state.completed = state.completed.wrapping_add(1);
+        completion
+    };
     if completion == Completion::Operation {
-        finish_operation(chm);
+        finish_operation();
     }
 }
 
-unsafe fn finish_operation(chm: *mut u8) {
-    let start = chm
-        .add(20)
-        .cast::<Option<ChannelCallback>>()
-        .read_unaligned();
-    let context = chm.add(16).cast::<*mut c_void>().read_unaligned();
+unsafe fn finish_operation() {
+    let (start, context, first, final_dwell) = {
+        let state = &*RESOURCES.machine.get();
+        if !state.operation_active {
+            fail(ChannelSwitchError::StateUnavailable, 0);
+            return;
+        }
+        (
+            state.start,
+            state.context,
+            state.first_dwell_ms,
+            state.final_dwell_ms,
+        )
+    };
     if let Some(start) = start {
         start(context, 0);
     }
 
-    let first = chm.add(8).cast::<u32>().read_unaligned();
-    let final_dwell = chm.add(12).cast::<u32>().read_unaligned();
     if first == 0 && final_dwell == 0 {
-        ptr::write_bytes(chm.add(4), 0, 24);
-        chm.add(4).write(u8::MAX);
+        (&mut *RESOURCES.machine.get()).clear_operation();
         return;
     }
     if first != 0 && first < final_dwell {
@@ -402,16 +489,15 @@ unsafe fn finish_operation(chm: *mut u8) {
 /// Promote the physically selected channel to the fixed STA home channel.
 /// Called only by the Rust tune completion while executing on the radio owner.
 pub(crate) unsafe fn make_current_channel_home() -> Result<(), ChannelSwitchError> {
-    let chm = g_chm;
-    if chm.is_null() || !crate::critical::on_strict_wifi_hart() {
+    if !crate::critical::on_strict_wifi_hart() {
         fail(ChannelSwitchError::StateUnavailable, 0);
         return Err(ChannelSwitchError::StateUnavailable);
     }
-    let interrupt_state = crate::critical::strict_wifi_int_disable();
-    chm.add(80).write(chm.add(82).read());
-    chm.add(81).write(chm.add(83).read());
-    crate::critical::strict_wifi_int_restore(interrupt_state);
-    Ok(())
+    let promoted = (&*RESOURCES.channels.get()).promote_current_to_home();
+    promoted.map_err(|_| {
+        fail(ChannelSwitchError::StateUnavailable, 0);
+        ChannelSwitchError::StateUnavailable
+    })
 }
 
 unsafe extern "C" fn first_dwell_elapsed(_argument: *mut c_void) {
@@ -424,16 +510,14 @@ unsafe extern "C" fn final_dwell_elapsed(_argument: *mut c_void) {
 }
 
 unsafe fn finish_strict_dwell() {
-    let chm = g_chm;
-    if chm.is_null() {
-        fail(ChannelSwitchError::StateUnavailable, 0);
-        return;
-    }
-    let end = chm
-        .add(24)
-        .cast::<Option<ChannelCallback>>()
-        .read_unaligned();
-    let context = chm.add(16).cast::<*mut c_void>().read_unaligned();
+    let (end, context) = {
+        let state = &*RESOURCES.machine.get();
+        if !state.operation_active {
+            fail(ChannelSwitchError::StateUnavailable, 0);
+            return;
+        }
+        (state.end, state.context)
+    };
     if end
         .is_none_or(|callback| callback as *const () != crate::scan::channel_complete as *const ())
     {
@@ -441,16 +525,15 @@ unsafe fn finish_strict_dwell() {
         return;
     }
 
-    // Exact finite state-clear prefix of pinned `chm_end_op`, followed by a
-    // direct call to the sole callback accepted by the strict scan API.
-    ptr::write_bytes(chm.add(4), 0, 24);
-    chm.add(4).write(u8::MAX);
+    // Release operation ownership before invoking the sole callback accepted
+    // by the strict scan API. This permits the callback to enqueue its next
+    // Rust-owned operation without aliasing this state.
+    (&mut *RESOURCES.machine.get()).clear_operation();
     crate::scan::channel_complete(context, 0);
 }
 
-/// Strict final-link channel-operation boundary. The vendor state and callback
-/// ABI are preserved, but the two mandatory MAC settling intervals become
-/// executor timers and the hardware-ready loop becomes exactly one check.
+/// Strict final-link channel-operation boundary. The callback ABI is
+/// preserved, while operation state and both timers are Rust-owned.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_chm_start_op(
     channel: *const u8,
@@ -466,27 +549,22 @@ pub unsafe extern "C" fn __wrap_chm_start_op(
     if channel.is_null() || !crate::critical::on_strict_wifi_hart() {
         return 3;
     }
-    let chm = g_chm;
-    if chm.is_null() || chm.add(4).read() != u8::MAX {
-        return 3;
-    }
 
     let selected = [channel.read(), channel.add(1).read()];
-    chm.add(4).write(selected[0]);
-    chm.add(5).write(selected[1]);
-    chm.add(8).cast::<u32>().write_unaligned(first_dwell_ms);
-    chm.add(12).cast::<u32>().write_unaligned(final_dwell_ms);
-    chm.add(16).cast::<*mut c_void>().write_unaligned(context);
-    chm.add(20)
-        .cast::<Option<ChannelCallback>>()
-        .write_unaligned(start);
-    chm.add(24)
-        .cast::<Option<ChannelCallback>>()
-        .write_unaligned(end);
+    {
+        let state = &mut *RESOURCES.machine.get();
+        if state.operation_active || !(&*RESOURCES.channels.get()).adopted() {
+            return 3;
+        }
+        state.operation_active = true;
+        state.first_dwell_ms = first_dwell_ms;
+        state.final_dwell_ms = final_dwell_ms;
+        state.start = start;
+        state.end = end;
+        state.context = context;
+    }
 
     if let Err(error) = begin(selected, Completion::Operation) {
-        ptr::write_bytes(chm.add(4), 0, 24);
-        chm.add(4).write(u8::MAX);
         fail(error, 0);
         return 3;
     }
@@ -502,13 +580,11 @@ pub unsafe extern "C" fn __wrap_chm_return_home_channel() {
         __real_chm_return_home_channel();
         return;
     }
-    let chm = g_chm;
-    if chm.is_null() {
+    let channels = &*RESOURCES.channels.get();
+    let (Some(home), Some(current)) = (channels.home(), channels.current()) else {
         fail(ChannelSwitchError::StateUnavailable, 0);
         return;
-    }
-    let home = [chm.add(80).read(), chm.add(81).read()];
-    let current = [chm.add(82).read(), chm.add(83).read()];
+    };
     if home != current {
         if let Err(error) = begin(home, Completion::Home) {
             fail(error, 0);

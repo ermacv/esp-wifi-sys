@@ -14,7 +14,6 @@ pub const ROOTS: &[&str] = &[
     "ppDequeueTxQ",
     "rcUpdateTxDone",
     "hal_get_tsf_time",
-    "chm_get_chan_info",
     "ic_set_current_channel",
     "phy_change_channel",
     "hal_mac_set_csi_cbw",
@@ -23,7 +22,6 @@ pub const ROOTS: &[&str] = &[
     "ic_set_rx_policy",
     "ic_set_rx_policy_ubssid_check",
     "ieee80211_getmgtframe",
-    "chm_get_home_channel",
     "esp_wifi_internal_free_rx_buffer",
     "ppDequeueRxq_Locked",
     "ppRxProtoProc",
@@ -34,6 +32,10 @@ pub const ROOTS: &[&str] = &[
     "wDev_Insert_KeyEntry",
     "ieee80211_set_tx_desc",
 ];
+
+// Channel-manager getters are intentionally absent. Strict handoff adopts the
+// finite `gChmCxt` selector/table state once; runtime channel lookup and
+// home/current checks are then Rust-owned and atomic.
 
 // These pinned leaves only bind fixed archive storage into ROM ABI pointer
 // cells. They contain no allocation, wait, indirect call or control-flow

@@ -710,7 +710,9 @@ mod target {
         #[link_name = "ieee80211_mgmt_output"]
         fn linked_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
         fn __real_ieee80211_mgmt_output(node: *mut u8, buffer: *mut u8, subtype: u8) -> i32;
+        #[cfg(not(feature = "strict-no-wait"))]
         fn chm_is_at_home_channel() -> bool;
+        #[cfg(not(feature = "strict-no-wait"))]
         fn chm_get_home_channel() -> *const u8;
         fn ic_tx_pkt(buffer: *mut u8) -> i32;
         fn esf_buf_recycle(frame: *mut c_void);
@@ -728,6 +730,18 @@ mod target {
         UnexpectedRemoveCallback(usize),
         UnexpectedGetRsnCallback(usize),
         UnexpectedSppCallback(usize),
+    }
+
+    #[inline]
+    unsafe fn is_at_home_channel() -> bool {
+        #[cfg(feature = "strict-no-wait")]
+        {
+            crate::channel_switch::is_at_home_channel()
+        }
+        #[cfg(not(feature = "strict-no-wait"))]
+        {
+            chm_is_at_home_channel()
+        }
     }
 
     unsafe fn callback_slot<T>(callbacks: *mut c_void, offset: usize) -> *mut T {
@@ -991,18 +1005,26 @@ mod target {
             }
         }
 
-        // The pinned channel-manager getter is a finite pointer leaf. The
-        // second byte is only a secondary-channel candidate: net80211 can
-        // recompute it after a station leaves even while the configured AP
-        // bandwidth remains 20 MHz. The authoritative AP bandwidth returned
-        // by `wifi_get_bw_process` is the byte at g_wifi_nvs+0x3fb.
-        let channel = chm_get_home_channel();
-        if channel.is_null() {
+        // In strict mode the home selector belongs to the Rust channel
+        // resource adopted before handoff. The non-strict profile retains the
+        // pinned finite getter. The second byte is only a secondary-channel
+        // candidate: net80211 can recompute it after a station leaves even
+        // while the configured AP bandwidth remains 20 MHz.
+        #[cfg(feature = "strict-no-wait")]
+        let primary_channel = crate::channel_switch::home_channel().map(|channel| channel[0]);
+        #[cfg(not(feature = "strict-no-wait"))]
+        let primary_channel = {
+            let channel = chm_get_home_channel();
+            (!channel.is_null()).then(|| channel.read())
+        };
+        let Some(primary_channel) = primary_channel else {
             return reject_association_construction(
                 AssociationRejectionReason::ChannelUnavailable,
                 node,
             );
-        }
+        };
+        // The authoritative AP bandwidth returned by
+        // `wifi_get_bw_process` is the byte at g_wifi_nvs+0x3fb.
         let wifi_nvs = ptr::addr_of!(g_wifi_nvs).read();
         if wifi_nvs.is_null() {
             return reject_association_construction(
@@ -1017,7 +1039,6 @@ mod target {
                 node,
             );
         }
-        let primary_channel = channel.read();
         let association_id = node.add(0x26).cast::<u16>().read_unaligned();
         let mut body = ptr::null_mut();
         let buffer = ieee80211_getmgtframe(
@@ -1252,7 +1273,7 @@ mod target {
             || buffer.is_null()
             || node.add(4).read() & 1 != 0
             || ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0
-            || !chm_is_at_home_channel()
+            || !is_at_home_channel()
         {
             if !buffer.is_null() {
                 esf_buf_recycle(buffer.cast());
@@ -1594,7 +1615,7 @@ mod target {
             Some(ManagementTxRejectionReason::UnsupportedSubtype)
         } else if ptr::addr_of_mut!(g_ic).add(0x74).cast::<usize>().read() != 0 {
             Some(ManagementTxRejectionReason::MeshEnabled)
-        } else if !chm_is_at_home_channel() {
+        } else if !is_at_home_channel() {
             Some(ManagementTxRejectionReason::OffHomeChannel)
         } else {
             None
