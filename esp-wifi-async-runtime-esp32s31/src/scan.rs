@@ -463,6 +463,21 @@ pub(crate) unsafe extern "C" fn channel_complete(_context: *mut core::ffi::c_voi
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub(crate) fn channel_switch_failed(error: u32) {
+    if OP_STATE
+        .compare_exchange(OP_RUNNING, OP_IDLE, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        restore_default_rx_policy();
+        OP_RESULT.store(error, Ordering::Release);
+        OP_SIGNAL.notify_from_isr();
+    }
+}
+
+#[cfg(not(all(target_arch = "riscv32", feature = "strict-no-wait")))]
+pub(crate) fn channel_switch_failed(_error: u32) {}
+
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 unsafe fn enable_scan_rx_policy() {
     // Exact policy-3 branch of the pinned `wifi_set_rx_policy` jump table.
     // Calling the three finite leaves directly removes the unproven indirect

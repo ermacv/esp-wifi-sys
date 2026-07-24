@@ -124,6 +124,12 @@ pub(crate) fn link_wrappers_active() -> bool {
 }
 
 pub fn channel_switch_snapshot() -> ChannelSwitchSnapshot {
+    #[cfg(target_arch = "riscv32")]
+    let live_phy_function_table =
+        unsafe { ptr::addr_of!(g_phyFuns).read_volatile() as usize };
+    #[cfg(not(target_arch = "riscv32"))]
+    let live_phy_function_table = PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire);
+    PHY_FUNCTION_TABLE_CURRENT.store(live_phy_function_table, Ordering::Release);
     let state = unsafe { &*STATE.0.get() };
     ChannelSwitchSnapshot {
         started: state.started,
@@ -187,6 +193,7 @@ unsafe fn fail(error: ChannelSwitchError, detail: u32) {
     state.waiting_for_mac_edge = false;
     MAC_FAILURE_STATUS.store(detail, Ordering::Relaxed);
     FAILURE.store(error as u32, Ordering::Release);
+    crate::scan::channel_switch_failed(error as u32);
 }
 
 unsafe fn first_timer() -> *mut c_void {
