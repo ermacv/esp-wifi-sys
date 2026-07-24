@@ -20,7 +20,8 @@ const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
     target_arch = "riscv32",
     any(
         feature = "rust-direct-cold-stop",
-        feature = "rust-direct-set-max-tx-power"
+        feature = "rust-direct-set-max-tx-power",
+        feature = "rust-direct-set-country-nvs-free"
     )
 ))]
 const WIFI_STATE_OFFSET: usize = 0x1f5;
@@ -29,6 +30,8 @@ const ESP_OK: i32 = 0;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_WIFI_NOT_INIT: i32 = 0x3001;
 const ESP_ERR_WIFI_NOT_STARTED: i32 = 0x3002;
+const ESP_ERR_WIFI_STATE: i32 = 0x3006;
+const ESP_ERR_WIFI_NVS: i32 = 0x3008;
 const MAX_PS_TYPE: u32 = 2;
 
 static CALLS: AtomicU32 = AtomicU32::new(0);
@@ -60,6 +63,24 @@ static SET_MAX_TX_POWER_NOT_STARTED: AtomicU32 = AtomicU32::new(0);
 static SET_MAX_TX_POWER_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
 static SET_MAX_TX_POWER_LAST_POWER: AtomicU32 = AtomicU32::new(0);
 static SET_MAX_TX_POWER_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_ACTIVE_REJECTIONS: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_NVS_REJECTIONS: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_LAST_CODE: AtomicU32 = AtomicU32::new(0);
+static SET_COUNTRY_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+
+#[repr(C)]
+struct WifiCountry {
+    cc: [u8; 3],
+    start_channel: u8,
+    channel_count: u8,
+    max_tx_power: i8,
+    _padding: [u8; 2],
+    policy: u32,
+}
 
 #[repr(C, align(4))]
 struct ApiRequest {
@@ -162,6 +183,19 @@ pub struct DirectSetMaxTxPowerSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for the NVS-free pre-start country boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetCountrySnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub active_rejections: u32,
+    pub nvs_rejections: u32,
+    pub invalid_arguments: u32,
+    pub publications: u32,
+    pub last_country_code: [u8; 3],
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -227,6 +261,21 @@ pub fn direct_set_max_tx_power_snapshot() -> DirectSetMaxTxPowerSnapshot {
     }
 }
 
+/// Return the current NVS-free pre-start country counters.
+pub fn direct_set_country_snapshot() -> DirectSetCountrySnapshot {
+    let code = SET_COUNTRY_LAST_CODE.load(Ordering::Relaxed).to_le_bytes();
+    DirectSetCountrySnapshot {
+        calls: SET_COUNTRY_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_COUNTRY_NOT_INITIALIZED.load(Ordering::Relaxed),
+        active_rejections: SET_COUNTRY_ACTIVE_REJECTIONS.load(Ordering::Relaxed),
+        nvs_rejections: SET_COUNTRY_NVS_REJECTIONS.load(Ordering::Relaxed),
+        invalid_arguments: SET_COUNTRY_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        publications: SET_COUNTRY_PUBLICATIONS.load(Ordering::Relaxed),
+        last_country_code: [code[0], code[1], code[2]],
+        last_result: SET_COUNTRY_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -255,15 +304,46 @@ fn validate_max_tx_power(power: i8) -> Result<u8, i32> {
     }
 }
 
+fn country_window_valid(
+    requested_start: u8,
+    requested_count: u8,
+    allowed_start: u8,
+    allowed_last: u8,
+) -> bool {
+    requested_start >= allowed_start
+        && requested_start <= allowed_last
+        && requested_count != 0
+        && u16::from(requested_start) + u16::from(requested_count) <= 15
+}
+
+fn normalized_operating_class(value: u8) -> u8 {
+    match value {
+        b' ' | b'I' | b'O' | b'X' => value,
+        _ => b' ',
+    }
+}
+
 #[cfg(all(
     target_arch = "riscv32",
     any(
         feature = "rust-direct-cold-stop",
-        feature = "rust-direct-set-max-tx-power"
+        feature = "rust-direct-set-max-tx-power",
+        feature = "rust-direct-set-country-nvs-free"
     )
 ))]
 unsafe extern "C" {
     static g_ic: u8;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-country-nvs-free"))]
+unsafe extern "C" {
+    static mut g_wifi_nvs: *mut u8;
+    static g_wifi_menuconfig: u8;
+    fn ieee80211_regdomain_get_country_info(
+        requested: *const WifiCountry,
+        normalized: *mut WifiCountry,
+        allowed_last: *mut u8,
+    ) -> i32;
 }
 
 #[cfg(all(
@@ -273,7 +353,8 @@ unsafe extern "C" {
         feature = "rust-direct-set-ps",
         feature = "rust-direct-reg-rxcb",
         feature = "rust-direct-reg-mgmt-frame",
-        feature = "rust-direct-set-max-tx-power"
+        feature = "rust-direct-set-max-tx-power",
+        feature = "rust-direct-set-country-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -461,6 +542,131 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_max_tx_power(power: i8) -> i32 {
     result
 }
 
+/// Publish a validated country before radio start without vendor NVS.
+///
+/// This reproduces the pinned pre-start branch only. Active-radio changes are
+/// rejected for the Rust async owner to sequence, and enabling vendor NVS is a
+/// hard configuration error. No `wifi_nvs_set`, `wifi_nvs_commit`, stop/start
+/// or ioctl function is called.
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-country-nvs-free"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_country(country: *const core::ffi::c_void) -> i32 {
+    const WIFI_NVS_COUNTRY_OFFSET: usize = 0x404;
+    const WIFI_NVS_COUNTRY_MAX_POWER_OFFSET: usize = WIFI_NVS_COUNTRY_OFFSET + 5;
+    const WIFI_NVS_COUNTRY_PADDING_OFFSET: usize = WIFI_NVS_COUNTRY_OFFSET + 6;
+    const WIFI_NVS_COUNTRY_POLICY_OFFSET: usize = WIFI_NVS_COUNTRY_OFFSET + 8;
+    const WIFI_MENUCONFIG_NVS_ENABLE_OFFSET: usize = 0x24;
+    const WIFI_COUNTRY_CHANGED_OFFSET: usize = 0x226;
+
+    SET_COUNTRY_CALLS.fetch_add(1, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_COUNTRY_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    if country.is_null() {
+        SET_COUNTRY_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+    let country = country.cast::<WifiCountry>();
+    let country_code = country.cast::<u8>().cast::<u32>().read_unaligned() & 0x00ff_ffff;
+    SET_COUNTRY_LAST_CODE.store(country_code, Ordering::Relaxed);
+    let state = core::ptr::read_volatile(core::ptr::addr_of!(g_ic).add(WIFI_STATE_OFFSET));
+    if state >= WIFI_STATE_STARTED {
+        SET_COUNTRY_ACTIVE_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_WIFI_STATE as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_STATE;
+    }
+    let nvs_enabled = core::ptr::read_volatile(
+        core::ptr::addr_of!(g_wifi_menuconfig)
+            .add(WIFI_MENUCONFIG_NVS_ENABLE_OFFSET)
+            .cast::<u32>(),
+    );
+    if nvs_enabled != 0 {
+        SET_COUNTRY_NVS_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_WIFI_NVS as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NVS;
+    }
+
+    let mut normalized = WifiCountry {
+        cc: [0; 3],
+        start_channel: 0,
+        channel_count: 0,
+        max_tx_power: 0,
+        _padding: [0; 2],
+        policy: 0,
+    };
+    let mut allowed_last = 0u8;
+    if ieee80211_regdomain_get_country_info(country, &mut normalized, &mut allowed_last) < 0
+        || !country_window_valid(
+            (*country).start_channel,
+            (*country).channel_count,
+            normalized.start_channel,
+            allowed_last,
+        )
+    {
+        SET_COUNTRY_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    let config = core::ptr::addr_of!(g_wifi_nvs).read_volatile();
+    if config.is_null() {
+        SET_COUNTRY_NVS_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        SET_COUNTRY_LAST_RESULT.store(ESP_ERR_WIFI_NVS as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NVS;
+    }
+    let requested_word = country.cast::<u32>().read_unaligned();
+    let requested_count = (*country).channel_count;
+    let requested_policy = core::ptr::addr_of!((*country).policy).read_unaligned();
+    let current_word = config
+        .add(WIFI_NVS_COUNTRY_OFFSET)
+        .cast::<u32>()
+        .read_unaligned();
+    let current_count = config.add(WIFI_NVS_COUNTRY_OFFSET + 4).read();
+    let current_policy = config
+        .add(WIFI_NVS_COUNTRY_POLICY_OFFSET)
+        .cast::<u32>()
+        .read_unaligned();
+    if current_word == requested_word
+        && current_count == requested_count
+        && current_policy == requested_policy
+    {
+        SET_COUNTRY_LAST_RESULT.store(ESP_OK as u32, Ordering::Relaxed);
+        return ESP_OK;
+    }
+
+    config
+        .add(WIFI_NVS_COUNTRY_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(requested_word);
+    config
+        .add(WIFI_NVS_COUNTRY_OFFSET + 2)
+        .write(normalized_operating_class((*country).cc[2]));
+    config
+        .add(WIFI_NVS_COUNTRY_OFFSET + 4)
+        .write(requested_count);
+    config
+        .add(WIFI_NVS_COUNTRY_MAX_POWER_OFFSET)
+        .write(normalized.max_tx_power as u8);
+    config
+        .add(WIFI_NVS_COUNTRY_PADDING_OFFSET)
+        .cast::<u16>()
+        .write_unaligned(0);
+    config
+        .add(WIFI_NVS_COUNTRY_POLICY_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(requested_policy);
+    core::ptr::addr_of!(g_ic)
+        .add(WIFI_COUNTRY_CHANGED_OFFSET)
+        .cast_mut()
+        .write_volatile(1);
+    SET_COUNTRY_PUBLICATIONS.fetch_add(1, Ordering::Relaxed);
+    SET_COUNTRY_LAST_RESULT.store(ESP_OK as u32, Ordering::Relaxed);
+    ESP_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +719,38 @@ mod tests {
         assert_eq!(validate_max_tx_power(85), Err(ESP_ERR_INVALID_ARG));
         assert_eq!(validate_max_tx_power(-1), Err(ESP_ERR_INVALID_ARG));
         assert_eq!(validate_max_tx_power(i8::MIN), Err(ESP_ERR_INVALID_ARG));
+    }
+
+    #[test]
+    fn country_request_layout_matches_the_vendor_abi() {
+        assert_eq!(core::mem::size_of::<WifiCountry>(), 12);
+        assert_eq!(core::mem::align_of::<WifiCountry>(), 4);
+        assert_eq!(core::mem::offset_of!(WifiCountry, cc), 0);
+        assert_eq!(core::mem::offset_of!(WifiCountry, start_channel), 3);
+        assert_eq!(core::mem::offset_of!(WifiCountry, channel_count), 4);
+        assert_eq!(core::mem::offset_of!(WifiCountry, max_tx_power), 5);
+        assert_eq!(core::mem::offset_of!(WifiCountry, policy), 8);
+    }
+
+    #[test]
+    fn country_channel_window_matches_the_vendor_validation() {
+        assert!(country_window_valid(1, 13, 1, 13));
+        assert!(country_window_valid(1, 11, 1, 11));
+        assert!(!country_window_valid(0, 13, 1, 13));
+        assert!(!country_window_valid(1, 0, 1, 13));
+        assert!(country_window_valid(12, 3, 1, 13));
+        assert!(!country_window_valid(13, 3, 1, 13));
+        assert!(!country_window_valid(14, 1, 1, 13));
+    }
+
+    #[test]
+    fn country_operating_class_is_restricted_to_vendor_values() {
+        for value in [b' ', b'I', b'O', b'X'] {
+            assert_eq!(normalized_operating_class(value), value);
+        }
+        for value in [0, b'D', b'Z', u8::MAX] {
+            assert_eq!(normalized_operating_class(value), b' ');
+        }
     }
 
     #[test]

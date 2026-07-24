@@ -77,6 +77,10 @@ rust-direct-reg-mgmt-frame = []
 # preserving the public started-state and 8..=84 range checks. The process
 # performs finite PHY publication and a fixed 43-entry table rebuild.
 rust-direct-set-max-tx-power = []
+# Replace the cold pre-start country ioctl with direct regdomain validation
+# and fixed-state publication. Vendor NVS and active-radio stop/start branches
+# are deliberately unreachable and rejected.
+rust-direct-set-country-nvs-free = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
