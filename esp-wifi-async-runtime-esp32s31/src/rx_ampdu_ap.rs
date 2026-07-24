@@ -15,7 +15,9 @@ use core::{
 
 use crate::{
     queue::WakerCell,
-    rx_ampdu::{RxAmpduMpdu, RxAmpduRelease, RxBlockAckReorder, RX_BLOCK_ACK_MAX_WINDOW},
+    rx_ampdu::{
+        RxAmpduError, RxAmpduMpdu, RxAmpduRelease, RxBlockAckReorder, RX_BLOCK_ACK_MAX_WINDOW,
+    },
     rx_ampdu_hw::S31RxBlockAckAgreement,
     tx_ampdu::BlockAckAction,
 };
@@ -82,6 +84,25 @@ static OUTPUT_ROLLBACKS: AtomicUsize = AtomicUsize::new(0);
 static RETAINED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static RELEASED_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static REJECTED_FRAMES: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_MISSING_SLOT: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_MALFORMED_QOS: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_STATE_UNAVAILABLE: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_INACTIVE: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_DIRECTION: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_PEER: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_TID: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_INVALID_WINDOW: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_INVALID_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_INVALID_SLOT: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_DUPLICATE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_SLOT_ALREADY_OWNED: AtomicUsize = AtomicUsize::new(0);
+static REJECTED_STALE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static REORDER_MISSING_SEQUENCES: AtomicUsize = AtomicUsize::new(0);
+static LAST_REJECTED_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static LAST_REJECTED_SLOT: AtomicUsize = AtomicUsize::new(0);
+static LAST_REJECTED_TID: AtomicUsize = AtomicUsize::new(0);
+static LAST_REJECTED_DIRECTION: AtomicUsize = AtomicUsize::new(0);
+static LAST_EXPECTED_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static GAP_EDGES: AtomicUsize = AtomicUsize::new(0);
 static GAP_EXPIRIES: AtomicUsize = AtomicUsize::new(0);
 static STALE_EXPIRIES: AtomicUsize = AtomicUsize::new(0);
@@ -98,6 +119,25 @@ pub struct RxAmpduApSnapshot {
     pub retained_frames: usize,
     pub released_frames: usize,
     pub rejected_frames: usize,
+    pub rejected_missing_slot: usize,
+    pub rejected_malformed_qos: usize,
+    pub rejected_state_unavailable: usize,
+    pub rejected_inactive: usize,
+    pub rejected_direction: usize,
+    pub rejected_peer: usize,
+    pub rejected_tid: usize,
+    pub rejected_invalid_window: usize,
+    pub rejected_invalid_sequence: usize,
+    pub rejected_invalid_slot: usize,
+    pub rejected_duplicate_sequence: usize,
+    pub rejected_slot_already_owned: usize,
+    pub rejected_stale_sequence: usize,
+    pub reorder_missing_sequences: usize,
+    pub last_rejected_sequence: usize,
+    pub last_rejected_slot: usize,
+    pub last_rejected_tid: usize,
+    pub last_rejected_direction: usize,
+    pub last_expected_sequence: usize,
     pub gap_edges: usize,
     pub gap_expiries: usize,
     pub stale_expiries: usize,
@@ -115,6 +155,25 @@ pub fn snapshot() -> RxAmpduApSnapshot {
         retained_frames: RETAINED_FRAMES.load(Ordering::Relaxed),
         released_frames: RELEASED_FRAMES.load(Ordering::Relaxed),
         rejected_frames: REJECTED_FRAMES.load(Ordering::Relaxed),
+        rejected_missing_slot: REJECTED_MISSING_SLOT.load(Ordering::Relaxed),
+        rejected_malformed_qos: REJECTED_MALFORMED_QOS.load(Ordering::Relaxed),
+        rejected_state_unavailable: REJECTED_STATE_UNAVAILABLE.load(Ordering::Relaxed),
+        rejected_inactive: REJECTED_INACTIVE.load(Ordering::Relaxed),
+        rejected_direction: REJECTED_DIRECTION.load(Ordering::Relaxed),
+        rejected_peer: REJECTED_PEER.load(Ordering::Relaxed),
+        rejected_tid: REJECTED_TID.load(Ordering::Relaxed),
+        rejected_invalid_window: REJECTED_INVALID_WINDOW.load(Ordering::Relaxed),
+        rejected_invalid_sequence: REJECTED_INVALID_SEQUENCE.load(Ordering::Relaxed),
+        rejected_invalid_slot: REJECTED_INVALID_SLOT.load(Ordering::Relaxed),
+        rejected_duplicate_sequence: REJECTED_DUPLICATE_SEQUENCE.load(Ordering::Relaxed),
+        rejected_slot_already_owned: REJECTED_SLOT_ALREADY_OWNED.load(Ordering::Relaxed),
+        rejected_stale_sequence: REJECTED_STALE_SEQUENCE.load(Ordering::Relaxed),
+        reorder_missing_sequences: REORDER_MISSING_SEQUENCES.load(Ordering::Relaxed),
+        last_rejected_sequence: LAST_REJECTED_SEQUENCE.load(Ordering::Relaxed),
+        last_rejected_slot: LAST_REJECTED_SLOT.load(Ordering::Relaxed),
+        last_rejected_tid: LAST_REJECTED_TID.load(Ordering::Relaxed),
+        last_rejected_direction: LAST_REJECTED_DIRECTION.load(Ordering::Relaxed),
+        last_expected_sequence: LAST_EXPECTED_SEQUENCE.load(Ordering::Relaxed),
         gap_edges: GAP_EDGES.load(Ordering::Relaxed),
         gap_expiries: GAP_EXPIRIES.load(Ordering::Relaxed),
         stale_expiries: STALE_EXPIRIES.load(Ordering::Relaxed),
@@ -147,6 +206,44 @@ pub(crate) enum Ingress {
     Retained,
     Release(RxAmpduRelease),
     Reject,
+}
+
+#[derive(Clone, Copy)]
+enum RejectReason {
+    MissingSlot,
+    MalformedQos,
+    StateUnavailable,
+    Inactive,
+    Direction,
+    Peer,
+    Tid,
+    InvalidWindow,
+    InvalidSequence,
+    InvalidSlot,
+    DuplicateSequence,
+    SlotAlreadyOwned,
+    StaleSequence,
+}
+
+fn reject(reason: RejectReason) -> Ingress {
+    REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
+    let counter = match reason {
+        RejectReason::MissingSlot => &REJECTED_MISSING_SLOT,
+        RejectReason::MalformedQos => &REJECTED_MALFORMED_QOS,
+        RejectReason::StateUnavailable => &REJECTED_STATE_UNAVAILABLE,
+        RejectReason::Inactive => &REJECTED_INACTIVE,
+        RejectReason::Direction => &REJECTED_DIRECTION,
+        RejectReason::Peer => &REJECTED_PEER,
+        RejectReason::Tid => &REJECTED_TID,
+        RejectReason::InvalidWindow => &REJECTED_INVALID_WINDOW,
+        RejectReason::InvalidSequence => &REJECTED_INVALID_SEQUENCE,
+        RejectReason::InvalidSlot => &REJECTED_INVALID_SLOT,
+        RejectReason::DuplicateSequence => &REJECTED_DUPLICATE_SEQUENCE,
+        RejectReason::SlotAlreadyOwned => &REJECTED_SLOT_ALREADY_OWNED,
+        RejectReason::StaleSequence => &REJECTED_STALE_SEQUENCE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    Ingress::Reject
 }
 
 fn state() -> Option<&'static mut State> {
@@ -356,45 +453,90 @@ pub(crate) fn rollback_failed_response(peer: [u8; 6]) {
 
 pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
     let Some(slot) = crate::esf::large_rx_slot_id(packet) else {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+        return reject(RejectReason::MissingSlot);
     };
-    if frame.len() < 26
-        || frame[0] & 0x0c != 0x08
-        || frame[0] & 0x80 == 0
-    {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+    if frame.len() < 26 || frame[0] & 0x0c != 0x08 || frame[0] & 0x80 == 0 {
+        return reject(RejectReason::MalformedQos);
     }
     let sequence = u16::from_le_bytes([frame[22], frame[23]]) >> 4;
     let tid = frame[24] & 0x0f;
+    let direction = frame[1] & 0x03;
     let mut peer = [0_u8; 6];
     peer.copy_from_slice(&frame[10..16]);
     let Some(state) = state() else {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+        record_rejected_frame(sequence, slot, tid, direction, 0);
+        return reject(RejectReason::StateUnavailable);
     };
     let Some(active) = state.active.as_mut() else {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+        record_rejected_frame(sequence, slot, tid, direction, 0);
+        return reject(RejectReason::Inactive);
     };
     let expected_direction = if active.interface == AP_INTERFACE_INDEX {
         0x01
     } else {
         0x02
     };
-    if frame[1] & 0x03 != expected_direction || active.peer != peer || active.tid != tid {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+    if direction != expected_direction {
+        record_rejected_frame(
+            sequence,
+            slot,
+            tid,
+            direction,
+            active.reorder.next_sequence(),
+        );
+        return reject(RejectReason::Direction);
     }
-    let Ok(release) = active.reorder.ingest(RxAmpduMpdu { sequence, slot }) else {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+    if active.peer != peer {
+        record_rejected_frame(
+            sequence,
+            slot,
+            tid,
+            direction,
+            active.reorder.next_sequence(),
+        );
+        return reject(RejectReason::Peer);
+    }
+    if active.tid != tid {
+        record_rejected_frame(
+            sequence,
+            slot,
+            tid,
+            direction,
+            active.reorder.next_sequence(),
+        );
+        return reject(RejectReason::Tid);
+    }
+    let release = match active.reorder.ingest(RxAmpduMpdu { sequence, slot }) {
+        Ok(release) => release,
+        Err(error) => {
+            record_rejected_frame(
+                sequence,
+                slot,
+                tid,
+                direction,
+                active.reorder.next_sequence(),
+            );
+            let reason = match error {
+                RxAmpduError::InvalidWindow(_) => RejectReason::InvalidWindow,
+                RxAmpduError::InvalidSequence(_) => RejectReason::InvalidSequence,
+                RxAmpduError::InvalidSlot(_) => RejectReason::InvalidSlot,
+                RxAmpduError::DuplicateSequence(_) => RejectReason::DuplicateSequence,
+                RxAmpduError::SlotAlreadyOwned(_) => RejectReason::SlotAlreadyOwned,
+            };
+            return reject(reason);
+        }
     };
     if release.rejected.is_some() {
-        REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
-        return Ingress::Reject;
+        record_rejected_frame(
+            sequence,
+            slot,
+            tid,
+            direction,
+            active.reorder.next_sequence(),
+        );
+        return reject(RejectReason::StaleSequence);
     }
+    REORDER_MISSING_SEQUENCES.fetch_add(release.missing as usize, Ordering::Relaxed);
     OCCUPIED.store(active.reorder.occupied() as usize, Ordering::Release);
     update_gap_edge(active);
     if release.count == 0 {
@@ -404,6 +546,14 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
         RELEASED_FRAMES.fetch_add(release.count as usize, Ordering::Relaxed);
         Ingress::Release(release)
     }
+}
+
+fn record_rejected_frame(sequence: u16, slot: u8, tid: u8, direction: u8, expected_sequence: u16) {
+    LAST_REJECTED_SEQUENCE.store(sequence as usize, Ordering::Relaxed);
+    LAST_REJECTED_SLOT.store(slot as usize, Ordering::Relaxed);
+    LAST_REJECTED_TID.store(tid as usize, Ordering::Relaxed);
+    LAST_REJECTED_DIRECTION.store(direction as usize, Ordering::Relaxed);
+    LAST_EXPECTED_SEQUENCE.store(expected_sequence as usize, Ordering::Relaxed);
 }
 
 pub(crate) fn frame_for_slot(slot: u8) -> Option<*mut u8> {
@@ -422,10 +572,7 @@ pub fn remove_peer(peer: [u8; 6]) {
     if let Some(tid) = tid {
         stop_peer(peer, tid);
     } else if let Some(state) = state() {
-        if state
-            .pending
-            .is_some_and(|pending| pending.peer == peer)
-        {
+        if state.pending.is_some_and(|pending| pending.peer == peer) {
             state.pending = None;
         }
     }
@@ -447,6 +594,7 @@ pub(crate) fn expire_gap(generation: usize) -> Option<RxAmpduRelease> {
     active.gap_generation = None;
     let release = active.reorder.expire_gap();
     GAP_EXPIRIES.fetch_add(1, Ordering::Relaxed);
+    REORDER_MISSING_SEQUENCES.fetch_add(release.missing as usize, Ordering::Relaxed);
     RELEASED_FRAMES.fetch_add(release.count as usize, Ordering::Relaxed);
     OCCUPIED.store(active.reorder.occupied() as usize, Ordering::Release);
     update_gap_edge(active);
