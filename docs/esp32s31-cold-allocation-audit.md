@@ -15,7 +15,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 7 allocations, 2 frees and 316 requested
+the current image is down to 6 allocations, 2 frees and 208 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -618,3 +618,73 @@ the allocation snapshot fixed at 7/2/316, zero allocation failures, zero
 radio-context allocator calls, zero core stalls and no TX/RX queue rejection.
 The strict whole-ELF no-wait/no-heap audit inspected 6,407 functions and
 reported zero violations.
+
+The next direct allocation was the supplicant callback table constructed by
+`esp_supplicant_init`. Reverse inspection of
+`libwpa_supplicant.a[esp_wpa_main.c.obj]` recovered an exact 108-byte,
+27-word layout. The constructor first calls `calloc(1, 0x6c)`, publishes the
+result through `wpa_cb`, and installs the following nonzero callbacks:
+
+| Word | Offset | Callback |
+| ---: | ---: | --- |
+| 0 | `0x00` | `wpa_attach` |
+| 1 | `0x04` | `wpa_deattach` |
+| 2 | `0x08` | `wpa_sta_connect` |
+| 3 | `0x0c` | `wpa_sta_connected_cb` |
+| 4 | `0x10` | `wpa_sta_disconnected_cb` |
+| 5 | `0x14` | `wpa_sm_rx_eapol` |
+| 6 | `0x18` | `wpa_sta_in_4way_handshake` |
+| 7 | `0x1c` | `hostap_init` |
+| 8 | `0x20` | `hostap_deinit` |
+| 9 | `0x24` | `hostap_sta_join` |
+| 10 | `0x28` | `wpa_ap_remove` |
+| 11 | `0x2c` | `wpa_ap_get_wpa_ie` |
+| 12 | `0x30` | `wpa_ap_rx_eapol` |
+| 13 | `0x34` | `wpa_ap_get_peer_spp_msg` |
+| 14 | `0x38` | `wpa_config_parse_string` |
+| 15 | `0x3c` | `wpa_parse_wpa_ie_wrapper` |
+| 17 | `0x44` | `wpa_michael_mic_failure` |
+| 22 | `0x58` | `wpa_config_done` |
+| 25 | `0x64` | `wpa_sta_clear_curr_pmksa` |
+| 26 | `0x68` | `wpa_config_reload` |
+
+Words 16, 18, 19, 20, 21, 23 and 24 remain zero. The constructor then calls
+`eloop_init` and `esp_supplicant_common_init` before registering the table.
+Its error path frees the same object and clears `wpa_cb`; normal supplicant
+deinitialization unregisters and clears `wpa_cb` but does not free the table.
+
+`rust-static-supplicant-callback-storage` admits only the exact direct
+`calloc`, size 108 and pinned return site `esp_supplicant_init + 0x26`. It
+claims one four-byte-aligned internal-SRAM object with a single non-retrying
+CAS and zeros it before the vendor constructor performs the recovered finite
+stores. A second live claim returns null instead of falling through to the
+heap or aliasing state. The exact constructor failure-path `free` wipes and
+releases the static object; every other allocation or free retains its
+ordinary traced behavior.
+
+The strict application checks after cold initialization that the claim is
+live and `wpa_cb` is exactly the static SRAM address. The final ELF audit
+requires the exact 108-byte aligned section, exactly one call edge from
+`esp_supplicant_init` to `__wrap_calloc`, no edge to `__real_calloc`, and no
+internal control-flow cycle. This keeps admission tied to the qualified
+vendor constructor rather than turning it into a generic 108-byte allocator
+exception.
+
+Hardware removed exactly one direct `calloc` and 108 requested bytes,
+producing 6 allocations, 2 observed frees and 208 requested bytes. The first
+strict WPA2 cycle completed passive scan, authentication, association,
+M1-M4, DHCP, ping, DNS, TCP and HTTP. The second passive-scan,
+authentication, association and WPA2 cycle completed post-link traffic with
+the allocation snapshot fixed at 6/2/208, zero allocation failures, zero
+radio-context allocator calls, zero core stalls and no TX/RX queue rejection.
+The strict whole-ELF no-wait/no-heap audit inspected 6,407 functions and
+reported zero violations.
+
+The qualified lifecycle includes radio reconnect without a full supplicant
+deinitialization. Because the vendor normal deinitializer clears `wpa_cb`
+without freeing this table, an eventual full `esp_supplicant_deinit` followed
+by `esp_supplicant_init` intentionally fails closed today. Re-enabling that
+lifecycle requires an explicit Rust reset boundary after unregister,
+deinitialization and quiescence of every callback consumer; silently
+reclaiming the same object earlier would permit a stale callback user to
+alias the new lifetime.
