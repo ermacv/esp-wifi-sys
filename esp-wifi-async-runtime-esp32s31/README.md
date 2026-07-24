@@ -406,6 +406,11 @@ fail-closed relocation audit while replacing them:
 cargo +stable run -p xtask --bin audit-strict-esp32s31 -- --enforce
 cargo +stable run -p xtask --bin audit-strict-esp32s31 -- \
     --elf path/to/final-firmware.elf --enforce
+cargo +stable run -p xtask --bin audit-strict-esp32s31 -- \
+    --include-static-binding-init --elf path/to/final-firmware.elf --enforce
+cargo +stable run -p xtask --bin audit-state-esp32s31 -- \
+    --elf path/to/final-firmware.elf \
+    --write docs/esp32s31-linked-state-audit.md
 ```
 
 The archive audit rejects direct heap/delay/RTOS/flash/logging paths, every
@@ -421,6 +426,14 @@ definitions in the image. The final audit permits them only while every call
 site remains in its pinned pre-handoff or dormant owner: a new caller of
 `esp_event_post`, libc printing, or the vendor assert immediately fails the
 audit.
+The optional static-binding-init roots cover `net80211_data_ptr_init` and
+`wdev_data_init`. These two pinned leaves only connect fixed archive storage
+such as `gChmCxt`, `g_ic`, and `TxRxCxt` to the S31 ROM ABI cells; they add no
+allocation, wait, indirect call, or control-flow cycle. The state audit joins
+archive relocations with the final ELF to report the exact live mutable blob
+objects, ROM ABI cells, Rust strict sections, wrappers, direct aliases, and
+retained `__real_*` ROM oracles. Its generated snapshot is
+[`../docs/esp32s31-linked-state-audit.md`](../docs/esp32s31-linked-state-audit.md).
 The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
 that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
 walks four-byte frame records with a counter narrowed to `u8`; including the

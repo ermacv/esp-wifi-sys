@@ -7,60 +7,9 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
-const ROOTS: &[&str] = &[
-    // The Rust event-25 continuation owns the bounded outer descriptor walk.
-    // The per-unit decoder and last-descriptor pointer leaf remain explicit.
-    "wDev_ProcessRxSucData",
-    "hal_mac_rx_get_last_dscr",
-    // Targets of callback bits required by basic STA/AP. Strict continuations
-    // dispatch both mode-0 and the timeout/discard mode-1 bits directly. The
-    // same callbacks remain reachable from vendor TX-completion roots until
-    // those entries are replaced as well.
-    "ieee80211_hostapd_data_txcb",
-    // Direct vendor leaves called by the Rust event-22 continuation.
-    "hal_mac_tx_set_cca",
-    // Finite hardware-formatting leaves used by the Rust-owned basic-HT retry
-    // submission. The Rust caller rejects legacy/HE/FTM/aggregate and invalid
-    // metadata branches before any of these entries is invoked.
-    "hal_mac_is_txq_valid",
-    "hal_mac_set_txq_invalid",
-    "hal_mac_txq_disable",
-    "lmacReleaseTxopQueue",
-    "ppDequeueTxQ",
-    "rcUpdateTxDone",
-    "hal_get_tsf_time",
-    // Direct finite leaves used by the Rust-owned channel switch and strict
-    // passive-scan receive-policy branches.
-    "chm_get_chan_info",
-    "ic_set_current_channel",
-    "phy_change_channel",
-    "hal_mac_set_csi_cbw",
-    "ic_mac_init",
-    "ic_set_mac",
-    "ic_set_rx_policy",
-    "ic_set_rx_policy_ubssid_check",
-    // Fixed-buffer management-frame allocation and a two-byte channel-state
-    // pointer leaf used by Rust-owned STA/AP management constructors.
-    "ieee80211_getmgtframe",
-    "chm_get_home_channel",
-    // Direct leaves used by the one-frame strict event-16 continuation.
-    "esp_wifi_internal_free_rx_buffer",
-    // Direct leaves used by the bounded Rust event-17 receive pump. The stock
-    // `ppRxPkt` outer drain is not a strict root.
-    "ppDequeueRxq_Locked",
-    "ppRxProtoProc",
-    "ppRecycleRxPkt",
-    // Rust owns WPA2 PTK/MIC/framing and bypasses the stock allocating TX/key
-    // wrappers. Only the exact lower leaves called by `S31StaticWpa2Io` remain
-    // roots here.
-    "ieee80211_post_hmac_tx",
-    "ic_del_key",
-    "ic_set_key",
-    "wDev_Insert_KeyEntry",
-    "ieee80211_set_tx_desc",
-    // Timer ID 0 is completed entirely by Rust; no vendor timer callback is a
-    // strict root. All other stock net80211 timers fail closed.
-];
+#[path = "../esp32s31_strict_policy.rs"]
+mod strict_policy;
+use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wdevProcessRxSucDataAll",
@@ -112,54 +61,6 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "pp_post",
     "ieee80211_timer_process",
     "ieee80211_timer_do_process",
-    "chm_start_op",
-    "chm_return_home_channel",
-    "esf_buf_alloc",
-    "esf_buf_recycle",
-    "ieee80211_mgmt_output",
-    "ieee80211_set_tx_pti",
-    "ieee80211_search_node",
-    "cnx_node_alloc",
-    "cnx_node_search",
-    "rcGetSched",
-    "ppTxProtoProc",
-    "ppProcTxSecFrame",
-];
-
-// Calls to these archive symbols are redirected by mandatory final-link GNU
-// wrappers or direct linker aliases. Their original bodies are therefore
-// graph boundaries, not strict runtime callees.
-const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
-    "lmacTxDone",
-    "hal_mac_get_txq_state",
-    "hal_mac_get_txq_complete",
-    "ieee80211_hostapd_beacon_txcb",
-    "ieee80211_tx_mgt_cb",
-    "wDev_record_ftm_data",
-    "pm_on_beacon_rx",
-    "pm_on_data_rx",
-    "pm_on_data_tx",
-    "pm_set_beacon_duration",
-    "dbg_read_tx_ppdu",
-    "dbg_dump_rx_ppdu",
-    "dbg_dump_rx_sigb",
-    "wifi_gpio_debug",
-    "esp_test_tx_enab_statistics",
-    "esp_test_rx_parse_mu",
-    "esp_test_rx_process_complete",
-    "wDev_SnifferRxData",
-    "wdev_csi_rx_process",
-    "wDev_ftm_set_t1t4",
-    "wDev_isNANPktInValidSlot",
-    "wDev_AppendRxBlocks",
-    "wDev_IndicateCtrlFrame",
-    "wpa_sm_rx_eapol",
-    "wpa_ap_rx_eapol",
-    "hal_crypto_set_key_entry",
-    "wifi_log",
-    "wifi_assert",
-    "pp_post",
-    "ieee80211_timer_process",
     "chm_start_op",
     "chm_return_home_channel",
     "esf_buf_alloc",
@@ -440,6 +341,7 @@ enum Violation {
 fn main() -> Result<()> {
     let mut enforce = false;
     let mut verbose = false;
+    let mut include_static_binding_init = false;
     let mut elf = None;
     let mut requested_roots = Vec::<String>::new();
     let mut arguments = env::args().skip(1);
@@ -447,6 +349,7 @@ fn main() -> Result<()> {
         match argument.as_str() {
             "--enforce" => enforce = true,
             "--verbose" => verbose = true,
+            "--include-static-binding-init" => include_static_binding_init = true,
             "--elf" => {
                 elf = Some(PathBuf::from(
                     arguments.next().context("--elf requires a path")?,
@@ -456,11 +359,18 @@ fn main() -> Result<()> {
             _ => bail!("unknown argument: {argument}"),
         }
     }
-    let roots = if requested_roots.is_empty() {
+    let mut roots = if requested_roots.is_empty() {
         ROOTS.iter().map(|root| (*root).to_owned()).collect()
     } else {
         requested_roots
     };
+    if include_static_binding_init {
+        for root in STATIC_BINDING_ROOTS {
+            if !roots.iter().any(|existing| existing == root) {
+                roots.push((*root).to_owned());
+            }
+        }
+    }
 
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
