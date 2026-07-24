@@ -468,7 +468,7 @@ pub(crate) fn channel_switch_failed(error: u32) {
         .compare_exchange(OP_RUNNING, OP_IDLE, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        restore_default_rx_policy();
+        unsafe { restore_default_rx_policy() };
         OP_RESULT.store(error, Ordering::Release);
         OP_SIGNAL.notify_from_isr();
     }
