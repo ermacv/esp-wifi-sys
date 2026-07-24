@@ -565,6 +565,9 @@ enum InactiveTimeSelectionError {
     InvalidMode,
 }
 
+// Keep validation as a separate final-ELF proof boundary. The strict
+// application audit requires this selector to remain call-free and acyclic.
+#[inline(never)]
 fn select_inactive_time_target(
     interface: u32,
     seconds: u16,
