@@ -39,6 +39,10 @@ rust-static-pmksa-cache-interpose = []
 # exact 108-byte internal-SRAM owner. Admission is pinned to the direct calloc
 # return PC and a second live claim fails closed.
 rust-static-supplicant-callback-storage = []
+# Supply the four 40-byte PP BAR bookkeeping objects from an exact
+# internal-SRAM pool. Admission is pinned to pp_attach's OSI malloc return PC;
+# pp_deattach releases and wipes each exact slot.
+rust-static-pp-bar-storage = []
 # Replace misc_nvs_init/misc_nvs_deinit with a fixed zeroed 0x3c-byte
 # internal-SRAM block. This is equivalent to the pinned nvs_enable=0 path and
 # avoids its unconditional calloc/free pair.

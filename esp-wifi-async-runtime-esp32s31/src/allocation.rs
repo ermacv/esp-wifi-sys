@@ -425,6 +425,27 @@ fn is_static_supplicant_callback_allocation(
             == SUPPLICANT_CALLBACK_TABLE_RETURN_OFFSET
 }
 
+#[cfg(feature = "rust-static-pp-bar-storage")]
+const PP_BAR_SIZE: usize = 40;
+#[cfg(feature = "rust-static-pp-bar-storage")]
+const PP_BAR_CAPACITY: usize = 4;
+// Return address immediately after the pinned S31 OSI malloc callback in
+// `pp_attach`.
+#[cfg(feature = "rust-static-pp-bar-storage")]
+const PP_BAR_RETURN_OFFSET: usize = 0x4a;
+
+#[cfg(feature = "rust-static-pp-bar-storage")]
+fn is_static_pp_bar_allocation(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    pp_attach_address: usize,
+) -> bool {
+    source == AllocationSource::OsiMallocInternal
+        && size == PP_BAR_SIZE
+        && caller.wrapping_sub(pp_attach_address) == PP_BAR_RETURN_OFFSET
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -445,6 +466,10 @@ mod target {
     use super::{
         classify_static_interface_allocation, StaticInterfaceAllocation, WIFI_INTERFACE_PHY_SIZE,
         WIFI_INTERFACE_STATE_SIZE,
+    };
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    use super::{
+        is_static_pp_bar_allocation, PP_BAR_CAPACITY, PP_BAR_SIZE,
     };
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     use super::{
@@ -687,6 +712,20 @@ mod target {
     #[cfg(feature = "rust-static-supplicant-callback-storage")]
     unsafe impl Sync for SupplicantCallbackTable {}
 
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    #[repr(C, align(4))]
+    struct PpBar(UnsafeCell<[u8; PP_BAR_SIZE]>);
+
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    impl PpBar {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; PP_BAR_SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    unsafe impl Sync for PpBar {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -779,6 +818,13 @@ mod target {
     static SUPPLICANT_CALLBACK_TABLE: SupplicantCallbackTable = SupplicantCallbackTable::new();
     #[cfg(feature = "rust-static-supplicant-callback-storage")]
     static SUPPLICANT_CALLBACK_TABLE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    #[link_section = ".critical.bss.wifi_strict.pp_bars"]
+    static PP_BARS: [PpBar; PP_BAR_CAPACITY] =
+        [const { PpBar::new() }; PP_BAR_CAPACITY];
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    static PP_BAR_CLAIMS: [AtomicUsize; PP_BAR_CAPACITY] =
+        [const { AtomicUsize::new(0) }; PP_BAR_CAPACITY];
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -809,6 +855,10 @@ mod target {
         fn esp_supplicant_init() -> i32;
         #[cfg(feature = "rust-static-supplicant-callback-storage")]
         static mut wpa_cb: *mut c_void;
+        #[cfg(feature = "rust-static-pp-bar-storage")]
+        fn pp_attach(config: *mut c_void) -> i32;
+        #[cfg(feature = "rust-static-pp-bar-storage")]
+        static mut s_bars: [*mut c_void; PP_BAR_CAPACITY];
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -1495,7 +1545,62 @@ mod target {
             && core::ptr::addr_of!(wpa_cb).read() == SUPPLICANT_CALLBACK_TABLE.0.get().cast()
     }
 
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    fn claim_static_pp_bar() -> Option<*mut c_void> {
+        for (index, claim) in PP_BAR_CLAIMS.iter().enumerate() {
+            if claim
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let pointer = PP_BARS[index].0.get();
+                unsafe { pointer.write([0; PP_BAR_SIZE]) };
+                return Some(pointer.cast());
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    fn release_static_pp_bar(pointer: *mut c_void) -> bool {
+        let base = PP_BARS.as_ptr() as usize;
+        let address = pointer as usize;
+        let stride = mem::size_of::<PpBar>();
+        let Some(offset) = address.checked_sub(base) else {
+            return false;
+        };
+        if offset % stride != 0 {
+            return false;
+        }
+        let index = offset / stride;
+        if index >= PP_BAR_CAPACITY {
+            return false;
+        }
+        if PP_BAR_CLAIMS[index].swap(0, Ordering::AcqRel) != 0 {
+            unsafe { PP_BARS[index].0.get().write([0; PP_BAR_SIZE]) };
+        }
+        // An exact pool address never belongs to the captured heap, even if a
+        // drifting vendor teardown presents it twice. Consume such a free
+        // rather than forwarding a static SRAM address to the heap.
+        true
+    }
+
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    pub unsafe fn static_pp_bar_storage_bound() -> bool {
+        (0..PP_BAR_CAPACITY).all(|index| {
+            PP_BAR_CLAIMS[index].load(Ordering::Acquire) == 1
+                && core::ptr::addr_of!(s_bars)
+                    .cast::<*mut c_void>()
+                    .add(index)
+                    .read_volatile()
+                    == PP_BARS[index].0.get().cast()
+        })
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-pp-bar-storage")]
+        if release_static_pp_bar(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-supplicant-callback-storage")]
         if release_static_supplicant_callbacks(ptr) {
             return true;
@@ -1718,6 +1823,19 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-pp-bar-storage")]
+        if is_static_pp_bar_allocation(
+            source,
+            size,
+            caller,
+            pp_attach as *const () as usize,
+        ) {
+            let result = claim_static_pp_bar().unwrap_or(core::ptr::null_mut());
+            if result.is_null() {
+                PROBE.record_request_at(size, true, false, source, caller, 0);
+            }
+            return result;
+        }
         #[cfg(feature = "rust-static-interface-storage")]
         if let Some(buffer) = claim_static_interface_storage(source, size, caller) {
             return buffer;
@@ -1966,8 +2084,14 @@ mod target {
         assert!(mem::size_of::<SupplicantCallbackTable>() == SUPPLICANT_CALLBACK_TABLE_SIZE);
     #[cfg(feature = "rust-static-supplicant-callback-storage")]
     const _: () = assert!(mem::align_of::<SupplicantCallbackTable>() >= 4);
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    const _: () = assert!(mem::size_of::<PpBar>() == PP_BAR_SIZE);
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    const _: () = assert!(mem::align_of::<PpBar>() >= 4);
 }
 
+#[cfg(all(target_arch = "riscv32", feature = "rust-static-pp-bar-storage"))]
+pub use target::static_pp_bar_storage_bound;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "rust-static-supplicant-callback-storage"
@@ -2266,6 +2390,43 @@ mod tests {
             ),
         ] {
             assert!(!is_static_supplicant_callback_allocation(
+                source, size, caller, BASE,
+            ));
+        }
+    }
+
+    #[cfg(feature = "rust-static-pp-bar-storage")]
+    #[test]
+    fn static_pp_bar_admission_is_exact() {
+        use super::{
+            is_static_pp_bar_allocation, AllocationSource, PP_BAR_RETURN_OFFSET, PP_BAR_SIZE,
+        };
+
+        const BASE: usize = 0x4008_3000;
+        assert!(is_static_pp_bar_allocation(
+            AllocationSource::OsiMallocInternal,
+            PP_BAR_SIZE,
+            BASE + PP_BAR_RETURN_OFFSET,
+            BASE,
+        ));
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiWifiMalloc,
+                PP_BAR_SIZE,
+                BASE + PP_BAR_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiMallocInternal,
+                PP_BAR_SIZE - 4,
+                BASE + PP_BAR_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiMallocInternal,
+                PP_BAR_SIZE,
+                BASE + PP_BAR_RETURN_OFFSET + 2,
+            ),
+        ] {
+            assert!(!is_static_pp_bar_allocation(
                 source, size, caller, BASE,
             ));
         }

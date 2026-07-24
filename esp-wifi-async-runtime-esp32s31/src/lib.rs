@@ -138,6 +138,8 @@ pub use adapter::{
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]
 pub use allocation::{allow_heap_for_wifi_teardown, patch_allocator_probes};
+#[cfg(all(target_arch = "riscv32", feature = "rust-static-pp-bar-storage"))]
+pub use allocation::static_pp_bar_storage_bound;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "rust-static-supplicant-callback-storage"
