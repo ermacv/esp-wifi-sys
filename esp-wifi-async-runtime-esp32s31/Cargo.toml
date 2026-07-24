@@ -81,6 +81,11 @@ rust-direct-set-max-tx-power = []
 # and fixed-state publication. Vendor NVS and active-radio stop/start branches
 # are deliberately unreachable and rejected.
 rust-direct-set-country-nvs-free = []
+# Copy the exact 184-byte interface configuration into a fixed 208-byte
+# caller-stack command owner and invoke the run-to-completion process directly.
+# This removes the allocator/ioctl envelope; Rust ownership of the configuration
+# globals is a separately audited follow-up boundary.
+rust-direct-set-config = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.

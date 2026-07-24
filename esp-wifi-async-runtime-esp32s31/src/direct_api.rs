@@ -16,6 +16,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 const API_REQUEST_SIZE: usize = 24;
 const API_REQUEST_ARGUMENT_OFFSET: usize = 8;
+const CONFIG_REQUEST_SIZE: usize = 208;
+const CONFIG_REQUEST_PAYLOAD_OFFSET: usize = 20;
+const WIFI_CONFIG_SIZE: usize = 184;
 #[cfg(all(
     target_arch = "riscv32",
     any(
@@ -30,6 +33,7 @@ const ESP_OK: i32 = 0;
 const ESP_ERR_INVALID_ARG: i32 = 0x102;
 const ESP_ERR_WIFI_NOT_INIT: i32 = 0x3001;
 const ESP_ERR_WIFI_NOT_STARTED: i32 = 0x3002;
+const ESP_ERR_WIFI_IF: i32 = 0x3004;
 const ESP_ERR_WIFI_STATE: i32 = 0x3006;
 const ESP_ERR_WIFI_NVS: i32 = 0x3008;
 const MAX_PS_TYPE: u32 = 2;
@@ -71,6 +75,12 @@ static SET_COUNTRY_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
 static SET_COUNTRY_PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
 static SET_COUNTRY_LAST_CODE: AtomicU32 = AtomicU32::new(0);
 static SET_COUNTRY_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
+static SET_CONFIG_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct WifiCountry {
@@ -85,6 +95,11 @@ struct WifiCountry {
 #[repr(C, align(4))]
 struct ApiRequest {
     bytes: [u8; API_REQUEST_SIZE],
+}
+
+#[repr(C, align(4))]
+struct ConfigRequest {
+    bytes: [u8; CONFIG_REQUEST_SIZE],
 }
 
 impl ApiRequest {
@@ -120,6 +135,21 @@ impl ApiRequest {
             .cast::<u32>()
             .write_unaligned(frame_subtype_mask);
         bytes.add(20).cast::<u32>().write_unaligned(context);
+        request
+    }
+}
+
+impl ConfigRequest {
+    unsafe fn new(interface: u8, config: *const core::ffi::c_void) -> core::mem::MaybeUninit<Self> {
+        let mut request = core::mem::MaybeUninit::<Self>::zeroed();
+        let bytes = request.as_mut_ptr().cast::<u8>();
+        bytes.write(11);
+        bytes.add(API_REQUEST_ARGUMENT_OFFSET).write(interface);
+        core::ptr::copy_nonoverlapping(
+            config.cast::<u8>(),
+            bytes.add(CONFIG_REQUEST_PAYLOAD_OFFSET),
+            WIFI_CONFIG_SIZE,
+        );
         request
     }
 }
@@ -193,6 +223,17 @@ pub struct DirectSetCountrySnapshot {
     pub invalid_arguments: u32,
     pub publications: u32,
     pub last_country_code: [u8; 3],
+    pub last_result: i32,
+}
+
+/// Observation counters for direct interface-configuration process calls.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetConfigSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub invalid_interfaces: u32,
+    pub invalid_arguments: u32,
+    pub last_interface: u8,
     pub last_result: i32,
 }
 
@@ -273,6 +314,18 @@ pub fn direct_set_country_snapshot() -> DirectSetCountrySnapshot {
         publications: SET_COUNTRY_PUBLICATIONS.load(Ordering::Relaxed),
         last_country_code: [code[0], code[1], code[2]],
         last_result: SET_COUNTRY_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
+/// Return the current direct interface-configuration counters.
+pub fn direct_set_config_snapshot() -> DirectSetConfigSnapshot {
+    DirectSetConfigSnapshot {
+        calls: SET_CONFIG_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_CONFIG_NOT_INITIALIZED.load(Ordering::Relaxed),
+        invalid_interfaces: SET_CONFIG_INVALID_INTERFACES.load(Ordering::Relaxed),
+        invalid_arguments: SET_CONFIG_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        last_interface: SET_CONFIG_LAST_INTERFACE.load(Ordering::Relaxed) as u8,
+        last_result: SET_CONFIG_LAST_RESULT.load(Ordering::Relaxed) as i32,
     }
 }
 
@@ -384,6 +437,11 @@ unsafe extern "C" {
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-ps"))]
 unsafe extern "C" {
     fn wifi_set_ps_process(request: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-config"))]
+unsafe extern "C" {
+    fn wifi_set_config_process(request: *mut core::ffi::c_void) -> i32;
 }
 
 /// Replace only the qualified pre-start use of `esp_wifi_stop`.
@@ -667,6 +725,45 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_country(country: *const core::ffi::
     ESP_OK
 }
 
+/// Apply one interface configuration through a fixed caller-stack request.
+///
+/// The public initialization, interface and pointer guards are preserved.
+/// The pinned process is synchronous and consumes the copied payload before
+/// returning. This boundary removes the allocator and `ieee80211_ioctl`; it
+/// deliberately does not yet claim Rust ownership of the vendor configuration
+/// globals touched by the process.
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-config"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_config(
+    interface: u32,
+    config: *mut core::ffi::c_void,
+) -> i32 {
+    const MAX_INTERFACE: u32 = 2;
+
+    SET_CONFIG_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_CONFIG_LAST_INTERFACE.store(interface, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_CONFIG_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_CONFIG_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    if interface > MAX_INTERFACE {
+        SET_CONFIG_INVALID_INTERFACES.fetch_add(1, Ordering::Relaxed);
+        SET_CONFIG_LAST_RESULT.store(ESP_ERR_WIFI_IF as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_IF;
+    }
+    if config.is_null() {
+        SET_CONFIG_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+        SET_CONFIG_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    let mut request = ConfigRequest::new(interface as u8, config);
+    let result = wifi_set_config_process(request.as_mut_ptr().cast());
+    SET_CONFIG_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +797,34 @@ mod tests {
             },
             3
         );
+    }
+
+    #[test]
+    fn set_config_request_has_exact_vendor_layout() {
+        assert_eq!(core::mem::size_of::<ConfigRequest>(), CONFIG_REQUEST_SIZE);
+        assert_eq!(core::mem::align_of::<ConfigRequest>(), 4);
+        let config = [0x5au8; WIFI_CONFIG_SIZE];
+        let request = unsafe { ConfigRequest::new(2, config.as_ptr().cast()) };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(request.as_ptr().cast::<u8>(), CONFIG_REQUEST_SIZE)
+        };
+        assert_eq!(bytes[0], 11);
+        assert_eq!(bytes[API_REQUEST_ARGUMENT_OFFSET], 2);
+        assert_eq!(
+            &bytes[CONFIG_REQUEST_PAYLOAD_OFFSET..CONFIG_REQUEST_PAYLOAD_OFFSET + WIFI_CONFIG_SIZE],
+            &config,
+        );
+        assert!(bytes[1..API_REQUEST_ARGUMENT_OFFSET]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert!(
+            bytes[API_REQUEST_ARGUMENT_OFFSET + 1..CONFIG_REQUEST_PAYLOAD_OFFSET]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert!(bytes[CONFIG_REQUEST_PAYLOAD_OFFSET + WIFI_CONFIG_SIZE..]
+            .iter()
+            .all(|byte| *byte == 0));
     }
 
     #[test]
