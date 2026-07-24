@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 15 allocations, 4 frees and 912 requested
+the current image is down to 13 allocations, 2 frees and 864 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -460,3 +460,34 @@ snapshot, zero failures and zero radio-context allocator calls. The first
 completed ping, DNS, TCP and HTTP; after the second, 22/22 TX and 20/20 RX
 owners had returned without rejection. The strict whole-ELF no-wait/no-heap
 audit reported zero violations.
+
+The remaining two 24-byte `esp_wifi_ipc_internal + 0x34` allocations came
+from the two HAL applications of `esp_wifi_set_inactive_time`. The public API
+uses IPC mode 1: its request remains owned by the caller and
+`wifi_ipc_process` invokes the callback before returning. The callback is
+`esp_wifi_set_inactive_time_local`; it validates interface, timeout and Wi-Fi
+mode, writes one timeout halfword into the live STA/AP interface and another
+into `g_wifi_nvs`, then tail-calls `wifi_nvs_set`.
+
+`rust-direct-set-inactive-time-nvs-free` preserves the initialization and
+started-state guards plus the pinned timeout rules: STA requires more than
+two seconds, AP more than nine, and the requested interface must be enabled
+by the current STA/AP/APSTA mode. It publishes the same two RAM halfwords and
+omits only the persistence tail. A null fixed configuration or interface
+owner fails closed. No generic function pointer, IPC command, ioctl, NVS
+operation, post, allocator or wait is entered.
+
+The final ELF audit rejects the original public envelope, requires the wrapper
+to call exactly `wifi_init_completed` and a separately retained Rust selector,
+and proves that selector call-free and acyclic. Calls to
+`esp_wifi_ipc_internal`, `wifi_ipc_process`, `ieee80211_ioctl`,
+`wifi_nvs_set`, `wifi_nvs_commit`, `pp_post` and every allocator are forbidden
+from the wrapper. The blob still contributes some of those symbols for other
+linked features; symbol presence alone is not treated as execution.
+
+Hardware produced the exact expected delta from 15 to 13 allocations, 4 to 2
+frees and 912 to 864 requested bytes. The first strict WPA2 cycle completed
+ping, DNS, TCP and HTTP. Teardown, a second passive scan, authentication,
+association and WPA2 M1-M4 also completed with the allocation snapshot fixed
+at 13/2/864, zero failures and zero radio-context allocator calls. The strict
+whole-ELF no-wait/no-heap audit again reported zero violations.
