@@ -150,6 +150,7 @@ pub struct StaAssocSnapshot {
     pub he_operation_len: u16,
     pub he_bidirectional_mcs9: bool,
     pub he_bss_color: Option<u8>,
+    pub he_peer_state_applied: bool,
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
     pub action_tx_done: u32,
@@ -462,6 +463,7 @@ mod target {
 
     static CONFIG: ConfigCell = ConfigCell(UnsafeCell::new(AuthConfig::EMPTY));
     static ASSOC_CONFIG: AssocConfigCell = AssocConfigCell(UnsafeCell::new(AssocConfig::EMPTY));
+    #[unsafe(link_section = ".critical.bss.wifi_strict.sta_node")]
     static NODE: NodeCell = NodeCell(UnsafeCell::new([0; VENDOR_NODE_LEN]));
     static TIMER: TimerCell = TimerCell(UnsafeCell::new(RawOsiTimer {
         next: ptr::null_mut(),
@@ -528,6 +530,7 @@ mod target {
     static ASSOC_HE_OPERATION_LEN: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HE_BIDIRECTIONAL_MCS9: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HE_BSS_COLOR: AtomicU32 = AtomicU32::new(u32::MAX);
+    static ASSOC_HE_PEER_STATE_APPLIED: AtomicU32 = AtomicU32::new(0);
     static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
@@ -674,6 +677,7 @@ mod target {
                 u32::MAX => None,
                 color => Some(color as u8),
             },
+            he_peer_state_applied: ASSOC_HE_PEER_STATE_APPLIED.load(Ordering::Acquire) != 0,
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
             action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
@@ -1318,6 +1322,7 @@ mod target {
         ASSOC_HE_OPERATION_LEN.store(0, Ordering::Relaxed);
         ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Relaxed);
         ASSOC_HE_BSS_COLOR.store(u32::MAX, Ordering::Relaxed);
+        ASSOC_HE_PEER_STATE_APPLIED.store(0, Ordering::Relaxed);
         let node_rate_count = usize::from(node.add(0x73).read()).min(16);
         let Some(body_len) =
             association_body_len(&config.access_point, node_rate_count, config.selected_rsn)
@@ -1587,7 +1592,15 @@ mod target {
             let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
         }
         if status == 0 {
-            if unsafe { commit_static_association(association_id, ht_capability, wmm) } {
+            if unsafe {
+                commit_static_association(
+                    association_id,
+                    ht_capability,
+                    he_capability,
+                    he_operation,
+                    wmm,
+                )
+            } {
                 complete_assoc(RESULT_OK);
             } else {
                 complete_assoc(RESULT_INTERFACE_UNAVAILABLE);
@@ -1600,6 +1613,8 @@ mod target {
     unsafe fn commit_static_association(
         association_id: u16,
         ht_capability: Option<&[u8]>,
+        he_capability: Option<&[u8]>,
+        he_operation: Option<&[u8]>,
         wmm: bool,
     ) -> bool {
         if association_id == 0 || association_id > 0x3fff {
@@ -1626,6 +1641,18 @@ mod target {
             let flags = node.add(0x0c).cast::<u32>().read();
             node.add(0x0c).cast::<u32>().write(flags | 0x02);
         }
+        #[cfg(feature = "hil-he-association-oracle")]
+        if ASSOC_HE_REQUESTED.load(Ordering::Acquire) != 0 {
+            let Some((he_capability, he_operation)) = he_capability.zip(he_operation) else {
+                return false;
+            };
+            if !apply_static_he_peer_state(node, he_capability, he_operation) {
+                return false;
+            }
+            ASSOC_HE_PEER_STATE_APPLIED.store(1, Ordering::Release);
+        }
+        #[cfg(not(feature = "hil-he-association-oracle"))]
+        let _ = (he_capability, he_operation);
         ASSOC_HT_NEGOTIATED.store(u32::from(mcs_count != 0), Ordering::Release);
         ASSOC_WMM_NEGOTIATED.store(u32::from(wmm), Ordering::Release);
         ASSOC_HT_MCS_COUNT.store(u32::from(mcs_count), Ordering::Release);
@@ -1644,6 +1671,54 @@ mod target {
         }
         node.add(0x26).cast::<u16>().write_unaligned(association_id);
         interface.add(0x98).cast::<u32>().write(5);
+        true
+    }
+
+    #[cfg(feature = "hil-he-association-oracle")]
+    #[link_section = ".rwtext.wifi_strict.he_peer"]
+    unsafe fn apply_static_he_peer_state(
+        node: *mut u8,
+        capability: &[u8],
+        operation: &[u8],
+    ) -> bool {
+        let Ok(state) = crate::he::parse_he20_peer_state(capability, operation) else {
+            return false;
+        };
+        if crate::he::program_he20_peer_hardware(state).is_err() {
+            return false;
+        }
+
+        // Exact node writes made by the pinned `ieee80211_parse_hecap` and
+        // `ieee80211_parse_heopr` leaves. Validation and all derived values are
+        // pure Rust; this boundary only commits the fixed offsets.
+        let flags = node.add(0x0c).cast::<u32>().read();
+        node.add(0x0c).cast::<u32>().write(flags | 0x0020_0000);
+        node.add(0x2ef).write(state.max_rate_code);
+        ptr::copy_nonoverlapping(
+            state.capability_prefix.as_ptr(),
+            node.add(0x33c),
+            state.capability_prefix.len(),
+        );
+        node.add(0x354).write(state.packet_padding_eight_us);
+        node.add(0x355).write(state.operation_parameters as u8);
+        node.add(0x356)
+            .write((state.operation_parameters >> 8) as u8);
+        node.add(0x357)
+            .write((state.operation_parameters >> 16) as u8);
+        node.add(0x358).write(state.bss_color_information);
+        node.add(0x35a)
+            .cast::<u16>()
+            .write_unaligned(state.basic_mcs_nss_map);
+        let mut operation_state = node.add(0x35c).cast::<u16>().read_unaligned() & !0x07ff;
+        if let Some(threshold) = state.rts_threshold {
+            operation_state |= threshold;
+        }
+        if state.extended_range_single_user {
+            operation_state |= 1 << 10;
+        }
+        node.add(0x35c)
+            .cast::<u16>()
+            .write_unaligned(operation_state);
         true
     }
 
@@ -1698,16 +1773,14 @@ mod target {
         ASSOC_HE_OPERATION_LEN.store(0, Ordering::Release);
         ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Release);
         ASSOC_HE_BSS_COLOR.store(u32::MAX, Ordering::Release);
+        ASSOC_HE_PEER_STATE_APPLIED.store(0, Ordering::Release);
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
 
         let ic = ptr::addr_of_mut!(g_ic);
         let interface = ic.add(0x10).cast::<*mut u8>().read();
         let node = interface.add(0xe4).cast::<*mut u8>().read();
-        interface
-            .add(0xe4)
-            .cast::<*mut u8>()
-            .write(ptr::null_mut());
+        interface.add(0xe4).cast::<*mut u8>().write(ptr::null_mut());
         interface.add(0x98).cast::<u32>().write(0);
         ptr::write_bytes(interface.add(0x9c), 0, 6);
         if node == NODE.0.get().cast::<u8>() {
@@ -1733,19 +1806,19 @@ pub use target::associate_sta;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::authenticate_open;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub(crate) use target::{can_reset_static_sta_link, reset_static_sta_link};
-#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::sta_assoc_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use target::sta_auth_snapshot;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use target::{sta_link_reset_generation, wait_sta_link_reset_after};
+pub(crate) use target::{can_reset_static_sta_link, reset_static_sta_link};
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub(crate) use target::{
     complete_owned_action_management, dispatch_assoc_tx, dispatch_auth_tx,
     ingest_management_action, is_owned_action_management, management_tx_done, observe_management,
     start_sta_tx_block_ack, STA_ASSOC_EVENT, STA_AUTH_EVENT,
 };
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use target::{sta_link_reset_generation, wait_sta_link_reset_after};
 
 #[cfg(test)]
 mod tests {

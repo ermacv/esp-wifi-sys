@@ -54,6 +54,18 @@ pub struct He20Operation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct He20PeerState {
+    pub capability_prefix: [u8; HE_CAPABILITIES_IE_MIN_LEN],
+    pub max_rate_code: u8,
+    pub packet_padding_eight_us: u8,
+    pub operation_parameters: u32,
+    pub bss_color_information: u8,
+    pub basic_mcs_nss_map: u16,
+    pub rts_threshold: Option<u16>,
+    pub extended_range_single_user: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeElementError {
     WrongElement,
     LengthMismatch,
@@ -118,9 +130,165 @@ pub fn parse_he20_operation(element: &[u8]) -> Result<He20Operation, HeElementEr
     })
 }
 
+/// Recover the bounded peer state installed by the pinned HE capability and
+/// operation parsers.
+///
+/// This is deliberately a pure transform. The caller separately owns the
+/// node stores and the finite MMIO leaves, keeping validation outside the
+/// small unsafe hardware boundary.
+pub(crate) fn parse_he20_peer_state(
+    capability: &[u8],
+    operation: &[u8],
+) -> Result<He20PeerState, HeElementError> {
+    let capability = validate_extension(
+        capability,
+        HE_CAPABILITIES_EXTENSION_ID,
+        HE_CAPABILITIES_IE_MIN_LEN,
+    )?;
+    let operation = validate_extension(
+        operation,
+        HE_OPERATION_EXTENSION_ID,
+        HE_OPERATION_IE_MIN_LEN,
+    )?;
+
+    let mut capability_prefix = [0_u8; HE_CAPABILITIES_IE_MIN_LEN];
+    capability_prefix.copy_from_slice(&capability[..HE_CAPABILITIES_IE_MIN_LEN]);
+
+    // `ieee80211_parse_hecap` selects the MCS9 rate code only when the first
+    // receive NSS map is above MCS0-7. Strict HE HIL advertises and accepts
+    // precisely that one-stream contract.
+    let max_rate_code = if capability[20] & 0x03 == 0 { 172 } else { 229 };
+
+    // Without PPE thresholds the nominal packet-padding field is in the
+    // mandatory PHY prefix. With PPE present, the pinned parser derives the
+    // RU26/NSS1 value from the first two PPE bytes. The node stores units of
+    // eight microseconds; the hardware leaf receives that value shifted by 3.
+    let packet_padding_eight_us = if capability[15] & 0x80 == 0 {
+        capability[18] >> 6
+    } else {
+        let ppe0 = *capability.get(24).ok_or(HeElementError::TooShort)?;
+        let ppe1 = *capability.get(25).ok_or(HeElementError::TooShort)?;
+        let ppet8 = ((ppe1 & 0x03) << 1) | (ppe0 >> 7);
+        if ppe0 & 0x08 != 0 && ppe1 & 0x1c == 0x1c && ppet8 == 0 {
+            2
+        } else {
+            0
+        }
+    };
+
+    let operation_parameters =
+        u32::from(operation[3]) | (u32::from(operation[4]) << 8) | (u32::from(operation[5]) << 16);
+    let encoded_rts_threshold =
+        (u16::from(operation[4] & 0x3f) << 4) | u16::from(operation[3] >> 4);
+    let rts_threshold =
+        (!matches!(encoded_rts_threshold, 0 | 0x03ff)).then_some(encoded_rts_threshold);
+
+    Ok(He20PeerState {
+        capability_prefix,
+        max_rate_code,
+        packet_padding_eight_us,
+        operation_parameters,
+        bss_color_information: operation[6],
+        basic_mcs_nss_map: u16::from_le_bytes([operation[7], operation[8]]),
+        rts_threshold,
+        extended_range_single_user: operation[5] & 0x01 != 0,
+    })
+}
+
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum He20HardwareError {
+    UnsupportedRtsThreshold,
+}
+
+/// Program only the finite HE20 receive-side MMIO leaves reached by the pinned
+/// HE capability/operation parsers.
+///
+/// The register transforms below are exact bounded read/modify/write bodies:
+/// they allocate nothing, acquire no lock, call no vendor function, and
+/// contain no wait or retry edge. A finite non-disabled RTS threshold is kept
+/// fail-closed because the vendor table builder contains a separate floating
+/// point loop which this HIL has not recovered yet.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+#[link_section = ".rwtext.wifi_strict.he_peer"]
+pub(crate) unsafe fn program_he20_peer_hardware(
+    state: He20PeerState,
+) -> Result<(), He20HardwareError> {
+    if state.rts_threshold.is_some() {
+        return Err(He20HardwareError::UnsupportedRtsThreshold);
+    }
+
+    const HE_BSS_COLOR: *mut u32 = 0x2010_4020 as *mut u32;
+    const HE_ERSU_ACK_RATE: *mut u32 = 0x2010_4404 as *mut u32;
+    const HE_ERSU_CONTROL: *mut u32 = 0x2010_4c7c as *mut u32;
+    const HE_DEFAULT_PE: *mut u32 = 0x2010_4c80 as *mut u32;
+    const HE_PACKET_PADDING: *mut u32 = 0x2010_4c90 as *mut u32;
+    const HE_RTS_AC0: *mut u32 = 0x2010_5368 as *mut u32;
+    const HE_RTS_AC1: *mut u32 = 0x2010_53e4 as *mut u32;
+    const HE_RTS_AC2: *mut u32 = 0x2010_5460 as *mut u32;
+    const HE_RTS_AC3: *mut u32 = 0x2010_54dc as *mut u32;
+
+    let color_information = state.bss_color_information;
+    let color = u32::from(color_information & 0x3f);
+    let partial = color_information & 0x40 != 0;
+    let disabled = color_information & 0x80 != 0;
+    // `ieee80211_parse_heopr` leaves the register untouched for the all-zero
+    // color-information value.
+    if color_information & 0xbf != 0 {
+        let mut bss_color = HE_BSS_COLOR.read_volatile();
+        bss_color &= !(0x0800_0000 | 0x07e0_0000 | 0x1000_0000);
+        if !disabled {
+            bss_color |= 0x0800_0000 | (color << 21);
+        }
+        if partial {
+            bss_color |= 0x1000_0000;
+        }
+        HE_BSS_COLOR.write_volatile(bss_color);
+    }
+
+    let mut default_pe = HE_DEFAULT_PE.read_volatile();
+    default_pe = default_pe & !0x07 | (state.operation_parameters & 0x07);
+    HE_DEFAULT_PE.write_volatile(default_pe);
+
+    let padding_us = u32::from(state.packet_padding_eight_us) << 3;
+    let repeated_padding = (padding_us & 0x1f)
+        | ((padding_us & 0x1f) << 5)
+        | ((padding_us & 0x1f) << 10)
+        | ((padding_us & 0x1f) << 15)
+        | ((padding_us & 0x1f) << 20);
+    let packet_padding = HE_PACKET_PADDING.read_volatile() & !0x01ff_ffff;
+    HE_PACKET_PADDING.write_volatile(packet_padding | repeated_padding);
+
+    HE_RTS_AC0.write_volatile(HE_RTS_AC0.read_volatile() | 0x0002_0000);
+    HE_RTS_AC1.write_volatile(HE_RTS_AC1.read_volatile() | 0x0002_0000);
+    HE_RTS_AC2.write_volatile(HE_RTS_AC2.read_volatile() | 0x0002_0000);
+    HE_RTS_AC3.write_volatile(HE_RTS_AC3.read_volatile() | 0x0002_0000);
+
+    let mut ersu = HE_ERSU_CONTROL.read_volatile();
+    if state.extended_range_single_user {
+        ersu &= !0x400;
+    } else {
+        ersu |= 0x400;
+        HE_ERSU_ACK_RATE.write_volatile(0x8080_8080);
+    }
+    HE_ERSU_CONTROL.write_volatile(ersu);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_he20_capabilities, parse_he20_operation, HeElementError, HeMcsNssSupport};
+    use super::{
+        parse_he20_capabilities, parse_he20_operation, parse_he20_peer_state, HeElementError,
+        HeMcsNssSupport,
+    };
 
     #[test]
     fn parses_single_stream_mcs9_capability_without_optional_tails() {
@@ -155,6 +323,37 @@ mod tests {
         assert_eq!(
             parse_he20_capabilities(&element),
             Err(HeElementError::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn recovers_vendor_ap_he20_peer_state() {
+        let capability = [
+            0xff, 0x1a, 0x23, 0x05, 0x00, 0x18, 0x12, 0x00, 0x10, 0x22, 0x20, 0x02, 0xc0, 0x0f,
+            0x41, 0x95, 0x08, 0x00, 0xcc, 0x00, 0xfa, 0xff, 0xfa, 0xff, 0x19, 0x1c, 0xc7, 0x71,
+        ];
+        let operation = [0xff, 0x07, 0x24, 0x04, 0x00, 0x01, 0x1b, 0xfc, 0xff];
+
+        let state = parse_he20_peer_state(&capability, &operation).unwrap();
+        assert_eq!(state.capability_prefix, capability[..24]);
+        assert_eq!(state.max_rate_code, 229);
+        assert_eq!(state.packet_padding_eight_us, 2);
+        assert_eq!(state.operation_parameters, 0x01_0004);
+        assert_eq!(state.bss_color_information, 27);
+        assert_eq!(state.basic_mcs_nss_map, 0xfffc);
+        assert_eq!(state.rts_threshold, None);
+        assert!(state.extended_range_single_user);
+    }
+
+    #[test]
+    fn peer_state_requires_complete_ppe_prefix() {
+        let mut capability = [0_u8; 24];
+        capability[..3].copy_from_slice(&[255, 22, 35]);
+        capability[15] = 0x80;
+        let operation = [255, 7, 36, 0, 0, 0, 0, 0xff, 0xff];
+        assert_eq!(
+            parse_he20_peer_state(&capability, &operation),
+            Err(HeElementError::TooShort)
         );
     }
 }
