@@ -9,9 +9,7 @@ use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
-use strict_policy::{
-    ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
-};
+use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
 
 // Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
 // wdev_data_init (remaining 31) disassemblies.
@@ -267,6 +265,10 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     );
     pushln(
         &mut report,
+        "- separately auditable Rust caller-task cold init: `wifi_init_in_caller_task`, `wifi_deinit_in_caller_task`",
+    );
+    pushln(
+        &mut report,
         &format!(
             "- vendor functions reachable from those roots: {}",
             reachable.len()
@@ -323,6 +325,10 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(
         &mut report,
         "Run `audit-strict-esp32s31 --include-static-binding-init --include-static-pm-init --enforce` to prove the fixed-storage cold-init leaves together with the runtime roots.",
+    );
+    pushln(
+        &mut report,
+        "The application `wifi-rust-static-cold-init-hil` final-ELF audit additionally proves the three fixed SRAM locks, the exact direct init/deinit call targets, the taskless PP tail calls, and the absence of control-flow cycles.",
     );
 
     pushln(&mut report, "");
