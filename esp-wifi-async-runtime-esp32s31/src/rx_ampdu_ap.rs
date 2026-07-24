@@ -41,6 +41,7 @@ struct PendingRequest {
 struct ActiveAgreement {
     peer: [u8; 6],
     tid: u8,
+    interface: u8,
     reorder: RxBlockAckReorder,
     gap_generation: Option<usize>,
 }
@@ -321,6 +322,7 @@ fn install_agreement(
     state.active = Some(ActiveAgreement {
         peer,
         tid,
+        interface,
         reorder,
         gap_generation: None,
     });
@@ -360,7 +362,6 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
     if frame.len() < 26
         || frame[0] & 0x0c != 0x08
         || frame[0] & 0x80 == 0
-        || frame[1] & 0x03 != 0x01
     {
         REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
@@ -377,7 +378,12 @@ pub(crate) fn ingest(packet: *mut u8, frame: &[u8]) -> Ingress {
         REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     };
-    if active.peer != peer || active.tid != tid {
+    let expected_direction = if active.interface == AP_INTERFACE_INDEX {
+        0x01
+    } else {
+        0x02
+    };
+    if frame[1] & 0x03 != expected_direction || active.peer != peer || active.tid != tid {
         REJECTED_FRAMES.fetch_add(1, Ordering::Relaxed);
         return Ingress::Reject;
     }
