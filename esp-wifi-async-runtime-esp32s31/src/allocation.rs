@@ -315,6 +315,47 @@ fn classify_wifi_nvs_static_allocation(
     }
 }
 
+#[cfg(feature = "rust-static-function-table-storage")]
+const WDEV_FUNCTION_TABLE_SIZE: usize = 1560;
+#[cfg(feature = "rust-static-function-table-storage")]
+const NET80211_FUNCTION_TABLE_SIZE: usize = 332;
+#[cfg(feature = "rust-static-function-table-storage")]
+const WDEV_FUNCTION_TABLE_RETURN_OFFSET: usize = 0x34;
+#[cfg(feature = "rust-static-function-table-storage")]
+const NET80211_FUNCTION_TABLE_RETURN_OFFSET: usize = 0x30;
+
+#[cfg(feature = "rust-static-function-table-storage")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaticFunctionTable {
+    Wdev,
+    Net80211,
+}
+
+#[cfg(feature = "rust-static-function-table-storage")]
+fn classify_static_function_table(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    wdev_funcs_init_address: usize,
+    net80211_funcs_init_address: usize,
+) -> Option<StaticFunctionTable> {
+    match (source, size) {
+        (AllocationSource::OsiCallocInternal, WDEV_FUNCTION_TABLE_SIZE)
+            if caller.wrapping_sub(wdev_funcs_init_address)
+                == WDEV_FUNCTION_TABLE_RETURN_OFFSET =>
+        {
+            Some(StaticFunctionTable::Wdev)
+        }
+        (AllocationSource::OsiCallocInternal, NET80211_FUNCTION_TABLE_SIZE)
+            if caller.wrapping_sub(net80211_funcs_init_address)
+                == NET80211_FUNCTION_TABLE_RETURN_OFFSET =>
+        {
+            Some(StaticFunctionTable::Net80211)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -327,6 +368,11 @@ mod target {
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
     use super::{AllocationSource, PROBE};
+    #[cfg(feature = "rust-static-function-table-storage")]
+    use super::{
+        classify_static_function_table, StaticFunctionTable, NET80211_FUNCTION_TABLE_SIZE,
+        WDEV_FUNCTION_TABLE_SIZE,
+    };
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     use super::{
         classify_wifi_nvs_static_allocation, WifiNvsStaticAllocation, WIFI_NVS_CFG_ITEMS_SIZE,
@@ -523,6 +569,20 @@ mod target {
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     unsafe impl<const SIZE: usize> Sync for WifiNvsStaticBuffer<SIZE> {}
 
+    #[cfg(feature = "rust-static-function-table-storage")]
+    #[repr(C, align(16))]
+    struct StaticFunctionTableBuffer<const SIZE: usize>(UnsafeCell<[u8; SIZE]>);
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    impl<const SIZE: usize> StaticFunctionTableBuffer<SIZE> {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    unsafe impl<const SIZE: usize> Sync for StaticFunctionTableBuffer<SIZE> {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -586,6 +646,18 @@ mod target {
         WifiNvsStaticBuffer::new();
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     static WIFI_NVS_LOAD_SCRATCH_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-function-table-storage")]
+    #[link_section = ".critical.bss.wifi_strict.wdev_function_table"]
+    static WDEV_FUNCTION_TABLE: StaticFunctionTableBuffer<WDEV_FUNCTION_TABLE_SIZE> =
+        StaticFunctionTableBuffer::new();
+    #[cfg(feature = "rust-static-function-table-storage")]
+    static WDEV_FUNCTION_TABLE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-function-table-storage")]
+    #[link_section = ".critical.bss.wifi_strict.net80211_function_table"]
+    static NET80211_FUNCTION_TABLE: StaticFunctionTableBuffer<NET80211_FUNCTION_TABLE_SIZE> =
+        StaticFunctionTableBuffer::new();
+    #[cfg(feature = "rust-static-function-table-storage")]
+    static NET80211_FUNCTION_TABLE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -604,6 +676,10 @@ mod target {
         fn wDev_Rxbuf_Init(count: u32) -> i32;
         #[cfg(feature = "rust-static-wifi-nvs-storage")]
         fn wifi_nvs_cfg_init() -> i32;
+        #[cfg(feature = "rust-static-function-table-storage")]
+        fn wdev_funcs_init(config: *mut c_void) -> i32;
+        #[cfg(feature = "rust-static-function-table-storage")]
+        fn net80211_funcs_init() -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -1119,7 +1195,75 @@ mod target {
         )
     }
 
+    #[cfg(feature = "rust-static-function-table-storage")]
+    fn claim_static_function_table_buffer<const SIZE: usize>(
+        buffer: &'static StaticFunctionTableBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> Option<*mut c_void> {
+        claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let pointer = buffer.0.get();
+        unsafe { pointer.write([0; SIZE]) };
+        Some(pointer.cast())
+    }
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    fn release_static_function_table_buffer<const SIZE: usize>(
+        pointer: *mut c_void,
+        buffer: &'static StaticFunctionTableBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> bool {
+        if pointer != buffer.0.get().cast() || claimed.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe { buffer.0.get().write([0; SIZE]) };
+        true
+    }
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    fn claim_static_function_table(
+        source: AllocationSource,
+        size: usize,
+        caller: usize,
+    ) -> Option<*mut c_void> {
+        let table = classify_static_function_table(
+            source,
+            size,
+            caller,
+            wdev_funcs_init as *const () as usize,
+            net80211_funcs_init as *const () as usize,
+        )?;
+        match table {
+            StaticFunctionTable::Wdev => claim_static_function_table_buffer(
+                &WDEV_FUNCTION_TABLE,
+                &WDEV_FUNCTION_TABLE_CLAIMED,
+            ),
+            StaticFunctionTable::Net80211 => claim_static_function_table_buffer(
+                &NET80211_FUNCTION_TABLE,
+                &NET80211_FUNCTION_TABLE_CLAIMED,
+            ),
+        }
+    }
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    fn release_static_function_table(pointer: *mut c_void) -> bool {
+        release_static_function_table_buffer(
+            pointer,
+            &WDEV_FUNCTION_TABLE,
+            &WDEV_FUNCTION_TABLE_CLAIMED,
+        ) || release_static_function_table_buffer(
+            pointer,
+            &NET80211_FUNCTION_TABLE,
+            &NET80211_FUNCTION_TABLE_CLAIMED,
+        )
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-function-table-storage")]
+        if release_static_function_table(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-wifi-nvs-storage")]
         if release_wifi_nvs_storage(ptr) {
             return true;
@@ -1391,21 +1535,19 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        let total_size = count.saturating_mul(size);
+        #[cfg(feature = "rust-static-function-table-storage")]
+        if let Some(buffer) = claim_static_function_table(source, total_size, caller) {
+            return buffer;
+        }
         if heap_forbidden() {
-            PROBE.record_request_at(
-                count.saturating_mul(size),
-                true,
-                false,
-                source,
-                caller,
-                0,
-            );
+            PROBE.record_request_at(total_size, true, false, source, caller, 0);
             return core::ptr::null_mut();
         }
         let original = mem::transmute::<usize, Calloc>(saved.load(Ordering::Acquire));
         let result = original(count, size);
         PROBE.record_request_at(
-            count.saturating_mul(size),
+            total_size,
             result.is_null(),
             false,
             source,
@@ -1527,6 +1669,13 @@ mod target {
     #[cfg(feature = "rust-static-wifi-nvs-storage")]
     const _: () =
         assert!(mem::align_of::<WifiNvsStaticBuffer<WIFI_NVS_LOAD_SCRATCH_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-function-table-storage")]
+    const _: () =
+        assert!(mem::align_of::<StaticFunctionTableBuffer<WDEV_FUNCTION_TABLE_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-function-table-storage")]
+    const _: () = assert!(
+        mem::align_of::<StaticFunctionTableBuffer<NET80211_FUNCTION_TABLE_SIZE>>() >= 16
+    );
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1636,6 +1785,73 @@ mod tests {
         ] {
             assert_eq!(
                 classify_wifi_nvs_static_allocation(source, size, caller, BASE),
+                None
+            );
+        }
+    }
+
+    #[cfg(feature = "rust-static-function-table-storage")]
+    #[test]
+    fn static_function_table_admission_is_exact() {
+        use super::{
+            classify_static_function_table, AllocationSource, StaticFunctionTable,
+            NET80211_FUNCTION_TABLE_RETURN_OFFSET, NET80211_FUNCTION_TABLE_SIZE,
+            WDEV_FUNCTION_TABLE_RETURN_OFFSET, WDEV_FUNCTION_TABLE_SIZE,
+        };
+
+        const WDEV_BASE: usize = 0x4005_1000;
+        const NET80211_BASE: usize = 0x4005_2000;
+        assert_eq!(
+            classify_static_function_table(
+                AllocationSource::OsiCallocInternal,
+                WDEV_FUNCTION_TABLE_SIZE,
+                WDEV_BASE + WDEV_FUNCTION_TABLE_RETURN_OFFSET,
+                WDEV_BASE,
+                NET80211_BASE,
+            ),
+            Some(StaticFunctionTable::Wdev)
+        );
+        assert_eq!(
+            classify_static_function_table(
+                AllocationSource::OsiCallocInternal,
+                NET80211_FUNCTION_TABLE_SIZE,
+                NET80211_BASE + NET80211_FUNCTION_TABLE_RETURN_OFFSET,
+                WDEV_BASE,
+                NET80211_BASE,
+            ),
+            Some(StaticFunctionTable::Net80211)
+        );
+
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiWifiCalloc,
+                WDEV_FUNCTION_TABLE_SIZE,
+                WDEV_BASE + WDEV_FUNCTION_TABLE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiCallocInternal,
+                WDEV_FUNCTION_TABLE_SIZE - 1,
+                WDEV_BASE + WDEV_FUNCTION_TABLE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiCallocInternal,
+                WDEV_FUNCTION_TABLE_SIZE,
+                WDEV_BASE + WDEV_FUNCTION_TABLE_RETURN_OFFSET + 2,
+            ),
+            (
+                AllocationSource::OsiCallocInternal,
+                NET80211_FUNCTION_TABLE_SIZE,
+                WDEV_BASE + WDEV_FUNCTION_TABLE_RETURN_OFFSET,
+            ),
+        ] {
+            assert_eq!(
+                classify_static_function_table(
+                    source,
+                    size,
+                    caller,
+                    WDEV_BASE,
+                    NET80211_BASE,
+                ),
                 None
             );
         }
