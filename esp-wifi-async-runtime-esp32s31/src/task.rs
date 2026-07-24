@@ -73,6 +73,21 @@ impl VirtualPpTask {
         self.started.load(Ordering::Acquire)
     }
 
+    /// Start the logical PP identity without entering the vendor
+    /// `pp_create_task` RTOS-style envelope.
+    pub fn try_start_static(&self) -> bool {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        self.startup_signal.store(false, Ordering::Release);
+        self.startup_delay_pending.store(false, Ordering::Release);
+        true
+    }
+
     /// Consume the virtual startup signal that replaces the first
     /// `sem_give(s_pp_task_create_sem)` performed by the real `ppTask`.
     pub fn take_startup_signal(&self) -> bool {
@@ -104,5 +119,22 @@ impl VirtualPpTask {
 impl Default for VirtualPpTask {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VirtualPpTask;
+
+    #[test]
+    fn static_start_has_no_synthetic_latch_or_delay() {
+        let task = VirtualPpTask::new();
+        assert!(task.try_start_static());
+        assert!(task.is_started());
+        assert!(!task.take_startup_signal());
+        assert!(!task.take_redundant_startup_delay(usize::MAX, 1));
+        assert!(!task.try_start_static());
+        task.stop();
+        assert!(task.try_start_static());
     }
 }

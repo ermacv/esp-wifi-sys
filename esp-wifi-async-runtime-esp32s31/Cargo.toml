@@ -23,6 +23,10 @@ rust-static-bindings-interpose = []
 # Replace the single 0x44-byte PM callback-table allocation and its paired
 # deallocation with fixed internal-SRAM ownership.
 rust-static-pm-init-interpose = []
+# Replace pp_create_task/pp_delete_task with direct publication of the fixed
+# Rust queue and logical task identity. No OSI task, semaphore, queue-create,
+# delay, or task-delete callback is entered.
+rust-static-pp-task-init-interpose = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []

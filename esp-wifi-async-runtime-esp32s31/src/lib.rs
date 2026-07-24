@@ -121,8 +121,8 @@ pub use adapter::{
 #[cfg(target_arch = "riscv32")]
 pub use adapter::{
     configure_wifi_runtime_clock, drain_wifi_initialization_events, patch_pp_runtime_callbacks,
-    request_shutdown, take_radio_future, take_wifi_runtime, InitializationDrainError,
-    InvalidPpPostSnapshot,
+    request_shutdown, static_pp_task_bound, take_radio_future, take_wifi_runtime,
+    InitializationDrainError, InvalidPpPostSnapshot,
 };
 pub use allocation::{allocation_probe, AllocationProbe, AllocationSnapshot};
 #[cfg(target_arch = "riscv32")]

@@ -57,6 +57,11 @@ unsafe extern "C" {
     static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
     static mut g_intr_lock_mux: *mut c_void;
     static mut pp_sig_cnt: [u8; 36];
+    static mut pp_task_hdl: *mut c_void;
+    static mut s_pp_task_create_sem: *mut c_void;
+    static mut s_pp_task_del_sem: *mut c_void;
+    static mut s_wifi_queue: *mut c_void;
+    static mut xphyQueue: *mut c_void;
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
     fn __real_pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
@@ -538,6 +543,89 @@ pub fn configure_wifi_runtime_clock(now: fn() -> u64) -> bool {
 #[cfg(target_arch = "riscv32")]
 pub(crate) fn virtual_pp_task_started() -> bool {
     STATE.virtual_task.is_started()
+}
+
+/// Verify the exact fixed queue and logical task publications used by the
+/// taskless cold-init wrapper.
+///
+/// # Safety
+///
+/// Wi-Fi initialization/deinitialization must not mutate the five vendor
+/// publication cells concurrently.
+#[cfg(target_arch = "riscv32")]
+pub unsafe fn static_pp_task_bound() -> bool {
+    let queue = STATE.queue_handle();
+    let descriptor = ptr::addr_of!(STATE.queue_descriptor).cast_mut().cast();
+    STATE.virtual_task.is_started()
+        && ptr::addr_of!(pp_task_hdl).read_volatile() == PP_TASK_HANDLE
+        && ptr::addr_of!(s_wifi_queue).read_volatile() == descriptor
+        && ptr::addr_of!(xphyQueue).read_volatile() == queue
+        && ptr::addr_of!(s_pp_task_create_sem)
+            .read_volatile()
+            .is_null()
+        && ptr::addr_of!(s_pp_task_del_sem)
+            .read_volatile()
+            .is_null()
+}
+
+/// Replace the RTOS-style `pp_create_task` envelope with direct fixed-state
+/// publication. No task entry, semaphore, queue-create callback, delay, or
+/// scheduler primitive is entered.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-static-pp-task-init-interpose"
+))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pp_create_task() -> i32 {
+    if !ptr::addr_of!(pp_task_hdl).read_volatile().is_null()
+        || !ptr::addr_of!(s_wifi_queue).read_volatile().is_null()
+        || !STATE.virtual_task.try_start_static()
+    {
+        return 0x101;
+    }
+
+    let queue = STATE.queue_handle();
+    let descriptor = STATE.queue_descriptor.initialize(queue);
+    ptr::addr_of_mut!(xphyQueue).write_volatile(queue);
+    ptr::addr_of_mut!(s_wifi_queue).write_volatile(descriptor);
+    ptr::addr_of_mut!(s_pp_task_create_sem).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(s_pp_task_del_sem).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(pp_task_hdl).write_volatile(PP_TASK_HANDLE);
+    STATE.shutdown_processed.store(false, Ordering::Release);
+    0
+}
+
+/// Paired taskless deinitializer. A live future or queued work fails
+/// immediately instead of being discarded or synchronously drained.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-static-pp-task-init-interpose"
+))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_pp_delete_task() -> i32 {
+    if STATE.radio_future_taken.load(Ordering::Acquire)
+        || !STATE.queue.is_empty()
+        || !STATE.internal_queue.is_empty()
+    {
+        return 0x101;
+    }
+    if !static_pp_task_bound() {
+        return if ptr::addr_of!(pp_task_hdl).read_volatile().is_null()
+            && ptr::addr_of!(s_wifi_queue).read_volatile().is_null()
+        {
+            0
+        } else {
+            0x101
+        };
+    }
+
+    ptr::addr_of_mut!(pp_task_hdl).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(s_wifi_queue).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(xphyQueue).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(s_pp_task_create_sem).write_volatile(ptr::null_mut());
+    ptr::addr_of_mut!(s_pp_task_del_sem).write_volatile(ptr::null_mut());
+    STATE.virtual_task.stop();
+    0
 }
 
 /// Run a finite cold-start batch after `esp_wifi_init_internal` returns.

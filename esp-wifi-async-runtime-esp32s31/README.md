@@ -457,6 +457,17 @@ and `__wrap_pm_funcs_deinit` withdraws the pointer without entering `free`.
 `static_pm_functions_bound` verifies the live publication before strict
 handoff. This removes one cold-init allocation; it does not yet replace the
 surrounding vendor initialization sequence.
+The next `ic_create_wifi_task` leaf is only a tail call into
+`pp_create_task`. That vendor envelope creates a queue and startup semaphore,
+invokes the OSI task-create callback, takes the semaphore with an infinite
+timeout, inserts a one-tick task delay, and deletes the semaphore. The
+`rust-static-pp-task-init-interpose` feature bypasses the whole envelope:
+`__wrap_pp_create_task` directly publishes the existing fixed Rust queue,
+`xphyQueue`, and logical `PP_TASK_HANDLE`; it enters no OSI callback and never
+calls `ppTask`. `__wrap_pp_delete_task` clears those cells only when no radio
+future or queued work is live, otherwise it fails immediately. The
+`static_pp_task_bound` check proves all five queue/task/semaphore publication
+cells before handoff.
 The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
 that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
 walks four-byte frame records with a counter narrowed to `u8`; including the
