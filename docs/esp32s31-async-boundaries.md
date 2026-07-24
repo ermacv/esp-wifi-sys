@@ -244,6 +244,15 @@ narrowed to Rust-owned behavior and its peer state, HE-SIG construction, retry
 schedule, and completion layouts have each been recovered and admitted as
 bounded leaves.
 
+The first taskless HIL run reached a successful HE association, WPA2 M1-M4,
+and a 32-frame BlockAck agreement with unchanged allocation and zero
+blocking/delay probes. It then received no ordinary data and could not acquire
+DHCP. Returning to the same image without the oracle immediately restored
+protected IPv4 and passed the full UDP/HTTP stress workload. This A/B result
+locates the next missing boundary after association construction: the S31 HE
+node/receive state must be reproduced before the AP is allowed to treat the
+station as an HE peer.
+
 The strict RX boundary obtains the complete 14-bit MPDU length from S31
 `sig_len` rather than the one-byte length of the first hardware block. It
 subtracts the documented four-byte FCS before constructing the shared protocol
