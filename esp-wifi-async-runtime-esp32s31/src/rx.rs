@@ -318,8 +318,6 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
             .cast::<*mut u8>()
             .write(rx_control.add(64))
     };
-    account_raw_frame(packet, rx_control);
-
     // Rust-owned association intentionally does not initialize the vendor
     // supplicant state consulted by the net80211 EAPOL route. Capture the
     // complete unencrypted EAPOL MPDU at the same bounded RX boundary instead.
@@ -338,6 +336,8 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
     }
     if raw_length >= 2 {
         let raw_bytes = unsafe { core::slice::from_raw_parts(raw_frame, raw_length) };
+        let rssi = unsafe { rx_control.cast::<i8>().read() };
+        account_raw_frame(raw_bytes, rssi);
         crate::ap_power_save::observe_frame(raw_bytes);
         if raw_length >= 24
             && raw_bytes[0] & 0x0c == 0
@@ -513,27 +513,16 @@ unsafe fn rx_signal_length(rx_control: *const u8) -> usize {
     )
 }
 
-fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
-    let mut length = unsafe { rx_control.add(20).read() as usize };
-    let mut frame = unsafe { rx_control.add(64) };
-    if unsafe { packet.add(36).cast::<u16>().read() } & 0x2000 != 0 {
-        if length < 8 {
-            return;
-        }
-        frame = unsafe { frame.add(8) };
-        length -= 8;
-    }
-    if length < 2 {
+fn account_raw_frame(frame: &[u8], rssi: i8) {
+    if frame.len() < 2 {
         return;
     }
-    let frame_control = u16::from_le_bytes(unsafe { [frame.read(), frame.add(1).read()] });
+    let frame_control = u16::from_le_bytes([frame[0], frame[1]]);
     match (frame_control >> 2) & 3 {
         0 => {
             COUNTERS.raw_management.fetch_add(1, Ordering::Relaxed);
             COUNTERS.management_subtypes[usize::from((frame_control >> 4) & 0x0f)]
                 .fetch_add(1, Ordering::Relaxed);
-            let rssi = unsafe { rx_control.cast::<i8>().read() };
-            let frame = unsafe { core::slice::from_raw_parts(frame, length) };
             observe_block_ack_action(frame);
             crate::scan::observe_management(frame, rssi);
             crate::sta_link::observe_management(frame);
@@ -555,9 +544,8 @@ fn account_raw_frame(packet: *const u8, rx_control: *const u8) {
                 }
             }
             const EAPOL_LLC: [u8; 8] = [0xaa, 0xaa, 0x03, 0, 0, 0, 0x88, 0x8e];
-            if length >= header_len + EAPOL_LLC.len()
-                && unsafe { core::slice::from_raw_parts(frame.add(header_len), EAPOL_LLC.len()) }
-                    == EAPOL_LLC
+            if frame.len() >= header_len + EAPOL_LLC.len()
+                && frame[header_len..header_len + EAPOL_LLC.len()] == EAPOL_LLC
             {
                 COUNTERS.raw_eapol.fetch_add(1, Ordering::Relaxed);
             }
