@@ -56,6 +56,10 @@ pub struct StrictRxSnapshot {
     pub michael_mic_failure: usize,
     pub callback_missing: usize,
     pub auxiliary_callback: usize,
+    pub station_callback: usize,
+    pub unrouted: usize,
+    pub last_route_flags: usize,
+    pub last_descriptor_word: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -98,6 +102,10 @@ struct Counters {
     michael_mic_failure: AtomicUsize,
     callback_missing: AtomicUsize,
     auxiliary_callback: AtomicUsize,
+    station_callback: AtomicUsize,
+    unrouted: AtomicUsize,
+    last_route_flags: AtomicUsize,
+    last_descriptor_word: AtomicUsize,
 }
 
 struct BlockAckCounters {
@@ -141,6 +149,10 @@ impl Counters {
             michael_mic_failure: AtomicUsize::new(0),
             callback_missing: AtomicUsize::new(0),
             auxiliary_callback: AtomicUsize::new(0),
+            station_callback: AtomicUsize::new(0),
+            unrouted: AtomicUsize::new(0),
+            last_route_flags: AtomicUsize::new(0),
+            last_descriptor_word: AtomicUsize::new(0),
         }
     }
 
@@ -161,6 +173,10 @@ impl Counters {
             michael_mic_failure: self.michael_mic_failure.load(Ordering::Acquire),
             callback_missing: self.callback_missing.load(Ordering::Acquire),
             auxiliary_callback: self.auxiliary_callback.load(Ordering::Acquire),
+            station_callback: self.station_callback.load(Ordering::Acquire),
+            unrouted: self.unrouted.load(Ordering::Acquire),
+            last_route_flags: self.last_route_flags.load(Ordering::Acquire),
+            last_descriptor_word: self.last_descriptor_word.load(Ordering::Acquire),
         }
     }
 }
@@ -446,6 +462,16 @@ unsafe fn process_protocol(
     }
 
     let flags = unsafe { rx_control.add(3).read() };
+    COUNTERS
+        .last_route_flags
+        .store(usize::from(flags), Ordering::Relaxed);
+    let descriptor = unsafe { packet.add(0x34).cast::<*mut u8>().read() };
+    if !descriptor.is_null() {
+        COUNTERS.last_descriptor_word.store(
+            unsafe { descriptor.cast::<u32>().read() } as usize,
+            Ordering::Relaxed,
+        );
+    }
     if flags & 0x10 != 0 {
         let protocol = unsafe { rx_control.add(60).read() };
         if protocol != 0 && protocol != 198 && protocol != 245 {
@@ -474,6 +500,7 @@ unsafe fn process_protocol(
         };
         let rssi = unsafe { rx_control.cast::<i8>().read() } as i32;
         let signal_length = unsafe { rx_control.add(20).read() } as u32;
+        COUNTERS.station_callback.fetch_add(1, Ordering::Relaxed);
         unsafe { callback(packet, rssi, signal_length) };
         return;
     }
@@ -507,7 +534,9 @@ unsafe fn process_protocol(
         // Interface two is NAN in the pinned registration table. The strict
         // STA/AP profile keeps it disabled and never enters its callback.
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
+        return;
     }
+    COUNTERS.unrouted.fetch_add(1, Ordering::Relaxed);
     unsafe { ppRecycleRxPkt(packet) };
 }
 
