@@ -1688,11 +1688,12 @@ mod target {
             return false;
         }
 
-        // Exact node writes made by the pinned `ieee80211_parse_hecap` and
-        // `ieee80211_parse_heopr` leaves. Validation and all derived values are
-        // pure Rust; this boundary only commits the fixed offsets.
-        let flags = node.add(0x0c).cast::<u32>().read();
-        node.add(0x0c).cast::<u32>().write(flags | 0x0020_0000);
+        // Exact bounded capability/operation stores recovered from the pinned
+        // parsers. Do not publish their HE TX-selection flag (0x0020_0000)
+        // yet: `ieee80211_set_tx_desc` turns it into the descriptor HE bit,
+        // whose PPDU formatter is intentionally still fail-closed. The
+        // receive-side MMIO state and peer bytes remain installed while this
+        // HIL keeps the qualified outbound HT path.
         node.add(0x2ef).write(state.max_rate_code);
         ptr::copy_nonoverlapping(
             state.capability_prefix.as_ptr(),
