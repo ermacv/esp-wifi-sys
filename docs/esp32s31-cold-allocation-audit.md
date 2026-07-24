@@ -112,7 +112,24 @@ snapshots remained intact. The application static cold-init profile therefore
 now includes the ESF boundary; its former explicit feature name remains only
 as a compatibility alias.
 
-After those pools, the next high-value leaf is `wifi_nvs_cfg_init` plus
-`wifi_nvs_load`; the numerous 24-byte entries are API command envelopes and
-should disappear when the upper initialization/configuration state machine is
-called directly instead of being replaced by generic allocator exceptions.
+The next qualified boundary supplies the `wifi_nvs_cfg_init` descriptor table
+and `wifi_nvs_load` scratch page from separate 16-byte-aligned internal-SRAM
+owners. Admission is exact: `OsiWifiZalloc`, 4,628 bytes and
+`wifi_nvs_cfg_init + 0x46` for the 89-by-52-byte table; or
+`OsiMallocInternal`, 1,024 bytes and `wifi_nvs_cfg_init + 0x13b6` for the
+serialized load page. The first owner lives until `wifi_nvs_deinit`; the
+second is released inside `wifi_nvs_load`. Every other source, size or caller
+falls through to the ordinary cold allocator.
+
+This reduces cold allocation to 38 calls / 5,724 requested bytes and the
+largest remaining request to 1,560 bytes. An 8 KiB bootstrap heap measured
+4,796 bytes used / 3,396 free and leaves 20,848 bytes of CPU0 stack. Two cold
+boots passed; the second completed six WPA2 scan/auth/association/handshake
+and post-link cycles with five teardown/reconnect boundaries, unchanged
+allocation counters, balanced channel work, an intact PHY function-table
+pointer and fully returned TX/RX owners. The application static cold-init
+profile now includes this boundary.
+
+The numerous remaining 24-byte entries are API command envelopes and should
+disappear when the upper initialization/configuration state machine is called
+directly instead of being replaced by generic allocator exceptions.
