@@ -15,9 +15,9 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 2 allocations, 2 frees and 48 requested
-bytes. These are still cold-bootstrap observations, not accepted final
-runtime dependencies.
+the current image performs zero allocations, reallocations or frees and
+requests zero heap bytes. The traced strict STA cold-start and runtime path
+therefore has no accepted dynamic-memory dependency.
 
 Addresses below are expressed as a function-relative return offset so that
 the audit does not depend on application link layout. `esf_buf_alloc_dynamic`
@@ -736,3 +736,47 @@ M1-M4, DHCP, ping, DNS, TCP and HTTP. Teardown and a second passive-scan,
 authentication, association and WPA2 cycle completed post-link traffic with
 the allocation snapshot fixed at 2/2/48, zero allocation failures, zero
 radio-context allocator calls, zero core stalls and no TX/RX queue rejection.
+
+The final two allocation sites were the 24-byte command envelopes in
+`esp_wifi_init_internal` and `esp_wifi_start`. Both load the
+`OsiWifiZalloc` callback from OSI slot `0x174`. In the final linked image their
+allocator calls return at `esp_wifi_init_internal + 0xd6` and
+`esp_wifi_start + 0x1a`.
+
+These commands do not take the ordinary RTOS ioctl path in the taskless cold
+profile. After `pp_create_task` has been replaced by direct publication, the
+patched `_task_get_current_task` reports the fixed logical Wi-Fi identity to
+the one serialized composition-root caller. `current_task_is_wifi_task`
+therefore succeeds, leaving the ioctl wait flag clear. `ieee80211_ioctl`
+selects the direct `ieee80211_ioctl_process` branch, runs the finite command
+leaf inline and invokes the free callback before returning. It does not call
+`pp_post`, create or take a semaphore, poll a status word, delay or switch a
+task for either command.
+
+`rust-static-cold-api-envelope-storage` supplies distinct four-byte-aligned
+24-byte internal-SRAM objects for init and start. Admission requires the exact
+`OsiWifiZalloc` source, request size and corresponding pinned return PC. Each
+object has an independent single non-retrying CAS claim and is zeroed before
+use. Unexpected lifetime overlap returns null and records failure instead of
+falling through to the heap. The release path recognizes only the two exact
+addresses, wipes a live object and consumes duplicate frees without ever
+forwarding static SRAM to the captured allocator.
+
+Per-object use and release counters prove after cold initialization that both
+commands ran, both objects are no longer live and every use has exactly one
+release. The final ELF audit requires the exact 48-byte, four-byte-aligned
+`.critical.bss.wifi_strict.cold_api_envelopes` section in internal SRAM and
+pins both allocator load/call sequences. In the qualified image the section
+was at `0x2f05e6b0`, `esp_wifi_init_internal` at `0x40076f60`,
+`esp_wifi_start` at `0x40077184` and `ieee80211_ioctl` at `0x40073580`.
+The strict whole-ELF no-wait/no-heap audit inspected 6,407 functions and
+reported zero violations.
+
+Hardware removed exactly the final two allocations, two frees and 48
+requested bytes. The resulting cold snapshot was 0 allocations, 0
+reallocations, 0 frees and 0 requested bytes. The first strict cycle completed
+passive scan, authentication, association, WPA2 M1-M4, DHCP, ping, DNS, TCP
+and HTTP. Teardown and a second passive-scan, authentication, association and
+WPA2 cycle completed post-link traffic with that all-zero snapshot unchanged,
+zero allocation failures, zero radio-context allocator calls, zero core
+stalls and no TX/RX queue rejection.
