@@ -431,9 +431,10 @@ The ROM-resident `wDev_IndicateFrame` is called directly from ROM and cannot
 be truthfully interposed with GNU `--wrap`. Its precondition instead lives in
 the SRAM Rust caller: the event-25 continuation follows the completed segment
 under a short local interrupt mask, checks every payload, and admits only a
-final marker reached in at most 64 links. It passes that exact tail and count
-to `wDev_ProcessRxSucData`; the segment remains owned by the current radio
-continuation until it is recycled. Consequently the two linked-copy
+final marker reached in at most 64 links. It passes the preserved segment head
+and the exact count ending at that checked tail to `wDev_ProcessRxSucData`,
+matching the pinned vendor outer walk; the segment remains owned by the
+current radio continuation until it is recycled. Consequently the two linked-copy
 backedges are finite data traversal, not polling or waiting. The exported
 frame-copy snapshot counts this real call boundary on hardware.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
