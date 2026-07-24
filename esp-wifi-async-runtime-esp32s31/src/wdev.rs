@@ -217,6 +217,8 @@ unsafe extern "C" {
     );
     #[link_name = "pm_on_data_tx"]
     fn vendor_pm_on_data_tx();
+    #[link_name = "pm_on_coex_schm_status_config"]
+    fn vendor_pm_on_coex_schm_status_config(status: u32);
     #[link_name = "pm_set_beacon_duration"]
     fn vendor_pm_set_beacon_duration(duration: u32);
     #[link_name = "wDev_ftm_set_t1t4"]
@@ -909,6 +911,9 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
         vendor_pm_on_data_tx as *const (),
         __wrap_pm_on_data_tx as *const (),
     ) && core::ptr::eq(
+        vendor_pm_on_coex_schm_status_config as *const (),
+        __wrap_pm_on_coex_schm_status_config as *const (),
+    ) && core::ptr::eq(
         vendor_pm_set_beacon_duration as *const (),
         __wrap_pm_set_beacon_duration as *const (),
     ) && core::ptr::eq(
@@ -1050,6 +1055,20 @@ pub unsafe extern "C" fn __wrap_pm_on_data_rx(
 /// frame state machine even though that mode is disabled.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_pm_on_data_tx() {}
+
+/// Remove the coexistence-to-power-management status bridge in the strict
+/// Wi-Fi-only profile.
+///
+/// The pinned body queries connectionless power-save state when `status` is
+/// zero, then enters OSI Wi-Fi locks and rearms a vendor PM timer. Bluetooth
+/// and IEEE 802.15.4 coexistence are not initialized by this profile and
+/// `WIFI_PS_NONE` is verified before handoff, so none of those state changes
+/// has a consumer. Keeping the leaf would also let a delayed status edge
+/// dereference connectionless-PM state which our taskless STA path never
+/// initializes.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.pm_coex_status"]
+pub unsafe extern "C" fn __wrap_pm_on_coex_schm_status_config(_status: u32) {}
 
 /// Remove the sampled-beacon-duration update under `WIFI_PS_NONE`.
 ///

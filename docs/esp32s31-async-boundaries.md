@@ -303,14 +303,16 @@ AP/STA frames return true, while NAN frames return false without entering the
 registered scheduler callback.
 
 The strict `WIFI_PS_NONE` profile also replaces `pm_on_beacon_rx`,
-`pm_on_data_rx`, and `pm_set_beacon_duration` with no-ops. PP/net80211 performs
-ordinary beacon/data parsing, delivery, and the independent RX rate update
-outside these hooks. The removed tails are limited to power-save/mesh
-bookkeeping: the beacon tail contains the TIM-to-radio-shutdown delay path, the
-data tail reaches modem-sleep OSI timers and Wi-Fi API locks, and the duration
-setter's first-sample path invokes two optional beacon-offset callbacks. Direct
-calls and saved vendor function-table pointers are redirected by mandatory
-final-link interposition.
+`pm_on_data_rx`, `pm_on_coex_schm_status_config`, and
+`pm_set_beacon_duration` with no-ops. PP/net80211 performs ordinary beacon/data
+parsing, delivery, and the independent RX rate update outside these hooks. The
+removed tails are limited to power-save/mesh bookkeeping: the beacon tail
+contains the TIM-to-radio-shutdown delay path, the data tail reaches
+modem-sleep OSI timers and Wi-Fi API locks, the coexistence status bridge
+queries taskless-uninitialized connectionless-PM state before entering an OSI
+lock/timer path, and the duration setter's first-sample path invokes two
+optional beacon-offset callbacks. Direct calls and saved vendor function-table
+pointers are redirected by mandatory final-link interposition.
 
 Hardware qualification with the data-RX alias completed WPA2,
 DHCP/DNS/TCP/HTTP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
