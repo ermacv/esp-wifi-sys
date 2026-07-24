@@ -15,7 +15,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 6 allocations, 2 frees and 208 requested
+the current image is down to 2 allocations, 2 frees and 48 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -688,3 +688,51 @@ lifecycle requires an explicit Rust reset boundary after unregister,
 deinitialization and quiescence of every callback consumer; silently
 reclaiming the same object earlier would permit a stale callback user to
 alias the new lifetime.
+
+The next persistent allocation boundary is the four-object `s_bars` array
+constructed by `pp_attach`. Reverse inspection of `libpp.a[pp.o]` recovered
+the complete finite allocation loop:
+
+- the loop bound is exactly four;
+- each iteration loads the internal-malloc callback from OSI slot `0x158`;
+- each request is exactly 40 bytes;
+- the indirect call returns at `pp_attach + 0x4a`, where the pointer is
+  published into the next `s_bars` word;
+- each successful object is zeroed for exactly 40 bytes;
+- the back edge at `pp_attach + 0xbc` targets `pp_attach + 0x3c`.
+
+If allocation fails, the constructor frees and clears only the already
+published prefix before returning its error. `pp_deattach` likewise frees all
+four objects and clears every `s_bars` entry, so this owner has an exact,
+auditable full teardown/reinitialization lifecycle.
+
+`rust-static-pp-bar-storage` admits only `OsiMallocInternal`, size 40 and the
+pinned `pp_attach + 0x4a` return site. It supplies four separately claimed,
+four-byte-aligned internal-SRAM objects and zeros each one before publication.
+Each claim uses a single non-retrying CAS. The fixed four-entry search is
+finite construction logic rather than a wait or polling loop. A fifth exact
+request records an allocation failure and returns null instead of falling
+through to the heap or aliasing an existing object.
+
+The exact address of each static object is also recognized at release. A live
+claim is cleared and wiped; a duplicate free of a pool address is consumed
+without forwarding that address to the heap. All unrelated allocations and
+frees retain their traced behavior. After cold initialization, the strict
+application verifies that all four claims are live and that each `s_bars`
+entry equals its corresponding static SRAM object.
+
+The final ELF audit requires an exact 160-byte, four-byte-aligned
+`.critical.bss.wifi_strict.pp_bars` section in internal SRAM and pins the
+recovered constructor instructions, allocator slot, request size, publication
+store, four-iteration bound and back-edge target. In the qualified image the
+section was at `0x2f060e7c`, `s_bars` at `0x2f07fd1c` and `pp_attach` at
+`0x40044834`. The strict whole-ELF no-wait/no-heap audit again inspected 6,407
+functions and reported zero violations.
+
+Hardware removed exactly four `OsiMallocInternal` calls and 160 requested
+bytes, producing 2 allocations, 2 frees and 48 requested bytes. The first
+strict cycle completed passive scan, authentication, association, WPA2
+M1-M4, DHCP, ping, DNS, TCP and HTTP. Teardown and a second passive-scan,
+authentication, association and WPA2 cycle completed post-link traffic with
+the allocation snapshot fixed at 2/2/48, zero allocation failures, zero
+radio-context allocator calls, zero core stalls and no TX/RX queue rejection.
