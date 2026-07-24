@@ -174,11 +174,12 @@ pub use direct_api::{
     direct_cold_stop_snapshot, direct_promiscuous_snapshot, direct_reg_mgmt_frame_snapshot,
     direct_reg_rxcb_snapshot,
     direct_set_config_snapshot, direct_set_country_snapshot, direct_set_max_tx_power_snapshot,
-    direct_set_mode_snapshot, direct_set_protocols_snapshot, direct_set_ps_snapshot,
+    direct_set_inactive_time_snapshot, direct_set_mode_snapshot, direct_set_protocols_snapshot,
+    direct_set_ps_snapshot,
     DirectColdStopSnapshot, DirectPromiscuousSnapshot, DirectRegMgmtFrameSnapshot,
     DirectRegRxcbSnapshot, DirectSetConfigSnapshot, DirectSetCountrySnapshot,
-    DirectSetMaxTxPowerSnapshot, DirectSetModeSnapshot, DirectSetProtocolsSnapshot,
-    DirectSetPsSnapshot,
+    DirectSetInactiveTimeSnapshot, DirectSetMaxTxPowerSnapshot, DirectSetModeSnapshot,
+    DirectSetProtocolsSnapshot, DirectSetPsSnapshot,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use delay::{

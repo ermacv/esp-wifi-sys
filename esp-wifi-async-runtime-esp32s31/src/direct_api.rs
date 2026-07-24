@@ -99,6 +99,15 @@ static SET_PROMISCUOUS_TRANSITION_REJECTIONS: AtomicU32 = AtomicU32::new(0);
 static SET_PROMISCUOUS_LAST_REQUESTED: AtomicU32 = AtomicU32::new(0);
 static SET_PROMISCUOUS_LAST_STATE: AtomicU32 = AtomicU32::new(0);
 static SET_PROMISCUOUS_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_CALLS: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_NOT_STARTED: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_INVALID_MODES: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_PUBLICATIONS: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_LAST_SECONDS: AtomicU32 = AtomicU32::new(0);
+static SET_INACTIVE_TIME_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C)]
 struct WifiCountry {
@@ -286,6 +295,20 @@ pub struct DirectPromiscuousSnapshot {
     pub last_result: i32,
 }
 
+/// Observation counters for direct NVS-free inactivity-time publication.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectSetInactiveTimeSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub not_started: u32,
+    pub invalid_arguments: u32,
+    pub invalid_modes: u32,
+    pub publications: u32,
+    pub last_interface: u8,
+    pub last_seconds: u16,
+    pub last_result: i32,
+}
+
 /// Return the current cold-stop interposition counters.
 pub fn direct_cold_stop_snapshot() -> DirectColdStopSnapshot {
     DirectColdStopSnapshot {
@@ -410,6 +433,21 @@ pub fn direct_promiscuous_snapshot() -> DirectPromiscuousSnapshot {
     }
 }
 
+/// Return the current direct inactivity-time publication counters.
+pub fn direct_set_inactive_time_snapshot() -> DirectSetInactiveTimeSnapshot {
+    DirectSetInactiveTimeSnapshot {
+        calls: SET_INACTIVE_TIME_CALLS.load(Ordering::Relaxed),
+        not_initialized: SET_INACTIVE_TIME_NOT_INITIALIZED.load(Ordering::Relaxed),
+        not_started: SET_INACTIVE_TIME_NOT_STARTED.load(Ordering::Relaxed),
+        invalid_arguments: SET_INACTIVE_TIME_INVALID_ARGUMENTS.load(Ordering::Relaxed),
+        invalid_modes: SET_INACTIVE_TIME_INVALID_MODES.load(Ordering::Relaxed),
+        publications: SET_INACTIVE_TIME_PUBLICATIONS.load(Ordering::Relaxed),
+        last_interface: SET_INACTIVE_TIME_LAST_INTERFACE.load(Ordering::Relaxed) as u8,
+        last_seconds: SET_INACTIVE_TIME_LAST_SECONDS.load(Ordering::Relaxed) as u16,
+        last_result: SET_INACTIVE_TIME_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -515,6 +553,42 @@ fn classify_promiscuous_request(requested: bool, current: u8) -> i32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InactiveTimeTarget {
+    Station,
+    AccessPoint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InactiveTimeSelectionError {
+    InvalidArgument,
+    InvalidMode,
+}
+
+fn select_inactive_time_target(
+    interface: u32,
+    seconds: u16,
+    mode: u8,
+) -> Result<InactiveTimeTarget, InactiveTimeSelectionError> {
+    match interface {
+        0 if seconds > 2 => {
+            if mode & !2 == 1 {
+                Ok(InactiveTimeTarget::Station)
+            } else {
+                Err(InactiveTimeSelectionError::InvalidMode)
+            }
+        }
+        1 if seconds > 9 => {
+            if matches!(mode, 2 | 3) {
+                Ok(InactiveTimeTarget::AccessPoint)
+            } else {
+                Err(InactiveTimeSelectionError::InvalidMode)
+            }
+        }
+        _ => Err(InactiveTimeSelectionError::InvalidArgument),
+    }
+}
+
 #[cfg(all(
     target_arch = "riscv32",
     any(
@@ -522,7 +596,8 @@ fn classify_promiscuous_request(requested: bool, current: u8) -> i32 {
         feature = "rust-direct-set-max-tx-power",
         feature = "rust-direct-set-country-nvs-free",
         feature = "rust-direct-set-protocols-nvs-free",
-        feature = "rust-direct-promiscuous-idempotent"
+        feature = "rust-direct-promiscuous-idempotent",
+        feature = "rust-direct-set-inactive-time-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -543,7 +618,8 @@ unsafe extern "C" {
     target_arch = "riscv32",
     any(
         feature = "rust-direct-set-country-nvs-free",
-        feature = "rust-direct-set-protocols-nvs-free"
+        feature = "rust-direct-set-protocols-nvs-free",
+        feature = "rust-direct-set-inactive-time-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -560,7 +636,8 @@ unsafe extern "C" {
         feature = "rust-direct-set-max-tx-power",
         feature = "rust-direct-set-country-nvs-free",
         feature = "rust-direct-set-protocols-nvs-free",
-        feature = "rust-direct-promiscuous-idempotent"
+        feature = "rust-direct-promiscuous-idempotent",
+        feature = "rust-direct-set-inactive-time-nvs-free"
     )
 ))]
 unsafe extern "C" {
@@ -1134,6 +1211,100 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_promiscuous(requested: bool) -> i32
     result
 }
 
+/// Publish the started STA/AP inactivity timeout without IPC, ioctl or NVS.
+///
+/// The pinned public function entered `esp_wifi_ipc_internal` with a
+/// caller-owned stack request. `wifi_ipc_process` synchronously invoked
+/// `esp_wifi_set_inactive_time_local`, which validated the interface, timeout
+/// and mode, wrote one halfword into the live interface and one into
+/// `g_wifi_nvs`, then tail-called `wifi_nvs_set`. The strict target has no
+/// persistent Wi-Fi NVS. This wrapper preserves the public guards and exact
+/// RAM publications while deliberately omitting that persistence-only tail.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "rust-direct-set-inactive-time-nvs-free"
+))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_set_inactive_time(
+    interface: u32,
+    seconds: u16,
+) -> i32 {
+    const WIFI_STA_STATE_OFFSET: usize = 0x10;
+    const WIFI_AP_STATE_OFFSET: usize = 0x14;
+    const WIFI_INTERFACE_INACTIVE_TIME_OFFSET: usize = 0x226;
+    const WIFI_STA_INACTIVE_TIME_OFFSET: usize = 0x47a;
+    const WIFI_AP_INACTIVE_TIME_OFFSET: usize = 0x516;
+
+    SET_INACTIVE_TIME_CALLS.fetch_add(1, Ordering::Relaxed);
+    SET_INACTIVE_TIME_LAST_INTERFACE.store(interface, Ordering::Relaxed);
+    SET_INACTIVE_TIME_LAST_SECONDS.store(u32::from(seconds), Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        SET_INACTIVE_TIME_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        SET_INACTIVE_TIME_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+
+    let ic = core::ptr::addr_of!(g_ic);
+    let state = ic.add(WIFI_STATE_OFFSET).read_volatile();
+    if state < WIFI_STATE_STARTED {
+        SET_INACTIVE_TIME_NOT_STARTED.fetch_add(1, Ordering::Relaxed);
+        SET_INACTIVE_TIME_LAST_RESULT.store(ESP_ERR_WIFI_NOT_STARTED as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_STARTED;
+    }
+
+    let config = core::ptr::addr_of!(g_wifi_nvs).read_volatile();
+    if config.is_null() {
+        SET_INACTIVE_TIME_INVALID_MODES.fetch_add(1, Ordering::Relaxed);
+        SET_INACTIVE_TIME_LAST_RESULT.store(ESP_ERR_WIFI_NVS as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NVS;
+    }
+    let mode = config.read_volatile();
+    let target = match select_inactive_time_target(interface, seconds, mode) {
+        Ok(target) => target,
+        Err(error) => {
+            match error {
+                InactiveTimeSelectionError::InvalidArgument => {
+                    SET_INACTIVE_TIME_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
+                }
+                InactiveTimeSelectionError::InvalidMode => {
+                    SET_INACTIVE_TIME_INVALID_MODES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            SET_INACTIVE_TIME_LAST_RESULT.store(ESP_ERR_INVALID_ARG as u32, Ordering::Relaxed);
+            return ESP_ERR_INVALID_ARG;
+        }
+    };
+
+    let (interface_state_offset, config_offset) = match target {
+        InactiveTimeTarget::Station => {
+            (WIFI_STA_STATE_OFFSET, WIFI_STA_INACTIVE_TIME_OFFSET)
+        }
+        InactiveTimeTarget::AccessPoint => {
+            (WIFI_AP_STATE_OFFSET, WIFI_AP_INACTIVE_TIME_OFFSET)
+        }
+    };
+    let interface_state = ic
+        .add(interface_state_offset)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    if interface_state.is_null() {
+        SET_INACTIVE_TIME_INVALID_MODES.fetch_add(1, Ordering::Relaxed);
+        SET_INACTIVE_TIME_LAST_RESULT.store(ESP_ERR_WIFI_STATE as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_STATE;
+    }
+    interface_state
+        .add(WIFI_INTERFACE_INACTIVE_TIME_OFFSET)
+        .cast::<u16>()
+        .write_unaligned(seconds);
+    config
+        .add(config_offset)
+        .cast::<u16>()
+        .write_unaligned(seconds);
+    SET_INACTIVE_TIME_PUBLICATIONS.fetch_add(1, Ordering::Relaxed);
+    SET_INACTIVE_TIME_LAST_RESULT.store(ESP_OK as u32, Ordering::Relaxed);
+    ESP_OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,6 +1426,54 @@ mod tests {
         assert_eq!(
             classify_promiscuous_request(false, 2),
             ESP_ERR_WIFI_STATE
+        );
+    }
+
+    #[test]
+    fn inactivity_time_validation_matches_the_pinned_sta_ap_boundaries() {
+        assert_eq!(
+            select_inactive_time_target(0, 3, 1),
+            Ok(InactiveTimeTarget::Station)
+        );
+        assert_eq!(
+            select_inactive_time_target(0, u16::MAX, 3),
+            Ok(InactiveTimeTarget::Station)
+        );
+        assert_eq!(
+            select_inactive_time_target(1, 10, 2),
+            Ok(InactiveTimeTarget::AccessPoint)
+        );
+        assert_eq!(
+            select_inactive_time_target(1, u16::MAX, 3),
+            Ok(InactiveTimeTarget::AccessPoint)
+        );
+        assert_eq!(
+            select_inactive_time_target(0, 2, 1),
+            Err(InactiveTimeSelectionError::InvalidArgument)
+        );
+        assert_eq!(
+            select_inactive_time_target(1, 9, 2),
+            Err(InactiveTimeSelectionError::InvalidArgument)
+        );
+        assert_eq!(
+            select_inactive_time_target(2, 10, 4),
+            Err(InactiveTimeSelectionError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn inactivity_time_rejects_an_interface_disabled_by_mode() {
+        assert_eq!(
+            select_inactive_time_target(0, 3, 2),
+            Err(InactiveTimeSelectionError::InvalidMode)
+        );
+        assert_eq!(
+            select_inactive_time_target(1, 10, 1),
+            Err(InactiveTimeSelectionError::InvalidMode)
+        );
+        assert_eq!(
+            select_inactive_time_target(1, 10, 4),
+            Err(InactiveTimeSelectionError::InvalidMode)
         );
     }
 

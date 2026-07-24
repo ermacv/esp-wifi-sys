@@ -94,6 +94,10 @@ rust-direct-set-protocols-nvs-free = []
 # check against the pinned control byte. Any actual hardware-mode transition
 # is rejected for an explicit async lifecycle owner.
 rust-direct-promiscuous-idempotent = []
+# Publish the started STA/AP inactivity timeout directly into the two pinned
+# RAM owners. This removes esp_wifi_ipc_internal, ieee80211_ioctl and the
+# wifi_nvs_set persistence tail from the strict no-NVS profile.
+rust-direct-set-inactive-time-nvs-free = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
