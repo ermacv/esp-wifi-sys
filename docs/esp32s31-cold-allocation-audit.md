@@ -252,3 +252,24 @@ not-initialized returns, mode 1 and result 0. The exact allocation delta was
 complete scan, authentication, association, WPA2 handshake and post-link
 network cycles passed with no runtime allocation delta, allocation failure,
 radio-context allocator call or TX/RX owner leak.
+
+The public `esp_wifi_set_ps` wrapper has the same 24-byte allocation and ioctl
+envelope. It first checks initialization and the public power-save type range
+`0..=2`, then writes only byte offset 8. The pinned `wifi_set_ps_process`
+reads that byte, calls `pm_set_sleep_type` once and returns success. The
+reviewed power-management path contains no wait or retry loop; timer changes
+use the already patched nonblocking OSI timer table.
+
+`rust-direct-set-ps` preserves both public checks and invokes that process with
+the same stack-resident `MaybeUninit` request used by direct set-mode. The ELF
+audit rejects linked `esp_wifi_set_ps` or `__real_esp_wifi_set_ps` envelopes,
+requires the wrapper's only calls to be `wifi_init_completed` followed by
+`wifi_set_ps_process`, and proves the process contains exactly one direct call
+to `pm_set_sleep_type` and no control-flow cycle.
+
+Hardware observed two calls, zero not-initialized or invalid-argument returns,
+last type 0 and result 0. The allocation delta was exact: 29 to 27 calls, 18
+to 16 frees and 1,616 to 1,568 requested bytes. Two scan, authentication,
+association, WPA2 handshake and post-link data cycles passed with an unchanged
+runtime allocation snapshot. The first also completed ping, DNS, TCP and HTTP;
+the second returned 22/22 TX and 20/20 RX owners without queue rejection.
