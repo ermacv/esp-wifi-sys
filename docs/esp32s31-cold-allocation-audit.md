@@ -105,9 +105,12 @@ rejects static-ESF images with less than 16 KiB of CPU0 stack. Two independent
 cold boots, each containing scan, WPA2 association, network traffic, teardown
 and a second complete connection, then passed with unchanged allocation
 counters, zero blocking-probe hits and an intact PHY function-table pointer.
-The ESF boundary remains an explicit feature until longer reconnect and load
-stress has been completed; the static lower-MAC RX boundary remains enabled
-independently.
+A subsequent six-connection run completed five teardown/reconnect boundaries
+with post-link traffic after every handshake. Channel work stayed balanced,
+all TX/RX owners returned to their pools and the same allocation and PHY
+snapshots remained intact. The application static cold-init profile therefore
+now includes the ESF boundary; its former explicit feature name remains only
+as a compatibility alias.
 
 After those pools, the next high-value leaf is `wifi_nvs_cfg_init` plus
 `wifi_nvs_load`; the numerous 24-byte entries are API command envelopes and
