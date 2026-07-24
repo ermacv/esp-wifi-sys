@@ -69,6 +69,10 @@ rust-direct-set-ps = []
 # invoke its finite interface dispatcher directly. The three target leaves
 # each perform one callback-pointer store.
 rust-direct-reg-rxcb = []
+# Construct the pinned 24-byte management-frame subscription request on stack
+# and invoke its finite process leaf directly. The leaf publishes only the
+# frame-subtype mask and callback context in the vendor control block.
+rust-direct-reg-mgmt-frame = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.

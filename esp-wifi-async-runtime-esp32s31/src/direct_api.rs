@@ -43,6 +43,11 @@ static REG_RXCB_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
 static REG_RXCB_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
 static REG_RXCB_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
 static REG_RXCB_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
+static REG_MGMT_FRAME_CALLS: AtomicU32 = AtomicU32::new(0);
+static REG_MGMT_FRAME_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static REG_MGMT_FRAME_LAST_MASK: AtomicU32 = AtomicU32::new(0);
+static REG_MGMT_FRAME_LAST_CONTEXT: AtomicU32 = AtomicU32::new(0);
+static REG_MGMT_FRAME_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 
 #[repr(C, align(4))]
 struct ApiRequest {
@@ -68,6 +73,20 @@ impl ApiRequest {
             .add(12)
             .cast::<u32>()
             .write_unaligned(callback);
+        request
+    }
+
+    unsafe fn with_mgmt_frame_registration(
+        frame_subtype_mask: u32,
+        context: u32,
+    ) -> core::mem::MaybeUninit<Self> {
+        let mut request = core::mem::MaybeUninit::<Self>::uninit();
+        let bytes = request.as_mut_ptr().cast::<u8>();
+        bytes
+            .add(12)
+            .cast::<u32>()
+            .write_unaligned(frame_subtype_mask);
+        bytes.add(20).cast::<u32>().write_unaligned(context);
         request
     }
 }
@@ -107,6 +126,16 @@ pub struct DirectRegRxcbSnapshot {
     pub not_initialized: u32,
     pub invalid_interfaces: u32,
     pub last_interface: u8,
+    pub last_result: i32,
+}
+
+/// Observation counters for direct management-frame registration.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DirectRegMgmtFrameSnapshot {
+    pub calls: u32,
+    pub not_initialized: u32,
+    pub last_frame_subtype_mask: u32,
+    pub last_context: usize,
     pub last_result: i32,
 }
 
@@ -152,6 +181,17 @@ pub fn direct_reg_rxcb_snapshot() -> DirectRegRxcbSnapshot {
     }
 }
 
+/// Return the current direct management-frame registration counters.
+pub fn direct_reg_mgmt_frame_snapshot() -> DirectRegMgmtFrameSnapshot {
+    DirectRegMgmtFrameSnapshot {
+        calls: REG_MGMT_FRAME_CALLS.load(Ordering::Relaxed),
+        not_initialized: REG_MGMT_FRAME_NOT_INITIALIZED.load(Ordering::Relaxed),
+        last_frame_subtype_mask: REG_MGMT_FRAME_LAST_MASK.load(Ordering::Relaxed),
+        last_context: REG_MGMT_FRAME_LAST_CONTEXT.load(Ordering::Relaxed) as usize,
+        last_result: REG_MGMT_FRAME_LAST_RESULT.load(Ordering::Relaxed) as i32,
+    }
+}
+
 fn classify_cold_stop(state: u8) -> i32 {
     if state < WIFI_STATE_STARTED {
         ESP_OK
@@ -178,7 +218,8 @@ unsafe extern "C" {
     any(
         feature = "rust-direct-set-mode",
         feature = "rust-direct-set-ps",
-        feature = "rust-direct-reg-rxcb"
+        feature = "rust-direct-reg-rxcb",
+        feature = "rust-direct-reg-mgmt-frame"
     )
 ))]
 unsafe extern "C" {
@@ -188,6 +229,11 @@ unsafe extern "C" {
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-rxcb"))]
 unsafe extern "C" {
     fn wifi_set_rxcb_process(request: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-mgmt-frame"))]
+unsafe extern "C" {
+    fn wifi_register_mgmt_frame(request: *mut core::ffi::c_void) -> i32;
 }
 
 #[cfg(all(target_arch = "riscv32", feature = "rust-direct-set-mode"))]
@@ -296,6 +342,31 @@ pub unsafe extern "C" fn __wrap_esp_wifi_internal_reg_rxcb(interface: u32, callb
     result
 }
 
+/// Publish the management-frame subtype mask and callback context directly.
+///
+/// The pinned process leaf reads only request words 12 and 20, stores them in
+/// the vendor control block, and returns success. The Rust radio owner
+/// serializes registration with all other upper API state transitions.
+#[cfg(all(target_arch = "riscv32", feature = "rust-direct-reg-mgmt-frame"))]
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_wifi_register_mgmt_frame_internal(
+    frame_subtype_mask: u32,
+    context: usize,
+) -> i32 {
+    REG_MGMT_FRAME_CALLS.fetch_add(1, Ordering::Relaxed);
+    REG_MGMT_FRAME_LAST_MASK.store(frame_subtype_mask, Ordering::Relaxed);
+    REG_MGMT_FRAME_LAST_CONTEXT.store(context as u32, Ordering::Relaxed);
+    if wifi_init_completed() == 0 {
+        REG_MGMT_FRAME_NOT_INITIALIZED.fetch_add(1, Ordering::Relaxed);
+        REG_MGMT_FRAME_LAST_RESULT.store(ESP_ERR_WIFI_NOT_INIT as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_NOT_INIT;
+    }
+    let mut request = ApiRequest::with_mgmt_frame_registration(frame_subtype_mask, context as u32);
+    let result = wifi_register_mgmt_frame(request.as_mut_ptr().cast());
+    REG_MGMT_FRAME_LAST_RESULT.store(result as u32, Ordering::Relaxed);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +418,20 @@ mod tests {
         assert_eq!(unsafe { bytes.add(API_REQUEST_ARGUMENT_OFFSET).read() }, 2);
         assert_eq!(
             unsafe { bytes.add(12).cast::<u32>().read_unaligned() },
+            0x1234_5678
+        );
+    }
+
+    #[test]
+    fn management_frame_registration_has_exact_vendor_fields() {
+        let request = unsafe { ApiRequest::with_mgmt_frame_registration(0x0000_080a, 0x1234_5678) };
+        let bytes = request.as_ptr().cast::<u8>();
+        assert_eq!(
+            unsafe { bytes.add(12).cast::<u32>().read_unaligned() },
+            0x0000_080a
+        );
+        assert_eq!(
+            unsafe { bytes.add(20).cast::<u32>().read_unaligned() },
             0x1234_5678
         );
     }
