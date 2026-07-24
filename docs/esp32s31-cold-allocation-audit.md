@@ -168,3 +168,39 @@ largest request unchanged at 1,296 bytes. Both WPA2 connections and post-link
 traffic completed with an unchanged runtime snapshot, zero allocation failure
 and zero radio-context allocator calls. Heap occupancy remains 2,896 bytes
 because the former heap scratch was already transient.
+
+The next boundary supplies the two allocations made by `wifi_create_sta` or
+`wifi_create_softap`. `rust-static-interface-storage` recognizes only
+`OsiWifiZalloc` with these pinned caller and size pairs:
+
+- `wifi_create_sta + 0x30` or `wifi_create_softap + 0x32`, 612 bytes, for the
+  interface state;
+- `wifi_create_sta + 0x6e` or `wifi_create_softap + 0x6e`, 1,296 bytes, for
+  the interface PHY state.
+
+The interface state has a 624-byte physical internal-SRAM reservation so its
+612-byte logical range can start and remain 16-byte aligned. The PHY owner is
+an independently aligned 1,296-byte internal-SRAM reservation. Each owner is
+claimed with one non-retrying CAS, zeroed before publication and released only
+for its exact base address. The blob destroy paths first clear the published
+global interface pointer, then free the PHY state and finally the interface
+state; the Rust release path wipes each exact owner and clears its claim.
+
+There is deliberately one shared pair of owners. It supports the qualified STA
+or softAP modes, but not simultaneous APSTA construction: an unexpected second
+claim falls through to the cold allocator and is therefore visible instead of
+silently aliasing live state. Strict heap-free APSTA remains unsupported until
+separate per-interface lifetime evidence is available.
+
+The two-cycle A/B qualification removed exactly two allocations and 1,908
+requested bytes. The promoted six-cycle run measured 33 allocations, 22 frees,
+1,712 requested bytes and a 208-byte largest request. The 8 KiB bootstrap heap
+retained only 980 bytes after handoff and CPU0 retained 17,016 bytes of stack.
+All six scan/authentication/association/WPA2/network cycles completed with an
+unchanged allocation snapshot, zero allocation failures and zero
+radio-context allocator calls. The final pool snapshot showed 56/56 TX owners
+and 58/58 RX owners returned, with no queue rejection. One TX ADDBA response
+timed out during the run and the asynchronous state machine recovered without
+affecting association, WPA2 or post-link traffic. The application static
+cold-init profile now includes this boundary; its explicit feature name is a
+compatibility alias.
