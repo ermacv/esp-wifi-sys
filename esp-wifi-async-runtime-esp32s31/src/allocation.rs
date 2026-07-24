@@ -356,6 +356,54 @@ fn classify_static_function_table(
     }
 }
 
+#[cfg(feature = "rust-static-interface-storage")]
+const WIFI_INTERFACE_STATE_SIZE: usize = 612;
+#[cfg(feature = "rust-static-interface-storage")]
+const WIFI_INTERFACE_PHY_SIZE: usize = 1296;
+#[cfg(feature = "rust-static-interface-storage")]
+const WIFI_CREATE_STA_STATE_RETURN_OFFSET: usize = 0x30;
+#[cfg(feature = "rust-static-interface-storage")]
+const WIFI_CREATE_SOFTAP_STATE_RETURN_OFFSET: usize = 0x32;
+#[cfg(feature = "rust-static-interface-storage")]
+const WIFI_CREATE_PHY_RETURN_OFFSET: usize = 0x6e;
+
+#[cfg(feature = "rust-static-interface-storage")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaticInterfaceAllocation {
+    State,
+    Phy,
+}
+
+#[cfg(feature = "rust-static-interface-storage")]
+fn classify_static_interface_allocation(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    wifi_create_sta_address: usize,
+    wifi_create_softap_address: usize,
+) -> Option<StaticInterfaceAllocation> {
+    if source != AllocationSource::OsiWifiZalloc {
+        return None;
+    }
+    let sta_offset = caller.wrapping_sub(wifi_create_sta_address);
+    let softap_offset = caller.wrapping_sub(wifi_create_softap_address);
+    match size {
+        WIFI_INTERFACE_STATE_SIZE
+            if sta_offset == WIFI_CREATE_STA_STATE_RETURN_OFFSET
+                || softap_offset == WIFI_CREATE_SOFTAP_STATE_RETURN_OFFSET =>
+        {
+            Some(StaticInterfaceAllocation::State)
+        }
+        WIFI_INTERFACE_PHY_SIZE
+            if sta_offset == WIFI_CREATE_PHY_RETURN_OFFSET
+                || softap_offset == WIFI_CREATE_PHY_RETURN_OFFSET =>
+        {
+            Some(StaticInterfaceAllocation::Phy)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -368,6 +416,11 @@ mod target {
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
     use super::{AllocationSource, PROBE};
+    #[cfg(feature = "rust-static-interface-storage")]
+    use super::{
+        classify_static_interface_allocation, StaticInterfaceAllocation, WIFI_INTERFACE_PHY_SIZE,
+        WIFI_INTERFACE_STATE_SIZE,
+    };
     #[cfg(feature = "rust-static-function-table-storage")]
     use super::{
         classify_static_function_table, StaticFunctionTable, NET80211_FUNCTION_TABLE_SIZE,
@@ -583,6 +636,20 @@ mod target {
     #[cfg(feature = "rust-static-function-table-storage")]
     unsafe impl<const SIZE: usize> Sync for StaticFunctionTableBuffer<SIZE> {}
 
+    #[cfg(feature = "rust-static-interface-storage")]
+    #[repr(C, align(16))]
+    struct StaticInterfaceBuffer<const SIZE: usize>(UnsafeCell<[u8; SIZE]>);
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    impl<const SIZE: usize> StaticInterfaceBuffer<SIZE> {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    unsafe impl<const SIZE: usize> Sync for StaticInterfaceBuffer<SIZE> {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -658,6 +725,18 @@ mod target {
         StaticFunctionTableBuffer::new();
     #[cfg(feature = "rust-static-function-table-storage")]
     static NET80211_FUNCTION_TABLE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-interface-storage")]
+    #[link_section = ".critical.bss.wifi_strict.wifi_interface_state"]
+    static WIFI_INTERFACE_STATE: StaticInterfaceBuffer<WIFI_INTERFACE_STATE_SIZE> =
+        StaticInterfaceBuffer::new();
+    #[cfg(feature = "rust-static-interface-storage")]
+    static WIFI_INTERFACE_STATE_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-interface-storage")]
+    #[link_section = ".critical.bss.wifi_strict.wifi_interface_phy"]
+    static WIFI_INTERFACE_PHY: StaticInterfaceBuffer<WIFI_INTERFACE_PHY_SIZE> =
+        StaticInterfaceBuffer::new();
+    #[cfg(feature = "rust-static-interface-storage")]
+    static WIFI_INTERFACE_PHY_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -680,6 +759,10 @@ mod target {
         fn wdev_funcs_init(config: *mut c_void) -> i32;
         #[cfg(feature = "rust-static-function-table-storage")]
         fn net80211_funcs_init() -> i32;
+        #[cfg(feature = "rust-static-interface-storage")]
+        fn wifi_create_sta() -> i32;
+        #[cfg(feature = "rust-static-interface-storage")]
+        fn wifi_create_softap() -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -1259,7 +1342,74 @@ mod target {
         )
     }
 
+    #[cfg(feature = "rust-static-interface-storage")]
+    fn claim_static_interface_buffer<const SIZE: usize>(
+        buffer: &'static StaticInterfaceBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> Option<*mut c_void> {
+        claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let pointer = buffer.0.get();
+        unsafe { pointer.write([0; SIZE]) };
+        Some(pointer.cast())
+    }
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    fn release_static_interface_buffer<const SIZE: usize>(
+        pointer: *mut c_void,
+        buffer: &'static StaticInterfaceBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> bool {
+        if pointer != buffer.0.get().cast() || claimed.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe { buffer.0.get().write([0; SIZE]) };
+        true
+    }
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    fn claim_static_interface_storage(
+        source: AllocationSource,
+        size: usize,
+        caller: usize,
+    ) -> Option<*mut c_void> {
+        let allocation = classify_static_interface_allocation(
+            source,
+            size,
+            caller,
+            wifi_create_sta as *const () as usize,
+            wifi_create_softap as *const () as usize,
+        )?;
+        match allocation {
+            StaticInterfaceAllocation::State => claim_static_interface_buffer(
+                &WIFI_INTERFACE_STATE,
+                &WIFI_INTERFACE_STATE_CLAIMED,
+            ),
+            StaticInterfaceAllocation::Phy => {
+                claim_static_interface_buffer(&WIFI_INTERFACE_PHY, &WIFI_INTERFACE_PHY_CLAIMED)
+            }
+        }
+    }
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    fn release_static_interface_storage(pointer: *mut c_void) -> bool {
+        release_static_interface_buffer(
+            pointer,
+            &WIFI_INTERFACE_STATE,
+            &WIFI_INTERFACE_STATE_CLAIMED,
+        ) || release_static_interface_buffer(
+            pointer,
+            &WIFI_INTERFACE_PHY,
+            &WIFI_INTERFACE_PHY_CLAIMED,
+        )
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-interface-storage")]
+        if release_static_interface_storage(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-function-table-storage")]
         if release_static_function_table(ptr) {
             return true;
@@ -1449,6 +1599,10 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-interface-storage")]
+        if let Some(buffer) = claim_static_interface_storage(source, size, caller) {
+            return buffer;
+        }
         #[cfg(feature = "rust-static-wifi-nvs-storage")]
         if let Some(buffer) = claim_wifi_nvs_storage(source, size, caller) {
             return buffer;
@@ -1682,6 +1836,12 @@ mod target {
     const _: () = assert!(
         mem::align_of::<StaticFunctionTableBuffer<NET80211_FUNCTION_TABLE_SIZE>>() >= 16
     );
+    #[cfg(feature = "rust-static-interface-storage")]
+    const _: () =
+        assert!(mem::align_of::<StaticInterfaceBuffer<WIFI_INTERFACE_STATE_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-interface-storage")]
+    const _: () =
+        assert!(mem::align_of::<StaticInterfaceBuffer<WIFI_INTERFACE_PHY_SIZE>>() >= 16);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1857,6 +2017,87 @@ mod tests {
                     caller,
                     WDEV_BASE,
                     NET80211_BASE,
+                ),
+                None
+            );
+        }
+    }
+
+    #[cfg(feature = "rust-static-interface-storage")]
+    #[test]
+    fn static_interface_admission_is_exact() {
+        use super::{
+            classify_static_interface_allocation, AllocationSource, StaticInterfaceAllocation,
+            WIFI_CREATE_PHY_RETURN_OFFSET, WIFI_CREATE_SOFTAP_STATE_RETURN_OFFSET,
+            WIFI_CREATE_STA_STATE_RETURN_OFFSET, WIFI_INTERFACE_PHY_SIZE,
+            WIFI_INTERFACE_STATE_SIZE,
+        };
+
+        const STA_BASE: usize = 0x4004_ce2a;
+        const SOFTAP_BASE: usize = 0x4004_cd04;
+        for (caller, expected) in [
+            (
+                STA_BASE + WIFI_CREATE_STA_STATE_RETURN_OFFSET,
+                StaticInterfaceAllocation::State,
+            ),
+            (
+                SOFTAP_BASE + WIFI_CREATE_SOFTAP_STATE_RETURN_OFFSET,
+                StaticInterfaceAllocation::State,
+            ),
+            (
+                STA_BASE + WIFI_CREATE_PHY_RETURN_OFFSET,
+                StaticInterfaceAllocation::Phy,
+            ),
+            (
+                SOFTAP_BASE + WIFI_CREATE_PHY_RETURN_OFFSET,
+                StaticInterfaceAllocation::Phy,
+            ),
+        ] {
+            let size = match expected {
+                StaticInterfaceAllocation::State => WIFI_INTERFACE_STATE_SIZE,
+                StaticInterfaceAllocation::Phy => WIFI_INTERFACE_PHY_SIZE,
+            };
+            assert_eq!(
+                classify_static_interface_allocation(
+                    AllocationSource::OsiWifiZalloc,
+                    size,
+                    caller,
+                    STA_BASE,
+                    SOFTAP_BASE,
+                ),
+                Some(expected)
+            );
+        }
+
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiWifiMalloc,
+                WIFI_INTERFACE_STATE_SIZE,
+                STA_BASE + WIFI_CREATE_STA_STATE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_INTERFACE_STATE_SIZE - 1,
+                STA_BASE + WIFI_CREATE_STA_STATE_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_INTERFACE_STATE_SIZE,
+                STA_BASE + WIFI_CREATE_STA_STATE_RETURN_OFFSET + 2,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_INTERFACE_PHY_SIZE,
+                SOFTAP_BASE + WIFI_CREATE_SOFTAP_STATE_RETURN_OFFSET,
+            ),
+        ] {
+            assert_eq!(
+                classify_static_interface_allocation(
+                    source,
+                    size,
+                    caller,
+                    STA_BASE,
+                    SOFTAP_BASE,
                 ),
                 None
             );

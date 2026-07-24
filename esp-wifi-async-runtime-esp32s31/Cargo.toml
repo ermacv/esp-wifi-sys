@@ -51,6 +51,9 @@ rust-static-function-table-storage = []
 # Admit the exact `ieee80211_setup_ratetable` 212-byte temporary owner during
 # cold init as well as after strict heap lockout.
 rust-static-rate-table-storage = []
+# Supply one AP-or-STA interface state and its PHY state from exact fixed
+# internal-SRAM owners. A simultaneous AP+STA second claim fails closed.
+rust-static-interface-storage = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.
