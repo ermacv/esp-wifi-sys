@@ -407,7 +407,8 @@ cargo +stable run -p xtask --bin audit-strict-esp32s31 -- --enforce
 cargo +stable run -p xtask --bin audit-strict-esp32s31 -- \
     --elf path/to/final-firmware.elf --enforce
 cargo +stable run -p xtask --bin audit-strict-esp32s31 -- \
-    --include-static-binding-init --elf path/to/final-firmware.elf --enforce
+    --include-static-binding-init --include-static-pm-init \
+    --elf path/to/final-firmware.elf --enforce
 cargo +stable run -p xtask --bin audit-state-esp32s31 -- \
     --elf path/to/final-firmware.elf \
     --write docs/esp32s31-linked-state-audit.md
@@ -445,6 +446,17 @@ A/B hardware image. The ordinary vendor bring-up still owns the surrounding
 initialization sequence; before handoff,
 `prepare_strict_runtime_before_handoff` independently verifies all 43 cells
 against their exact fixed backing objects.
+The adjacent `pm_funcs_init` leaf previously obtained one zeroed 0x44-byte
+callback table through the OSI allocator, published it through
+`ptr_beacon_offset_funcs`, and called `pm_beacon_offset_funcs_init`. Its
+matching deinitializer freed the same pointer. The
+`rust-static-pm-init-interpose` feature replaces that ownership pair with a
+fixed internal-SRAM table: `__wrap_pm_funcs_init` clears and publishes the
+table before calling only the separately audited 17-store callback publisher,
+and `__wrap_pm_funcs_deinit` withdraws the pointer without entering `free`.
+`static_pm_functions_bound` verifies the live publication before strict
+handoff. This removes one cold-init allocation; it does not yet replace the
+surrounding vendor initialization sequence.
 The ROM `is_ndpa_to_dut` HE user-info scan is retained rather than pretending
 that a link wrapper can intercept a ROM-to-ROM call. Its sole backward branch
 walks four-byte frame records with a counter narrowed to `u8`; including the

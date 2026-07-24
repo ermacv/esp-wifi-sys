@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
-use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
+use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "wdevProcessRxSucDataAll",
@@ -342,6 +342,7 @@ fn main() -> Result<()> {
     let mut enforce = false;
     let mut verbose = false;
     let mut include_static_binding_init = false;
+    let mut include_static_pm_init = false;
     let mut elf = None;
     let mut requested_roots = Vec::<String>::new();
     let mut arguments = env::args().skip(1);
@@ -350,6 +351,7 @@ fn main() -> Result<()> {
             "--enforce" => enforce = true,
             "--verbose" => verbose = true,
             "--include-static-binding-init" => include_static_binding_init = true,
+            "--include-static-pm-init" => include_static_pm_init = true,
             "--elf" => {
                 elf = Some(PathBuf::from(
                     arguments.next().context("--elf requires a path")?,
@@ -366,6 +368,13 @@ fn main() -> Result<()> {
     };
     if include_static_binding_init {
         for root in STATIC_BINDING_ROOTS {
+            if !roots.iter().any(|existing| existing == root) {
+                roots.push((*root).to_owned());
+            }
+        }
+    }
+    if include_static_pm_init {
+        for root in STATIC_PM_INIT_ROOTS {
             if !roots.iter().any(|existing| existing == root) {
                 roots.push((*root).to_owned());
             }

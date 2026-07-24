@@ -66,6 +66,8 @@ pub mod scan;
 mod sta_link;
 #[cfg(target_arch = "riscv32")]
 mod static_bindings;
+#[cfg(target_arch = "riscv32")]
+mod static_pm;
 pub mod strict;
 pub mod task;
 mod tbtt;
@@ -260,6 +262,8 @@ pub use static_bindings::{
     bind_static_vendor_state, bind_static_vendor_state_in_rust, validate_static_vendor_bindings,
     StaticVendorBinding, StaticVendorBindingError, StaticVendorBindings,
 };
+#[cfg(target_arch = "riscv32")]
+pub use static_pm::static_pm_functions_bound;
 pub use strict::{AuditedFuture, StrictAudit, StrictPolicy, StrictViolation};
 pub use task::VirtualPpTask;
 pub use timer::{RawOsiTimer, RuntimeTimerPool, RuntimeTimerSnapshot, TIMER_CONTEXT_EVENT};

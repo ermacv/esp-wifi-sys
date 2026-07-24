@@ -40,6 +40,10 @@ pub const ROOTS: &[&str] = &[
 // cycle, and are the first reusable part of a future Rust-owned cold init.
 pub const STATIC_BINDING_ROOTS: &[&str] = &["net80211_data_ptr_init", "wdev_data_init"];
 
+// The Rust PM cold-init wrapper supplies fixed storage, then calls only this
+// finite callback-table publisher.
+pub const STATIC_PM_INIT_ROOTS: &[&str] = &["pm_beacon_offset_funcs_init"];
+
 pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "lmacTxDone",
     "hal_mac_get_txq_state",

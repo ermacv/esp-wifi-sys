@@ -9,7 +9,9 @@ use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
-use strict_policy::{ROOTS, STATIC_BINDING_ROOTS, WRAPPED_VENDOR_BOUNDARIES};
+use strict_policy::{
+    ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
+};
 
 // Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
 // wdev_data_init (remaining 31) disassemblies.
@@ -259,6 +261,13 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(
         &mut report,
         &format!(
+            "- separately auditable static-PM root: `{}`",
+            STATIC_PM_INIT_ROOTS.join("`, `")
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
             "- vendor functions reachable from those roots: {}",
             reachable.len()
         ),
@@ -313,7 +322,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     );
     pushln(
         &mut report,
-        "Run `audit-strict-esp32s31 --include-static-binding-init --enforce` to prove the two fixed-storage binding leaves together with the runtime roots.",
+        "Run `audit-strict-esp32s31 --include-static-binding-init --include-static-pm-init --enforce` to prove the fixed-storage cold-init leaves together with the runtime roots.",
     );
 
     pushln(&mut report, "");

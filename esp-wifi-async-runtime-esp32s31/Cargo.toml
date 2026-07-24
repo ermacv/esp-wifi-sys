@@ -20,6 +20,9 @@ strict-no-wait = []
 # equivalent 43 direct Rust stores. The final link must additionally pass
 # --wrap=net80211_data_ptr_init and --wrap=wdev_data_init.
 rust-static-bindings-interpose = []
+# Replace the single 0x44-byte PM callback-table allocation and its paired
+# deallocation with fixed internal-SRAM ownership.
+rust-static-pm-init-interpose = []
 # HIL-only oracle for separating frame construction from the reconstructed
 # strict TX leaf path. Never enable in a production strict image.
 hil-vendor-tx = []
