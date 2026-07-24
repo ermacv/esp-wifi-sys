@@ -13,7 +13,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 13 allocations, 2 frees and 864 requested
+the current image is down to 12 allocations, 2 frees and 796 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -491,3 +491,24 @@ ping, DNS, TCP and HTTP. Teardown, a second passive scan, authentication,
 association and WPA2 M1-M4 also completed with the allocation snapshot fixed
 at 13/2/864, zero failures and zero radio-context allocator calls. The strict
 whole-ELF no-wait/no-heap audit again reported zero violations.
+
+The independently qualified `rust-static-pm-init-interpose` boundary is now
+part of the standard static cold-init profile rather than an isolated A/B
+feature. It replaces the persistent 68-byte `pm_funcs_init` allocation with
+one exact-size internal-SRAM object. Initialization clears it, publishes it
+through `ptr_beacon_offset_funcs` and calls only the finite 17-store
+`pm_beacon_offset_funcs_init`; deinitialization withdraws the pointer without
+freeing static storage.
+
+The application audit now enables the PM publisher as an explicit strict root
+for every static cold-init alias. It also verifies the exact 0x44-byte SRAM
+section, init opcode sequence and two direct call targets (`memset` and the
+publisher), plus the call-free pointer-clear deinitializer.
+
+Hardware removed exactly one allocation and 68 requested bytes, producing
+12 allocations, 2 observed frees and 796 requested bytes. The free count does
+not change at the post-init snapshot because the vendor PM table was
+persistent and had not yet reached its deinitializer there. Two complete
+scan/authentication/association/WPA2 cycles passed with the snapshot fixed at
+12/2/796. The first also completed ping, DNS, TCP and HTTP; all strict ELF
+audits reported zero violations.
