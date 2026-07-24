@@ -204,3 +204,26 @@ timed out during the run and the asynchronous state machine recovered without
 affecting association, WPA2 or post-link traffic. The application static
 cold-init profile now includes this boundary; its explicit feature name is a
 compatibility alias.
+
+The remaining `esp_wifi_stop + 0x2e` command was not merely an allocation
+site. The pinned public wrapper can retry stop phase one up to 500 times,
+calling the registered OSI delay for 10 ms between attempts. The qualified
+cold-start caller invokes it only while `g_ic + 0x1f5` is state 1, before the
+radio has started; the vendor stop process maps that state to
+`ESP_ERR_WIFI_NOT_STARTED` and the public wrapper converts it to success.
+
+`rust-direct-cold-stop` replaces this narrow pre-start use with one volatile
+state read. States 0 and 1 return success immediately. State 2 or greater is
+rejected and counted rather than entering the vendor active-stop body. A
+running radio must later be stopped by an explicit Rust asynchronous lifecycle,
+not through this synchronous compatibility ABI. The final ELF audit requires
+the wrapper to contain exactly one byte load, no call and no control-flow
+cycle, and rejects an image which still links `esp_wifi_stop` or
+`__real_esp_wifi_stop`.
+
+Hardware observed one call in state 1, one pre-start success and zero active
+rejections. The expected allocation delta was exact: 33 to 32 calls, 22 to 21
+frees and 1,712 to 1,688 requested bytes. Two complete WPA2 scan,
+authentication, association, handshake and post-link cycles then passed with
+the allocation snapshot unchanged, 22/22 TX owners and 20/20 RX owners
+returned, and no queue rejection.
