@@ -84,6 +84,7 @@ static SET_CONFIG_LAST_INTERFACE: AtomicU32 = AtomicU32::new(0);
 static SET_CONFIG_LAST_RESULT: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_CALLS: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_NOT_INITIALIZED: AtomicU32 = AtomicU32::new(0);
+static SET_PROTOCOLS_ACTIVE_IDEMPOTENT_SUCCESSES: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_ACTIVE_REJECTIONS: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_INVALID_INTERFACES: AtomicU32 = AtomicU32::new(0);
 static SET_PROTOCOLS_INVALID_ARGUMENTS: AtomicU32 = AtomicU32::new(0);
@@ -255,6 +256,7 @@ pub struct DirectSetConfigSnapshot {
 pub struct DirectSetProtocolsSnapshot {
     pub calls: u32,
     pub not_initialized: u32,
+    pub active_idempotent_successes: u32,
     pub active_rejections: u32,
     pub invalid_interfaces: u32,
     pub invalid_arguments: u32,
@@ -363,6 +365,8 @@ pub fn direct_set_protocols_snapshot() -> DirectSetProtocolsSnapshot {
     DirectSetProtocolsSnapshot {
         calls: SET_PROTOCOLS_CALLS.load(Ordering::Relaxed),
         not_initialized: SET_PROTOCOLS_NOT_INITIALIZED.load(Ordering::Relaxed),
+        active_idempotent_successes: SET_PROTOCOLS_ACTIVE_IDEMPOTENT_SUCCESSES
+            .load(Ordering::Relaxed),
         active_rejections: SET_PROTOCOLS_ACTIVE_REJECTIONS.load(Ordering::Relaxed),
         invalid_interfaces: SET_PROTOCOLS_INVALID_INTERFACES.load(Ordering::Relaxed),
         invalid_arguments: SET_PROTOCOLS_INVALID_ARGUMENTS.load(Ordering::Relaxed),
@@ -881,10 +885,12 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_config(
 /// The pinned public API reduces the bitmap to one primary PHY mode plus the
 /// LR flag, then enters an allocator-backed ioctl whose process may stop and
 /// restart an active interface and persists the same fields through NVS.
-/// Strict initialization needs only the pre-start branch. Rust therefore owns
-/// the validation and fixed-state publication, rejects active-radio changes,
-/// and calls the finite protocol attach leaf only when the live interface
-/// state actually changed.
+/// Strict initialization needs only the pre-start branch plus the HAL's
+/// identical post-start reapplication used to refresh rate control. Rust
+/// therefore owns the validation and fixed-state publication, accepts an
+/// active idempotent request as a no-op, rejects active-radio changes, and
+/// calls the finite protocol attach leaf only when the live interface state
+/// actually changed.
 #[cfg(all(
     target_arch = "riscv32",
     feature = "rust-direct-set-protocols-nvs-free"
@@ -936,13 +942,6 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_protocols(
         return ESP_ERR_NOT_SUPPORTED;
     }
 
-    let state = core::ptr::read_volatile(core::ptr::addr_of!(g_ic).add(WIFI_STATE_OFFSET));
-    if state >= WIFI_STATE_STARTED {
-        SET_PROTOCOLS_ACTIVE_REJECTIONS.fetch_add(1, Ordering::Relaxed);
-        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_STATE as u32, Ordering::Relaxed);
-        return ESP_ERR_WIFI_STATE;
-    }
-
     let config = core::ptr::addr_of!(g_wifi_nvs).read_volatile();
     if config.is_null() {
         SET_PROTOCOLS_INVALID_ARGUMENTS.fetch_add(1, Ordering::Relaxed);
@@ -973,6 +972,32 @@ pub unsafe extern "C" fn __wrap_esp_wifi_set_protocols(
         };
 
     let ic = core::ptr::addr_of!(g_ic);
+    let state = core::ptr::read_volatile(ic.add(WIFI_STATE_OFFSET));
+    if state >= WIFI_STATE_STARTED {
+        let unchanged = match interface {
+            0 => {
+                config.add(WIFI_STA_PROTOCOL_OFFSET).read() == primary
+                    && ic.add(WIFI_IC_STA_PROTOCOL_OFFSET).read() == primary
+                    && config.add(WIFI_STA_LR_OFFSET).read() == lr
+            }
+            1 => {
+                config.add(WIFI_AP_PROTOCOL_OFFSET).read() == primary
+                    && ic.add(WIFI_IC_AP_PROTOCOL_OFFSET).read() == primary
+                    && config.add(WIFI_AP_LR_OFFSET).read() == lr
+            }
+            2 => config.add(WIFI_NAN_PROTOCOL_OFFSET).read() == primary,
+            _ => unreachable!(),
+        };
+        if unchanged {
+            SET_PROTOCOLS_ACTIVE_IDEMPOTENT_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            SET_PROTOCOLS_LAST_RESULT.store(ESP_OK as u32, Ordering::Relaxed);
+            return ESP_OK;
+        }
+        SET_PROTOCOLS_ACTIVE_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+        SET_PROTOCOLS_LAST_RESULT.store(ESP_ERR_WIFI_STATE as u32, Ordering::Relaxed);
+        return ESP_ERR_WIFI_STATE;
+    }
+
     match interface {
         0 => {
             let protocol_changed = config.add(WIFI_STA_PROTOCOL_OFFSET).read() != primary
