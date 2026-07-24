@@ -342,6 +342,20 @@ mod target {
     const WDEV_RX_DESCRIPTOR_ALLOCATION_RETURN_OFFSET: usize = 0x36;
     #[cfg(feature = "rust-static-rx-buffer-init")]
     const WDEV_RX_PAYLOAD_ALLOCATION_RETURN_OFFSET: usize = 0x108;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESP32S31_ECO0_ESF_DYNAMIC_ALLOCATION_RETURN_ADDRESS: usize = 0x2f83_2460;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_WIFI_648_SIZE: usize = 648;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_WIFI_648_CAPACITY: usize = 8;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_INTERNAL_1748_SIZE: usize = 1748;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_INTERNAL_1748_CAPACITY: usize = 32;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_INTERNAL_788_SIZE: usize = 788;
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const ESF_INTERNAL_788_CAPACITY: usize = 2;
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -426,6 +440,20 @@ mod target {
     #[cfg(feature = "rust-static-rx-buffer-init")]
     unsafe impl Sync for WdevRxPayload {}
 
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    #[repr(C, align(16))]
+    struct ColdEsfBuffer<const SIZE: usize>(UnsafeCell<[u8; SIZE]>);
+
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    impl<const SIZE: usize> ColdEsfBuffer<SIZE> {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    unsafe impl<const SIZE: usize> Sync for ColdEsfBuffer<SIZE> {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -454,6 +482,29 @@ mod target {
     #[cfg(feature = "rust-static-rx-buffer-init")]
     static CLAIMED_WDEV_RX_PAYLOADS: [AtomicUsize; WDEV_RX_PAYLOAD_CAPACITY] =
         [const { AtomicUsize::new(0) }; WDEV_RX_PAYLOAD_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    #[link_section = ".critical.bss.wifi_strict.esf_cold_wifi_648"]
+    static ESF_WIFI_648: [ColdEsfBuffer<ESF_WIFI_648_SIZE>; ESF_WIFI_648_CAPACITY] =
+        [const { ColdEsfBuffer::new() }; ESF_WIFI_648_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    static CLAIMED_ESF_WIFI_648: [AtomicUsize; ESF_WIFI_648_CAPACITY] =
+        [const { AtomicUsize::new(0) }; ESF_WIFI_648_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    #[link_section = ".critical.bss.wifi_strict.esf_cold_internal_1748"]
+    static ESF_INTERNAL_1748:
+        [ColdEsfBuffer<ESF_INTERNAL_1748_SIZE>; ESF_INTERNAL_1748_CAPACITY] =
+        [const { ColdEsfBuffer::new() }; ESF_INTERNAL_1748_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    static CLAIMED_ESF_INTERNAL_1748: [AtomicUsize; ESF_INTERNAL_1748_CAPACITY] =
+        [const { AtomicUsize::new(0) }; ESF_INTERNAL_1748_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    #[link_section = ".critical.bss.wifi_strict.esf_cold_internal_788"]
+    static ESF_INTERNAL_788:
+        [ColdEsfBuffer<ESF_INTERNAL_788_SIZE>; ESF_INTERNAL_788_CAPACITY] =
+        [const { ColdEsfBuffer::new() }; ESF_INTERNAL_788_CAPACITY];
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    static CLAIMED_ESF_INTERNAL_788: [AtomicUsize; ESF_INTERNAL_788_CAPACITY] =
+        [const { AtomicUsize::new(0) }; ESF_INTERNAL_788_CAPACITY];
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -847,7 +898,86 @@ mod target {
         true
     }
 
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    fn claim_cold_esf_slot<const SIZE: usize, const CAPACITY: usize>(
+        buffers: &'static [ColdEsfBuffer<SIZE>; CAPACITY],
+        claims: &'static [AtomicUsize; CAPACITY],
+    ) -> Option<*mut c_void> {
+        for (index, claimed) in claims.iter().enumerate() {
+            if claimed
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let buffer = buffers[index].0.get();
+                unsafe { buffer.write([0; SIZE]) };
+                return Some(buffer.cast());
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    fn release_cold_esf_slot<const SIZE: usize, const CAPACITY: usize>(
+        pointer: *mut c_void,
+        buffers: &'static [ColdEsfBuffer<SIZE>; CAPACITY],
+        claims: &'static [AtomicUsize; CAPACITY],
+    ) -> bool {
+        let base = buffers.as_ptr() as usize;
+        let address = pointer as usize;
+        let stride = mem::size_of::<ColdEsfBuffer<SIZE>>();
+        let Some(offset) = address.checked_sub(base) else {
+            return false;
+        };
+        if offset % stride != 0 {
+            return false;
+        }
+        let index = offset / stride;
+        if index >= CAPACITY || claims[index].swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe { buffers[index].0.get().write([0; SIZE]) };
+        true
+    }
+
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    fn claim_cold_esf_buffer(
+        source: AllocationSource,
+        size: usize,
+        caller: usize,
+    ) -> Option<*mut c_void> {
+        if caller != ESP32S31_ECO0_ESF_DYNAMIC_ALLOCATION_RETURN_ADDRESS {
+            return None;
+        }
+        match (source, size) {
+            (AllocationSource::OsiWifiMalloc, ESF_WIFI_648_SIZE) => {
+                claim_cold_esf_slot(&ESF_WIFI_648, &CLAIMED_ESF_WIFI_648)
+            }
+            (AllocationSource::OsiMallocInternal, ESF_INTERNAL_1748_SIZE) => {
+                claim_cold_esf_slot(&ESF_INTERNAL_1748, &CLAIMED_ESF_INTERNAL_1748)
+            }
+            (AllocationSource::OsiMallocInternal, ESF_INTERNAL_788_SIZE) => {
+                claim_cold_esf_slot(&ESF_INTERNAL_788, &CLAIMED_ESF_INTERNAL_788)
+            }
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    fn release_cold_esf_buffer(pointer: *mut c_void) -> bool {
+        release_cold_esf_slot(pointer, &ESF_WIFI_648, &CLAIMED_ESF_WIFI_648)
+            || release_cold_esf_slot(
+                pointer,
+                &ESF_INTERNAL_1748,
+                &CLAIMED_ESF_INTERNAL_1748,
+            )
+            || release_cold_esf_slot(pointer, &ESF_INTERNAL_788, &CLAIMED_ESF_INTERNAL_788)
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-esf-buffer-init")]
+        if release_cold_esf_buffer(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-rx-buffer-init")]
         if release_wdev_rx_descriptor_arena(ptr) || release_wdev_rx_payload(ptr) {
             return true;
@@ -1007,6 +1137,10 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-esf-buffer-init")]
+        if let Some(buffer) = claim_cold_esf_buffer(source, size, caller) {
+            return buffer;
+        }
         #[cfg(feature = "rust-static-rx-buffer-init")]
         match source {
             AllocationSource::OsiZallocInternal => {
@@ -1187,6 +1321,12 @@ mod target {
     const _: () = assert!(mem::align_of::<WdevRxDescriptorArena>() >= 16);
     #[cfg(feature = "rust-static-rx-buffer-init")]
     const _: () = assert!(mem::align_of::<WdevRxPayload>() >= 16);
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const _: () = assert!(mem::align_of::<ColdEsfBuffer<ESF_WIFI_648_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const _: () = assert!(mem::align_of::<ColdEsfBuffer<ESF_INTERNAL_1748_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-esf-buffer-init")]
+    const _: () = assert!(mem::align_of::<ColdEsfBuffer<ESF_INTERNAL_788_SIZE>>() >= 16);
 }
 
 #[cfg(target_arch = "riscv32")]

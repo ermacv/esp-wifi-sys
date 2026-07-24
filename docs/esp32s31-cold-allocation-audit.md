@@ -81,8 +81,14 @@ The test image reduced its temporary bootstrap heap from 128 KiB to 80 KiB.
 It used 72,292 bytes and retained 9,628 bytes after handoff, proving that the
 new SRAM pool replaced rather than duplicated the old heap ownership.
 
-The ROM ESF pools are deliberately kept separate until their implementation
-return address, object classes, alignment and teardown ownership are pinned.
+`rust-static-esf-buffer-init` now supplies the three ROM ESF classes from
+separate 16-byte-aligned internal-SRAM arrays. Admission requires the fixed
+ECO0 implementation return address `0x2f832460` plus the exact allocator
+source and size pair observed above. Each class has its exact observed
+capacity, and teardown recognizes only aligned slot bases in those arrays.
+An unexpected ROM revision, source, size or extra request therefore falls
+back to the traced bootstrap allocator instead of aliasing storage.
+
 After those pools, the next high-value leaf is `wifi_nvs_cfg_init` plus
 `wifi_nvs_load`; the numerous 24-byte entries are API command envelopes and
 should disappear when the upper initialization/configuration state machine is
