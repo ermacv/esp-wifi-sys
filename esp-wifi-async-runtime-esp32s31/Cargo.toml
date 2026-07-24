@@ -40,6 +40,10 @@ rust-static-wifi-init-interpose = [
 # independent from `rust-static-wifi-init-interpose` until reconnect lifetime
 # and layout are qualified on hardware.
 rust-static-esf-buffer-init = []
+# Supply the 89-entry Wi-Fi NVS configuration table and the serialized
+# wifi_nvs_load scratch page from exact fixed internal-SRAM buffers. Admission
+# is restricted to the pinned allocator source, size and blob return address.
+rust-static-wifi-nvs-storage = []
 # Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
 # payload buffers from fixed internal SRAM. This removes the two allocator
 # sites while retaining the vendor's finite descriptor construction.

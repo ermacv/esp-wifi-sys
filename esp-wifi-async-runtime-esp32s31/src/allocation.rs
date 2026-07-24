@@ -272,6 +272,49 @@ pub fn allocation_probe() -> &'static AllocationProbe {
     &PROBE
 }
 
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+const WIFI_NVS_CFG_ITEMS_SIZE: usize = 89 * 52;
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+const WIFI_NVS_LOAD_SCRATCH_SIZE: usize = 1024;
+// Return address after the pinned `_wifi_zalloc(4628)` in
+// `wifi_nvs_cfg_init`.
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+const WIFI_NVS_CFG_ITEMS_RETURN_OFFSET: usize = 0x46;
+// `wifi_nvs_load` is local to the blob object, so anchor its return PC to the
+// exported `wifi_nvs_cfg_init` symbol from the same object. The allocation
+// returns at wifi_nvs_cfg_init + 0x13b6 in the pinned S31 archive.
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+const WIFI_NVS_LOAD_SCRATCH_RETURN_OFFSET: usize = 0x13b6;
+
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WifiNvsStaticAllocation {
+    ConfigItems,
+    LoadScratch,
+}
+
+#[cfg(feature = "rust-static-wifi-nvs-storage")]
+fn classify_wifi_nvs_static_allocation(
+    source: AllocationSource,
+    size: usize,
+    caller: usize,
+    wifi_nvs_cfg_init_address: usize,
+) -> Option<WifiNvsStaticAllocation> {
+    match (source, size, caller.wrapping_sub(wifi_nvs_cfg_init_address)) {
+        (
+            AllocationSource::OsiWifiZalloc,
+            WIFI_NVS_CFG_ITEMS_SIZE,
+            WIFI_NVS_CFG_ITEMS_RETURN_OFFSET,
+        ) => Some(WifiNvsStaticAllocation::ConfigItems),
+        (
+            AllocationSource::OsiMallocInternal,
+            WIFI_NVS_LOAD_SCRATCH_SIZE,
+            WIFI_NVS_LOAD_SCRATCH_RETURN_OFFSET,
+        ) => Some(WifiNvsStaticAllocation::LoadScratch),
+        _ => None,
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 mod target {
     use core::{
@@ -284,6 +327,11 @@ mod target {
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
     use super::{AllocationSource, PROBE};
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    use super::{
+        classify_wifi_nvs_static_allocation, WifiNvsStaticAllocation, WIFI_NVS_CFG_ITEMS_SIZE,
+        WIFI_NVS_LOAD_SCRATCH_SIZE,
+    };
 
     type Malloc = unsafe extern "C" fn(usize) -> *mut c_void;
     type Free = unsafe extern "C" fn(*mut c_void);
@@ -461,6 +509,20 @@ mod target {
     #[cfg(feature = "rust-static-esf-buffer-init")]
     unsafe impl<const SIZE: usize> Sync for ColdEsfBuffer<SIZE> {}
 
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    #[repr(C, align(16))]
+    struct WifiNvsStaticBuffer<const SIZE: usize>(UnsafeCell<[u8; SIZE]>);
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    impl<const SIZE: usize> WifiNvsStaticBuffer<SIZE> {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    unsafe impl<const SIZE: usize> Sync for WifiNvsStaticBuffer<SIZE> {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -512,6 +574,18 @@ mod target {
     #[cfg(feature = "rust-static-esf-buffer-init")]
     static CLAIMED_ESF_INTERNAL_788: [AtomicUsize; ESF_INTERNAL_788_CAPACITY] =
         [const { AtomicUsize::new(0) }; ESF_INTERNAL_788_CAPACITY];
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    #[link_section = ".critical.bss.wifi_strict.wifi_nvs_cfg_items"]
+    static WIFI_NVS_CFG_ITEMS: WifiNvsStaticBuffer<WIFI_NVS_CFG_ITEMS_SIZE> =
+        WifiNvsStaticBuffer::new();
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    static WIFI_NVS_CFG_ITEMS_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    #[link_section = ".critical.bss.wifi_strict.wifi_nvs_load_scratch"]
+    static WIFI_NVS_LOAD_SCRATCH: WifiNvsStaticBuffer<WIFI_NVS_LOAD_SCRATCH_SIZE> =
+        WifiNvsStaticBuffer::new();
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    static WIFI_NVS_LOAD_SCRATCH_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -528,6 +602,8 @@ mod target {
         fn ieee80211_setup_ratetable(interface: *mut c_void, mode: u32, phy_mode: u32) -> i32;
         #[cfg(feature = "rust-static-rx-buffer-init")]
         fn wDev_Rxbuf_Init(count: u32) -> i32;
+        #[cfg(feature = "rust-static-wifi-nvs-storage")]
+        fn wifi_nvs_cfg_init() -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -980,7 +1056,74 @@ mod target {
             || release_cold_esf_slot(pointer, &ESF_INTERNAL_788, &CLAIMED_ESF_INTERNAL_788)
     }
 
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    fn claim_wifi_nvs_static_buffer<const SIZE: usize>(
+        buffer: &'static WifiNvsStaticBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> Option<*mut c_void> {
+        claimed
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let pointer = buffer.0.get();
+        unsafe { pointer.write([0; SIZE]) };
+        Some(pointer.cast())
+    }
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    fn release_wifi_nvs_static_buffer<const SIZE: usize>(
+        pointer: *mut c_void,
+        buffer: &'static WifiNvsStaticBuffer<SIZE>,
+        claimed: &'static AtomicUsize,
+    ) -> bool {
+        if pointer != buffer.0.get().cast() || claimed.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe { buffer.0.get().write([0; SIZE]) };
+        true
+    }
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    fn claim_wifi_nvs_storage(
+        source: AllocationSource,
+        size: usize,
+        caller: usize,
+    ) -> Option<*mut c_void> {
+        let allocation = classify_wifi_nvs_static_allocation(
+            source,
+            size,
+            caller,
+            wifi_nvs_cfg_init as *const () as usize,
+        )?;
+        match allocation {
+            WifiNvsStaticAllocation::ConfigItems => claim_wifi_nvs_static_buffer(
+                &WIFI_NVS_CFG_ITEMS,
+                &WIFI_NVS_CFG_ITEMS_CLAIMED,
+            ),
+            WifiNvsStaticAllocation::LoadScratch => claim_wifi_nvs_static_buffer(
+                &WIFI_NVS_LOAD_SCRATCH,
+                &WIFI_NVS_LOAD_SCRATCH_CLAIMED,
+            ),
+        }
+    }
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    fn release_wifi_nvs_storage(pointer: *mut c_void) -> bool {
+        release_wifi_nvs_static_buffer(
+            pointer,
+            &WIFI_NVS_CFG_ITEMS,
+            &WIFI_NVS_CFG_ITEMS_CLAIMED,
+        ) || release_wifi_nvs_static_buffer(
+            pointer,
+            &WIFI_NVS_LOAD_SCRATCH,
+            &WIFI_NVS_LOAD_SCRATCH_CLAIMED,
+        )
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-wifi-nvs-storage")]
+        if release_wifi_nvs_storage(ptr) {
+            return true;
+        }
         #[cfg(feature = "rust-static-esf-buffer-init")]
         if release_cold_esf_buffer(ptr) {
             return true;
@@ -1162,6 +1305,10 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-wifi-nvs-storage")]
+        if let Some(buffer) = claim_wifi_nvs_storage(source, size, caller) {
+            return buffer;
+        }
         #[cfg(feature = "rust-static-esf-buffer-init")]
         if let Some(buffer) = claim_cold_esf_buffer(source, size, caller) {
             return buffer;
@@ -1374,6 +1521,12 @@ mod target {
     const _: () = assert!(mem::align_of::<ColdEsfBuffer<ESF_INTERNAL_1748_SIZE>>() >= 16);
     #[cfg(feature = "rust-static-esf-buffer-init")]
     const _: () = assert!(mem::align_of::<ColdEsfBuffer<ESF_INTERNAL_788_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    const _: () =
+        assert!(mem::align_of::<WifiNvsStaticBuffer<WIFI_NVS_CFG_ITEMS_SIZE>>() >= 16);
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    const _: () =
+        assert!(mem::align_of::<WifiNvsStaticBuffer<WIFI_NVS_LOAD_SCRATCH_SIZE>>() >= 16);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1426,6 +1579,64 @@ mod tests {
                     realloc: true,
                     failed: true,
                 })
+            );
+        }
+    }
+
+    #[cfg(feature = "rust-static-wifi-nvs-storage")]
+    #[test]
+    fn wifi_nvs_static_admission_is_exact() {
+        use super::{
+            classify_wifi_nvs_static_allocation, AllocationSource, WifiNvsStaticAllocation,
+            WIFI_NVS_CFG_ITEMS_RETURN_OFFSET, WIFI_NVS_CFG_ITEMS_SIZE,
+            WIFI_NVS_LOAD_SCRATCH_RETURN_OFFSET, WIFI_NVS_LOAD_SCRATCH_SIZE,
+        };
+
+        const BASE: usize = 0x4006_b980;
+        assert_eq!(
+            classify_wifi_nvs_static_allocation(
+                AllocationSource::OsiWifiZalloc,
+                WIFI_NVS_CFG_ITEMS_SIZE,
+                BASE + WIFI_NVS_CFG_ITEMS_RETURN_OFFSET,
+                BASE,
+            ),
+            Some(WifiNvsStaticAllocation::ConfigItems)
+        );
+        assert_eq!(
+            classify_wifi_nvs_static_allocation(
+                AllocationSource::OsiMallocInternal,
+                WIFI_NVS_LOAD_SCRATCH_SIZE,
+                BASE + WIFI_NVS_LOAD_SCRATCH_RETURN_OFFSET,
+                BASE,
+            ),
+            Some(WifiNvsStaticAllocation::LoadScratch)
+        );
+
+        for (source, size, caller) in [
+            (
+                AllocationSource::OsiWifiMalloc,
+                WIFI_NVS_CFG_ITEMS_SIZE,
+                BASE + WIFI_NVS_CFG_ITEMS_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_NVS_CFG_ITEMS_SIZE - 1,
+                BASE + WIFI_NVS_CFG_ITEMS_RETURN_OFFSET,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_NVS_CFG_ITEMS_SIZE,
+                BASE + WIFI_NVS_CFG_ITEMS_RETURN_OFFSET + 2,
+            ),
+            (
+                AllocationSource::OsiWifiZalloc,
+                WIFI_NVS_LOAD_SCRATCH_SIZE,
+                BASE + WIFI_NVS_LOAD_SCRATCH_RETURN_OFFSET,
+            ),
+        ] {
+            assert_eq!(
+                classify_wifi_nvs_static_allocation(source, size, caller, BASE),
+                None
             );
         }
     }
