@@ -31,9 +31,14 @@ rust-static-misc-nvs-init-interpose = []
 # serialized Rust cold-init sequence and fixed lock publications. The retained
 # menuconfig and ioctl leaves are separately audited and finite.
 rust-static-wifi-init-interpose = [
+    "rust-static-rx-buffer-init",
     "rust-static-misc-nvs-init-interpose",
     "rust-static-pp-task-init-interpose",
 ]
+# Supply the pinned `wDev_Rxbuf_Init` descriptor arena and 32 internal RX
+# payload buffers from fixed internal SRAM. This removes the two allocator
+# sites while retaining the vendor's finite descriptor construction.
+rust-static-rx-buffer-init = []
 # Replace pp_create_task/pp_delete_task with direct publication of the fixed
 # Rust queue and logical task identity. No OSI task, semaphore, queue-create,
 # delay, or task-delete callback is entered.

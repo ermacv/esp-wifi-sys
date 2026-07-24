@@ -325,6 +325,23 @@ mod target {
     // `ieee80211_setup_ratetable`. The function uses this as serialized
     // scratch and frees it before returning.
     const RATE_TABLE_SCRATCH_ALLOCATION_RETURN_OFFSET: usize = 0x26;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_DESCRIPTOR_SIZE: usize = 12;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_DESCRIPTOR_CAPACITY: usize = 48;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_DESCRIPTOR_ARENA_SIZE: usize =
+        WDEV_RX_DESCRIPTOR_SIZE * WDEV_RX_DESCRIPTOR_CAPACITY;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_PAYLOAD_SIZE: usize = 1704;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_PAYLOAD_CAPACITY: usize = 48;
+    // Return addresses immediately after the pinned S31 allocator callbacks
+    // in `wDev_Rxbuf_Init`.
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_DESCRIPTOR_ALLOCATION_RETURN_OFFSET: usize = 0x36;
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const WDEV_RX_PAYLOAD_ALLOCATION_RETURN_OFFSET: usize = 0x108;
 
     #[repr(C, align(4))]
     struct BlacklistNode(UnsafeCell<[u8; BLACKLIST_NODE_SIZE]>);
@@ -381,6 +398,34 @@ mod target {
 
     unsafe impl Sync for RateTableScratch {}
 
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    #[repr(C, align(16))]
+    struct WdevRxDescriptorArena(UnsafeCell<[u8; WDEV_RX_DESCRIPTOR_ARENA_SIZE]>);
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    impl WdevRxDescriptorArena {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; WDEV_RX_DESCRIPTOR_ARENA_SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    unsafe impl Sync for WdevRxDescriptorArena {}
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    #[repr(C, align(16))]
+    struct WdevRxPayload(UnsafeCell<[u8; WDEV_RX_PAYLOAD_SIZE]>);
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    impl WdevRxPayload {
+        const fn new() -> Self {
+            Self(UnsafeCell::new([0; WDEV_RX_PAYLOAD_SIZE]))
+        }
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    unsafe impl Sync for WdevRxPayload {}
+
     static BLACKLIST_NODES: [BlacklistNode; BLACKLIST_NODE_CAPACITY] =
         [const { BlacklistNode::new() }; BLACKLIST_NODE_CAPACITY];
     static CLAIMED_BLACKLIST_NODES: AtomicUsize = AtomicUsize::new(0);
@@ -397,6 +442,18 @@ mod target {
     #[link_section = ".critical.bss.wifi_strict.rate_table_scratch"]
     static RATE_TABLE_SCRATCH: RateTableScratch = RateTableScratch::new();
     static RATE_TABLE_SCRATCH_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    #[link_section = ".critical.bss.wifi_strict.wdev_rx_descriptor_arena"]
+    static WDEV_RX_DESCRIPTOR_ARENA: WdevRxDescriptorArena = WdevRxDescriptorArena::new();
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    static WDEV_RX_DESCRIPTOR_ARENA_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    #[link_section = ".critical.bss.wifi_strict.wdev_rx_payloads"]
+    static WDEV_RX_PAYLOADS: [WdevRxPayload; WDEV_RX_PAYLOAD_CAPACITY] =
+        [const { WdevRxPayload::new() }; WDEV_RX_PAYLOAD_CAPACITY];
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    static CLAIMED_WDEV_RX_PAYLOADS: [AtomicUsize; WDEV_RX_PAYLOAD_CAPACITY] =
+        [const { AtomicUsize::new(0) }; WDEV_RX_PAYLOAD_CAPACITY];
 
     unsafe extern "C" {
         static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
@@ -411,6 +468,8 @@ mod target {
         fn os_memdup(source: *const c_void, length: usize) -> *mut c_void;
         fn rc_enable_trc(interface: u32, peer: *const u8, index: u32, mode: u32) -> *mut c_void;
         fn ieee80211_setup_ratetable(interface: *mut c_void, mode: u32, phy_mode: u32) -> i32;
+        #[cfg(feature = "rust-static-rx-buffer-init")]
+        fn wDev_Rxbuf_Init(count: u32) -> i32;
     }
 
     /// Wrap every OSI allocator callback while preserving the original
@@ -702,7 +761,97 @@ mod target {
         true
     }
 
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    fn claim_wdev_rx_descriptor_arena(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller =
+            wDev_Rxbuf_Init as *const () as usize + WDEV_RX_DESCRIPTOR_ALLOCATION_RETURN_OFFSET;
+        if caller != expected_caller
+            || size == 0
+            || size > WDEV_RX_DESCRIPTOR_ARENA_SIZE
+            || size % WDEV_RX_DESCRIPTOR_SIZE != 0
+        {
+            return None;
+        }
+        WDEV_RX_DESCRIPTOR_ARENA_CLAIMED
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let arena = WDEV_RX_DESCRIPTOR_ARENA.0.get();
+        unsafe { arena.write([0; WDEV_RX_DESCRIPTOR_ARENA_SIZE]) };
+        Some(arena.cast())
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    fn release_wdev_rx_descriptor_arena(arena: *mut c_void) -> bool {
+        if arena != WDEV_RX_DESCRIPTOR_ARENA.0.get().cast() {
+            return false;
+        }
+        if WDEV_RX_DESCRIPTOR_ARENA_CLAIMED.swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe {
+            WDEV_RX_DESCRIPTOR_ARENA
+                .0
+                .get()
+                .write([0; WDEV_RX_DESCRIPTOR_ARENA_SIZE])
+        };
+        true
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    fn claim_wdev_rx_payload(size: usize, caller: usize) -> Option<*mut c_void> {
+        let expected_caller =
+            wDev_Rxbuf_Init as *const () as usize + WDEV_RX_PAYLOAD_ALLOCATION_RETURN_OFFSET;
+        if caller != expected_caller || size != WDEV_RX_PAYLOAD_SIZE {
+            return None;
+        }
+        for (index, claimed) in CLAIMED_WDEV_RX_PAYLOADS.iter().enumerate() {
+            if claimed
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let payload = WDEV_RX_PAYLOADS[index].0.get();
+                unsafe { payload.write([0; WDEV_RX_PAYLOAD_SIZE]) };
+                return Some(payload.cast());
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    fn wdev_rx_payload_index(payload: *mut c_void) -> Option<usize> {
+        let base = core::ptr::addr_of!(WDEV_RX_PAYLOADS) as usize;
+        let address = payload as usize;
+        let stride = mem::size_of::<WdevRxPayload>();
+        let offset = address.checked_sub(base)?;
+        if offset % stride != 0 {
+            return None;
+        }
+        let index = offset / stride;
+        (index < WDEV_RX_PAYLOAD_CAPACITY).then_some(index)
+    }
+
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    fn release_wdev_rx_payload(payload: *mut c_void) -> bool {
+        let Some(index) = wdev_rx_payload_index(payload) else {
+            return false;
+        };
+        if CLAIMED_WDEV_RX_PAYLOADS[index].swap(0, Ordering::AcqRel) == 0 {
+            return false;
+        }
+        unsafe {
+            WDEV_RX_PAYLOADS[index]
+                .0
+                .get()
+                .write([0; WDEV_RX_PAYLOAD_SIZE])
+        };
+        true
+    }
+
     fn release_strict_allocation(ptr: *mut c_void) -> bool {
+        #[cfg(feature = "rust-static-rx-buffer-init")]
+        if release_wdev_rx_descriptor_arena(ptr) || release_wdev_rx_payload(ptr) {
+            return true;
+        }
         release_blacklist_node(ptr)
             || release_ipc_envelope(ptr)
             || release_wpa_ie_slot(ptr)
@@ -858,6 +1007,20 @@ mod target {
         source: AllocationSource,
         caller: usize,
     ) -> *mut c_void {
+        #[cfg(feature = "rust-static-rx-buffer-init")]
+        match source {
+            AllocationSource::OsiZallocInternal => {
+                if let Some(arena) = claim_wdev_rx_descriptor_arena(size, caller) {
+                    return arena;
+                }
+            }
+            AllocationSource::OsiMallocInternal => {
+                if let Some(payload) = claim_wdev_rx_payload(size, caller) {
+                    return payload;
+                }
+            }
+            _ => {}
+        }
         if heap_forbidden() {
             if source == AllocationSource::OsiWifiMalloc {
                 if let Some(node) = claim_blacklist_node(size, caller) {
@@ -1020,6 +1183,10 @@ mod target {
     const _: () = assert!(mem::size_of::<RateContext>() == RATE_CONTEXT_SIZE);
     const _: () = assert!(RATE_CONTEXT_CAPACITY < usize::BITS as usize);
     const _: () = assert!(mem::size_of::<RateTableScratch>() == RATE_TABLE_SCRATCH_SIZE);
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const _: () = assert!(mem::align_of::<WdevRxDescriptorArena>() >= 16);
+    #[cfg(feature = "rust-static-rx-buffer-init")]
+    const _: () = assert!(mem::align_of::<WdevRxPayload>() >= 16);
 }
 
 #[cfg(target_arch = "riscv32")]
