@@ -215,6 +215,50 @@ unsafe extern "C" {
     static mut g_bss_color_collision_detection_enabled: u8;
 }
 
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+static DISABLED_BSS_COLOR_COLLISIONS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Number of stale hardware color-collision notifications consumed after the
+/// interface-0 producer was disabled.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+pub fn disabled_bss_color_collision_count() -> usize {
+    DISABLED_BSS_COLOR_COLLISIONS.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Consume event 30 only when HE collision reporting is already disabled.
+///
+/// The interrupt can publish one last event after the interface flag is
+/// cleared. Calling the vendor consumer would allocate a robust-management
+/// action frame. This bounded leaf instead acknowledges the hardware bitmap
+/// and lets the Rust radio future continue. If reporting is enabled, it fails
+/// closed so an unimplemented live collision-reporting path cannot be hidden.
+#[cfg(all(
+    target_arch = "riscv32",
+    feature = "strict-no-wait",
+    feature = "hil-he-association-oracle"
+))]
+#[link_section = ".rwtext.wifi_strict.he_peer"]
+pub(crate) unsafe fn consume_disabled_bss_color_collision() -> bool {
+    if core::ptr::addr_of!(g_bss_color_collision_detection_enabled).read_volatile() != 0 {
+        return false;
+    }
+
+    const HE_BSS_COLOR_BITMAP_CONTROL: *mut u32 = 0x2010_4048 as *mut u32;
+    HE_BSS_COLOR_BITMAP_CONTROL
+        .write_volatile(HE_BSS_COLOR_BITMAP_CONTROL.read_volatile() | 0x01);
+    DISABLED_BSS_COLOR_COLLISIONS.fetch_add(1, core::sync::atomic::Ordering::Release);
+    true
+}
+
 /// Program only the finite HE20 receive-side MMIO leaves reached by the pinned
 /// HE capability/operation parsers.
 ///
@@ -269,7 +313,7 @@ pub(crate) unsafe fn program_he20_peer_hardware(
     // its interface-0 producer exactly as the pinned ioctl leaf does and
     // clear the accumulated hardware bitmap. Ordinary BSS-color filtering
     // above remains enabled.
-    core::ptr::addr_of_mut!(g_bss_color_collision_detection_enabled).write(0);
+    core::ptr::addr_of_mut!(g_bss_color_collision_detection_enabled).write_volatile(0);
     HE_BSS_COLOR_BITMAP_CONTROL.write_volatile(HE_BSS_COLOR_BITMAP_CONTROL.read_volatile() | 0x01);
 
     let mut default_pe = HE_DEFAULT_PE.read_volatile();

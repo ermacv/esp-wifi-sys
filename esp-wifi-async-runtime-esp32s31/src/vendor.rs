@@ -536,7 +536,6 @@ impl PpDispatcher for VendorPpDispatcher {
                 action @ (PpAction::PowerSaveTbtt
                 | PpAction::PowerSaveTsfTimer
                 | PpAction::PowerSaveBeaconRx
-                | PpAction::BssColorCollision
                 | PpAction::PowerSaveBeaconMiss
                 | PpAction::WdevModemStateRxBeacon
                 | PpAction::CoexPreemptionEnd) => {
@@ -557,6 +556,26 @@ impl PpDispatcher for VendorPpDispatcher {
                         PpAction::CoexPreemptionEnd => pm_on_coex_preemption_end(event.argument),
                         _ => unreachable!(),
                     }
+                }
+                PpAction::BssColorCollision => {
+                    #[cfg(all(
+                        feature = "strict-no-wait",
+                        feature = "hil-he-association-oracle"
+                    ))]
+                    if !unsafe { crate::he::consume_disabled_bss_color_collision() } {
+                        return Err(VendorDispatchError::UnsupportedStrictAction(
+                            PpAction::BssColorCollision,
+                        ));
+                    }
+                    #[cfg(all(
+                        feature = "strict-no-wait",
+                        not(feature = "hil-he-association-oracle")
+                    ))]
+                    return Err(VendorDispatchError::UnsupportedStrictAction(
+                        PpAction::BssColorCollision,
+                    ));
+                    #[cfg(not(feature = "strict-no-wait"))]
+                    wifi_process_bsscolor_collision();
                 }
             }
         }
