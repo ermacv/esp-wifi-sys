@@ -102,6 +102,10 @@ pub struct StaAssocSnapshot {
     pub wmm_negotiated: bool,
     pub ht_mcs_count: u8,
     pub fixed_ht20_rate: Option<u8>,
+    pub he_capability_len: u16,
+    pub he_operation_len: u16,
+    pub he_bidirectional_mcs9: bool,
+    pub he_bss_color: Option<u8>,
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
     pub action_tx_done: u32,
@@ -112,6 +116,41 @@ pub struct StaAssocSnapshot {
     pub tx_addba_timeouts: u32,
     pub tx_addba_last_status: u16,
     pub tx_addba_window: u16,
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn association_response_ie(frame: &[u8], id: u8) -> Option<&[u8]> {
+    let mut offset = 30_usize;
+    while offset + 2 <= frame.len() {
+        let element_id = frame[offset];
+        let length = usize::from(frame[offset + 1]);
+        let end = offset.checked_add(2 + length)?;
+        if end > frame.len() {
+            return None;
+        }
+        if element_id == id {
+            return Some(&frame[offset..end]);
+        }
+        offset = end;
+    }
+    None
+}
+
+#[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn association_response_extension_ie(frame: &[u8], extension_id: u8) -> Option<&[u8]> {
+    let mut offset = 30_usize;
+    while offset + 3 <= frame.len() {
+        let length = usize::from(frame[offset + 1]);
+        let end = offset.checked_add(2 + length)?;
+        if end > frame.len() {
+            return None;
+        }
+        if frame[offset] == 255 && length >= 1 && frame[offset + 2] == extension_id {
+            return Some(&frame[offset..end]);
+        }
+        offset = end;
+    }
+    None
 }
 
 #[cfg(any(test, all(target_arch = "riscv32", feature = "strict-no-wait")))]
@@ -440,6 +479,10 @@ mod target {
     static ASSOC_WMM_NEGOTIATED: AtomicU32 = AtomicU32::new(0);
     static ASSOC_HT_MCS_COUNT: AtomicU32 = AtomicU32::new(0);
     static ASSOC_FIXED_HT20_RATE: AtomicU32 = AtomicU32::new(u32::MAX);
+    static ASSOC_HE_CAPABILITY_LEN: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HE_OPERATION_LEN: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HE_BIDIRECTIONAL_MCS9: AtomicU32 = AtomicU32::new(0);
+    static ASSOC_HE_BSS_COLOR: AtomicU32 = AtomicU32::new(u32::MAX);
     static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
@@ -577,6 +620,13 @@ mod target {
             fixed_ht20_rate: match ASSOC_FIXED_HT20_RATE.load(Ordering::Acquire) {
                 u32::MAX => None,
                 rate => Some(rate as u8),
+            },
+            he_capability_len: ASSOC_HE_CAPABILITY_LEN.load(Ordering::Acquire) as u16,
+            he_operation_len: ASSOC_HE_OPERATION_LEN.load(Ordering::Acquire) as u16,
+            he_bidirectional_mcs9: ASSOC_HE_BIDIRECTIONAL_MCS9.load(Ordering::Acquire) != 0,
+            he_bss_color: match ASSOC_HE_BSS_COLOR.load(Ordering::Acquire) {
+                u32::MAX => None,
+                color => Some(color as u8),
             },
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
@@ -1203,6 +1253,10 @@ mod target {
         ASSOC_HT_NEGOTIATED.store(0, Ordering::Relaxed);
         ASSOC_WMM_NEGOTIATED.store(0, Ordering::Relaxed);
         ASSOC_HT_MCS_COUNT.store(0, Ordering::Relaxed);
+        ASSOC_HE_CAPABILITY_LEN.store(0, Ordering::Relaxed);
+        ASSOC_HE_OPERATION_LEN.store(0, Ordering::Relaxed);
+        ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Relaxed);
+        ASSOC_HE_BSS_COLOR.store(u32::MAX, Ordering::Relaxed);
         let node_rate_count = usize::from(node.add(0x73).read()).min(16);
         let Some(body_len) =
             association_body_len(&config.access_point, node_rate_count, config.selected_rsn)
@@ -1364,23 +1418,6 @@ mod target {
         }
     }
 
-    fn association_response_ie(frame: &[u8], id: u8) -> Option<&[u8]> {
-        let mut offset = 30_usize;
-        while offset + 2 <= frame.len() {
-            let element_id = frame[offset];
-            let length = usize::from(frame[offset + 1]);
-            let end = offset.checked_add(2 + length)?;
-            if end > frame.len() {
-                return None;
-            }
-            if element_id == id {
-                return Some(&frame[offset..end]);
-            }
-            offset = end;
-        }
-        None
-    }
-
     fn association_response_has_wmm(frame: &[u8]) -> bool {
         let mut offset = 30_usize;
         while offset + 2 <= frame.len() {
@@ -1455,6 +1492,16 @@ mod target {
         let status = u16::from_le_bytes([frame[26], frame[27]]);
         let association_id = u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff;
         let ht_capability = association_response_ie(frame, 45);
+        let he_capability =
+            association_response_extension_ie(frame, crate::he::HE_CAPABILITIES_EXTENSION_ID);
+        let he_operation =
+            association_response_extension_ie(frame, crate::he::HE_OPERATION_EXTENSION_ID);
+        let he_bidirectional_mcs9 = he_capability
+            .and_then(|element| crate::he::parse_he20_capabilities(element).ok())
+            .is_some_and(|capability| capability.supports_bidirectional_mcs9());
+        let he_bss_color = he_operation
+            .and_then(|element| crate::he::parse_he20_operation(element).ok())
+            .map(|operation| operation.bss_color);
         // HT stations use QoS data service. The bounded S31 RX prefix may end
         // before the response's trailing WMM parameter element, but an AP
         // returning an HT Capability after accepting our explicit WMM request
@@ -1464,6 +1511,16 @@ mod target {
         ASSOC_LAST_CAPABILITY.store(u32::from(capability), Ordering::Relaxed);
         ASSOC_LAST_STATUS.store(u32::from(status), Ordering::Relaxed);
         ASSOC_LAST_ID.store(u32::from(association_id), Ordering::Relaxed);
+        ASSOC_HE_CAPABILITY_LEN.store(
+            he_capability.map_or(0, |element| element.len()) as u32,
+            Ordering::Relaxed,
+        );
+        ASSOC_HE_OPERATION_LEN.store(
+            he_operation.map_or(0, |element| element.len()) as u32,
+            Ordering::Relaxed,
+        );
+        ASSOC_HE_BIDIRECTIONAL_MCS9.store(u32::from(he_bidirectional_mcs9), Ordering::Relaxed);
+        ASSOC_HE_BSS_COLOR.store(he_bss_color.map_or(u32::MAX, u32::from), Ordering::Relaxed);
         ASSOC_RESPONSES.fetch_add(1, Ordering::Relaxed);
         unsafe {
             let _ = crate::adapter::cancel_internal_timer(ASSOC_TIMER.0.get().cast());
@@ -1575,6 +1632,10 @@ mod target {
         ASSOC_WMM_NEGOTIATED.store(0, Ordering::Release);
         ASSOC_HT_MCS_COUNT.store(0, Ordering::Release);
         ASSOC_FIXED_HT20_RATE.store(u32::MAX, Ordering::Release);
+        ASSOC_HE_CAPABILITY_LEN.store(0, Ordering::Release);
+        ASSOC_HE_OPERATION_LEN.store(0, Ordering::Release);
+        ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Release);
+        ASSOC_HE_BSS_COLOR.store(u32::MAX, Ordering::Release);
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
 
@@ -1710,5 +1771,55 @@ mod tests {
         assert_eq!(frame[0] & 0xfc, 0x10);
         assert_eq!(u16::from_le_bytes([frame[26], frame[27]]), 0);
         assert_eq!(u16::from_le_bytes([frame[28], frame[29]]) & 0x3fff, 42);
+    }
+
+    #[test]
+    fn association_response_extension_elements_are_bounded_and_parsed() {
+        let mut frame = [0_u8; 63];
+        frame[0] = 0x10;
+        frame[24..26].copy_from_slice(&0x0431_u16.to_le_bytes());
+        frame[28..30].copy_from_slice(&0xc02a_u16.to_le_bytes());
+
+        let capability = &mut frame[30..54];
+        capability[..3].copy_from_slice(&[255, 22, crate::he::HE_CAPABILITIES_EXTENSION_ID]);
+        capability[20..22].copy_from_slice(&0xfffd_u16.to_le_bytes());
+        capability[22..24].copy_from_slice(&0xfffd_u16.to_le_bytes());
+        frame[54..63].copy_from_slice(&[
+            255,
+            7,
+            crate::he::HE_OPERATION_EXTENSION_ID,
+            0,
+            0,
+            0,
+            0xc5,
+            0xfd,
+            0xff,
+        ]);
+
+        let capability =
+            association_response_extension_ie(&frame, crate::he::HE_CAPABILITIES_EXTENSION_ID)
+                .unwrap();
+        assert!(crate::he::parse_he20_capabilities(capability)
+            .unwrap()
+            .supports_bidirectional_mcs9());
+        let operation =
+            association_response_extension_ie(&frame, crate::he::HE_OPERATION_EXTENSION_ID)
+                .unwrap();
+        assert_eq!(
+            crate::he::parse_he20_operation(operation)
+                .unwrap()
+                .bss_color,
+            5
+        );
+    }
+
+    #[test]
+    fn association_response_extension_parser_rejects_truncated_tail() {
+        let mut frame = [0_u8; 34];
+        frame[30..34].copy_from_slice(&[255, 22, crate::he::HE_CAPABILITIES_EXTENSION_ID, 0]);
+        assert_eq!(
+            association_response_extension_ie(&frame, crate::he::HE_CAPABILITIES_EXTENSION_ID),
+            None
+        );
     }
 }

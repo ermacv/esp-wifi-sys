@@ -36,6 +36,7 @@ mod eap;
 mod esf;
 pub mod event;
 pub mod event_bridge;
+pub mod he;
 #[cfg(target_arch = "riscv32")]
 mod handoff;
 pub mod interrupt;
@@ -168,6 +169,11 @@ pub use event::{PpAction, PpEvent};
 #[cfg(target_arch = "riscv32")]
 pub use event_bridge::patch_async_event_post;
 pub use event_bridge::{EventCopyError, OwnedWifiEvent, WifiEventBridge, WIFI_EVENT_BASE_CAPACITY};
+pub use he::{
+    parse_he20_capabilities, parse_he20_operation, He20Capabilities, He20Operation,
+    HeElementError, HeMcsNssSupport, HE_CAPABILITIES_EXTENSION_ID, HE_CAPABILITIES_IE_MIN_LEN,
+    HE_OPERATION_EXTENSION_ID, HE_OPERATION_IE_MIN_LEN,
+};
 #[cfg(target_arch = "riscv32")]
 pub use handoff::{
     arm_pp_task_handoff, begin_pp_task_handoff, install_pp_task_handoff,
@@ -231,7 +237,8 @@ pub use rx::{
 pub use rx::expire_rx_ampdu_gap;
 pub use scan::{
     best_matching_ssid, StrictScanError, StrictScanRecord, StrictScanSummary,
-    STRICT_SCAN_EXTENDED_RATES_CAPACITY, STRICT_SCAN_RECORD_CAPACITY, STRICT_SCAN_RSNXE_CAPACITY,
+    STRICT_SCAN_EXTENDED_RATES_CAPACITY, STRICT_SCAN_HE_CAPABILITY_IE_CAPACITY,
+    STRICT_SCAN_HE_OPERATION_IE_CAPACITY, STRICT_SCAN_RECORD_CAPACITY, STRICT_SCAN_RSNXE_CAPACITY,
     STRICT_SCAN_RSN_IE_CAPACITY,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]

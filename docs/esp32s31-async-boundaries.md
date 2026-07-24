@@ -216,6 +216,20 @@ branches are expressed as direct calls to audited finite `ic_*` leaves. Dwell
 completion likewise accepts only the Rust scan callback, clears the fixed
 channel-operation state directly, and makes no arbitrary indirect call.
 
+HE20 discovery is now owned by the same bounded parser. Extension elements 35
+(HE Capabilities) and 36 (HE Operation) are copied into fixed 64-byte and
+32-byte record fields; an element that does not fit marks the record truncated
+instead of allocating or accepting a prefix. The stateless HE parser validates
+the complete element length, extracts the mandatory <=80-MHz RX/TX MCS/NSS
+maps for NSS1, and records BSS color. Association-response observation exposes
+the received HE element lengths, bidirectional MCS9 support, and BSS color
+through atomics in `StaAssocSnapshot`. This is deliberately observational:
+the strict association request still advertises HT20 only, the peer mutation
+still installs only the recovered HT state, and the descriptor/completion
+gates continue to reject HE. HE transmission must not be enabled until its
+association request, peer state, HE-SIG construction, retry schedule, and
+completion layouts have each been recovered and admitted as bounded leaves.
+
 ## Heap and indirect calls
 
 Setting dynamic RX, dynamic TX, and cache TX counts to zero removes only the

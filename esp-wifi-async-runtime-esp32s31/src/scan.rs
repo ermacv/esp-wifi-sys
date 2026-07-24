@@ -29,6 +29,8 @@ pub const STRICT_SCAN_RSNXE_CAPACITY: usize = 16;
 pub const STRICT_SCAN_EXTENDED_RATES_CAPACITY: usize = 16;
 pub const STRICT_SCAN_HT_CAPABILITY_IE_LEN: usize = 28;
 pub const STRICT_SCAN_HT_OPERATION_IE_LEN: usize = 24;
+pub const STRICT_SCAN_HE_CAPABILITY_IE_CAPACITY: usize = 64;
+pub const STRICT_SCAN_HE_OPERATION_IE_CAPACITY: usize = 32;
 pub const STRICT_SCAN_WMM_IE_CAPACITY: usize = 26;
 
 /// Verify that the strict final link cannot re-enter the vendor connection
@@ -114,6 +116,10 @@ pub struct StrictScanRecord {
     pub ht_capability_ie_present: bool,
     pub ht_operation_ie: [u8; STRICT_SCAN_HT_OPERATION_IE_LEN],
     pub ht_operation_ie_present: bool,
+    pub he_capability_ie: [u8; STRICT_SCAN_HE_CAPABILITY_IE_CAPACITY],
+    pub he_capability_ie_len: u8,
+    pub he_operation_ie: [u8; STRICT_SCAN_HE_OPERATION_IE_CAPACITY],
+    pub he_operation_ie_len: u8,
     pub wmm_ie: [u8; STRICT_SCAN_WMM_IE_CAPACITY],
     pub wmm_ie_len: u8,
     pub rsn_ie: [u8; STRICT_SCAN_RSN_IE_CAPACITY],
@@ -143,6 +149,10 @@ impl StrictScanRecord {
         ht_capability_ie_present: false,
         ht_operation_ie: [0; STRICT_SCAN_HT_OPERATION_IE_LEN],
         ht_operation_ie_present: false,
+        he_capability_ie: [0; STRICT_SCAN_HE_CAPABILITY_IE_CAPACITY],
+        he_capability_ie_len: 0,
+        he_operation_ie: [0; STRICT_SCAN_HE_OPERATION_IE_CAPACITY],
+        he_operation_ie_len: 0,
         wmm_ie: [0; STRICT_SCAN_WMM_IE_CAPACITY],
         wmm_ie_len: 0,
         rsn_ie: [0; STRICT_SCAN_RSN_IE_CAPACITY],
@@ -173,6 +183,16 @@ impl StrictScanRecord {
     pub fn ht_operation_ie_bytes(&self) -> Option<&[u8; STRICT_SCAN_HT_OPERATION_IE_LEN]> {
         self.ht_operation_ie_present
             .then_some(&self.ht_operation_ie)
+    }
+
+    /// Exact HE Capabilities extension element, including id and length.
+    pub fn he_capability_ie_bytes(&self) -> &[u8] {
+        &self.he_capability_ie[..usize::from(self.he_capability_ie_len)]
+    }
+
+    /// Exact HE Operation extension element, including id and length.
+    pub fn he_operation_ie_bytes(&self) -> &[u8] {
+        &self.he_operation_ie[..usize::from(self.he_operation_ie_len)]
     }
 
     /// Exact WMM information/parameter element, including id and length.
@@ -579,6 +599,24 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
                     .copy_from_slice(&frame[offset - 2..end]);
                 record.ht_operation_ie_present = true;
             }
+            255 if value.first().copied() == Some(crate::he::HE_CAPABILITIES_EXTENSION_ID) => {
+                let total = length + 2;
+                if total <= record.he_capability_ie.len() {
+                    record.he_capability_ie[..total].copy_from_slice(&frame[offset - 2..end]);
+                    record.he_capability_ie_len = total as u8;
+                } else {
+                    record.information_elements_truncated = true;
+                }
+            }
+            255 if value.first().copied() == Some(crate::he::HE_OPERATION_EXTENSION_ID) => {
+                let total = length + 2;
+                if total <= record.he_operation_ie.len() {
+                    record.he_operation_ie[..total].copy_from_slice(&frame[offset - 2..end]);
+                    record.he_operation_ie_len = total as u8;
+                } else {
+                    record.information_elements_truncated = true;
+                }
+            }
             244 => {
                 let total = length + 2;
                 if total <= record.rsnxe.len() {
@@ -610,6 +648,7 @@ fn parse_management(frame: &[u8], fallback_channel: u8, rssi: i8) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::{best_matching_ssid, parse_management, StrictScanRecord};
+    use crate::he::{parse_he20_capabilities, parse_he20_operation};
 
     #[test]
     fn parses_beacon_into_owned_bounded_record() {
@@ -674,6 +713,24 @@ mod tests {
             &[221, 7, 0x00, 0x50, 0xf2, 0x02, 0, 1, 0]
         );
         assert!(!record.legacy_wpa);
+    }
+
+    #[test]
+    fn owns_and_parses_bounded_he20_extension_elements() {
+        let mut frame = [0_u8; 69];
+        frame[0] = 0x80;
+        frame[36..60].fill(0);
+        frame[36..39].copy_from_slice(&[255, 22, 35]);
+        frame[56..58].copy_from_slice(&0xfffd_u16.to_le_bytes());
+        frame[58..60].copy_from_slice(&0xfffd_u16.to_le_bytes());
+        frame[60..69].copy_from_slice(&[255, 7, 36, 0, 0, 0, 0xc5, 0xfd, 0xff]);
+
+        let record = parse_management(&frame, 6, -20).unwrap();
+        let capability = parse_he20_capabilities(record.he_capability_ie_bytes()).unwrap();
+        let operation = parse_he20_operation(record.he_operation_ie_bytes()).unwrap();
+        assert!(capability.supports_bidirectional_mcs9());
+        assert_eq!(operation.bss_color, 5);
+        assert_eq!(operation.basic_mcs_nss_map, 0xfffd);
     }
 
     #[test]
