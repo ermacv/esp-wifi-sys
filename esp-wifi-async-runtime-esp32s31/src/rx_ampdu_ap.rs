@@ -1,4 +1,4 @@
-//! Strict SoftAP receive BlockAck ownership.
+//! Strict receive BlockAck ownership for SoftAP and station links.
 //!
 //! This HIL layer bridges one measured ADDBA exchange to the allocation-free
 //! reorder machine. All mutable protocol state is touched only by the Rust
@@ -21,6 +21,7 @@ use crate::{
 };
 
 const AP_INTERFACE_INDEX: u8 = 1;
+const STA_INTERFACE_INDEX: u8 = 0;
 const HARDWARE_INDEX: u8 = 0;
 const INITIAL_SUPPORTED_TID: u8 = 0;
 const ADDBA_RESPONSE_BODY_LEN: usize = 9;
@@ -205,37 +206,25 @@ pub(crate) fn try_accept_response(peer: [u8; 6], body: &mut [u8]) -> bool {
     if body.len() != ADDBA_RESPONSE_BODY_LEN || body[0] != 3 || body[1] != 1 {
         return false;
     }
-    let Some(state) = state() else {
-        return false;
+    let pending = {
+        let Some(state) = state() else {
+            return false;
+        };
+        let Some(pending) = state.pending.take() else {
+            return false;
+        };
+        if pending.peer != peer || pending.dialog_token != body[2] || state.active.is_some() {
+            return false;
+        }
+        pending
     };
-    let Some(pending) = state.pending.take() else {
-        return false;
-    };
-    if pending.peer != peer || pending.dialog_token != body[2] || state.active.is_some() {
-        return false;
-    }
-    let Ok(reorder) =
-        RxBlockAckReorder::new(pending.starting_sequence, RX_BLOCK_ACK_MAX_WINDOW)
-    else {
-        return false;
-    };
-    state.active = Some(ActiveAgreement {
+    if !install_agreement(
         peer,
-        tid: pending.tid,
-        reorder,
-        gap_generation: None,
-    });
-    let agreement = S31RxBlockAckAgreement {
-        hardware_index: HARDWARE_INDEX,
-        interface: AP_INTERFACE_INDEX,
-        peer,
-        tid: pending.tid,
-        starting_sequence: pending.starting_sequence,
-        window: RX_BLOCK_ACK_MAX_WINDOW,
-    };
-    if unsafe { crate::rx_ampdu_hw::program(agreement) }.is_err() {
-        state.active = None;
-        HARDWARE_PROGRAM_FAILURES.fetch_add(1, Ordering::Relaxed);
+        pending.tid,
+        pending.starting_sequence,
+        RX_BLOCK_ACK_MAX_WINDOW,
+        AP_INTERFACE_INDEX,
+    ) {
         return false;
     }
 
@@ -251,10 +240,104 @@ pub(crate) fn try_accept_response(peer: [u8; 6], body: &mut [u8]) -> bool {
         OCCUPIED.store(0, Ordering::Release);
         ACCEPTED_RESPONSES.fetch_add(1, Ordering::Relaxed);
     } else {
-        state.active = None;
-        let _ = unsafe { crate::rx_ampdu_hw::clear(HARDWARE_INDEX) };
+        rollback_failed_response(peer);
     }
     accepted
+}
+
+/// Accept one validated station-side ADDBA request into the same fixed reorder
+/// owner used by SoftAP.
+///
+/// The caller owns the management response buffer. It must roll the agreement
+/// back if the finite transmit leaf rejects the response or TX completes
+/// without an acknowledgement.
+pub(crate) fn try_accept_sta_request(peer: [u8; 6], request: &[u8], response: &mut [u8]) -> bool {
+    if peer[0] & 1 != 0 || response.len() != ADDBA_RESPONSE_BODY_LEN {
+        return false;
+    }
+    let Some(BlockAckAction::AddbaRequest {
+        dialog_token,
+        tid,
+        immediate,
+        window,
+        timeout_tu,
+        starting_sequence,
+        ..
+    }) = crate::tx_ampdu::parse_block_ack_action(request)
+    else {
+        return false;
+    };
+    if !immediate
+        || window == 0
+        || timeout_tu != 0
+        || tid != INITIAL_SUPPORTED_TID
+        || starting_sequence > 0x0fff
+    {
+        return false;
+    }
+    let selected_window = window.min(RX_BLOCK_ACK_MAX_WINDOW);
+    if !install_agreement(
+        peer,
+        tid,
+        starting_sequence,
+        selected_window,
+        STA_INTERFACE_INDEX,
+    ) {
+        return false;
+    }
+    let accepted = crate::rx_ampdu::write_successful_addba_response(
+        response,
+        dialog_token,
+        tid,
+        selected_window,
+    )
+    .is_ok();
+    if accepted {
+        ACTIVE.store(1, Ordering::Release);
+        OCCUPIED.store(0, Ordering::Release);
+        ACCEPTED_RESPONSES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        rollback_failed_response(peer);
+    }
+    accepted
+}
+
+fn install_agreement(
+    peer: [u8; 6],
+    tid: u8,
+    starting_sequence: u16,
+    window: u16,
+    interface: u8,
+) -> bool {
+    let Ok(reorder) = RxBlockAckReorder::new(starting_sequence, window) else {
+        return false;
+    };
+    let Some(state) = state() else {
+        return false;
+    };
+    if state.active.is_some() {
+        return false;
+    }
+    state.active = Some(ActiveAgreement {
+        peer,
+        tid,
+        reorder,
+        gap_generation: None,
+    });
+    let agreement = S31RxBlockAckAgreement {
+        hardware_index: HARDWARE_INDEX,
+        interface,
+        peer,
+        tid,
+        starting_sequence,
+        window,
+    };
+    if unsafe { crate::rx_ampdu_hw::program(agreement) }.is_err() {
+        state.active = None;
+        HARDWARE_PROGRAM_FAILURES.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    true
 }
 
 /// Undo an agreement when the finite management TX leaf rejects its response.

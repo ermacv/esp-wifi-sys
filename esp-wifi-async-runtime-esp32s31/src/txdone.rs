@@ -550,9 +550,8 @@ unsafe fn strict_management_txdone(frame: *mut u8) -> Result<(), ()> {
         // Disconnect and off-channel action completions enter node/key/channel
         // state machines in the stock callback. They require explicit async
         // commands and are not allowed to run implicitly from TX completion.
-        0xd0
-            if crate::sta_link::complete_owned_action_management()
-                || strict_ap_addba_response_txdone(frame).is_ok() =>
+        0xd0 if crate::sta_link::complete_owned_action_management(frame)
+            || strict_ap_addba_response_txdone(frame).is_ok() =>
         {
             Ok(())
         }

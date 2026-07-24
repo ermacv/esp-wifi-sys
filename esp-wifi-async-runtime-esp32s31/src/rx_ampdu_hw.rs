@@ -7,7 +7,7 @@
 #[cfg(target_arch = "riscv32")]
 use core::sync::atomic::{compiler_fence, Ordering};
 
-const EXTRA_SOFTAP_RX_BA_CAPACITY: u8 = 8;
+const RX_BA_CAPACITY: u8 = 8;
 const EXTRA_SOFTAP_RX_BA_INDEX_MASK: u32 = 0x0000_03e0;
 const EXTRA_SOFTAP_RX_BA_TID_MASK: u32 = 0x0000_f000;
 const EXTRA_SOFTAP_RX_BA_WINDOW_MASK: u32 = 0x01fc_0000;
@@ -52,7 +52,7 @@ pub enum S31RxBlockAckAgreementError {
 
 impl S31RxBlockAckAgreement {
     pub const fn validate(self) -> Result<Self, S31RxBlockAckAgreementError> {
-        if self.hardware_index >= EXTRA_SOFTAP_RX_BA_CAPACITY {
+        if self.hardware_index >= RX_BA_CAPACITY {
             return Err(S31RxBlockAckAgreementError::HardwareIndex(
                 self.hardware_index,
             ));
@@ -103,8 +103,8 @@ const fn peer_tail(interface: u8, peer: [u8; 6], window: u16) -> u32 {
         | ((window as u32) << 18 & EXTRA_SOFTAP_RX_BA_WINDOW_MASK)
 }
 
-/// Program one extra SoftAP receive BlockAck entry without entering vendor
-/// logging, allocation, timer, or synchronization code.
+/// Program one receive BlockAck entry without entering vendor logging,
+/// allocation, timer, or synchronization code.
 ///
 /// # Safety
 ///
@@ -159,7 +159,7 @@ pub unsafe fn program(
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.rx_ampdu_hw"]
 pub unsafe fn clear(hardware_index: u8) -> Result<(), S31RxBlockAckAgreementError> {
-    if hardware_index >= EXTRA_SOFTAP_RX_BA_CAPACITY {
+    if hardware_index >= RX_BA_CAPACITY {
         return Err(S31RxBlockAckAgreementError::HardwareIndex(hardware_index));
     }
     let selected = selected_control(EXTRA_SOFTAP_RX_BA_CONTROL.read_volatile(), hardware_index);

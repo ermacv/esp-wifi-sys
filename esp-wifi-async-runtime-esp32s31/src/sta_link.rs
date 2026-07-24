@@ -153,6 +153,7 @@ pub struct StaAssocSnapshot {
     pub he_peer_state_applied: bool,
     pub addba_requests: u32,
     pub addba_declines_submitted: u32,
+    pub addba_accepted_submitted: u32,
     pub action_tx_done: u32,
     pub tx_addba_submitted: u32,
     pub tx_addba_responses: u32,
@@ -533,8 +534,10 @@ mod target {
     static ASSOC_HE_PEER_STATE_APPLIED: AtomicU32 = AtomicU32::new(0);
     static ADDBA_REQUESTS: AtomicU32 = AtomicU32::new(0);
     static ADDBA_DECLINES_SUBMITTED: AtomicU32 = AtomicU32::new(0);
+    static ADDBA_ACCEPTED_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static ACTION_TX_DONE: AtomicU32 = AtomicU32::new(0);
     static OWNED_ACTION_BUFFER: AtomicUsize = AtomicUsize::new(0);
+    static OWNED_RX_ADDBA_ACCEPTED: AtomicU8 = AtomicU8::new(0);
     static TX_ADDBA_SUBMITTED: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_SESSION_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
     static TX_ADDBA_RESPONSES: AtomicU32 = AtomicU32::new(0);
@@ -680,6 +683,7 @@ mod target {
             he_peer_state_applied: ASSOC_HE_PEER_STATE_APPLIED.load(Ordering::Acquire) != 0,
             addba_requests: ADDBA_REQUESTS.load(Ordering::Acquire),
             addba_declines_submitted: ADDBA_DECLINES_SUBMITTED.load(Ordering::Acquire),
+            addba_accepted_submitted: ADDBA_ACCEPTED_SUBMITTED.load(Ordering::Acquire),
             action_tx_done: ACTION_TX_DONE.load(Ordering::Acquire),
             tx_addba_submitted: TX_ADDBA_SUBMITTED.load(Ordering::Acquire),
             tx_addba_responses: TX_ADDBA_RESPONSES.load(Ordering::Acquire),
@@ -1049,10 +1053,21 @@ mod target {
             && OWNED_ACTION_BUFFER.load(Ordering::Acquire) == buffer as usize
     }
 
-    pub(crate) fn complete_owned_action_management() -> bool {
+    pub(crate) unsafe fn complete_owned_action_management(frame: *mut u8) -> bool {
         if OWNED_ACTION_BUFFER.swap(0, Ordering::AcqRel) == 0 {
             return false;
         }
+        let accepted_rx_addba = OWNED_RX_ADDBA_ACCEPTED.swap(0, Ordering::AcqRel) != 0;
+        #[cfg(feature = "hil-rx-ampdu")]
+        if accepted_rx_addba {
+            let descriptor = frame.add(0x34).cast::<*mut u8>().read();
+            if !descriptor.is_null() && descriptor.add(19).read() == 2 {
+                let config = ASSOC_CONFIG.0.get().read();
+                crate::rx_ampdu_ap::rollback_failed_response(config.access_point.bssid);
+            }
+        }
+        #[cfg(not(feature = "hil-rx-ampdu"))]
+        let _ = (frame, accepted_rx_addba);
         ACTION_TX_DONE.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -1064,6 +1079,7 @@ mod target {
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
     }
 
     unsafe extern "C" fn tx_addba_timeout(_argument: *mut c_void) {
@@ -1169,7 +1185,7 @@ mod target {
         true
     }
 
-    unsafe fn send_addba_decline(node: *mut u8, request: &[u8]) -> bool {
+    unsafe fn send_addba_response(node: *mut u8, peer: [u8; 6], request: &[u8]) -> bool {
         const ACTION_BODY_LEN: usize = 9;
         const STATUS_REQUEST_DECLINED: u16 = 37;
         if request.len() < 33 || OWNED_ACTION_BUFFER.load(Ordering::Acquire) != 0 {
@@ -1211,12 +1227,31 @@ mod target {
             esf_buf_recycle(buffer.cast());
             return false;
         }
+        #[cfg(feature = "hil-rx-ampdu")]
+        let rx_ampdu_accepted = crate::rx_ampdu_ap::try_accept_sta_request(
+            peer,
+            &request[24..33],
+            core::slice::from_raw_parts_mut(body, ACTION_BODY_LEN),
+        );
+        #[cfg(not(feature = "hil-rx-ampdu"))]
+        let rx_ampdu_accepted = false;
+        if rx_ampdu_accepted {
+            OWNED_RX_ADDBA_ACCEPTED.store(1, Ordering::Release);
+        }
         let result = linked_ieee80211_mgmt_output(node, buffer, 0xd0);
         if result != 0 {
+            #[cfg(feature = "hil-rx-ampdu")]
+            if rx_ampdu_accepted {
+                crate::rx_ampdu_ap::rollback_failed_response(peer);
+            }
             cancel_owned_action_management(buffer);
             return false;
         }
-        ADDBA_DECLINES_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        if rx_ampdu_accepted {
+            ADDBA_ACCEPTED_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ADDBA_DECLINES_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+        }
         true
     }
 
@@ -1279,7 +1314,7 @@ mod target {
         if node != NODE.0.get().cast::<u8>() {
             return true;
         }
-        let _ = unsafe { send_addba_decline(node, frame) };
+        let _ = unsafe { send_addba_response(node, config.access_point.bssid, frame) };
         true
     }
 
@@ -1787,6 +1822,10 @@ mod target {
         ASSOC_HE_BIDIRECTIONAL_MCS9.store(0, Ordering::Release);
         ASSOC_HE_BSS_COLOR.store(u32::MAX, Ordering::Release);
         ASSOC_HE_PEER_STATE_APPLIED.store(0, Ordering::Release);
+        let associated_peer = ASSOC_CONFIG.0.get().read().access_point.bssid;
+        #[cfg(feature = "hil-rx-ampdu")]
+        crate::rx_ampdu_ap::remove_peer(associated_peer);
+        OWNED_RX_ADDBA_ACCEPTED.store(0, Ordering::Release);
         CONFIG.0.get().write(AuthConfig::EMPTY);
         ASSOC_CONFIG.0.get().write(AssocConfig::EMPTY);
 

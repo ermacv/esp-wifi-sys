@@ -26,8 +26,8 @@ hil-tx-deep-telemetry = ["hil-vendor-tx"]
 # Laboratory bridge: retain fully prepared MPDUs at ppMapTxQueue and feed the
 # Rust A-MPDU submit/completion path. The vendor mapper remains in the graph.
 hil-ampdu-intercept = ["hil-vendor-tx"]
-# Laboratory RX BlockAck bring-up. This accepts one SoftAP TID-0 agreement
-# through Rust-owned fixed state and the recovered finite MAC register leaf.
+# Laboratory RX BlockAck bring-up. This accepts one SoftAP or station TID-0
+# agreement through Rust-owned fixed state and the recovered finite MAC leaf.
 hil-rx-ampdu = []
 # Laboratory-only association oracle. This advertises the exact bounded HE20
 # MCS0-9 capability element observed from the pinned vendor STA, while the
