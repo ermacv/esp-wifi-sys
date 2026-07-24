@@ -434,6 +434,10 @@ fn interface_enabled_by_mode(interface: u32, mode: u8) -> bool {
     }
 }
 
+// Keep this pure selector as an explicit final-ELF proof boundary. The strict
+// application audit verifies that it is call-free, finite and reached directly
+// by the public wrapper.
+#[inline(never)]
 fn select_2_4_ghz_protocol(
     bitmap: u16,
     supports_2_4_ghz: bool,
