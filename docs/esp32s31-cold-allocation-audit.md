@@ -15,7 +15,7 @@ network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image is down to 8 allocations, 2 frees and 336 requested
+the current image is down to 7 allocations, 2 frees and 316 requested
 bytes. These are still cold-bootstrap observations, not accepted final
 runtime dependencies.
 
@@ -581,3 +581,40 @@ association/WPA2 cycle completed post-link traffic with the allocation
 snapshot fixed at 8/2/336, zero failures, zero radio-context allocator calls
 and no TX/RX queue rejection. The strict whole-ELF no-wait/no-heap audit
 again reported zero violations.
+
+The next persistent owner was the supplicant's empty PMKSA-cache header.
+Reverse inspection of `libwpa_supplicant.a[pmksa_cache.c.obj]` recovered an
+exact 20-byte layout: entry-list head and entry count at offsets 0 and 4,
+the `wpa_sm` pointer at 8, and the free callback plus its context at 12 and
+16. `pmksa_cache_init` allocated and zeroed that object before publishing the
+three nonzero fields. The vendor deinitializer walked and freed entries,
+cancelled and recomputed expiration timeouts and finally freed the header.
+
+The strict WPA2 STA path does not create a vendor PMKSA entry: both qualified
+connections retained an empty list, a zero count and an unchanged runtime
+allocation snapshot. `rust-static-pmksa-cache-interpose` therefore replaces
+only that observed empty-header case with one aligned internal-SRAM object.
+Initialization requires all three input pointers and an entirely unowned
+object, then performs the exact five field stores. Deinitialization accepts
+only the exact static address with an empty head and zero count, clears the
+same five fields and returns. An unknown or populated cache fails closed:
+Rust does not call a vendor callback, timer registration/cancellation or
+deallocator and does not pretend to implement PMKSA entry ownership.
+
+The final ELF audit explicitly retains both wrappers so archive extraction or
+LTO cannot silently discard this proof boundary. It requires the exact
+20-byte aligned SRAM section, rejects the original and `__real_`
+constructor/deinitializer and proves that each wrapper is acyclic, call-free
+and contains exactly five stores. The same explicit retention is applied to
+the other audited cold wrappers, preventing a build-only audit from accepting
+a missing compatibility boundary.
+
+Hardware removed exactly one direct `calloc` and 20 requested bytes,
+producing 7 allocations, 2 observed frees and 316 requested bytes. The first
+strict WPA2 cycle completed passive scan, authentication, association,
+M1-M4, DHCP, ping, DNS, TCP and HTTP. Teardown and a second passive-scan,
+authentication, association and WPA2 cycle completed post-link traffic with
+the allocation snapshot fixed at 7/2/316, zero allocation failures, zero
+radio-context allocator calls, zero core stalls and no TX/RX queue rejection.
+The strict whole-ELF no-wait/no-heap audit inspected 6,407 functions and
+reported zero violations.
