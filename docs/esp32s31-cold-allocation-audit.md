@@ -81,7 +81,7 @@ The test image reduced its temporary bootstrap heap from 128 KiB to 80 KiB.
 It used 72,292 bytes and retained 9,628 bytes after handoff, proving that the
 new SRAM pool replaced rather than duplicated the old heap ownership.
 
-The independent experimental `rust-static-esf-buffer-init` boundary supplies
+The explicit `rust-static-esf-buffer-init` boundary supplies
 the three ROM ESF classes from separate 16-byte-aligned internal-SRAM arrays.
 Admission requires the fixed ECO0 implementation return address `0x2f832460`
 plus the exact allocator source and size pair observed above. Each class has
@@ -90,14 +90,24 @@ in those arrays. An unexpected ROM revision, source, size or extra request
 therefore falls back to the traced bootstrap allocator instead of aliasing
 storage.
 
-One complete scan/association/WPA2/network cycle reduced cold allocation from
-82 calls / 74,072 requested bytes to 40 calls / 11,376 requested bytes.
-Reconnect then exposed `g_phyFuns == 0x00040000` before the second scan's PHY
-channel change. The arrays do not overlap that symbol in the final ELF, so
-this boundary is deliberately not implied by
-`rust-static-wifi-init-interpose` until pointer lifetime and the corrupting
-writer are identified. The qualified static lower-MAC RX boundary remains
-enabled independently.
+Static ESF storage reduces cold allocation from 82 calls / 74,072 requested
+bytes to 40 calls / 11,376 requested bytes. The apparent reconnect-time
+`g_phyFuns` corruption was not an ESF lifetime failure. A JTAG write
+watchpoint stopped in the ROM `memcpy` called by the Rust WPA2 continuation:
+the generated `strict_wpa2_m1_m2_with_security` poll frame was 10,288 bytes,
+while the 24 KiB bootstrap heap plus the new static sections left CPU0 only
+about 10 KiB of stack. Its local copy crossed `_stack_end_cpu0` and overwrote
+the adjacent vendor BSS.
+
+Reducing the cold-only heap to 16 KiB leaves 18,328 bytes of CPU0 stack while
+the measured post-init heap occupancy is 9,428 bytes. A post-link audit now
+rejects static-ESF images with less than 16 KiB of CPU0 stack. Two independent
+cold boots, each containing scan, WPA2 association, network traffic, teardown
+and a second complete connection, then passed with unchanged allocation
+counters, zero blocking-probe hits and an intact PHY function-table pointer.
+The ESF boundary remains an explicit feature until longer reconnect and load
+stress has been completed; the static lower-MAC RX boundary remains enabled
+independently.
 
 After those pools, the next high-value leaf is `wifi_nvs_cfg_init` plus
 `wifi_nvs_load`; the numerous 24-byte entries are API command envelopes and
