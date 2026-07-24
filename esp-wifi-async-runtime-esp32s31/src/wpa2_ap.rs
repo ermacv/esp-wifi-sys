@@ -1570,7 +1570,11 @@ mod target {
         let on_wifi_hart = crate::critical::on_strict_wifi_hart();
         let in_radio_context = crate::context::in_radio_context();
         let owned_action = crate::sta_link::is_owned_action_management(buffer, subtype);
-        let ap_addba_response = if on_wifi_hart && in_radio_context && !buffer.is_null() {
+        let ap_addba_response = if !owned_action
+            && on_wifi_hart
+            && in_radio_context
+            && !buffer.is_null()
+        {
             is_bounded_ap_addba_response(buffer, subtype)
         } else {
             false
