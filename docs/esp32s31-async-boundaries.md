@@ -196,13 +196,16 @@ replacement `ieee80211_post_hmac_tx` accepts only a run-to-completion call on
 the strict Wi-Fi hart, an ordinary STA/AP descriptor, and the current home
 channel. A Rust-owned event-token bit ensures that publication posts event 5
 only on the empty-to-non-empty transition. Each event consumes that token,
-removes one frame, lends the single frame through `s_tx_cacheq` to the
-temporary vendor output stage, verifies that the mailbox is empty again, and
-reserves one follow-up token only if another Rust-owned frame remains. A
-nested publication observes the already reserved token, so it cannot create a
-surplus empty event. Thus the stock shared-list drain cannot monopolize one
-executor turn and the vendor `g_ic+0x1ac/+0x1b0` off-channel queue cannot
-become live.
+removes one frame, and runs the ordinary STA/AP consumer directly in Rust.
+Node lookup, Ethernet-to-802.11 encapsulation, completion-callback selection,
+classification, optional CCMP selection, alignment, descriptor construction,
+PTI selection, and the call to the existing `ppTxPkt` preparation boundary
+all complete in that one bounded action. A follow-up token is reserved only
+if another Rust-owned frame remains. A nested publication observes the
+already reserved token, so it cannot create a surplus empty event. Thus
+neither the stock shared-list drain nor `ieee80211_output_process` is a
+runtime dependency, and the vendor `g_ic+0x1ac/+0x1b0` off-channel queue
+cannot become live.
 Node lookup is already constrained by the Rust STA/AP interface and node-table
 owners. Classification is now a finite Rust leaf: direct references are
 wrapped, and strict handoff replaces the ROM consumer's callback-table slot
@@ -218,10 +221,15 @@ following ESF header reservation and alignment leaf is Rust-owned too. It
 admits only the recovered 24-byte legacy or 26-byte QoS header, checks the
 14-bit MPDU length, shifts the MPDU by an alignment delta of at most three
 bytes, and publishes the packed storage word only after all arithmetic
-succeeds. The remaining
-Ethernet address/LLC construction, sequence/descriptor construction, and
-`ppTxPkt` hardware-submit stage remain migration work; this boundary does not
-claim that the complete event-5 call graph is strict yet.
+succeeds. The live ordinary encapsulator now constructs the STA/AP address
+layout, RFC 1042 LLC/SNAP prefix, QoS/no-ack policy, sequence field,
+descriptor, and PTI directly. It rejects WAPI, raw, HE-prefix, NAN/mesh,
+off-channel, and AP power-save states before ownership can escape. The
+recovered STA EAPOL rule is explicit: EtherType `0x888e` owns descriptor
+callback bit 3; ordinary STA data owns no callback; AP traffic owns callback
+bit 12. The remaining lower transition is `ppTxPkt` and its already
+interposed stateless preparation/queue-map leaves, not the vendor net80211
+event-5 consumer.
 
 For timers, the original producer allocates an eight-byte envelope and posts
 event 7. The final-link timer wrapper replaces that producer with a sixteen-slot

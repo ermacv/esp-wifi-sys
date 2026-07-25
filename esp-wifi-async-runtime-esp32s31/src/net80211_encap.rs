@@ -14,11 +14,14 @@ pub(crate) const IEEE80211_LEGACY_DATA_HEADER_LEN: usize = 24;
 pub(crate) const IEEE80211_QOS_DATA_HEADER_LEN: usize = 26;
 pub(crate) const LLC_SNAP_HEADER_LEN: usize = 8;
 
+const ETHER_TYPE_EAPOL: u16 = 0x888e;
 const IEEE80211_DATA: u8 = 0x08;
 const IEEE80211_QOS_DATA: u8 = 0x88;
 const IEEE80211_TO_DS: u8 = 0x01;
 const IEEE80211_FROM_DS: u8 = 0x02;
 const QOS_NO_ACK_POLICY: u8 = 0x20;
+const CALLBACK_STA_EAPOL: u32 = 1 << 3;
+const CALLBACK_AP_POWER_SAVE: u32 = 1 << 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DataEncapPlan {
@@ -60,6 +63,21 @@ pub(crate) const fn descriptor_priority_byte(priority: u8) -> Option<u8> {
     match queue_class(priority) {
         Some(class) => Some((class << 4) | priority),
         None => None,
+    }
+}
+
+/// Select the exact completion callback mask for an ordinary STA/AP frame.
+///
+/// The pinned `ieee80211_output_process` writes callback bit 3 for STA EAPOL
+/// before encapsulation. The ordinary AP branch of
+/// `ieee80211_encap_esfbuf` adds bit 12 to every transmitted frame. Keeping
+/// both decisions here prevents a recycled descriptor from retaining an
+/// implicit callback owner.
+pub(crate) const fn completion_callback_mask(role: Net80211InterfaceRole, ether_type: u16) -> u32 {
+    match role {
+        Net80211InterfaceRole::Station if ether_type == ETHER_TYPE_EAPOL => CALLBACK_STA_EAPOL,
+        Net80211InterfaceRole::Station => 0,
+        Net80211InterfaceRole::AccessPoint => CALLBACK_AP_POWER_SAVE,
     }
 }
 
@@ -199,6 +217,26 @@ mod tests {
         }
         assert_eq!(queue_class(8), None);
         assert_eq!(descriptor_priority_byte(0xff), None);
+    }
+
+    #[test]
+    fn completion_callbacks_have_one_explicit_owner() {
+        assert_eq!(
+            completion_callback_mask(Net80211InterfaceRole::Station, ETHER_TYPE_EAPOL),
+            1 << 3
+        );
+        assert_eq!(
+            completion_callback_mask(Net80211InterfaceRole::Station, 0x0800),
+            0
+        );
+        assert_eq!(
+            completion_callback_mask(Net80211InterfaceRole::AccessPoint, ETHER_TYPE_EAPOL),
+            1 << 12
+        );
+        assert_eq!(
+            completion_callback_mask(Net80211InterfaceRole::AccessPoint, 0x0800),
+            1 << 12
+        );
     }
 
     #[test]

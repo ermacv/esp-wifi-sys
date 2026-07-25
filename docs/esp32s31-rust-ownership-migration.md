@@ -192,10 +192,12 @@ function as a strict vendor root.
 
 Node tables and interface contents remain separate owners: publishing an
 interface does not grant arbitrary mutable access to every field behind its
-pointer. The registry adds 12 bytes of internal SRAM and was verified on S31
-hardware through passive scan, WPA2 association, DHCP, ping, DNS, TCP, and
-post-link data with zero recorded allocations. The final ELF still passes the
-strict no-wait/no-heap audit with zero violations.
+pointer. Cold adoption now also copies each present interface's six-byte MAC
+address into 16 bytes of aligned atomic SRAM storage; the live encapsulator
+does not call `wifi_get_macaddr` or inspect a vendor interface field. This was
+verified on S31 hardware through passive scan, WPA2 association, DHCP, ping,
+DNS, TCP, and post-link data with zero recorded allocations. The final ELF
+still passes the strict no-wait/no-heap audit with zero violations.
 
 The Rust replacement validates the descriptor interface, strict-hart and
 radio-owner identity, and home-channel state, appends through the recovered
@@ -205,15 +207,25 @@ allocation, wait, retry, indirect call, or `g_ic` access. The persistent input
 queue and its event-token state are now one explicit Rust object in internal
 SRAM.
 
-Event 5 removes exactly one frame from that queue and lends it through the
-eight-byte `s_tx_cacheq` ABI object to `ieee80211_output_process`. The vendor
-mailbox must be empty before and after the call; another Rust event token is
-reserved only when another frame remains and no nested publication already
-reserved it. This bounds the stock list drain to one owned frame per executor
-action without creating a surplus empty event. Publication away from the
-Rust-owned home channel is rejected before queue ownership changes, so the
-vendor `g_ic+0x1ac/+0x1b0` pending-frame list remains an invariant instead of
-becoming live runtime state.
+Event 5 removes exactly one frame from that queue and runs the recovered
+ordinary STA/AP path directly. It resolves the bounded peer, copies the
+Ethernet header into an owned local value, rejects raw/WAPI/HE-prefix,
+NAN/mesh, off-channel, and AP power-save cases, then applies the pure
+address/LLC/QoS plan. The live target adapter advances the per-TID sequence,
+invokes only the separately interposed classifier, CCMP, alignment,
+descriptor, and PTI leaves, and enters `ppTxPkt` without publishing a vendor
+mailbox. Another Rust event token is reserved only when another frame remains
+and no nested publication already reserved it.
+
+Completion ownership is no longer inherited from recycled descriptor state.
+The recovered `ieee80211_output_process` branch is an explicit pure rule:
+STA EAPOL (`0x888e`) gets callback bit 3, ordinary STA data gets zero, and AP
+traffic gets the encapsulator's callback bit 12. Host tests cover the complete
+STA/AP matrix. Hardware validation observed M2 and M4 through the Rust
+completion path, completed authorization, DHCP, ping, DNS, TCP, and HTTP, then
+passed the 4096-datagram/four-HTTP strict stress workload with all 4786 TX
+credits returned, empty queues, no rejected event posts, and unchanged
+post-handoff allocation counters.
 
 The next leaf inside that compatibility stage is now Rust-owned.
 `ieee80211_classify` was recovered from the pinned
@@ -304,33 +316,18 @@ association, all 19 post-link TX frames released their static credits, and
 the one-shot critical snapshot reported zero other-core stalls and zero
 wrong-hart entries.
 
-The Ethernet-to-802.11 geometry adjacent to the descriptor leaf is also
-encoded as a pure Rust plan: STA/AP address selection, RFC 1042 LLC/SNAP,
-QoS/no-ack policy, multicast handling, sequence wrap, and the priority byte
-are bounded and allocation-free. It is not yet the live data encapsulator.
-The ROM/archive `ieee80211_output_process` consumer performs an internal call
-which cannot be redirected by an external symbol alias, so the data path still
-uses that compatibility consumer until the surrounding encapsulation stage is
-replaced.
+The Ethernet-to-802.11 geometry adjacent to the descriptor leaf is now the
+live data encapsulator: STA/AP address selection, RFC 1042 LLC/SNAP,
+QoS/no-ack policy, multicast handling, sequence wrap, callback ownership, and
+the priority byte are bounded and allocation-free. The final-ELF auditor
+rejects any direct call to `ieee80211_output_process`; its absolute ROM symbol
+may remain linked for cold/vendor compatibility but is not callable by the
+strict image.
 
-This consumer is not a leaf. An explicit strict-auditor probe with
-`ieee80211_output_process` as the sole root currently finds 23 control-flow
-cycles and 14 indirect calls. Several branches are expected to be unreachable
-under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
-expectation is not a proof and the compatibility stage must not be described
-as fully strict yet. Queue ownership, the one-frame presentation boundary,
-role-checked node lookup, classification, CCMP key/header construction, and
-ESF alignment are live. Address/LLC geometry and sequence/descriptor
-construction are now recovered as pure policies, while only direct management
-descriptor calls are live. The next slice must replace the surrounding data
-encapsulator and then the remaining hardware-submit branches explicitly.
-
-After the event-5 consumer and its internal data-descriptor call have Rust
-replacements, the linked-state audit should no longer report `g_ic` as
-strict-vendor-reachable even while cold initialization still retains its
-backing. Until the consumer is added to the enforced graph, the generated
-linked-state table intentionally describes only the current declared vendor
-roots and is narrower than the complete Rust-to-vendor runtime graph. Final
-ELF verification must use a non-empty STA configuration; otherwise the HIL
-binary deliberately enters `pending()` before Wi-Fi initialization and LTO
-removes the unreachable strict runtime.
+The next TX slice is below net80211: reduce the remaining `ppTxPkt` shell and
+its queue insertion to explicit Rust ownership. Its protocol, security,
+rate-schedule, and queue-map leaves are already replaced or bounded, but the
+outer archive function still sequences them and inserts the frame into the
+vendor `pTxRx` queue. Final ELF verification must continue to use a non-empty
+STA configuration; otherwise the HIL binary deliberately enters `pending()`
+before Wi-Fi initialization and LTO removes the unreachable strict runtime.

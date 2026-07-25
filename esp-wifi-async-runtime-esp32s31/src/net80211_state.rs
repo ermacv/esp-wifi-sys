@@ -8,7 +8,7 @@
 
 use core::{
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering},
 };
 
 #[cfg(target_arch = "riscv32")]
@@ -33,6 +33,8 @@ pub enum Net80211StateAdoptionError {
     CachedTxEnabled,
     MissingWifiConfig,
     InvalidIndividualTwtFlowId(u8),
+    InvalidStationMac,
+    InvalidAccessPointMac,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +64,8 @@ pub struct Net80211InterfaceRegistrySnapshot {
     pub adopted: bool,
     pub station: Option<usize>,
     pub access_point: Option<usize>,
+    pub station_mac: Option<[u8; 6]>,
+    pub access_point_mac: Option<[u8; 6]>,
     pub descriptor_config_0x44a: Option<u8>,
     pub individual_twt_flow_id: Option<u8>,
 }
@@ -70,6 +74,8 @@ struct Net80211InterfaceRegistry {
     adopted: AtomicBool,
     station: AtomicUsize,
     access_point: AtomicUsize,
+    station_mac: [AtomicU32; 2],
+    access_point_mac: [AtomicU32; 2],
     descriptor_config_0x44a: AtomicU8,
     individual_twt_flow_id: AtomicU8,
 }
@@ -80,6 +86,8 @@ impl Net80211InterfaceRegistry {
             adopted: AtomicBool::new(false),
             station: AtomicUsize::new(0),
             access_point: AtomicUsize::new(0),
+            station_mac: [const { AtomicU32::new(0) }; 2],
+            access_point_mac: [const { AtomicU32::new(0) }; 2],
             descriptor_config_0x44a: AtomicU8::new(0),
             individual_twt_flow_id: AtomicU8::new(0),
         }
@@ -92,6 +100,8 @@ impl Net80211InterfaceRegistry {
         mesh_state: usize,
         pending_tx_head: usize,
         cached_tx_enabled: bool,
+        station_mac: [u8; 6],
+        access_point_mac: [u8; 6],
         descriptor_config_0x44a: u8,
         individual_twt_flow_id: u8,
     ) -> Result<(), Net80211StateAdoptionError> {
@@ -121,15 +131,31 @@ impl Net80211InterfaceRegistry {
                 individual_twt_flow_id,
             ));
         }
+        if station != 0 && !valid_interface_mac(station_mac) {
+            return Err(Net80211StateAdoptionError::InvalidStationMac);
+        }
+        if access_point != 0 && !valid_interface_mac(access_point_mac) {
+            return Err(Net80211StateAdoptionError::InvalidAccessPointMac);
+        }
 
         self.station.store(station, Ordering::Relaxed);
         self.access_point.store(access_point, Ordering::Relaxed);
+        store_mac(&self.station_mac, station_mac);
+        store_mac(&self.access_point_mac, access_point_mac);
         self.descriptor_config_0x44a
             .store(descriptor_config_0x44a, Ordering::Relaxed);
         self.individual_twt_flow_id
             .store(individual_twt_flow_id, Ordering::Relaxed);
         self.adopted.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn mac(&self, role: Net80211InterfaceRole) -> Option<[u8; 6]> {
+        self.interface(role)?;
+        Some(match role {
+            Net80211InterfaceRole::Station => load_mac(&self.station_mac),
+            Net80211InterfaceRole::AccessPoint => load_mac(&self.access_point_mac),
+        })
     }
 
     fn interface(&self, role: Net80211InterfaceRole) -> Option<Net80211InterfaceHandle> {
@@ -153,12 +179,40 @@ impl Net80211InterfaceRegistry {
             access_point: adopted
                 .then(|| self.access_point.load(Ordering::Acquire))
                 .filter(|address| *address != 0),
+            station_mac: adopted
+                .then(|| self.mac(Net80211InterfaceRole::Station))
+                .flatten(),
+            access_point_mac: adopted
+                .then(|| self.mac(Net80211InterfaceRole::AccessPoint))
+                .flatten(),
             descriptor_config_0x44a: adopted
                 .then(|| self.descriptor_config_0x44a.load(Ordering::Acquire)),
             individual_twt_flow_id: adopted
                 .then(|| self.individual_twt_flow_id.load(Ordering::Acquire)),
         }
     }
+}
+
+const fn valid_interface_mac(mac: [u8; 6]) -> bool {
+    mac[0] & 1 == 0
+        && (mac[0] != 0 || mac[1] != 0 || mac[2] != 0 || mac[3] != 0 || mac[4] != 0 || mac[5] != 0)
+}
+
+fn store_mac(destination: &[AtomicU32; 2], mac: [u8; 6]) {
+    destination[0].store(
+        u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]),
+        Ordering::Relaxed,
+    );
+    destination[1].store(
+        u32::from(u16::from_le_bytes([mac[4], mac[5]])),
+        Ordering::Relaxed,
+    );
+}
+
+fn load_mac(source: &[AtomicU32; 2]) -> [u8; 6] {
+    let low = source[0].load(Ordering::Relaxed).to_le_bytes();
+    let high = (source[1].load(Ordering::Relaxed) as u16).to_le_bytes();
+    [low[0], low[1], low[2], low[3], high[0], high[1]]
 }
 
 #[link_section = ".critical.bss.wifi_strict.net80211_interfaces"]
@@ -170,6 +224,10 @@ pub(crate) fn station_interface() -> Option<Net80211InterfaceHandle> {
 
 pub(crate) fn access_point_interface() -> Option<Net80211InterfaceHandle> {
     INTERFACES.interface(Net80211InterfaceRole::AccessPoint)
+}
+
+pub(crate) fn interface_mac(role: Net80211InterfaceRole) -> Option<[u8; 6]> {
+    INTERFACES.mac(role)
 }
 
 pub(crate) fn role_for_interface(interface: *mut u8) -> Option<Net80211InterfaceRole> {
@@ -220,6 +278,7 @@ unsafe extern "C" {
     static g_ic: u8;
     static mut g_itwt_fid: u8;
     static mut g_wifi_nvs: *mut u8;
+    fn wifi_get_macaddr(interface: u32, address: *mut u8);
 }
 
 /// Adopt the ordinary STA/AP interface publications and the two bounded
@@ -256,12 +315,18 @@ pub(crate) unsafe fn adopt_vendor_interface_registry() -> Result<(), Net80211Sta
     }
     let descriptor_config_0x44a = wifi_config.add(0x44a).read();
     let individual_twt_flow_id = core::ptr::addr_of!(g_itwt_fid).read_volatile();
+    let mut station_mac = [0_u8; 6];
+    let mut access_point_mac = [0_u8; 6];
+    wifi_get_macaddr(0, station_mac.as_mut_ptr());
+    wifi_get_macaddr(1, access_point_mac.as_mut_ptr());
     INTERFACES.adopt(
         station,
         access_point,
         mesh_state,
         pending_tx_head,
         cached_tx_enabled,
+        station_mac,
+        access_point_mac,
         descriptor_config_0x44a,
         individual_twt_flow_id,
     )
@@ -274,12 +339,17 @@ mod tests {
     #[test]
     fn publication_is_role_checked_and_null_role_remains_absent() {
         let registry = Net80211InterfaceRegistry::new();
-        registry.adopt(0x1000, 0, 0, 0, false, 3, 5).unwrap();
+        let sta_mac = [0x02, 1, 2, 3, 4, 5];
+        registry
+            .adopt(0x1000, 0, 0, 0, false, sta_mac, [0; 6], 3, 5)
+            .unwrap();
 
         let station = registry.interface(Net80211InterfaceRole::Station).unwrap();
         assert_eq!(station.role(), Net80211InterfaceRole::Station);
         assert_eq!(station.as_ptr() as usize, 0x1000);
         assert_eq!(registry.interface(Net80211InterfaceRole::AccessPoint), None);
+        assert_eq!(registry.mac(Net80211InterfaceRole::Station), Some(sta_mac));
+        assert_eq!(registry.mac(Net80211InterfaceRole::AccessPoint), None);
         assert_eq!(registry.snapshot().descriptor_config_0x44a, Some(3));
         assert_eq!(registry.snapshot().individual_twt_flow_id, Some(5));
     }
@@ -288,38 +358,86 @@ mod tests {
     fn invalid_publication_is_not_observable() {
         let registry = Net80211InterfaceRegistry::new();
         assert_eq!(
-            registry.adopt(0, 0, 0, 0, false, 0, 0),
+            registry.adopt(0, 0, 0, 0, false, [0; 6], [0; 6], 0, 0),
             Err(Net80211StateAdoptionError::MissingInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1001, 0, 0, 0, false, 0, 0),
+            registry.adopt(0x1001, 0, 0, 0, false, [0x02, 1, 2, 3, 4, 5], [0; 6], 0, 0),
             Err(Net80211StateAdoptionError::MisalignedStationInterface)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0x1000, 0, 0, false, 0, 0),
+            registry.adopt(
+                0x1000,
+                0x1000,
+                0,
+                0,
+                false,
+                [0x02, 1, 2, 3, 4, 5],
+                [0x02, 6, 7, 8, 9, 10],
+                0,
+                0
+            ),
             Err(Net80211StateAdoptionError::AliasedInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0, 0x2000, 0, false, 0, 0),
+            registry.adopt(
+                0x1000,
+                0,
+                0x2000,
+                0,
+                false,
+                [0x02, 1, 2, 3, 4, 5],
+                [0; 6],
+                0,
+                0
+            ),
             Err(Net80211StateAdoptionError::MeshModeActive)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, 0x2000, false, 0, 0),
+            registry.adopt(
+                0x1000,
+                0,
+                0,
+                0x2000,
+                false,
+                [0x02, 1, 2, 3, 4, 5],
+                [0; 6],
+                0,
+                0
+            ),
             Err(Net80211StateAdoptionError::PendingTxActive)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, 0, true, 0, 0),
+            registry.adopt(0x1000, 0, 0, 0, true, [0x02, 1, 2, 3, 4, 5], [0; 6], 0, 0),
             Err(Net80211StateAdoptionError::CachedTxEnabled)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, 0, false, 0, 8),
+            registry.adopt(0x1000, 0, 0, 0, false, [0x02, 1, 2, 3, 4, 5], [0; 6], 0, 8),
             Err(Net80211StateAdoptionError::InvalidIndividualTwtFlowId(8))
+        );
+        assert_eq!(
+            registry.adopt(0x1000, 0, 0, 0, false, [0; 6], [0; 6], 0, 0),
+            Err(Net80211StateAdoptionError::InvalidStationMac)
+        );
+        assert_eq!(
+            registry.adopt(
+                0x1000,
+                0x2000,
+                0,
+                0,
+                false,
+                [0x02, 1, 2, 3, 4, 5],
+                [0x03, 6, 7, 8, 9, 10],
+                0,
+                0
+            ),
+            Err(Net80211StateAdoptionError::InvalidAccessPointMac)
         );
         assert!(!registry.snapshot().adopted);
     }

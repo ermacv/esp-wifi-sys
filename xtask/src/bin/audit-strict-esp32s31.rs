@@ -36,6 +36,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacProcessTxError",
     "lmacProcessCollisions_task",
     "ppRxPkt",
+    "ieee80211_output_process",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
