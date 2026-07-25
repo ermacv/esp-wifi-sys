@@ -159,7 +159,14 @@ pub const fn strict_persistent_frame_completion_layout(
         && matches!(input.descriptor_security, 0 | 0x0114_0000);
     let beacon = input.frame_control == 0x0080
         && input.descriptor_flags == PERSISTENT_BIT | 0x0000_0412
-        && matches!(input.descriptor_security, 0x0114_0000 | 0x0414_0000)
+        && matches!(
+            input.descriptor_security,
+            // The strict B/G/N AP HIL completes its first 204-byte beacon
+            // with hardware-success bit 24 plus the fixed AP selector.  The
+            // older 0x0114/0x0414 states remain measured vendor completion
+            // variants, but must not be required for this direct LMAC path.
+            0x0104_0000 | 0x0114_0000 | 0x0414_0000
+        )
         && input.header_len == 0x20;
     if input.frame_control & 0x000c != 0
         || !(management_reply || beacon)
@@ -1059,6 +1066,26 @@ mod tests {
                 remaining_len: 0x74,
                 layout: 0x02db,
                 buffer_flags: 0xc023_00f8,
+                descriptor_flags: 0x0000_0412,
+                descriptor_security: 0x0004_0000,
+            }),
+        );
+
+        // Strict AP direct-LMAC HIL, B/G/N profile: the 204-byte transmitted
+        // beacon carries no 0x0010_0000 queue-state bit at completion.
+        let direct_lmac_beacon = TxSecurityLayoutInput {
+            remaining_len: 0x00ac,
+            buffer_flags: 0xc033_02f8,
+            descriptor_security: 0x0104_0000,
+            ..beacon
+        };
+        assert_eq!(
+            strict_persistent_frame_completion_layout(direct_lmac_beacon),
+            Some(PersistentFrameCompletionLayout {
+                header_len: 0x18,
+                remaining_len: 0x00a8,
+                layout: 0,
+                buffer_flags: 0xc030_02f8,
                 descriptor_flags: 0x0000_0412,
                 descriptor_security: 0x0004_0000,
             }),

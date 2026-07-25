@@ -784,6 +784,18 @@ byte four `0x07`. It is an existing bounded beacon layout already shared by
 the Rust security and completion policies; the mapper preserves byte four and
 does not enter aggregation or power-save search state.
 
+The same AP run qualified the direct-LMAC beacon completion rather than
+borrowing a descriptor state from an older vendor path. Hardware completed
+the 204-byte frame as lengths `0x00ac_0020`, layout `0x2000`, buffer word
+`0xc033_02f8`, descriptor flags `0x0080_0412`, and descriptor-security word
+`0x0104_0000`. The pinned `ppProcTxDone` persistent-object branch proves the
+inverse operation: remove four bytes of trailer accounting, remove the
+one-transmission eight-byte PP prefix, clear layout bit `0x2000`, and clear
+descriptor ownership bit `0x0080_0000`. Rust admits that exact hardware status
+in addition to the previously measured vendor completion variants, validates
+the encoded length and fixed 1600-byte management bound before mutation, and
+returns the beacon to its `0x0004_0000` base selector for reuse.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
