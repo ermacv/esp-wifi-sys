@@ -724,6 +724,29 @@ branches: fixed primary HT and an SRAM-owned 12-byte legacy secondary schedule.
 The final-link wrapper traps on every other adaptive/PHY override and never
 delegates to vendor rate control.
 
+The enclosing `libpp.a[pp.o]::ppTxPkt` function is now replaced as well.
+The implementation was recovered from the pinned RV32 disassembly, including
+the complete user-priority-to-hardware-queue decision tree and the intrusive
+tail-queue offsets. The armed path validates the Rust-adopted STA/AP interface,
+executes only the Rust protocol, security, rate, and mapper transformations,
+stores the MAC time, and publishes one frame into the selected logical queue.
+It reads hardware-queue idle state directly from the adopted LMAC instance and
+posts one stackless executor event; it never calls `ic_interface_enabled`,
+`lmacIsIdle`, the cached-HMAC queue consumer, or the vendor mapper. The current
+`pTxRx` object remains vendor-layout transitional storage and is the next
+ownership boundary to replace.
+
+The replacement was exercised on ESP32-S31 through passive scan, open
+authentication, HT20/WMM association, WPA2 M1-M4, DHCP, ping, DNS, TCP, HTTP,
+ADDBA, and the combined UDP/HTTP stress workload. All 4,786 submitted TX frames
+and all 690 RX frames returned their static credits; the PP queue finished with
+21,284 pushes and pops, zero rejects, and zero queued entries. The allocation
+snapshot remained unchanged after strict handoff. The run delivered 4,096 of
+4,096 UDP datagrams plus four HTTP transfers at 23.799 Mbit/s. During this run
+the static ESF slots exposed layout values `0x2000`, `0x2008`, and `0x2010`;
+the pinned mapper tests bit `0x2000`, while the lower bits identify the reused
+slot and must not be interpreted as mapper state.
+
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,
 queued, or safely recycled, so exactly one pointer may be quarantined and

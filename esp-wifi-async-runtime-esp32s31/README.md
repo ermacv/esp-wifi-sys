@@ -173,6 +173,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=realloc
 -Wl,--wrap=free
 -Wl,--wrap=pp_post
+-Wl,--wrap=ppTxPkt
 -Wl,--wrap=ieee80211_timer_process
 -Wl,--wrap=ieee80211_mgmt_output
 -Wl,--wrap=ieee80211_hostapd_beacon_txcb
@@ -227,6 +228,15 @@ a delegating probe: the fragment retains the unique
 `wifi_strict_pp_tx_proto_proc` Rust symbol and aliases the public ROM name
 directly to it. This avoids LLD creating an absolute `__wrap_ppTxProtoProc`
 symbol at the ROM address.
+
+`ppTxPkt` is an ordinary `libpp.a[pp.o]` archive function and therefore uses
+GNU `--wrap`. Its strict replacement validates the adopted STA/AP interface
+and descriptor queue, calls the Rust protocol/security/rate leaves, applies
+the recovered finite Rust queue mapper, and appends the frame to the selected
+logical `pTxRx` queue. The fixed queue object is still vendor-layout
+transitional storage, but `ppTxPkt`, `ppMapTxQueue`, `ic_interface_enabled`,
+`lmacIsIdle`, and `pp_process_hmac_waiting_txq` are absent from the armed
+runtime path.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.

@@ -108,6 +108,7 @@ mod tx_proto;
 mod tx_queue;
 mod tx_rate;
 mod tx_security;
+mod tx_submit;
 #[cfg(feature = "hil-vendor-tx")]
 mod tx_trace;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]

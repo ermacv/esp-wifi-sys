@@ -34,6 +34,22 @@ unsafe extern "C" {
     static mut pTxRx: *mut u8;
 }
 
+/// Read the exact finite `lmacIsIdle` state without entering its vendor leaf.
+///
+/// Queue four is a PP software-only class and is outside the strict hardware
+/// submission profile.
+pub(crate) unsafe fn hardware_queue_idle(queue: u8) -> bool {
+    if queue > 3 {
+        return false;
+    }
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    !instances.is_null()
+        && instances
+            .add(usize::from(queue) * TX_QUEUE_STATE_SIZE + TX_QUEUE_STATUS_OFFSET)
+            .read()
+            == 0
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxQueueProcessError {
     UnsupportedEventQueue(u8),

@@ -37,6 +37,8 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacProcessCollisions_task",
     "ppRxPkt",
     "ieee80211_output_process",
+    "ppTxPkt",
+    "ppMapTxQueue",
     "ieee80211_hostapd_beacon_txcb",
     "ieee80211_tx_mgt_cb",
     "wDev_record_ftm_data",
@@ -186,6 +188,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_cnx_node_alloc",
     "__wrap_cnx_node_search",
     "__wrap_rcGetSched",
+    "__wrap_ppTxPkt",
     "__wrap_ets_delay_us",
     "__wrap_vTaskDelay",
     "__wrap_os_sleep",
@@ -222,6 +225,7 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "process_tx_queue",
     "wifi_strict_env_is_chip",
     "__wrap_wDev_AppendRxBlocks",
+    "__wrap_ppTxPkt",
 ];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",
@@ -229,6 +233,8 @@ const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ppProcessTxQ",
     "pp_default_event_handler",
     "pp_coex_tx_release",
+    "ppTxPkt",
+    "ppMapTxQueue",
     "pm_on_coex_schm_status_config",
     "pm_set_beacon_duration",
     "cnx_check_bssid_in_blacklist",

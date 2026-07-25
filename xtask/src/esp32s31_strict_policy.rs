@@ -91,6 +91,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "rcGetSched",
     "ppTxProtoProc",
     "ppProcTxSecFrame",
+    "ppTxPkt",
 ];
 
 /// Public runtime entry points which must resolve to an exact Rust symbol.

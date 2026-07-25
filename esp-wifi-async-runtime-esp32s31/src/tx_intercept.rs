@@ -710,7 +710,7 @@ unsafe fn bypass_pre_enable_mapper(frame: *mut u8) -> i32 {
     let pre = read_mapper_state(frame);
     let (rate, layout, frame_control) = read_mapper_identity(frame);
     let Some(treatment) =
-        crate::tx_mapper::strict_pre_addba_treatment(rate, layout, frame_control, pre)
+        crate::tx_mapper::strict_sta_ap_treatment(rate, layout, frame_control, pre)
     else {
         fail_and_trap();
     };

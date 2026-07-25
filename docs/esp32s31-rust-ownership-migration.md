@@ -324,10 +324,28 @@ rejects any direct call to `ieee80211_output_process`; its absolute ROM symbol
 may remain linked for cold/vendor compatibility but is not callable by the
 strict image.
 
-The next TX slice is below net80211: reduce the remaining `ppTxPkt` shell and
-its queue insertion to explicit Rust ownership. Its protocol, security,
-rate-schedule, and queue-map leaves are already replaced or bounded, but the
-outer archive function still sequences them and inserts the frame into the
-vendor `pTxRx` queue. Final ELF verification must continue to use a non-empty
-STA configuration; otherwise the HIL binary deliberately enters `pending()`
-before Wi-Fi initialization and LTO removes the unreachable strict runtime.
+The outer `libpp.a[pp.o]::ppTxPkt` shell is now Rust-owned. The pinned RV32
+disassembly supplies the exact interface selector, priority-to-hardware-queue
+table, MAC-time register read, and `pTxRx` tail-link offsets. In the armed
+profile Rust sequences the existing protocol, security and rate leaves,
+applies the finite observed mapper table, and publishes the frame. It does not
+call `ic_interface_enabled`, `lmacIsIdle`, `ppMapTxQueue`, or the cached-HMAC
+queue consumer.
+
+The first hardware run with this shell completed the full STA workload:
+passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
+and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
+frames, drained 21,284 of 21,284 PP events with no rejects, and preserved the
+post-handoff allocation snapshot. This also established that the observed
+`0x2000`, `0x2008`, and `0x2010` ESF layout values are static-slot identities:
+only bit `0x2000` is consumed by the pinned mapper.
+
+The next TX ownership slice is therefore the 1044-byte `pTxRx` object itself:
+separate its sixteen logical queue heads/tails and four hardware selectors
+from unrelated vendor fields, adopt their initialized values once, then move
+producer, dequeue, completion, and teardown to one Rust owner. Until that
+transaction is complete, `pTxRx` is deliberately documented as vendor-layout
+transitional storage rather than modeled as a safe Rust structure. Final ELF
+verification must continue to use a non-empty STA configuration; otherwise
+the HIL binary deliberately enters `pending()` before Wi-Fi initialization
+and LTO removes the unreachable strict runtime.
