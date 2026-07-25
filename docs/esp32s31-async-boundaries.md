@@ -1298,7 +1298,12 @@ recycle instead of continuing with an invalid descriptor.
 `S31StaticWpa2Io` no longer
 calls `esp_wifi_internal_tx`, because its
 global OSI lock can wait; it enters the bounded peer/static-buffer/post leaves
-directly and fails immediately on exhaustion or a power-save peer. STA GTK maps
+directly and fails immediately on exhaustion. A sleeping unicast peer retains
+one owned command behind its Rust Active/PS-Poll/removal future. Group frames
+move to a 16-element fixed ESF queue (eight per pseudo-peer), set TIM in Rust,
+and are released by the transmitted-beacon DTIM edge with More Data on every
+non-final MPDU. None of these paths polls peer state, invokes the vendor
+power-save queue, or waits synchronously. STA GTK maps
 all logical ids to the pinned hardware group slot one and
 uses the finite `ieee80211_set_sta_gtk_index` byte stores; AP GTK uses hardware
 slots 8 through 11. Since the blob has no independent controlled-port setter,

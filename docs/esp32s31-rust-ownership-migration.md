@@ -907,12 +907,42 @@ into this fixed-per-packet-rate class remain rejected.
 
 When a second WPA2 station joined while Android was in power-save state, an
 ordinary net80211 event encountered the associated node's measured sleep bit.
-That per-frame condition no longer propagates `UnsupportedPowerSave` out of
-the dispatcher and terminates the radio owner. Until ordinary data is wired
-to the existing peer-bound async wake edge, the fixed-pool ESF is released,
-the cancellation is counted, and the next queued frame is armed. This
-temporary bounded drop has no retry, wait, callback, vendor PS queue, or
-effect on traffic owned by another peer.
+Unicast ownership now stays in the radio command until the peer-bound
+Active/PS-Poll/removal future reports an edge; no status loop, delay, vendor PS
+queue, or RTOS primitive is entered. Group ownership instead crosses the ESF
+boundary immediately into a 16-frame fixed Rust queue with an eight-frame
+per-peer/pseudo-peer bound. That distinction is required because group
+traffic has no `ff:ff:ff:ff:ff:ff` active edge and one retained radio command
+would serialize delivery to one frame per DTIM.
+
+The pinned `ieee80211_hostap_send_beacon_process` computes DTIM count as
+`period - 1 - ((tsf / beacon_interval_us) % period)`. Its ROM
+`hal_get_tsf_time` source returned zero in the adopted runtime, so the stock
+builder emitted count one continuously. The Rust submit boundary now stamps
+timestamp, DTIM count, and TIM bitmap-control bit zero from the executor's
+monotonic clock immediately before hardware ownership. Beacon TX-done only
+observes the value that was actually transmitted and publishes one async group
+DTIM epoch when count is zero.
+
+The pinned `pwrsave_flushq` established the remaining air contract: it sets
+802.11 More Data (`frame_control` bit `0x2000`) on every non-final retained
+MPDU and submits the already prepared FIFO directly. The Rust continuation
+reproduces that bit before copying the header into aligned ESF storage, clears
+the multicast TIM bit on the final element, and advances at most one ESF per
+executor event while a persistent DTIM edge exposes the rest of the bounded
+FIFO. HIL measured the resulting non-final mapper tuple as frame control
+`0x6208`, rate 12, layout `0x2029`, flags `0x0000_200b`, priority 7, group
+selector `0x0004_0342`, and pseudo-peer state `0x83`; only this More Data
+variant of the existing group-CCMP class was added.
+
+A deterministic async HIL stimulus submitted three eight-frame broadcast
+bursts after the laptop entered power save. Sixteen frames took the DTIM
+queue, all 25 application TX owners were returned, hardware and software
+queues ended empty, and there were no overflow or admission rejects. After a
+subsequent ICMP/HTTP run the cumulative result remained balanced at
+49/49/49/49 application TX ownership, 20/20 ICMP replies and HTTP 200 while
+beacon completions continued. The final ELF audit remained at 24 roots, 6,407
+functions, and zero no-wait/no-heap violations.
 
 Keeping the first Android peer active while associating the laptop exposed the
 second pairwise key selector before security headroom was changed:
