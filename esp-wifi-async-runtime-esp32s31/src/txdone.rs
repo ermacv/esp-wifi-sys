@@ -825,77 +825,7 @@ pub unsafe extern "C" fn __wrap_ieee80211_tx_mgt_cb(frame: *mut c_void) {
     }
 }
 
-fn beacon_dtim(bytes: &[u8]) -> Option<(usize, u8, u8)> {
-    const FIXED_BEACON_LENGTH: usize = 24 + 8 + 2 + 2;
-
-    if bytes.len() < FIXED_BEACON_LENGTH
-        || u16::from_le_bytes([bytes[0], bytes[1]]) & 0x00fc != 0x0080
-    {
-        return None;
-    }
-    let mut offset = FIXED_BEACON_LENGTH;
-    macro_rules! inspect_element {
-        () => {{
-            if offset + 2 > bytes.len() {
-                return None;
-            }
-            let id = bytes[offset];
-            let length = usize::from(bytes[offset + 1]);
-            let end = offset + 2 + length;
-            if end > bytes.len() {
-                return None;
-            }
-            if id == 5 {
-                if length < 4 {
-                    return None;
-                }
-                let count = bytes[offset + 2];
-                let period = bytes[offset + 3];
-                return (period != 0 && count < period).then_some((offset, count, period));
-            }
-            offset = end;
-        }};
-    }
-
-    // A beacon can carry at most 32 elements in the qualified 1600-byte
-    // management object. Expanding the bound leaves no control-flow cycle in
-    // this strict TX-done root.
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    inspect_element!();
-    None
-}
-
-unsafe fn advance_strict_beacon_dtim(frame: *mut u8) -> Option<(u8, u8)> {
+unsafe fn strict_beacon_dtim(frame: *mut u8) -> Option<(u8, u8)> {
     if frame.is_null() {
         return None;
     }
@@ -912,12 +842,8 @@ unsafe fn advance_strict_beacon_dtim(frame: *mut u8) -> Option<(u8, u8)> {
     if length > 1600 {
         return None;
     }
-    let bytes = core::slice::from_raw_parts_mut(data, length);
-    let (offset, count, period) = beacon_dtim(bytes)?;
-    // The transmitted value is the readiness fact. Mutate only the restored
-    // persistent template for the next beacon; this is the finite state update
-    // previously hidden in the vendor completion callback.
-    bytes[offset + 2] = if count == 0 { period - 1 } else { count - 1 };
+    let bytes = core::slice::from_raw_parts(data, length);
+    let (_, count, period) = crate::beacon::dtim(bytes)?;
     Some((count, period))
 }
 
@@ -927,7 +853,7 @@ unsafe fn strict_ap_beacon_txdone(frame: *mut u8) -> Result<(), ()> {
     if TmpSTAAPCloseAP != 0 || !crate::net80211_state::ordinary_sta_ap_profile() {
         return Err(());
     }
-    let dtim = advance_strict_beacon_dtim(frame);
+    let dtim = strict_beacon_dtim(frame);
     let interface = crate::net80211_state::access_point_interface()
         .map(|interface| interface.as_ptr())
         .unwrap_or(ptr::null_mut());

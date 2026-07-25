@@ -395,13 +395,15 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     Ok(())
 }
 
-/// Publish a monotonic TSF directly in a queued AP beacon.
+/// Publish a monotonic TSF and DTIM phase directly in a queued AP beacon.
 ///
 /// The current S31 ROM `hal_get_tsf_time` export remains zero after both the
 /// reset and set-time leaves.  Scan clients accept the otherwise valid frame,
 /// but associated clients reject the zero-TSF stream as missed beacons.  The
-/// executor clock is already the sole strict-runtime time source, so copying
-/// it into the fixed beacon field keeps this leaf bounded and nonblocking.
+/// vendor beacon builder also derives DTIM from that zero TSF, permanently
+/// producing `count = period - 1`. The executor clock is already the sole
+/// strict-runtime time source, so the submit boundary replaces both fields
+/// before hardware ownership. This finite leaf performs no wait or allocation.
 unsafe fn stamp_ap_beacon(frame: *mut u8) -> Result<(), TxQueueProcessError> {
     let first_buffer = frame.add(4).cast::<*mut u8>().read();
     if first_buffer.is_null() {
@@ -415,19 +417,31 @@ unsafe fn stamp_ap_beacon(frame: *mut u8) -> Result<(), TxQueueProcessError> {
         .add(TX_FRAME_LAYOUT_FLAGS_OFFSET)
         .cast::<u16>()
         .read_unaligned();
-    let header = metadata.add(if layout & 0x2000 != 0 { 8 } else { 0 });
+    let prefix = if layout & 0x2000 != 0 { 8 } else { 0 };
+    let header = metadata.add(prefix);
     let frame_control = header.cast::<u16>().read_unaligned();
     if frame_control != 0x0080 {
         return Ok(());
     }
+    let length = usize::from(frame.add(0x14).cast::<u16>().read_unaligned())
+        + usize::from(frame.add(0x16).cast::<u16>().read_unaligned());
+    let Some(body_length) = length.checked_sub(prefix) else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    if body_length > 1600 {
+        return Err(TxQueueProcessError::InvalidFrame);
+    }
     let Some(timestamp) = crate::adapter::runtime_now_us() else {
         return Err(TxQueueProcessError::InvalidFrame);
     };
-    header
-        .add(24)
-        .cast::<u64>()
-        .write_unaligned(timestamp.to_le());
-    Ok(())
+    let bytes = core::slice::from_raw_parts_mut(header, body_length);
+    crate::beacon::stamp(
+        bytes,
+        timestamp,
+        crate::net80211_tx::deferred_group_pending(),
+    )
+    .map(|_| ())
+    .ok_or(TxQueueProcessError::InvalidFrame)
 }
 
 #[cfg(not(feature = "hil-vendor-tx"))]

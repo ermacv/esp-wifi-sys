@@ -19,6 +19,7 @@ pub mod adapter;
 pub mod allocation;
 mod ap_power_save;
 mod atomic_once;
+mod beacon;
 pub mod channel;
 mod channel_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]

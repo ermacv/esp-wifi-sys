@@ -299,6 +299,12 @@ impl DeferredPeerQueues {
         (*self.0.get()).iter().all(DeferredPeerQueue::is_empty)
     }
 
+    unsafe fn group_pending(&self) -> bool {
+        (*self.0.get())
+            .iter()
+            .any(|slot| !slot.is_empty() && slot.peer[0] & 1 != 0)
+    }
+
     unsafe fn ready_slot(&self, cx: &mut Context<'_>) -> Option<usize> {
         (*self.0.get())
             .iter()
@@ -416,6 +422,14 @@ pub(crate) unsafe fn vendor_mailbox_empty() -> bool {
 
 pub(crate) unsafe fn rust_mailbox_empty() -> bool {
     RUST_TX_QUEUE.is_idle() && DEFERRED_PEER_QUEUES.is_idle()
+}
+
+/// Report whether the strict radio owner currently retains AP group traffic.
+///
+/// The caller must be the adopted Wi-Fi hart. This observes the Rust-owned
+/// fixed queue; it neither waits nor consults vendor node or queue state.
+pub(crate) unsafe fn deferred_group_pending() -> bool {
+    DEFERRED_PEER_QUEUES.group_pending()
 }
 
 unsafe fn read_mac(source: *const u8) -> [u8; 6] {
