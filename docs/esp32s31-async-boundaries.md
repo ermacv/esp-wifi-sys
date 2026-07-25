@@ -951,20 +951,22 @@ beacon, or authentication management frame, with
 promiscuous/error-dump/CSI modes disabled, Rust publishes the recovered
 `wDevCtrl+0x40/+0x44/+0x45` fields, copies the two metadata nibbles, derives
 the exact copy/aggregate arguments, and calls `wDev_IndicateFrame`. Probe
-requests deliberately retain the reference path because it rewrites the STA
-route to AP before its interface-enabled decision. Action frames retain it
-because they contain separate FTM and NAN branches. Other classes still
-delegate explicitly, so the aggregate remains in the strict root graph and
-the ROM indication leaf is not claimed as replaced.
+Requests in the STA-only profile instead take the recovered direct discard
+path: strict preparation proves the optional observation callback null, the
+interface registry proves AP absent, and the unit is consumed into the Rust
+asynchronous recycler. Action frames retain the reference path because they
+contain separate FTM and NAN branches. Other classes still delegate
+explicitly, so the aggregate remains in the strict root graph and the ROM
+indication leaf is not claimed as replaced.
 
 The management HIL measurement produced subtype bitmap `0x2912`: association
 response (1), probe request (4), beacon (8), authentication (11), and action
-(13). After the qualified port, the full WPA2/network stress run decoded
-713/713 base-layout, status-zero STA units. Rust owned 693 data and 8
-management routes; the ROM fallback handled the remaining 12 management
-routes. It completed scan, authentication, association, the four-way
-handshake, DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
-24.596 Mbit/s with balanced 4,786/4,786 TX and 690/690 network RX ownership,
+(13). After the Probe Request port, the full WPA2/network stress run decoded
+710/710 base-layout, status-zero STA units. Rust indicated 694 data and 9
+management routes, discarded 5 Probe Requests, and left only 2 Action routes
+in the ROM fallback. It completed scan, authentication, association, the
+four-way handshake, DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
+23.813 Mbit/s with balanced 4,786/4,786 TX and 691/691 network RX ownership,
 zero allocations, and zero rejections. The host-tested aggregate decoder
 reported only flag value zero. Control, AP/NAN, optional metadata and error
 classes remain unqualified.

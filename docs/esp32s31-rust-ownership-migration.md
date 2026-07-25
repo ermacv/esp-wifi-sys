@@ -298,31 +298,35 @@ with promiscuous/error-dump/CSI modes disabled publishes the pinned `wDevCtrl`
 metadata and frame-pointer fields, derives the exact copy and aggregate flags,
 and calls the existing finite `wDev_IndicateFrame` leaf. The same route now
 owns ordinary STA association-response, beacon, and authentication management
-frames. Probe-request frames retain the vendor path because the reference body
-rewrites their route from STA to AP before its interface-enabled decision.
-Action frames retain it because their classifier contains separate FTM and NAN
-branches. Control, AP/NAN, optional-metadata, error-status and unclassified
-inputs also enter an explicit `__real_wDev_ProcessRxSucData` fallback. This is
-not yet a claim that the complete aggregate or frame-indication leaf has been
-replaced.
+frames. In the STA-only profile, Probe Request frames are also Rust-owned: the
+pinned body rewrites their route from STA to AP, its optional observation
+callback is proven null during strict preparation, and an absent AP interface
+makes the final operation an immediate discard. Rust performs that exact
+ownership transfer through the already qualified asynchronous recycler.
+Action frames retain the vendor path because their classifier contains
+separate FTM and NAN branches. Control, AP/NAN, optional-metadata, error-status
+and unclassified inputs also enter an explicit
+`__real_wDev_ProcessRxSucData` fallback. This is not yet a claim that the
+complete aggregate or frame-indication leaf has been replaced.
 
 Host tests cover the base layout, both rounded optional fields, a truncated
 prefix, all three branches of the recovered aggregate-flag decoder, and the
-data and management copy-mode classifiers; the runtime suite now passes 268
-tests. The complete metadata/route probe owns 88 bytes of explicit
-internal-SRAM state. Strict Rust static storage is 311,589
+data, management, and exact Probe Request classifiers; the runtime suite now
+passes 269 tests. The complete metadata/route probe owns 92 bytes of explicit
+internal-SRAM state. Strict Rust static storage is 311,593
 bytes and remains below the qualified baseline. The counters are diagnostic
 migration state and can be removed when the aggregate routes are fully
 Rust-owned.
 
 The management measurement observed subtype bitmap `0x2912`: association
 response (1), probe request (4), beacon (8), authentication (11), and action
-(13). The post-port hardware run decoded 713/713 status-zero, base-offset STA
-units: 693 data and 8 qualified management aggregates used the Rust route;
-the remaining 12 management aggregates used the explicit fallback. It
-completed scan, authentication, association, the WPA2 four-way handshake,
-DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at 24.596 Mbit/s.
-TX ownership balanced at 4,786/4,786 and network RX at 690/690, with zero
+(13). The Probe Request post-port hardware run decoded 710/710 status-zero,
+base-offset STA units: 694 data and 9 qualified management aggregates entered
+the Rust indication route, while 5 Probe Requests entered the Rust discard
+route. Only 2 Action aggregates retained the explicit fallback. It completed
+scan, authentication, association, the WPA2 four-way handshake, DHCP,
+4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at 23.813 Mbit/s. TX
+ownership balanced at 4,786/4,786 and network RX at 691/691, with zero
 allocation and rejection counts. The exact decoder reported only aggregate
 flag value zero in that run. Optional sniffer, CSI, NAN, error-status and
 extended-metadata classes remain unqualified.
@@ -336,10 +340,11 @@ on mutable blob bytes:
    `wDev_ProcessRxSucData` one vertical boundary at a time.
    The measured status-zero/base-offset STA data route and ordinary
    association-response, beacon, and authentication management routes are now
-   Rust-owned. Recover the probe-request route rewrite/discard decision and
-   the guarded Action/FTM/NAN classifier next, retaining explicit fallback for
-   control, AP/NAN, optional metadata and error-status classes. Then reduce
-   the remaining `wDev_IndicateFrame` leaf as its own ownership boundary.
+   Rust-owned. The STA-only Probe Request route rewrite/discard decision is
+   Rust-owned as well. Recover the guarded Action/FTM/NAN classifier next,
+   retaining explicit fallback for control, AP/NAN, optional metadata and
+   error-status classes. Then reduce the remaining `wDev_IndicateFrame` leaf
+   as its own ownership boundary.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
    public `esp_wifi_internal_free_rx_buffer` release boundary are now
    Rust-owned. The adjacent `wDev_DiscardFrame` head publication and transfer

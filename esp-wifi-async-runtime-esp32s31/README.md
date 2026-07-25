@@ -579,10 +579,12 @@ links. It passes that exact checked tail and count into the Rust
 `wDev_ProcessRxSucData` boundary. Qualified status-zero/base-offset STA data,
 association responses, beacons, and authentication frames now bypass the
 vendor aggregate classifier, publish the recovered `wDevCtrl` fields in Rust,
-and call `wDev_IndicateFrame` directly. Probe requests keep the vendor route
-rewrite/discard decision, while Action frames keep the FTM/NAN classifier;
-all other unqualified classes use the explicit ROM aggregate fallback. The
-segment remains owned by the current radio continuation until it is recycled.
+and call `wDev_IndicateFrame` directly. In the STA-only profile, Probe Requests
+take the recovered STA-to-AP rewrite outcome directly into the Rust recycler:
+the optional observation callback is null and no AP interface is enabled.
+Action frames keep the FTM/NAN classifier; all other unqualified classes use
+the explicit ROM aggregate fallback. The segment remains owned by the current
+radio continuation until it is recycled.
 Consequently the two linked-copy backedges are finite data traversal, not
 polling or waiting. The exported frame-copy snapshot counts this real call
 boundary on hardware.
