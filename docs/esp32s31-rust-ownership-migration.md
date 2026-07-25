@@ -870,6 +870,28 @@ published to ROM remain a separately stated limitation. This makes those two
 functions the next concrete cold-PHY ownership frontier instead of treating
 all 35 linked PHY helpers as equally live during initialization.
 
+The first cold-PHY parameter-transfer group is now interposed in Rust.
+`register_chipv7_phy_init_param` copies exactly 71 bytes from the 128-byte
+init profile into six disjoint `phy_param` ranges. The mapping is kept as
+offsets because the meaning of most fields is not published. The Rust
+`phy_rfcal_data_sub_new` transform copies all 508 parameter bytes to or from
+`cal_data[12..520]`; its backup and recovery entry points preserve the
+vendor return contracts. The reference bodies are the complete pinned
+`phy_init.o` functions and the complete rev0 ROM `phy_byte_to_word` body at
+`0x2f826034`. All bounds are compile-time constants, null inputs trap before
+dereferencing, and no allocation, wait, MMIO, callback, or hidden state is
+introduced.
+
+Final-ELF disassembly proves that `register_chipv7_phy` calls the uniquely
+named Rust init and calibration-transfer boundaries. The transfer loops
+currently lower to the stateless ROM `memcpy` leaf; this is an admissible
+temporary input/output helper, not a ROM state owner, and is simple enough to
+replace when the remaining cold object is removed. `phy_param` and
+`g_phyFuns` still remain vendor-defined because the other live functions from
+the same `phy_init.o` member have not yet all been ported. We deliberately do
+not patch or weaken the archive: ownership will switch only after the whole
+member can stop being extracted.
+
 The migrated sequence passed the strict hardware workload: passive
 scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
 UDP datagrams and four HTTP transfers. All 4786 TX credits and 690 RX credits
@@ -886,6 +908,12 @@ WPA2, DHCP, gateway ping, DNS, TCP and HTTP 200. It returned 19/19 TX and
 and remained running for a further 30 seconds without a trap or `ppTask`
 entry. The final strict debt is `1 fallback + 9 stateful/unproven + 0
 temporary MMIO`; 10 vendor roots and 23 reachable vendor functions remain.
+The subsequent cold-parameter-transfer image exercised full calibration,
+including Rust init mapping and backup, then completed scan, WPA2, DHCP,
+ping, DNS, TCP and HTTP 200. It returned 18/18 TX and 15/15 RX owners with
+zero allocation operations, other-core stalls, or `ppTask` entries. Recovery
+has exact host coverage over all 508 bytes; a warm/no-calibration hardware
+cycle remains a separate qualification item.
 
 ## In-progress slice: `g_ic`
 
