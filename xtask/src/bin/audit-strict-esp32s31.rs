@@ -134,6 +134,11 @@ const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
 const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
     &[("wDev_ProcessRxSucData", 0x5fe, "wifi_strict_env_is_chip")];
 
+// `phy_change_channel` remains a reference-only oracle for the pre-handoff
+// vendor sequence. Its archived `phy_set_tx_gain_mem_new` descendant has an
+// exact caller count of 32 and an inner four-halfword copy, so these cycles
+// stay proven for that oracle even though runtime resolves the public leaf to
+// Rust and no longer classifies it as ownership debt.
 // `rc_get_trc` clears one set bit from a local u32 peer bitmap per iteration,
 // and compares exactly six address bytes, so it exits after at most 32 steps.
 // `is_ndpa_to_dut` scans four-byte HE user-info records. Its record count is
@@ -148,6 +153,8 @@ const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
 // The ROM-to-ROM call is not GNU-wrap interposable, so this proof belongs at
 // the real Rust caller rather than behind a link-only wrapper.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
+    ("phy_set_tx_gain_mem_new", 0xaa),
+    ("phy_set_tx_gain_mem_new", 0x12e),
     ("rc_get_trc", 0x74),
     ("is_ndpa_to_dut", 0x66),
     ("wDev_IndicateFrame", 0x184),
@@ -1359,16 +1366,16 @@ mod tests {
     #[test]
     fn bounded_cycle_proofs_are_instruction_specific() {
         assert!(is_pinned_bounded_cycle(
-            "rc_get_trc",
-            "74: bnez a5, 0x60 <.L10>"
+            "phy_set_tx_gain_mem_new",
+            "aa: bne a5, s8, 0x94 <.L10>"
         ));
         assert!(!is_pinned_bounded_cycle(
-            "rc_get_trc",
-            "76: j 0x60 <.Lassert>"
+            "phy_set_tx_gain_mem_new",
+            "ac: j 0xac <.Lassert>"
         ));
         assert!(!is_pinned_bounded_cycle(
             "different_function",
-            "74: bnez a5, 0x60 <.L10>"
+            "aa: bne a5, s8, 0x94 <.L10>"
         ));
     }
 
