@@ -844,6 +844,13 @@ security leaf had already qualified this descriptor and expanded its CCMP
 headroom. The mapper now admits only this complete observed state; the
 rate-control-bit variant and pairwise/QoS data remain separately fail-closed.
 
+The first completion of that frame retained the same validated `0x0020:0x0068`
+lengths, `0x2000` layout, `0xc022_0082` buffer equation, and callback bit 12,
+while hardware returned group-key status `0x0104_0342`. The AP power-save
+callback policy now accepts that exact status alongside the two previously
+measured group-CCMP outcomes. It remains a no-op only after the complete
+bounded geometry is checked; nearby selector/status values are rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
