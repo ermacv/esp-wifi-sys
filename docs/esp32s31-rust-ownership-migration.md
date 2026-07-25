@@ -529,6 +529,15 @@ differential inspection. `rcUpdateTxDone` calls the Rust adapter directly, so
 the strict runtime root has been removed without moving record ownership into
 the adapter.
 
+The final AP ELF binds the public symbol to Rust at `0x400c33ac` and retains
+the old `0x2f801064` entry only as `__real_rcUpdateAckSnr`; final disassembly
+contains no transfer to the old address. The linked-state graph decreased from
+23 to 22 runtime vendor roots and from 36 to 35 reachable vendor functions,
+while mutable blob state reachable from strict leaves remained zero. The
+no-wait/no-heap audit covered 6,407 functions with zero violations. On
+ESP32-S31 hardware an Android client completed WPA2 M1/M3, became authorized,
+and reached the ready AP after the Rust replacement was flashed.
+
 ## Completed strict-runtime slice: `wDevCtrl`
 
 The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
