@@ -81,8 +81,6 @@ const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
 const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
 const AP_BEACON_SUCCESS_DESCRIPTOR: u32 = 0x0080_0412;
 const TXRX_QUEUE_SIZE: usize = 0x34;
-const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
-const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
 
 const DISCARD_IDLE: u8 = 0;
 const DISCARD_FIND_TAIL: u8 = 1;
@@ -113,7 +111,6 @@ unsafe extern "C" {
     fn lmacReleaseTxopQueue(queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
-    fn ppDequeueTxQ(queue: u8) -> *mut u8;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2838,34 +2835,15 @@ unsafe fn find_tail_step(state: &mut TxTimeoutState) -> Result<(), LmacAsyncErro
         return enqueue_discard_continuation();
     }
 
-    let txrx = ptr::addr_of!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(LmacAsyncError::TxRxUnavailable);
-    }
     let descriptor = descriptor(state.discard_frame)?;
     let queue = descriptor_queue(descriptor);
-    let entry = txrx.add(usize::from(queue) * TXRX_QUEUE_SIZE);
     let chain_head = state
         .discard_frame
         .add(TX_FRAME_NEXT_OFFSET)
         .cast::<*mut u8>()
         .read();
-    let old_head = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
-    state
-        .discard_tail
-        .add(TX_FRAME_NEXT_OFFSET)
-        .cast::<*mut u8>()
-        .write(old_head);
-    if old_head.is_null() {
-        entry
-            .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
-            .cast::<*mut u8>()
-            .write(state.discard_tail.add(TX_FRAME_NEXT_OFFSET));
-    }
-    entry
-        .add(TXRX_QUEUE_HEAD_OFFSET)
-        .cast::<*mut u8>()
-        .write(chain_head);
+    crate::tx_queue::requeue_logical_chain_front(queue, chain_head, state.discard_tail)
+        .map_err(|_| LmacAsyncError::TxRxUnavailable)?;
 
     state.discard_phase = DISCARD_FRAME;
     enqueue_discard_continuation()
@@ -2911,7 +2889,8 @@ unsafe fn finish_discard_frame_step(state: &mut TxTimeoutState) -> Result<(), Lm
     let flags = descriptor.cast::<u32>().read();
     let queue = descriptor_queue(descriptor);
     if flags & TX_FRAME_DEQUEUE_MASK == TX_FRAME_DEQUEUE_VALUE {
-        let next = ppDequeueTxQ(queue);
+        let next = crate::tx_queue::dequeue_logical_queue(queue)
+            .map_err(|_| LmacAsyncError::TxRxUnavailable)?;
         if !next.is_null() {
             state.discard_frame = next;
             state.discard_phase = DISCARD_FRAME;

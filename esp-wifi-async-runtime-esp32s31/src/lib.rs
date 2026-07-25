@@ -106,6 +106,7 @@ mod tx_plcp;
 mod tx_proto;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod tx_queue;
+mod tx_queue_state;
 mod tx_rate;
 mod tx_security;
 mod tx_submit;
@@ -367,7 +368,7 @@ pub use tx_intercept::{
 #[cfg(target_arch = "riscv32")]
 pub use tx_proto::strict_pp_tx_proto_proc;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
-pub use tx_queue::TxQueueProcessError;
+pub use tx_queue::{TxQueueProcessError, TxQueueStateAdoptionError};
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

@@ -10,7 +10,6 @@ pub const ROOTS: &[&str] = &[
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
     "lmacReleaseTxopQueue",
-    "ppDequeueTxQ",
     "rcUpdateTxDone",
     "hal_get_tsf_time",
     "ic_set_current_channel",

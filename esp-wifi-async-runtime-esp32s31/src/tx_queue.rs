@@ -3,19 +3,24 @@
 //! Hardware observation first narrowed the pinned `ppProcessTxQ` state machine
 //! to one basic MPDU. Reverse engineering then established that its event is a
 //! hardware queue while the descriptor contains one of sixteen logical queues.
-//! Per-hardware-queue bitmaps and cursors in `pTxRx` map between the two. The
-//! active strict path reproduces that fixed mapping as one Rust executor action.
+//! Per-hardware-queue bitmaps and cursors map between the two. Strict handoff
+//! adopts the four fixed vendor masks once, then all sixteen intrusive queue
+//! heads, tails, and rotation cursors live in one Rust-owned single-hart state.
 
-use core::ptr;
+use crate::tx_queue_state::{select_ready_logical_queue, LogicalQueue, TX_FRAME_NEXT_OFFSET};
 #[cfg(feature = "hil-vendor-tx")]
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    cell::UnsafeCell,
+    ptr,
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+};
 
 #[cfg(feature = "hil-vendor-tx")]
 const TX_QUEUE_HARDWARE_INDEX_OFFSET: usize = 0x04;
 const TX_QUEUE_STATE_SIZE: usize = 0x38;
 const TX_QUEUE_STATUS_OFFSET: usize = 0x12;
 const TX_QUEUE_KIND_OFFSET: usize = 0x1d;
-const TX_FRAME_NEXT_OFFSET: usize = 0x30;
 const TX_FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
 const TX_FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
 #[cfg(feature = "hil-vendor-tx")]
@@ -25,13 +30,111 @@ const TXRX_QUEUE_SIZE: usize = 0x34;
 const TXRX_QUEUE_HEAD_OFFSET: usize = 0x20;
 const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
 const TXRX_QUEUE_BUSY_OFFSET: usize = 0x29;
-const TXRX_QUEUE_SELECTED_OFFSET: usize = 0x31;
 const TXRX_HARDWARE_MASKS_OFFSET: usize = 0x04;
 const TXRX_HARDWARE_CURSORS_OFFSET: usize = 0x18;
+const LOGICAL_QUEUE_COUNT: usize = 16;
+const HARDWARE_QUEUE_COUNT: usize = 4;
 
 unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
     static mut pTxRx: *mut u8;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxQueueStateAdoptionError {
+    TxRxUnavailable,
+    QueueNotEmpty(u8),
+    InvalidEmptyTailLink(u8),
+    QueueBusy(u8),
+}
+
+struct StrictTxQueueState {
+    hardware_masks: [u16; HARDWARE_QUEUE_COUNT],
+    cursors: [u8; HARDWARE_QUEUE_COUNT],
+    queues: [LogicalQueue; LOGICAL_QUEUE_COUNT],
+}
+
+impl StrictTxQueueState {
+    const fn empty() -> Self {
+        Self {
+            hardware_masks: [0; HARDWARE_QUEUE_COUNT],
+            cursors: [0; HARDWARE_QUEUE_COUNT],
+            queues: [LogicalQueue::empty(); LOGICAL_QUEUE_COUNT],
+        }
+    }
+}
+
+struct StrictTxQueueStateCell(UnsafeCell<StrictTxQueueState>);
+
+// All mutable access is restricted to the adopted strict Wi-Fi hart. The
+// release/acquire adoption edge publishes the initialized state to that hart.
+unsafe impl Sync for StrictTxQueueStateCell {}
+
+#[link_section = ".critical.bss.wifi_strict.tx_queue_state"]
+static STRICT_TX_QUEUE_STATE: StrictTxQueueStateCell =
+    StrictTxQueueStateCell(UnsafeCell::new(StrictTxQueueState::empty()));
+static STRICT_TX_QUEUE_STATE_ADOPTED: AtomicBool = AtomicBool::new(false);
+
+/// Adopt only the finite TX scheduler policy from the vendor `pTxRx` object.
+///
+/// The handoff is intentionally fail-closed: no frame or busy queue may cross
+/// the ownership edge. RX queues, TX-done callbacks, and PPDU-format metadata
+/// remain in the transitional vendor object and are not copied here.
+///
+/// # Safety
+///
+/// Wi-Fi initialization must be quiescent and no TX producer may run until
+/// this function returns and the strict radio owner is armed.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdoptionError> {
+    if STRICT_TX_QUEUE_STATE_ADOPTED.load(AtomicOrdering::Acquire) {
+        return Ok(());
+    }
+    let txrx = ptr::addr_of!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(TxQueueStateAdoptionError::TxRxUnavailable);
+    }
+
+    let mut logical = 0_u8;
+    while usize::from(logical) < LOGICAL_QUEUE_COUNT {
+        let entry = txrx.add(usize::from(logical) * TXRX_QUEUE_SIZE);
+        let head_slot = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>();
+        if !head_slot.read().is_null() {
+            return Err(TxQueueStateAdoptionError::QueueNotEmpty(logical));
+        }
+        let tail_link = entry
+            .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
+            .cast::<*mut *mut u8>()
+            .read();
+        if tail_link != head_slot {
+            return Err(TxQueueStateAdoptionError::InvalidEmptyTailLink(logical));
+        }
+        if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
+            return Err(TxQueueStateAdoptionError::QueueBusy(logical));
+        }
+        logical += 1;
+    }
+
+    let state = &mut *STRICT_TX_QUEUE_STATE.0.get();
+    let mut hardware = 0_usize;
+    while hardware < HARDWARE_QUEUE_COUNT {
+        state.hardware_masks[hardware] = txrx
+            .add(TXRX_HARDWARE_MASKS_OFFSET + hardware * 4)
+            .cast::<u32>()
+            .read() as u16;
+        state.cursors[hardware] = txrx.add(TXRX_HARDWARE_CURSORS_OFFSET + hardware).read();
+        hardware += 1;
+    }
+    state.queues = [LogicalQueue::empty(); LOGICAL_QUEUE_COUNT];
+    STRICT_TX_QUEUE_STATE_ADOPTED.store(true, AtomicOrdering::Release);
+    Ok(())
+}
+
+#[inline(always)]
+unsafe fn strict_tx_queue_state() -> Option<&'static mut StrictTxQueueState> {
+    STRICT_TX_QUEUE_STATE_ADOPTED
+        .load(AtomicOrdering::Acquire)
+        .then(|| &mut *STRICT_TX_QUEUE_STATE.0.get())
 }
 
 /// Read the exact finite `lmacIsIdle` state without entering its vendor leaf.
@@ -219,19 +322,11 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         return Err(TxQueueProcessError::UnsupportedQueueKind(queue_kind));
     }
 
-    let txrx = ptr::addr_of!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(TxQueueProcessError::TxRxUnavailable);
-    }
-    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx, queue)? else {
+    let Some(expected_logical_queue) = select_logical_queue(queue)? else {
         HIL_COUNTERS.no_frame[input].fetch_add(1, Ordering::Relaxed);
         return Ok(());
     };
-    if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
-        HIL_COUNTERS.no_frame[input].fetch_add(1, Ordering::Relaxed);
-        return Ok(());
-    }
-    let frame = dequeue_one(entry);
+    let frame = dequeue_one(expected_logical_queue)?;
     if !frame
         .add(TX_FRAME_NEXT_OFFSET)
         .cast::<*mut u8>()
@@ -239,7 +334,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         .is_null()
         || frame.add(0x2c).cast::<*mut u8>().read().is_null()
     {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::InvalidFrame);
     }
     let descriptor = frame
@@ -247,7 +342,7 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         .cast::<*mut u8>()
         .read();
     if descriptor.is_null() {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::InvalidFrame);
     }
     let logical_queue = (descriptor
@@ -257,17 +352,17 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
         >> 20)
         & 0x0f;
     if logical_queue != u32::from(expected_logical_queue) {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::InvalidFrame);
     }
 
     if let Err(error) = stamp_ap_beacon(frame) {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(error);
     }
 
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::Submit {
             hardware_queue: queue,
             logical_queue: expected_logical_queue,
@@ -333,17 +428,10 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     if queue_kind != 3 {
         return Err(TxQueueProcessError::UnsupportedQueueKind(queue_kind));
     }
-    let txrx = ptr::addr_of!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(TxQueueProcessError::TxRxUnavailable);
-    }
-    let Some((entry, expected_logical_queue)) = select_logical_queue(txrx, queue)? else {
+    let Some(expected_logical_queue) = select_logical_queue(queue)? else {
         return Ok(());
     };
-    if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
-        return Ok(());
-    }
-    let frame = dequeue_one(entry);
+    let frame = dequeue_one(expected_logical_queue)?;
     let peer = frame.add(0x2c).cast::<*mut u8>().read();
     let descriptor = frame
         .add(TX_FRAME_DESCRIPTOR_OFFSET)
@@ -364,15 +452,15 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
             & 0x0f
             != u32::from(expected_logical_queue)
     {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::InvalidFrame);
     }
     if let Err(error) = stamp_ap_beacon(frame) {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(error);
     }
     if let Err(error) = crate::lmac::submit_basic_non_he_frame(queue_state, frame) {
-        requeue_front(entry, frame);
+        requeue_front(expected_logical_queue, frame)?;
         return Err(TxQueueProcessError::Submit {
             hardware_queue: queue,
             logical_queue: expected_logical_queue,
@@ -382,120 +470,103 @@ pub(crate) unsafe fn process_tx_queue(queue: u8) -> Result<(), TxQueueProcessErr
     Ok(())
 }
 
-unsafe fn select_logical_queue(
-    txrx: *mut u8,
-    hardware_queue: u8,
-) -> Result<Option<(*mut u8, u8)>, TxQueueProcessError> {
+unsafe fn select_logical_queue(hardware_queue: u8) -> Result<Option<u8>, TxQueueProcessError> {
     if hardware_queue > 3 {
         return Err(TxQueueProcessError::UnsupportedEventQueue(hardware_queue));
     }
+    let state = strict_tx_queue_state().ok_or(TxQueueProcessError::TxRxUnavailable)?;
     let mut ready_mask = 0_u16;
     let mut logical_queue = 0_u8;
     while logical_queue < 16 {
-        let entry = txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE);
-        let head = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
-        if !head.is_null() && entry.add(TXRX_QUEUE_BUSY_OFFSET).read() == 0 {
+        if !state.queues[usize::from(logical_queue)].head.is_null() {
             ready_mask |= 1_u16 << logical_queue;
         }
         logical_queue += 1;
     }
-    let cursor = txrx
-        .add(TXRX_HARDWARE_CURSORS_OFFSET + usize::from(hardware_queue))
-        .read();
-    let current_entry = (cursor < 16)
-        .then(|| txrx.add(usize::from(cursor) * TXRX_QUEUE_SIZE));
-    let advance = current_entry.is_some_and(|entry| {
-        let selected = entry.add(TXRX_QUEUE_SELECTED_OFFSET).read() != 0;
-        if selected {
-            entry.add(TXRX_QUEUE_SELECTED_OFFSET).write(0);
-        }
-        selected
-    });
-    let allowed_mask = txrx
-        .add(TXRX_HARDWARE_MASKS_OFFSET + usize::from(hardware_queue) * 4)
-        .cast::<u32>()
-        .read() as u16;
+    let hardware = usize::from(hardware_queue);
+    let cursor = state.cursors[hardware];
+    let advance = (cursor < 16)
+        .then_some(usize::from(cursor))
+        .is_some_and(|current| {
+            let selected = state.queues[current].selected;
+            if selected {
+                state.queues[current].selected = false;
+            }
+            selected
+        });
+    let allowed_mask = state.hardware_masks[hardware];
     let selected =
         select_ready_logical_queue(hardware_queue, allowed_mask, cursor, ready_mask, advance);
-    Ok(selected.map(|logical_queue| {
-        txrx
-            .add(TXRX_HARDWARE_CURSORS_OFFSET + usize::from(hardware_queue))
-            .write(logical_queue);
-        let entry = txrx.add(usize::from(logical_queue) * TXRX_QUEUE_SIZE);
-        entry.add(TXRX_QUEUE_SELECTED_OFFSET).write(1);
-        (entry, logical_queue)
-    }))
+    if let Some(logical_queue) = selected {
+        state.cursors[hardware] = logical_queue;
+        state.queues[usize::from(logical_queue)].selected = true;
+    }
+    Ok(selected)
 }
 
-const fn select_ready_logical_queue(
-    hardware_queue: u8,
-    allowed_mask: u16,
-    cursor: u8,
-    ready_mask: u16,
-    advance: bool,
-) -> Option<u8> {
-    let candidates = allowed_mask & ready_mask;
-    if !advance && cursor < 16 && candidates & (1_u16 << cursor) != 0 {
-        return Some(cursor);
-    }
-    let mut offset = 1_u8;
-    while offset <= 16 {
-        let logical_queue = cursor.wrapping_add(offset) & 0x0f;
-        if candidates & (1_u16 << logical_queue) != 0 {
-            return Some(logical_queue);
-        }
-        offset += 1;
-    }
-    // The pinned event-zero selector has an explicit latency fallback over
-    // logical queues 0..=2 when its scheduled bitmap has no ready member.
-    if hardware_queue == 0 {
-        let fallback = ready_mask & 0x0007;
-        if fallback != 0 {
-            return Some(fallback.trailing_zeros() as u8);
-        }
-    }
-    None
+pub(crate) unsafe fn dequeue_logical_queue(
+    logical_queue: u8,
+) -> Result<*mut u8, TxQueueProcessError> {
+    dequeue_one(logical_queue)
 }
 
-unsafe fn dequeue_one(entry: *mut u8) -> *mut u8 {
-    let frame = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
-    if frame.is_null() {
-        return frame;
-    }
-    let next = frame.add(TX_FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
-    entry
-        .add(TXRX_QUEUE_HEAD_OFFSET)
-        .cast::<*mut u8>()
-        .write(next);
-    if next.is_null() {
-        entry
-            .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
-            .cast::<*mut u8>()
-            .write(entry.add(TXRX_QUEUE_HEAD_OFFSET));
-    }
-    frame
-        .add(TX_FRAME_NEXT_OFFSET)
-        .cast::<*mut u8>()
-        .write(ptr::null_mut());
-    frame
+unsafe fn dequeue_one(logical_queue: u8) -> Result<*mut u8, TxQueueProcessError> {
+    let state = strict_tx_queue_state().ok_or(TxQueueProcessError::TxRxUnavailable)?;
+    let Some(queue) = state.queues.get_mut(usize::from(logical_queue)) else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    Ok(queue.pop_front())
 }
 
-unsafe fn requeue_front(entry: *mut u8, frame: *mut u8) {
-    let head = entry.add(TXRX_QUEUE_HEAD_OFFSET).cast::<*mut u8>().read();
-    frame
-        .add(TX_FRAME_NEXT_OFFSET)
-        .cast::<*mut u8>()
-        .write(head);
-    entry
-        .add(TXRX_QUEUE_HEAD_OFFSET)
-        .cast::<*mut u8>()
-        .write(frame);
-    if head.is_null() {
-        entry
-            .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
-            .cast::<*mut u8>()
-            .write(frame.add(TX_FRAME_NEXT_OFFSET));
+unsafe fn requeue_front(logical_queue: u8, frame: *mut u8) -> Result<(), TxQueueProcessError> {
+    let state = strict_tx_queue_state().ok_or(TxQueueProcessError::TxRxUnavailable)?;
+    let Some(queue) = state.queues.get_mut(usize::from(logical_queue)) else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    if !queue.push_front(frame) {
+        return Err(TxQueueProcessError::InvalidFrame);
     }
+    Ok(())
+}
+
+/// Append one exclusively owned frame to a Rust logical queue.
+///
+/// # Safety
+///
+/// `frame` must be live, unlinked, and remain owned by the strict radio hart
+/// until it is dequeued for hardware submission or completion.
+pub(crate) unsafe fn append_logical_queue(
+    logical_queue: u8,
+    frame: *mut u8,
+) -> Result<(), TxQueueProcessError> {
+    let state = strict_tx_queue_state().ok_or(TxQueueProcessError::TxRxUnavailable)?;
+    let Some(queue) = state.queues.get_mut(usize::from(logical_queue)) else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    if !queue.append(frame) {
+        return Err(TxQueueProcessError::InvalidFrame);
+    }
+    Ok(())
+}
+
+/// Prepend one already linked chain after a timeout discard split.
+///
+/// # Safety
+///
+/// `head..=tail` must be a finite live chain owned by the strict radio hart.
+pub(crate) unsafe fn requeue_logical_chain_front(
+    logical_queue: u8,
+    head: *mut u8,
+    tail: *mut u8,
+) -> Result<(), TxQueueProcessError> {
+    let state = strict_tx_queue_state().ok_or(TxQueueProcessError::TxRxUnavailable)?;
+    let Some(queue) = state.queues.get_mut(usize::from(logical_queue)) else {
+        return Err(TxQueueProcessError::InvalidFrame);
+    };
+    if !queue.prepend_chain(head, tail) {
+        return Err(TxQueueProcessError::InvalidFrame);
+    }
+    Ok(())
 }
 
 #[cfg(feature = "hil-vendor-tx")]
@@ -571,43 +642,5 @@ unsafe fn record_submitted(input: usize, queue_state: *mut u8, frame: *mut u8) {
 fn record_small_mask(counter: &AtomicU32, value: u8) {
     if value < 32 {
         counter.fetch_or(1_u32 << value, Ordering::Relaxed);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::select_ready_logical_queue;
-
-    #[test]
-    fn hardware_bitmap_selects_and_rotates_all_logical_queues() {
-        assert_eq!(
-            select_ready_logical_queue(1, 0x0013, 1, 0x0010, false),
-            Some(4)
-        );
-        assert_eq!(
-            select_ready_logical_queue(1, 0x0013, 0, 0x0013, false),
-            Some(0)
-        );
-        assert_eq!(
-            select_ready_logical_queue(1, 0x0013, 0, 0x0013, true),
-            Some(1)
-        );
-        assert_eq!(
-            select_ready_logical_queue(1, 0x0013, 4, 0x0013, true),
-            Some(0)
-        );
-        assert_eq!(
-            select_ready_logical_queue(1, 0x0013, 4, 0x0004, true),
-            None
-        );
-    }
-
-    #[test]
-    fn hardware_zero_preserves_the_recovered_latency_fallback() {
-        assert_eq!(
-            select_ready_logical_queue(0, 0, 0, 0x0004, false),
-            Some(2)
-        );
-        assert_eq!(select_ready_logical_queue(1, 0, 0, 0x0004, false), None);
     }
 }

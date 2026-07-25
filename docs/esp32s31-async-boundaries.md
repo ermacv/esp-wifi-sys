@@ -732,9 +732,7 @@ executes only the Rust protocol, security, rate, and mapper transformations,
 stores the MAC time, and publishes one frame into the selected logical queue.
 It reads hardware-queue idle state directly from the adopted LMAC instance and
 posts one stackless executor event; it never calls `ic_interface_enabled`,
-`lmacIsIdle`, the cached-HMAC queue consumer, or the vendor mapper. The current
-`pTxRx` object remains vendor-layout transitional storage and is the next
-ownership boundary to replace.
+`lmacIsIdle`, the cached-HMAC queue consumer, or the vendor mapper.
 
 The replacement was exercised on ESP32-S31 through passive scan, open
 authentication, HT20/WMM association, WPA2 M1-M4, DHCP, ping, DNS, TCP, HTTP,
@@ -746,6 +744,23 @@ snapshot remained unchanged after strict handoff. The run delivered 4,096 of
 the static ESF slots exposed layout values `0x2000`, `0x2008`, and `0x2010`;
 the pinned mapper tests bit `0x2000`, while the lower bits identify the reused
 slot and must not be interpreted as mapper state.
+
+The logical TX scheduler has since been separated from the mixed 1,044-byte
+`pTxRx` object. At strict handoff Rust requires all sixteen vendor logical
+queues to be empty and idle, validates their intrusive empty-tail invariant,
+and adopts the four initialized scheduler masks and cursors. Producer append,
+hardware selection, dequeue, error requeue, and timeout-chain requeue then use
+one fixed SRAM `StrictTxQueueState`; no armed path calls `ppDequeueTxQ` or
+mutates the vendor logical queue links. RX, TX-done callback lists, and the two
+observed PPDU-format bytes remain in `pTxRx` and are deliberately treated as
+separate ownership slices.
+
+The first hardware stress run after that split completed WPA2/DHCP/ping/DNS/
+TCP/HTTP/ADDBA, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers. It released
+4,787/4,787 TX and 692/692 RX owners, drained 21,371/21,371 PP events with zero
+rejects, and preserved the allocation snapshot. The measured UDP payload rate
+was 17.514 Mbit/s; this run qualifies ownership and correctness, not a new
+throughput ceiling.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,
@@ -894,7 +909,7 @@ frame. Events one through four were never posted. Every submitted frame used
 logical and hardware queue zero, queue kind three, status one after submission,
 no linked successor, and the already qualified basic non-HE/non-A-MPDU layout.
 The replacement accepts only that profile, removes at most one pointer from
-the fixed `pTxRx` queue, validates the peer and descriptor before mutation, and
+the Rust-owned logical queue, validates the peer and descriptor before mutation, and
 calls the existing finite Rust basic-frame submit path. An error before
 hardware ownership restores the pointer at the queue head; exhaustion and a
 busy hardware queue return immediately. Events one through four fail closed.

@@ -4,8 +4,7 @@
 //! interface admission, descriptor queue validation, protocol/security/rate
 //! preparation, queue mapping, and intrusive-list publication. The first four
 //! are now Rust-owned finite transformations. This module reproduces the last
-//! list append explicitly while `pTxRx` remains a transitional vendor-layout
-//! storage object.
+//! publication through the Rust-owned logical TX queue registry.
 
 #[cfg(target_arch = "riscv32")]
 use core::{ffi::c_void, ptr};
@@ -50,15 +49,10 @@ const DESCRIPTOR_INTERFACE_SHIFT: u32 = 18;
 #[cfg(target_arch = "riscv32")]
 const DESCRIPTOR_LOGICAL_QUEUE_SHIFT: u32 = 20;
 #[cfg(target_arch = "riscv32")]
-const TXRX_LOGICAL_QUEUE_SIZE: usize = 0x34;
-#[cfg(target_arch = "riscv32")]
-const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
-#[cfg(target_arch = "riscv32")]
 const MAC_TIME_LOW_REGISTER: *const u32 = 0x2010_d800 as *const u32;
 
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
-    static mut pTxRx: *mut u8;
     fn esf_buf_recycle(frame: *mut c_void);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
@@ -98,31 +92,15 @@ unsafe fn map_strict_frame(frame: *mut u8) -> i32 {
     }
 }
 
-/// Append one fully prepared frame to its logical `pTxRx` queue.
-///
-/// This is intentionally the sole remaining `pTxRx` mutation on the ordinary
-/// TX producer side. The queue object is still initialized by the blob, but
-/// the mutation and its single-owner invariant are explicit Rust code.
+/// Append one fully prepared frame to its Rust-owned logical queue.
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".rwtext.wifi_strict.tx_submit"]
 unsafe fn append_logical_queue(frame: *mut u8, descriptor: *mut u8) -> u8 {
-    let txrx = ptr::addr_of!(pTxRx).read();
-    if txrx.is_null() {
-        trap_invalid_tx_submit(frame, 0x3002);
-    }
     let control = descriptor
         .add(DESCRIPTOR_CONTROL_OFFSET)
         .cast::<u32>()
         .read_unaligned();
     let logical_queue = ((control >> DESCRIPTOR_LOGICAL_QUEUE_SHIFT) & 0x0f) as u8;
-    let entry = txrx.add(usize::from(logical_queue) * TXRX_LOGICAL_QUEUE_SIZE);
-    let tail_slot = entry
-        .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
-        .cast::<*mut *mut u8>()
-        .read();
-    if tail_slot.is_null() || (tail_slot as usize) & (core::mem::align_of::<*mut u8>() - 1) != 0 {
-        trap_invalid_tx_submit(frame, 0x3003 | (u32::from(logical_queue) << 16));
-    }
     frame
         .add(FRAME_NEXT_OFFSET)
         .cast::<*mut u8>()
@@ -131,11 +109,9 @@ unsafe fn append_logical_queue(frame: *mut u8, descriptor: *mut u8) -> u8 {
         .add(DESCRIPTOR_TIMESTAMP_OFFSET)
         .cast::<u32>()
         .write_unaligned(MAC_TIME_LOW_REGISTER.read_volatile());
-    tail_slot.write(frame);
-    entry
-        .add(TXRX_QUEUE_TAIL_LINK_OFFSET)
-        .cast::<*mut *mut u8>()
-        .write(frame.add(FRAME_NEXT_OFFSET).cast());
+    if crate::tx_queue::append_logical_queue(logical_queue, frame).is_err() {
+        trap_invalid_tx_submit(frame, 0x3003 | (u32::from(logical_queue) << 16));
+    }
     descriptor.add(TX_DESCRIPTOR_PRIORITY_OFFSET).read() >> 4
 }
 

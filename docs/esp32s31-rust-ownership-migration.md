@@ -340,12 +340,20 @@ post-handoff allocation snapshot. This also established that the observed
 `0x2000`, `0x2008`, and `0x2010` ESF layout values are static-slot identities:
 only bit `0x2000` is consumed by the pinned mapper.
 
-The next TX ownership slice is therefore the 1044-byte `pTxRx` object itself:
-separate its sixteen logical queue heads/tails and four hardware selectors
-from unrelated vendor fields, adopt their initialized values once, then move
-producer, dequeue, completion, and teardown to one Rust owner. Until that
-transaction is complete, `pTxRx` is deliberately documented as vendor-layout
-transitional storage rather than modeled as a safe Rust structure. Final ELF
+The TX scheduler slice is now separated from the 1,044-byte `pTxRx` object.
+Strict handoff proves all sixteen vendor logical queues empty and idle,
+validates each empty intrusive tail link, and copies only four initialized
+hardware masks and four rotation cursors. From that point producer append,
+selection, dequeue, error rollback, and timeout-chain requeue operate on one
+fixed SRAM `StrictTxQueueState`. The last runtime `ppDequeueTxQ` call is gone.
+A full hardware stress run released 4,787/4,787 TX frames and 692/692 RX
+frames, drained 21,371 PP events without rejection, and changed no allocation
+counter.
+
+This does not yet make all of `pTxRx` obsolete. Its RX queue, TX-done callback
+registration/list, and two observed PPDU-format bytes are independent live
+slices. They should move one at a time; only then can `pTxRx`/`TxRxCxt` be
+removed from the static binding and linked-state inventory. Final ELF
 verification must continue to use a non-empty STA configuration; otherwise
 the HIL binary deliberately enters `pending()` before Wi-Fi initialization
 and LTO removes the unreachable strict runtime.
