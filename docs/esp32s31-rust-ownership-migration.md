@@ -854,7 +854,7 @@ pairwise/QoS data remained separately fail-closed.
 
 The Android WPA2 join later emitted the same group-CCMP class from static-slot
 layout `0x2003` with descriptor flags `0x0200_200b`. The additional
-`0x0200_0000` rate-control bit is already a bounded input in the adjacent
+`0x0200_0000` fixed-per-packet-rate bit is already a bounded input in the adjacent
 security and completion leaves, so the mapper now admits the two observed
 group descriptor words explicitly. An unrelated `0x0100_0000` bit remains
 rejected.
@@ -888,8 +888,9 @@ finite mapper admits only this complete measured tuple and rewrites descriptor
 byte four to the recovered treatment `7`; the group-key selector, an already
 mapped priority, and a pre-association peer remain independently rejected.
 
-An Android station later exposed the adjacent rate-control form of that first
-pairwise downlink: frame control `0x4288`, rate `11`, layout `0x2002`,
+An Android station later exposed the adjacent fixed-per-packet-rate form of
+that first pairwise downlink: frame control `0x4288`, internal rate code `11`,
+layout `0x2002`,
 descriptor flags `0x0200_2009`, priority `7`, pairwise selector
 `0x0004_0348`, associated-peer word `0x2100_0000`, and peer flag `1`. It is
 admitted as a separate complete mapper class for the two already-qualified AP

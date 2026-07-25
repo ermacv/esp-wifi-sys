@@ -161,7 +161,8 @@ pub(crate) fn strict_sta_ap_treatment(
         && bounded_ap_peer;
     // Android exposed the adjacent first-downlink state before the selected
     // rate has converged to the fixed HT tuple above. The descriptor carries
-    // the already-qualified rate-control bit, rate 11, and the untouched
+    // the already-qualified fixed-per-packet-rate bit, internal rate code 11,
+    // and the untouched
     // treatment byte 7. Keep it as a separate complete class: admitting the
     // bit on the HT tuple would hide an unobserved combination.
     let ap_pairwise_rate_control_qos = rate == 11
