@@ -654,7 +654,7 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
         __wrap_ic_get_next_tbtt as *const (),
     ) && core::ptr::eq(
         vendor_rc_update_tx_done as *const (),
-        __wrap_rcUpdateTxDone as *const (),
+        wifi_strict_rc_update_tx_done as *const (),
     )
 }
 
@@ -667,7 +667,10 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
 /// Mesh-specific retry clamping is intentionally absent from the strict
 /// basic AP/STA profile.
 #[no_mangle]
-pub unsafe extern "C" fn __wrap_rcUpdateTxDone(rate_control: *mut c_void, descriptor: *mut c_void) {
+pub unsafe extern "C" fn wifi_strict_rc_update_tx_done(
+    rate_control: *mut c_void,
+    descriptor: *mut c_void,
+) {
     let rate_control = rate_control.cast::<u8>();
     let descriptor = descriptor.cast::<u8>();
     if rate_control.is_null() || descriptor.is_null() {

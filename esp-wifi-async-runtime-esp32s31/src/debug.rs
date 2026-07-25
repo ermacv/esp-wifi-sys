@@ -50,7 +50,7 @@ pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
         )
         && core::ptr::eq(
             vendor_test_set_rx_error_occurs as *const (),
-            __wrap_esp_test_set_rx_error_occurs as *const (),
+            wifi_strict_esp_test_set_rx_error_occurs as *const (),
         )
         && core::ptr::eq(
             vendor_test_rx_parse_mu as *const (),
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn __wrap_esp_test_tx_enab_statistics(_queue: u32) -> i32 
 /// vendor success value removes both the diagnostic pointer and the unrelated
 /// 72-byte `wDevCtrl` object from this path.
 #[no_mangle]
-pub unsafe extern "C" fn __wrap_esp_test_set_rx_error_occurs() -> i32 {
+pub unsafe extern "C" fn wifi_strict_esp_test_set_rx_error_occurs() -> i32 {
     0
 }
 

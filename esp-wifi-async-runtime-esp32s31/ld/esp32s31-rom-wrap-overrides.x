@@ -70,6 +70,15 @@ hal_mac_get_txq_complete = __wrap_hal_mac_get_txq_complete;
 __real_lmacTxDone = 0x2f800dec;
 lmacTxDone = __wrap_lmacTxDone;
 
+/* TX rate completion is an absolute ROM export even though the pinned archive
+ * also contains its reference body. Keep the ROM entry only as an oracle and
+ * route runtime calls to the unique finite Rust adapter. */
+__real_rcUpdateTxDone = 0x2f80106c;
+EXTERN(wifi_strict_rc_update_tx_done);
+rcUpdateTxDone = wifi_strict_rc_update_tx_done;
+ASSERT(rcUpdateTxDone == wifi_strict_rc_update_tx_done,
+       "ESP32-S31 rcUpdateTxDone Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 
@@ -89,6 +98,12 @@ ppProcTxSecFrame = wifi_strict_pp_proc_tx_sec_frame;
 
 __real_esp_test_tx_enab_statistics = 0x2f801144;
 esp_test_tx_enab_statistics = __wrap_esp_test_tx_enab_statistics;
+
+__real_esp_test_set_rx_error_occurs = 0x2f801164;
+EXTERN(wifi_strict_esp_test_set_rx_error_occurs);
+esp_test_set_rx_error_occurs = wifi_strict_esp_test_set_rx_error_occurs;
+ASSERT(esp_test_set_rx_error_occurs == wifi_strict_esp_test_set_rx_error_occurs,
+       "ESP32-S31 RX error diagnostic Rust boundary is inactive");
 
 __real_esp_test_rx_process_complete = 0x2f801158;
 esp_test_rx_process_complete = __wrap_esp_test_rx_process_complete;

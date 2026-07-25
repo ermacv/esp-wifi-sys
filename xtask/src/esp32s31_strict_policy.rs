@@ -104,6 +104,11 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
     (
+        "esp_test_set_rx_error_occurs",
+        "wifi_strict_esp_test_set_rx_error_occurs",
+    ),
+    ("rcUpdateTxDone", "wifi_strict_rc_update_tx_done"),
+    (
         "ieee80211_post_hmac_tx",
         "wifi_strict_ieee80211_post_hmac_tx",
     ),

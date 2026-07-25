@@ -182,7 +182,6 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=free
 -Wl,--wrap=pp_post
 -Wl,--wrap=ppTxPkt
--Wl,--wrap=rcUpdateTxDone
 -Wl,--wrap=ieee80211_timer_process
 -Wl,--wrap=ieee80211_mgmt_output
 -Wl,--wrap=ieee80211_hostapd_beacon_txcb
@@ -201,7 +200,6 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=dbg_dump_rx_ppdu
 -Wl,--wrap=dbg_dump_rx_sigb
 -Wl,--wrap=wifi_gpio_debug
--Wl,--wrap=esp_test_set_rx_error_occurs
 -Wl,--wrap=wDev_SnifferRxData
 -Wl,--wrap=wdev_csi_rx_process
 -Wl,--wrap=wpa_sm_rx_eapol
@@ -218,11 +216,12 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=wifi_assert
 ```
 
-The other eleven entries (`esf_buf_alloc`, `esf_buf_recycle`,
+The other thirteen entries (`esf_buf_alloc`, `esf_buf_recycle`,
 `ieee80211_set_tx_pti`, `lmacTxDone`, `hal_mac_get_txq_state`,
 `hal_mac_get_txq_complete`,
 `pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`,
-`esp_test_tx_enab_statistics`, and `wDev_AppendRxBlocks`) are ECO0 ROM exports.
+`esp_test_tx_enab_statistics`, `esp_test_set_rx_error_occurs`,
+`rcUpdateTxDone`, and `wDev_AppendRxBlocks`) are ECO0 ROM exports.
 Do not pass them through
 LLD `--wrap`: `esp-rom-sys` defines them with absolute linker-script
 assignments, and LLD would rewrite the Rust `__wrap_*` definition itself to a
