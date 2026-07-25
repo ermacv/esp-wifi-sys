@@ -796,6 +796,12 @@ in addition to the previously measured vendor completion variants, validates
 the encoded length and fixed 1600-byte management bound before mutation, and
 returns the beacon to its `0x0004_0000` base selector for reuse.
 
+With the beacon visible, an external active scan also supplied the adjacent AP
+probe-response mapper class: frame control `0x0050`, rate `12`, layout
+`0x2003`, descriptor flags `0x0800_0010`, priority `7`, AP selector
+`0x0004_0000`, and peer state `0x83`. The mapper admits only that complete
+tuple; changing the peer state or any descriptor role still fails closed.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
