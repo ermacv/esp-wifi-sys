@@ -28,7 +28,7 @@ pub(crate) fn strict_sta_ap_treatment(
     // Pinned ppMapTxQueue preserves descriptor byte four as 0x07 for this
     // class; no aggregation or power-save search state is consulted.
     let ap_beacon =
-        rate == 12 && frame_control == 0x0080 && state == [0x0080_0412, 7, 0x0004_0000, 0x80, 0];
+        rate == 12 && frame_control == 0x0080 && state == [0x0080_0412, 7, 0x0004_0000, 0x83, 0];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -214,8 +214,8 @@ mod tests {
             (0, 0x2000, 0x0000, [0, 7, 0, 0x80, 0]),
             (0, 0x2000, 0x0188, [0x0200_200c, 7, 0, 0x81, 0]),
             (0, 0x2001, 0x0188, [0x0200_200c, 7, 0, 0x81, 0]),
-            (12, 0x2000, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x80, 0]),
-            (12, 0x2001, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x80, 0]),
+            (12, 0x2000, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x83, 0]),
+            (12, 0x2001, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x83, 0]),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -254,6 +254,10 @@ mod tests {
         );
         assert_eq!(
             strict_sta_ap_treatment(0, 0x2000, 0x0080, [0, 7, 0, 0x80, 0]),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(12, 0x2000, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x80, 0],),
             None
         );
         assert_eq!(

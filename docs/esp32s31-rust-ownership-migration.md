@@ -779,7 +779,7 @@ queue consumer.
 
 The strict AP cold-start run additionally qualified the retained beacon mapper
 class: frame control `0x0080`, legacy rate `12`, descriptor flags
-`0x0080_0412`, AP selector `0x0004_0000`, peer state `0x80`, and descriptor
+`0x0080_0412`, AP selector `0x0004_0000`, peer state `0x83`, and descriptor
 byte four `0x07`. It is an existing bounded beacon layout already shared by
 the Rust security and completion policies; the mapper preserves byte four and
 does not enter aggregation or power-save search state.
