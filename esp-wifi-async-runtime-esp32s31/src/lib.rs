@@ -46,10 +46,13 @@ pub mod interrupt;
 mod lmac;
 #[cfg(all(target_arch = "riscv32", feature = "wpa-async-mic"))]
 pub mod michael;
+mod net80211_classify;
+mod net80211_crypto;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod net80211_crypto_tx;
+mod net80211_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_timer;
-mod net80211_classify;
-mod net80211_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_tx;
 pub mod osi;

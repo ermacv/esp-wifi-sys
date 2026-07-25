@@ -152,7 +152,7 @@ the event-5 consumer called directly by Rust, gives the narrower graph:
 | `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
 | `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
 | `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | replaced; ordinary STA/AP queue publication is Rust |
-| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; classifier replaced, leaf remains |
+| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; classifier and CCMP key/header leaf replaced, consumer remains |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -234,15 +234,37 @@ references. A JTAG snapshot of the running image showed the slot equal to
 `__wrap_ieee80211_classify`; the same image completed passive scan, WPA2
 association, DHCP, ping, DNS, TCP, and HTTP with zero allocation counters.
 
+The WPA2-CCMP security-selection leaf is now Rust-owned as well. Its reference
+is the pinned `libnet80211.a[ieee80211_crypto.o]` and
+`libnet80211.a[ieee80211_crypto_ccmp.o]` pair. Descriptor bit 1 selects the
+group hardware-key index at `node+0x135`; otherwise the pairwise index at
+`node+0x134` is used. The Rust boundary resolves that index only through the
+fixed `STATIC_VENDOR_KEY_SLOTS` registry, validates the pinned CCMP object and
+16-byte key length, advances the key object's 48-bit TX packet number by the
+recovered value three, and inserts the exact eight-byte CCMP header. It neither
+reads the vendor software-key pointer array at `g_ic+0x148` nor dispatches
+through the cipher object at offset `+0x10`.
+
+The ESP32-S31 runtime reaches this leaf through `net80211_funcs+0x44`. Strict
+handoff adopts and reads back that slot exactly as it does the classifier
+slot. The public `ieee80211_crypto_encap` name is an absolute ROM export at
+`0x2f800cac`, so GNU wrapping is not used: the final linker fragment aliases
+the public name to the uniquely named Rust boundary and retains the pinned ROM
+address only for pre-strict cold-init delegation. The strict ELF audit proves
+both the alias and the callback-table adoption contract. Hardware verification
+completed passive scan, WPA2 association, DHCP, ping, DNS, TCP, and HTTP with
+zero allocations after this replacement.
+
 This consumer is not a leaf. An explicit strict-auditor probe with
 `ieee80211_output_process` as the sole root currently finds 23 control-flow
 cycles and 14 indirect calls. Several branches are expected to be unreachable
 under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
 expectation is not a proof and the compatibility stage must not be described
 as fully strict yet. Queue ownership, the one-frame presentation boundary,
-role-checked node lookup, and classification are now implemented. The next
-slices replace each remaining reachable encapsulation, encryption, and
-hardware-submit branch explicitly. Only after that work should
+role-checked node lookup, classification, and CCMP key/header construction are
+now implemented. The next slices replace the remaining reachable
+Ethernet-to-802.11/LLC geometry, sequence/descriptor construction, and
+hardware-submit branches explicitly. Only after that work should
 `ieee80211_set_tx_desc` become the final `g_ic` leaf.
 
 After the event-5 consumer and the remaining descriptor leaf have Rust

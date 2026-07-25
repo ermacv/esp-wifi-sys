@@ -565,6 +565,16 @@ contains the pinned vendor classifier or the Rust replacement, then verifies
 both paths. JTAG inspection of the running final image confirmed that the ROM
 slot contained `__wrap_ieee80211_classify`.
 
+The WPA2-CCMP key-selection and header leaf is also Rust-owned. Strict handoff
+adopts `net80211_funcs+0x44`, and the replacement accepts only a fixed
+Rust-owned key object with the pinned CCMP layout. It chooses the pairwise or
+group hardware index, advances the recovered 48-bit packet number by three,
+and inserts the exact eight-byte CCMP header. It does not read the
+`g_ic+0x148` software-key slots and does not call an indirect cipher callback.
+Because `ieee80211_crypto_encap` is an absolute S31 ROM export, the supplied
+linker override aliases that public name to a unique Rust symbol rather than
+using GNU `--wrap`.
+
 ## Remaining WPA scope
 
 The active secured scope is WPA2-Personal AP/STA. WPA3 SAE is not being

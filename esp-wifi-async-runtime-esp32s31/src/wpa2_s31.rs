@@ -278,19 +278,28 @@ fn unregister_static_vendor_key_slot(slot: &StaticVendorKeySlot) {
 }
 
 #[cfg(target_arch = "riscv32")]
-unsafe fn static_vendor_key_object_is_owned(hardware_index: u8, pointer: *mut c_void) -> bool {
-    if pointer.is_null() || hardware_index > MAX_VENDOR_KEY_INDEX {
-        return false;
+pub(crate) unsafe fn owned_static_vendor_key_object(hardware_index: u8) -> Option<*mut u8> {
+    if hardware_index > MAX_VENDOR_KEY_INDEX {
+        return None;
     }
     let slot_address =
         STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].load(Ordering::Acquire);
     if slot_address == 0 {
-        return false;
+        return None;
     }
     let slot = &*(slot_address as *const StaticVendorKeySlot);
-    slot.claimed.load(Ordering::Acquire)
-        && slot.hardware_index.load(Ordering::Acquire) == hardware_index
-        && core::ptr::eq(slot.object.get().cast::<c_void>(), pointer)
+    (slot.claimed.load(Ordering::Acquire)
+        && slot.hardware_index.load(Ordering::Acquire) == hardware_index)
+        .then(|| slot.object.get().cast::<u8>())
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn static_vendor_key_object_is_owned(hardware_index: u8, pointer: *mut c_void) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    owned_static_vendor_key_object(hardware_index)
+        .is_some_and(|object| core::ptr::eq(object.cast::<c_void>(), pointer))
 }
 
 /// Consume the vendor `free` performed after `ic_del_key` for a Rust-owned

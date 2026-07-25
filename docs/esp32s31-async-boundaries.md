@@ -209,9 +209,14 @@ wrapped, and strict handoff replaces the ROM consumer's callback-table slot
 `net80211_funcs+0x24` after validating its previous value. EAPOL/WAPI, STA
 ARP, DHCP/DNS, IPv4/IPv6 priority, multicast, and the four-state WMM admission
 graph are handled without allocation, waiting, retry, or indirect calls.
-Encapsulation, security selection, and `ppTxPkt` inside the one-frame stage
-remain migration work; this boundary does not claim that the complete event-5
-call graph is strict yet.
+WPA2-CCMP key selection and header insertion are also Rust-owned. The strict
+leaf accepts only a key object in the fixed Rust key registry, selects the
+pairwise or group hardware index without reading the `g_ic` software-key
+table, advances the recovered 48-bit packet number by three, and inserts the
+eight-byte CCMP header without the vendor cipher-object indirect call. The
+remaining Ethernet-to-802.11/LLC geometry, sequence/descriptor construction,
+and `ppTxPkt` hardware-submit stage remain migration work; this boundary does
+not claim that the complete event-5 call graph is strict yet.
 
 For timers, the original producer allocates an eight-byte envelope and posts
 event 7. The final-link timer wrapper replaces that producer with a sixteen-slot
