@@ -291,27 +291,34 @@ As with the adjacent ROM leaves, GNU `--wrap` cannot safely interpose this
 absolute export. The late linker fragment retains `0x2f8010f4` only as
 `__real_wDev_ProcessRxSucData`, publishes
 `wifi_strict_wdev_process_rx_success_data` under the public name, and asserts
-the alias. The SRAM Rust boundary copies only the fixed metadata prefix,
-validates the computed status offset against the descriptor length, records
-bounded class counters, and currently delegates all protocol routing to the
-pinned ROM body. This is therefore an explicit migration/measurement boundary,
-not yet a claim that the aggregate itself has been replaced.
+the alias. The SRAM Rust boundary copies only the fixed metadata prefix and
+validates the computed status offset against the descriptor length. Its first
+qualified protocol route is now Rust-owned: status-zero, base-offset STA data
+with promiscuous/error-dump/CSI modes disabled publishes the pinned `wDevCtrl`
+metadata and frame-pointer fields, derives the exact copy and aggregate flags,
+and calls the existing finite `wDev_IndicateFrame` leaf. Management, control,
+AP/NAN, optional-metadata, error-status and unclassified inputs still enter an
+explicit `__real_wDev_ProcessRxSucData` fallback. This is not yet a claim that
+the complete aggregate or frame-indication leaf has been replaced.
 
-Three new host tests cover the base layout, both rounded optional fields and a
-truncated prefix; the runtime suite now passes 265 tests. The fixed probe adds
-48 bytes of explicit internal-SRAM state, moving strict Rust static storage
-from 311,501 to 311,549 bytes while staying below the qualified baseline. It
-is diagnostic migration state and can be removed when the common route is
-fully Rust-owned.
+Host tests cover the base layout, both rounded optional fields, a truncated
+prefix, all three branches of the recovered aggregate-flag decoder, and the
+data copy-mode classifier; the runtime suite now passes 267 tests. The
+complete metadata/route probe owns 80
+bytes of explicit internal-SRAM state. Strict Rust static storage is 311,581
+bytes and remains below the qualified baseline. The counters are diagnostic
+migration state and can be removed when the aggregate routes are fully
+Rust-owned.
 
-Hardware qualification observed 719/719 valid layouts, all with status zero,
-payload offset 0x38, no sublength and no extended field. The same run completed
-WPA2, 4,096/4,096 UDP datagrams and 4/4 HTTP transfers at 25.541 Mbit/s,
-balanced 4,786/4,786 TX and 691/691 network RX owners, and retained zero
-allocation and rejection counts. This establishes a narrow measured common
-AP/STA input class for the next port; it does not justify accepting optional
-sniffer, CSI, NAN, error-status, or extended-metadata classes without their own
-evidence.
+The pre-port measurement observed 711/711 status-zero base layouts, all on the
+STA route and with only management/data frame classes (`bitmap=0x101`). The
+post-port hardware run decoded 708/708 such units: 696 data aggregates used
+the Rust route and the 12 management aggregates used the explicit fallback.
+It completed WPA2, 4,096/4,096 UDP datagrams and 4/4 HTTP transfers at
+25.211 Mbit/s, balanced 4,786/4,786 TX and 693/693 network RX owners, and
+retained zero allocation and rejection counts. The exact decoder reported
+only aggregate-flag value zero in that run. Optional sniffer, CSI, NAN,
+error-status and extended-metadata classes remain unqualified.
 
 ## Next slices
 
@@ -320,9 +327,9 @@ on mutable blob bytes:
 
 1. Continue replacing the remaining raw Radio-owned packet transitions in
    `wDev_ProcessRxSucData` one vertical boundary at a time.
-   Start with the measured status-zero/base-offset AP/STA route and fail closed
-   or delegate every optional metadata/status class until separately
-   qualified.
+   The measured status-zero/base-offset STA data route is now Rust-owned.
+   Recover and qualify the management classifier next, retaining explicit
+   fallback for control, AP/NAN, optional metadata and error-status classes.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
    public `esp_wifi_internal_free_rx_buffer` release boundary are now
    Rust-owned. The adjacent `wDev_DiscardFrame` head publication and transfer

@@ -571,17 +571,18 @@ walks four-byte frame records with a counter narrowed to `u8`; including the
 zero/wrap case, it executes at most 256 times and never polls hardware or
 external state. Its logging call is still consumed by the mandatory
 `wifi_log` wrapper.
-The ROM-resident `wDev_IndicateFrame` is called directly from ROM and cannot
-be truthfully interposed with GNU `--wrap`. Its precondition instead lives in
-the SRAM Rust caller: the event-25 continuation follows the completed segment
-under a short local interrupt mask, checks every payload, and admits only a
-final marker reached in at most 64 links. It passes that exact checked tail
-and the count ending there to `wDev_ProcessRxSucData`; the inner routine
-obtains the segment head independently from `wDevCtrl.head`, matching the
-pinned vendor outer walk. The segment remains owned by the
-current radio continuation until it is recycled. Consequently the two linked-copy
-backedges are finite data traversal, not polling or waiting. The exported
-frame-copy snapshot counts this real call boundary on hardware.
+The ROM-resident `wDev_IndicateFrame` cannot be truthfully interposed with GNU
+`--wrap`. Its precondition instead lives in SRAM Rust: the event-25
+continuation follows the completed segment under a short local interrupt mask,
+checks every payload, and admits only a final marker reached in at most 64
+links. It passes that exact checked tail and count into the Rust
+`wDev_ProcessRxSucData` boundary. Qualified status-zero/base-offset STA data
+now bypasses the vendor aggregate classifier, publishes its recovered
+`wDevCtrl` fields in Rust, and calls `wDev_IndicateFrame` directly; remaining
+classes use the explicit ROM aggregate fallback. The segment remains owned by
+the current radio continuation until it is recycled. Consequently the two
+linked-copy backedges are finite data traversal, not polling or waiting. The
+exported frame-copy snapshot counts this real call boundary on hardware.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
 posts another event for a captured remainder. `hal_mac_get_txq_complete` is

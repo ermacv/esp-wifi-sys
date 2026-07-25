@@ -11,7 +11,7 @@ static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 use crate::{
     rx_descriptor::{
         RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout, descriptor_buffer_length,
-        recycled_descriptor_word, rx_indicate_aggregate_flag,
+        recycled_descriptor_word, rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
     },
     timer::RawOsiTimer,
 };
@@ -914,14 +914,22 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
 
     let status = metadata.add(status_offset).read();
     let frame_offset = layout.payload_offset + 8;
+    let frame_control = if frame_offset + 2 <= descriptor_length {
+        Some(metadata.add(frame_offset).cast::<u16>().read_unaligned())
+    } else {
+        None
+    };
+    let copy_mode = frame_control.and_then(rx_sta_data_copy_mode);
     let control = ptr::addr_of_mut!(wDevCtrl);
     let strict_sta_data_route = status == 0
+        && !tail.is_null()
+        && count != 0
+        && count <= MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32
         && !layout.has_sublength
         && !layout.has_extra_field
         && layout.payload_offset == 0x38
         && prefix[3] & 0x70 == 0x10
-        && frame_offset + 2 <= descriptor_length
-        && metadata.add(frame_offset).cast::<u16>().read_unaligned() & 0x0f == 0x08
+        && copy_mode.is_some()
         && control.add(0x30).read() == 0
         && control.add(0x46).read() == 0
         && ptr::addr_of!(g_wdev_csi_rx).read() == 0
@@ -941,14 +949,9 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         let frame = metadata.add(frame_offset);
         control.add(0x40).cast::<*mut u8>().write_unaligned(frame);
 
-        let frame_control = frame.cast::<u16>().read_unaligned();
-        // With the strict real-chip OSI leaf, ordinary data uses copy_mode 0;
-        // QoS-null data retains the vendor's special value 1. Fragmented
-        // frames always clear it at the common post-classification join.
-        let mut copy_mode = u32::from(frame_control & 0x70 == 0x40);
-        if frame.add(1).read() & 0x04 != 0 {
-            copy_mode = 0;
-        }
+        // The safe classifier reproduces the strict real-chip branch and its
+        // fragment-clearing join before this unsafe ownership boundary.
+        let copy_mode = copy_mode.unwrap_or(0);
         let timestamp =
             u32::from_le_bytes([prefix[0x0c], prefix[0x0d], prefix[0x0e], prefix[0x0f]]);
         RX_METADATA_PROBE

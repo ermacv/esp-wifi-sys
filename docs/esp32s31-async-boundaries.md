@@ -940,21 +940,29 @@ remaining ROM aggregate. The safe `decode_rx_metadata_layout` function
 reproduces the pinned 0x146-byte `get_sublen_offset` result from a fixed
 44-byte prefix and one explicit read of MAC register `0x2010_4098` bit 23.
 It bounds the computed status-byte offset by the descriptor length and records
-its finite layout/status class in 48 bytes of Rust-owned SRAM. The public
+its finite layout/status/route class in fixed Rust-owned SRAM. The public
 absolute ROM name is late-aliased to that boundary; the original
 `0x2f8010f4` address remains reachable only through
 `__real_wDev_ProcessRxSucData`.
 
-The boundary deliberately still delegates protocol routing to the pinned
-0x6a0-byte body. It removes unsafe variable-offset arithmetic from the next
-porting step and supplies runtime evidence, but does not yet remove that body
-from the strict root graph. A full WPA2/network stress run decoded 719/719
-units with no rejected layout: every unit had status zero, offset 0x38 and
-neither optional field. It completed at 25.541 Mbit/s with balanced
-4,786/4,786 TX and 691/691 network RX ownership and zero allocations or
-rejections. The next inner-aggregate slice can therefore specialize the
-measured ordinary AP/STA class while continuing to reject or delegate
-unqualified sniffer, CSI, NAN and error classes.
+The first common route no longer enters the pinned 0x6a0-byte body. For a
+status-zero, base-offset STA data frame with promiscuous/error-dump/CSI modes
+disabled, Rust publishes the recovered `wDevCtrl+0x40/+0x44/+0x45` fields,
+copies the two metadata nibbles, derives the exact copy/aggregate arguments,
+and calls `wDev_IndicateFrame`. Every other class still delegates explicitly,
+so the aggregate remains in the strict root graph and the ROM indication leaf
+is not claimed as replaced.
+
+The pre-port HIL measurement saw 711/711 base-layout, status-zero STA units and
+only management/data frame classes (`bitmap=0x101`). After the change, a full
+WPA2/network stress run decoded 708/708 units: Rust owned 696 data routes and
+the ROM fallback handled 12 management routes. It completed 4,096/4,096 UDP
+datagrams and 4/4 HTTP transfers at 25.211 Mbit/s with balanced 4,786/4,786 TX
+and 693/693 network RX ownership, zero allocations and zero rejections. The
+host-tested aggregate decoder also corrected the earlier diagnostic
+approximation: this run contained only flag value zero. Management is the next
+measured aggregate slice; control, AP/NAN, optional metadata and error classes
+remain unqualified.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

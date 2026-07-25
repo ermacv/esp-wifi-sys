@@ -84,6 +84,20 @@ pub(crate) fn rx_indicate_aggregate_flag(metadata: &[u8]) -> Option<u32> {
     Some((u32::from_le_bytes(metadata[4..8].try_into().ok()?) >> 27) & 1)
 }
 
+/// Recover the first `wDev_IndicateFrame` argument for a data MPDU.
+///
+/// Only frame-control classification is performed here. The caller separately
+/// owns descriptor bounds, interface routing and optional-mode admission.
+pub(crate) const fn rx_sta_data_copy_mode(frame_control: u16) -> Option<u32> {
+    if frame_control & 0x0f != 0x08 {
+        return None;
+    }
+    if frame_control & 0x0400 != 0 {
+        return Some(0);
+    }
+    Some((frame_control & 0x70 == 0x40) as u32)
+}
+
 /// Reproduce the pinned S31 RX recycle descriptor transformation.
 ///
 /// This leaf is deliberately independent of global state, registers and raw
@@ -140,7 +154,7 @@ mod tests {
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout,
         descriptor_buffer_length, recycled_descriptor_word, restore_received_packet_buffer_view,
-        rx_indicate_aggregate_flag,
+        rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
     };
 
     #[test]
@@ -268,5 +282,13 @@ mod tests {
         assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(1));
         metadata[7] = 0;
         assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(0));
+    }
+
+    #[test]
+    fn sta_data_copy_mode_matches_the_pinned_classifier_join() {
+        assert_eq!(rx_sta_data_copy_mode(0x0080), None);
+        assert_eq!(rx_sta_data_copy_mode(0x0008), Some(0));
+        assert_eq!(rx_sta_data_copy_mode(0x0048), Some(1));
+        assert_eq!(rx_sta_data_copy_mode(0x0448), Some(0));
     }
 }
