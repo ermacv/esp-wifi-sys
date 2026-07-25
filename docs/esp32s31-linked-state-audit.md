@@ -1,16 +1,16 @@
 # ESP32-S31 linked state and interposition audit
 
 - final ELF: `wifi-sta`
-- ELF SHA-256: `1bad37d851c6cf7e4ca09d644344be886dc1b56b12539383aa258044939435b4`
-- strict vendor roots: 19
+- ELF SHA-256: `375a51ea2b2ca8dffefcc0232c3382d9fbe76731ef04c233ab02e355c5b595ae`
+- strict vendor roots: 18
 - Rust boundaries retaining vendor fallback: 1
 - stateful or not-yet-proven runtime roots: 9
-- temporary evidenced MMIO-only roots: 9
+- temporary evidenced MMIO-only roots: 8
 - reference-only control-flow roots: `phy_change_channel`
 - separately auditable static-binding roots: `net80211_data_ptr_init`, `wdev_data_init`
 - separately auditable static-PM root: `pm_beacon_offset_funcs_init`
 - separately auditable Rust caller-task cold init: `wifi_init_in_caller_task`, `wifi_deinit_in_caller_task`
-- vendor functions reachable from those roots: 32
+- vendor functions reachable from those roots: 31
 - live mutable blob globals reached by strict leaves: 0 symbols / 0 bytes
 - live mutable blob globals reached from `register_chipv7_phy`: 2 symbols / 512 bytes
 - ROM-ABI mutable indirection cells reached by strict leaves: 0 cells / 0 inferred bytes
@@ -251,12 +251,12 @@ These are the exact direct stores recovered from the two separately audited cold
 | `pp_post` | `0x400c0e22` | GNU `--wrap` boundary | - |
 | `rcGetSched` | `0x2f0029ce` | retained replacement only | - |
 | `realloc` | `0x400c1dc8` | GNU `--wrap` boundary | - |
-| `sleep` | `0x400bb8aa` | GNU `--wrap` boundary | - |
+| `sleep` | `0x400bb898` | GNU `--wrap` boundary | - |
 | `sta_rx_cb` | `0x400adbc2` | GNU `--wrap` boundary | - |
 | `trc_deinit` | `0x400d112e` | retained replacement only | - |
 | `trc_init` | `0x400d1174` | retained replacement only | - |
-| `usleep` | `0x400bb906` | GNU `--wrap` boundary | - |
-| `vTaskDelay` | `0x400bb932` | GNU `--wrap` boundary | - |
+| `usleep` | `0x400bb8f4` | GNU `--wrap` boundary | - |
+| `vTaskDelay` | `0x400bb920` | GNU `--wrap` boundary | - |
 | `wDev_AppendRxBlocks` | `0x2f005872` | direct public alias | `0x2f8010c4` (ROM export) |
 | `wDev_IndicateCtrlFrame` | `0x2f005854` | GNU `--wrap` boundary | - |
 | `wDev_SnifferRxData` | `0x400c30c8` | retained replacement only | - |
@@ -283,6 +283,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `lmacRequestTxopQueue` | `0x400de75e` | direct public alias | - |
 | `lmacReleaseTxopQueue` | `0x400de738` | direct public alias | - |
 | `hal_get_tsf_time` | `0x2f008f22` | direct public alias | `0x2f82b9f8` (ROM export) |
+| `hal_mac_rx_get_last_dscr` | `0x2f008f4e` | direct public alias | `0x2f8386a2` (ROM export) |
 | `ieee80211_post_hmac_tx` | `0x400d16dc` | direct public alias | `0x2f800cc0` (ROM export) |
 | `ieee80211_crypto_encap` | `0x400c133a` | direct public alias | `0x2f800cac` (ROM export) |
 | `ieee80211_align_eb` | `0x400d15fc` | direct public alias | `0x2f800c7c` (ROM export) |

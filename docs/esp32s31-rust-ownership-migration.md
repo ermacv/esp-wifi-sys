@@ -632,7 +632,7 @@ frames returned their static TX slots, all 16 received frames returned their
 static RX slots, the 32-credit TX pool was balanced, and no other-core stall
 was observed.
 
-## ROM ELF as a deblob oracle and the first direct radio-HAL leaf
+## ROM ELF as a deblob oracle and the first direct radio-HAL leaves
 
 The rev0 ROM ELF is now treated as the primary oracle for replacing temporary
 ROM calls. The qualified artifact is `esp32s31_rev0_rom.elf`, SHA-256
@@ -657,17 +657,26 @@ in a 44-byte internal-SRAM Rust leaf. The final linker aliases the public
 generated RV32 body preserves the ROM high-then-low read order and the `u64`
 return ABI, and contains no call or backward edge.
 
+The next completed leaf is `hal_mac_rx_get_last_dscr` at ROM address
+`0x2f8386a2`, size `0x1e`. Its entire state is two register reads: the low
+20 address bits from `0x2010_408c` and the high 12 address bits from
+`0x2010_4c70`. `wifi_strict_hal_mac_rx_get_last_dscr` preserves the ROM
+low-register-then-high-register read order and joins only those disjoint
+fields. The generated internal-SRAM RV32 implementation is also exactly
+`0x1e` bytes, has no call or backward edge, and the original ROM address is
+retained only as `__real_hal_mac_rx_get_last_dscr`.
+
 The exact credentialed STA ELF passed the complete strict audit over 6,407
-functions with zero violations. Runtime vendor debt decreased to 19 roots and
-`1 fallback + 9 stateful/unproven + 9 temporary MMIO`; reachable vendor
-functions decreased to 32. Mutable blob state reachable from strict leaves
+functions with zero violations. Runtime vendor debt decreased to 18 roots and
+`1 fallback + 9 stateful/unproven + 8 temporary MMIO`; reachable vendor
+functions decreased to 31. Mutable blob state reachable from strict leaves
 remained zero, all 43 fixed cold-init bindings remained active, and the
 strict-static baseline remained 82 sections / 312,441 bytes.
 
 Hardware qualification completed passive scan, WPA2 association and four-way
 handshake, DHCP, gateway ping, DNS, TCP and HTTP 200 without entering
 `ppTask`. Allocation, reallocation, free and failure counters all remained
-zero. TX ownership balanced at 18/18, RX ownership at 15/15, the 32-credit TX
+zero. TX ownership balanced at 18/18, RX ownership at 16/16, the 32-credit TX
 pool returned to zero use, and no other-core stall was observed.
 
 ## Completed strict-runtime slice: `wDevCtrl`
