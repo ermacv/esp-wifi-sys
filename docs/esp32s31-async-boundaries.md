@@ -963,6 +963,18 @@ C global. Other classes still delegate explicitly, so the aggregate remains
 in the strict root graph and the ROM indication leaf remains only for
 multi-descriptor, CSI, or otherwise unqualified indication variants.
 
+The singleton indication boundary now also accepts a rounded optional
+sublength when CSI/extended metadata is absent. A safe `SingleRxCopyPlan`
+proves the two source ranges and the compacted published length before the
+unsafe ESF leaf performs its two finite copies. The pinned kind selection is
+reproduced exactly: copy-mode-one frames use kind 8 only through 500 bytes and
+otherwise use fixed kind 7; an exhausted kind-8 pool falls through immediately
+to kind 7 without recording a false allocation failure. Multi-descriptor units
+still require a distinct aggregate owner because the ROM constructs one
+contiguous MPDU larger than the current 1700-byte ESF slot; treating the
+hardware descriptor chain as multiple network frames would violate both the
+ESF ABI and BlockAck reorder ownership.
+
 The management HIL measurement produced subtype bitmap `0x2912`: association
 response (1), probe request (4), beacon (8), authentication (11), and action
 (13). After the Action port, the full WPA2/network stress run decoded 708/708

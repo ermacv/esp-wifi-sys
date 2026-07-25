@@ -371,6 +371,44 @@ Removing unsupported vendor benchmark-statistics calls from `wifi-primary`
 also made the whole runtime allocation snapshot exactly zero, including
 attempted/failed allocations, frees, and reallocations.
 
+## Completed slice: singleton optional-sublength indication
+
+The singleton Rust indication path now owns the second finite layout admitted
+by the recovered `get_sublen_offset` contract: zero CSI/extended metadata with
+an optional rounded sublength. `SingleRxCopyPlan` performs all variable-offset
+arithmetic in safe, host-tested Rust. The SRAM ABI leaf copies the fixed
+0x38-byte RX-control prefix, skips the rounded sublength, copies the remaining
+MPDU bytes, and publishes `descriptor_length - rounded_sublength`, matching the
+pinned ROM stores. CSI/extended metadata remains fail-closed because its raw
+length and four-byte-aligned source offset are not yet one qualified
+published-length contract.
+
+The allocation selector now also matches the pinned ROM order. Copy mode zero
+uses the fixed kind-7 pool. Copy mode one uses kind 8 only for inputs no larger
+than 500 bytes, then immediately falls back to fixed kind 7 for a larger input
+or an exhausted small pool. A successful preferred-pool fallback is not
+reported as an allocation rejection; both pools are finite and neither path
+waits or enters the public allocator wrapper.
+
+Fat LTO temporarily removed the individual symbols for the already Rust-owned
+`ppRxProtoProc`, `rc_get_trc`, and `rcUpdateRxDone` leaves. They are now
+`inline(never)` and the final application link retains all three explicitly.
+This is a proof boundary rather than a behavioral dependency: the strict audit
+can inspect their independent call graphs and internal-SRAM placement under
+every optimized link.
+
+The updated primary ELF passed the 25-root, 6,407-function no-wait/no-heap
+audit with zero violations. Its strict vendor-root graph reaches zero mutable
+blob symbols/bytes, and strict Rust static storage remains 311,618 bytes. The
+hardware regression completed scan, WPA2, DHCP, 4,096/4,096 UDP datagrams and
+4/4 HTTP transfers at 24.382 Mbit/s. WDEV validated 707/707 units, Rust
+indicated 706 and discarded one qualified STA Probe Request; both vendor
+fallback counters and both indication reject counters were zero. TX ownership
+balanced at 4,786/4,786, network RX at 691/691, and the complete allocator
+snapshot remained zero. That workload observed 707 base layouts and no
+optional-sublength layout, so it qualifies the base-path regression while the
+new optional branch currently rests on pinned disassembly plus host tests.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
@@ -384,8 +422,9 @@ on mutable blob bytes:
    the guarded Action route with NAN/FTM disabled are Rust-owned as well. The
    complete observed basic STA RX workload now reaches neither the vendor
    aggregate nor the ROM indication leaf. Retain fail-closed fallback for
-   control, AP/NAN, optional metadata, error-status, CSI, and multi-descriptor
-   classes while porting those indication variants. Remove the ROM leaf from
+   control, AP/NAN, CSI/extended metadata, error-status, and multi-descriptor
+   classes while porting those indication variants. Singleton rounded
+   sublength metadata with zero CSI is now Rust-owned. Remove the ROM leaf from
    the strict root graph only after every admitted mode has an explicit Rust
    owner or an intentional fail-closed policy.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
