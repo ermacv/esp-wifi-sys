@@ -179,6 +179,7 @@ static RUST_TX_QUEUE: RustTxQueueCell = RustTxQueueCell::new();
 
 struct DeferredPeerQueue {
     peer: [u8; 6],
+    association_epoch: usize,
     head: *mut u8,
     tail: *mut u8,
     len: usize,
@@ -192,6 +193,7 @@ impl DeferredPeerQueue {
     const fn new() -> Self {
         Self {
             peer: [0; 6],
+            association_epoch: 0,
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
             len: 0,
@@ -225,6 +227,7 @@ impl DeferredPeerQueue {
         debug_assert!(self.is_empty());
         debug_assert_eq!(self.len, 0);
         self.peer = [0; 6];
+        self.association_epoch = 0;
         self.group_dtim_after = 0;
         self.active_after = 0;
         self.ps_poll_after = 0;
@@ -256,6 +259,14 @@ impl DeferredPeerQueues {
             return false;
         }
         let group = peer[0] & 1 != 0;
+        let association_epoch = if group {
+            0
+        } else {
+            current_ap_association_epoch(&peer)
+        };
+        if !group && association_epoch == 0 {
+            return false;
+        }
         let slot_index = queues
             .iter()
             .position(|slot| {
@@ -279,6 +290,7 @@ impl DeferredPeerQueues {
         next.write(ptr::null_mut());
         if slot.is_empty() {
             slot.peer = peer;
+            slot.association_epoch = association_epoch;
             slot.head = buffer.as_ptr();
             slot.group_dtim_after = crate::ap_power_save::group_dtim_epoch();
             slot.active_after = crate::ap_power_save::active_epoch(&peer);
@@ -322,6 +334,12 @@ impl DeferredPeerQueues {
                         Poll::Pending => None,
                     };
                 }
+                if association_epoch_changed(
+                    current_ap_association_epoch(&slot.peer),
+                    slot.association_epoch,
+                ) {
+                    return Some(index);
+                }
                 match crate::ap_power_save::poll_peer_edge(
                     slot.active_after,
                     slot.ps_poll_after,
@@ -345,6 +363,20 @@ impl DeferredPeerQueues {
     link_section = ".critical.bss.wifi_strict.net80211_power_save"
 )]
 static DEFERRED_PEER_QUEUES: DeferredPeerQueues = DeferredPeerQueues::new();
+
+#[cfg(target_arch = "riscv32")]
+fn current_ap_association_epoch(peer: &[u8; 6]) -> usize {
+    crate::wpa2_ap::wpa2_ap_peer_association_epoch(peer).unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn current_ap_association_epoch(_peer: &[u8; 6]) -> usize {
+    1
+}
+
+const fn association_epoch_changed(current: usize, retained: usize) -> bool {
+    current == 0 || current != retained
+}
 
 unsafe extern "C" {
     static mut s_tx_cacheq: VendorTailQueue;
@@ -786,12 +818,21 @@ pub(crate) unsafe fn dispatch_power_save_continuation(
 
     let peer = slot.peer;
     let group = peer[0] & 1 != 0;
+    let association_changed = !group
+        && association_epoch_changed(
+            current_ap_association_epoch(&peer),
+            slot.association_epoch,
+        );
     let group_dtim_epoch = crate::ap_power_save::group_dtim_epoch();
     let active_epoch = crate::ap_power_save::active_epoch(&peer);
     let ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
     let removal_epoch = crate::ap_power_save::removal_epoch(&peer);
-    let removed = removal_epoch != slot.removal_after;
-    let active = active_epoch != slot.active_after;
+    // A zero epoch means the bounded event-table entry is absent, not that an
+    // edge occurred. Treating eviction as readiness could transmit to a peer
+    // which is still asleep.
+    let removed = association_changed
+        || (removal_epoch != 0 && removal_epoch != slot.removal_after);
+    let active = active_epoch != 0 && active_epoch != slot.active_after;
     let ps_poll = ps_poll_epoch != 0 && ps_poll_epoch != slot.ps_poll_after;
     let group_dtim = group && group_dtim_epoch != slot.group_dtim_after;
     if !group_dtim && !removed && !active && !ps_poll {
@@ -1067,11 +1108,18 @@ const _: () = assert!(core::mem::size_of::<VendorTailQueue>() == 8);
 
 #[cfg(test)]
 mod tests {
-    use super::{DeferredPeerQueues, ESF_QUEUE_LINK_OFFSET};
+    use super::{association_epoch_changed, DeferredPeerQueues, ESF_QUEUE_LINK_OFFSET};
     use core::ptr::NonNull;
 
     #[repr(align(8))]
     struct TestBuffer([u8; 64]);
+
+    #[test]
+    fn missing_or_replaced_association_cancels_retained_ownership() {
+        assert!(!association_epoch_changed(7, 7));
+        assert!(association_epoch_changed(8, 7));
+        assert!(association_epoch_changed(0, 7));
+    }
 
     #[test]
     fn deferred_peer_queues_preserve_per_peer_fifo_ownership() {

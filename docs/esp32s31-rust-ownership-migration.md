@@ -944,6 +944,18 @@ subsequent ICMP/HTTP run the cumulative result remained balanced at
 beacon completions continued. The final ELF audit remained at 24 roots, 6,407
 functions, and zero no-wait/no-heap violations.
 
+Unicast Active, PS-Poll, and removal publications are keyed by both station
+MAC and the Rust AP association epoch. A foreign frame is therefore unable to
+occupy a readiness slot, and a disconnect/reassociation cannot transfer a
+one-frame PS-Poll credit to a new session using the same MAC. Event-table
+absence is explicitly Pending rather than an edge: bounded-slot replacement
+can delay a retained owner until its next real peer event, but can never cause
+transmission to a still-sleeping peer. The ordinary ESF queue and the WPA2
+command owner also retain the association epoch; removal or replacement makes
+each queued owner independently cancellable and recyclable without a drain
+loop. Same-MAC reassociation publishes the old-generation removal before the
+new nonzero generation becomes visible.
+
 Keeping the first Android peer active while associating the laptop exposed the
 second pairwise key selector before security headroom was changed:
 frame control `0x4288`, HT rate code `33`, descriptor flags `0x0000_2009`,

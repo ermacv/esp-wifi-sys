@@ -4,8 +4,9 @@
 //! queue. Strict mode does not enter that queue. Instead, the radio owner
 //! retains the original owned command and is woken only when that peer sends an
 //! active-mode data frame or a PS-Poll. TIM mutation remains a small, measured
-//! vendor leaf; it has no calls, loops, allocation, lock, or OS wait in the
-//! pinned archive.
+//! Rust leaf. Every readiness edge is bound to the fixed AP association
+//! generation as well as its MAC address, so removal/reassociation cannot
+//! transfer a credit to another session.
 
 use core::{
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -39,6 +40,7 @@ const PEER_EVENT_CAPACITY: usize = crate::wpa2_ap::WPA2_AP_ASSOC_CAPACITY;
 
 struct PeerEventSlot {
     peer: [AtomicU8; 6],
+    association_epoch: AtomicUsize,
     active_epoch: AtomicUsize,
     ps_poll_epoch: AtomicUsize,
     removal_epoch: AtomicUsize,
@@ -48,17 +50,20 @@ impl PeerEventSlot {
     const fn new() -> Self {
         Self {
             peer: [const { AtomicU8::new(0) }; 6],
+            association_epoch: AtomicUsize::new(0),
             active_epoch: AtomicUsize::new(0),
             ps_poll_epoch: AtomicUsize::new(0),
             removal_epoch: AtomicUsize::new(0),
         }
     }
 
-    fn matches(&self, peer: &[u8; 6]) -> bool {
-        self.peer
-            .iter()
-            .zip(peer)
-            .all(|(stored, expected)| stored.load(Ordering::Relaxed) == *expected)
+    fn matches(&self, peer: &[u8; 6], association_epoch: usize) -> bool {
+        self.association_epoch.load(Ordering::Acquire) == association_epoch
+            && self
+                .peer
+                .iter()
+                .zip(peer)
+                .all(|(stored, expected)| stored.load(Ordering::Relaxed) == *expected)
     }
 
     fn last_epoch(&self) -> usize {
@@ -68,15 +73,19 @@ impl PeerEventSlot {
             .max(self.removal_epoch.load(Ordering::Acquire))
     }
 
-    fn replace_peer(&self, peer: &[u8; 6]) {
+    fn replace_peer(&self, peer: &[u8; 6], association_epoch: usize) {
         // Zero is never a published event. Invalidate the slot before changing
-        // its key so a reader cannot attach an old credit to the new peer.
+        // its key so a reader cannot attach an old credit to a new association
+        // which happens to reuse the same MAC address.
+        self.association_epoch.store(0, Ordering::Release);
         self.active_epoch.store(0, Ordering::Release);
         self.ps_poll_epoch.store(0, Ordering::Release);
         self.removal_epoch.store(0, Ordering::Release);
         for (stored, value) in self.peer.iter().zip(peer) {
             stored.store(*value, Ordering::Relaxed);
         }
+        self.association_epoch
+            .store(association_epoch, Ordering::Release);
     }
 }
 
@@ -90,11 +99,27 @@ enum PeerEvent {
     Removed(usize),
 }
 
+#[cfg(target_arch = "riscv32")]
+fn current_association_epoch(peer: &[u8; 6]) -> usize {
+    crate::wpa2_ap::wpa2_ap_peer_association_epoch(peer).unwrap_or(0)
+}
+
+// Host tests exercise the finite event transport without linking the pinned
+// target-only AP association table.
+#[cfg(not(target_arch = "riscv32"))]
+fn current_association_epoch(_peer: &[u8; 6]) -> usize {
+    1
+}
+
 fn publish_peer_event(peer: &[u8; 6], event: PeerEvent) {
+    let association_epoch = current_association_epoch(peer);
+    if association_epoch == 0 {
+        return;
+    }
     let mut replacement = 0;
     let mut replacement_epoch = usize::MAX;
     for (index, slot) in PEER_EVENTS.iter().enumerate() {
-        if slot.matches(peer) && slot.last_epoch() != 0 {
+        if slot.matches(peer, association_epoch) && slot.last_epoch() != 0 {
             publish_in_slot(slot, event);
             return;
         }
@@ -106,7 +131,7 @@ fn publish_peer_event(peer: &[u8; 6], event: PeerEvent) {
     }
 
     let slot = &PEER_EVENTS[replacement];
-    slot.replace_peer(peer);
+    slot.replace_peer(peer, association_epoch);
     publish_in_slot(slot, event);
 }
 
@@ -132,8 +157,12 @@ fn next_peer_event_epoch() -> usize {
 }
 
 fn peer_epochs(peer: &[u8; 6]) -> (usize, usize, usize) {
+    let association_epoch = current_association_epoch(peer);
+    if association_epoch == 0 {
+        return (0, 0, 0);
+    }
     for slot in &PEER_EVENTS {
-        if slot.matches(peer) {
+        if slot.matches(peer, association_epoch) {
             return (
                 slot.active_epoch.load(Ordering::Acquire),
                 slot.ps_poll_epoch.load(Ordering::Acquire),
@@ -184,8 +213,9 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
 /// Observe a raw 802.11 frame before the vendor receive callback consumes it.
 ///
 /// Only an infrastructure data frame directed to the AP can publish a client
-/// power-management transition. Readiness is retained per source address so
-/// one peer cannot wake or cancel a command owned by another peer.
+/// power-management transition. Readiness is retained per source address and
+/// current association generation, so a foreign peer or an old session cannot
+/// wake or cancel a command owned by another peer.
 pub(crate) fn observe_frame(frame: &[u8]) {
     if frame.len() < 2 {
         return;
@@ -330,9 +360,11 @@ pub(crate) fn poll_peer_edge(
     cx: &mut Context<'_>,
 ) -> Poll<PeerEdge> {
     ACTIVE_EDGE.register(cx.waker());
-    if removal_epoch(peer) != removal_after {
+    let removal_epoch = removal_epoch(peer);
+    let active_epoch = active_epoch(peer);
+    if removal_epoch != 0 && removal_epoch != removal_after {
         Poll::Ready(PeerEdge::Removed)
-    } else if active_epoch(peer) != active_after
+    } else if (active_epoch != 0 && active_epoch != active_after)
         || ps_poll_credit_after(ps_poll_after, peer).is_some()
     {
         Poll::Ready(PeerEdge::Retry)
@@ -444,5 +476,17 @@ mod tests {
             Poll::Ready(PeerEdge::Removed)
         );
         assert_eq!(removal_epoch(&other), other_removal_before);
+    }
+
+    #[test]
+    fn a_missing_event_slot_is_not_a_readiness_edge() {
+        let _guard = test_guard();
+        let peer = [0xee, 0xee, 0xee, 0xee, 0xee, 0xee];
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert_eq!(
+            poll_peer_edge(123, 124, 125, &peer, &mut context),
+            Poll::Pending
+        );
     }
 }

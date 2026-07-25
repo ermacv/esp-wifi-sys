@@ -764,8 +764,12 @@ mod target {
     unsafe fn claim_peer(peer: [u8; 6]) -> Option<*mut c_void> {
         for slot in &PEERS {
             if slot.claimed.load(Ordering::Acquire) && station_mac(slot) == peer {
+                // A reassociation replaces the previous generation in place.
+                // Wake its deferred owners before publishing the new epoch so
+                // none can inherit readiness from the replacement session.
+                crate::ap_power_save::observe_peer_removed(&peer);
                 slot.association_epoch.store(
-                    NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                    next_association_epoch(),
                     Ordering::Release,
                 );
                 return Some(slot.station.get().cast());
@@ -787,7 +791,7 @@ mod target {
                     peer.len(),
                 );
                 slot.association_epoch.store(
-                    NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed),
+                    next_association_epoch(),
                     Ordering::Release,
                 );
                 return Some(slot.station.get().cast());
@@ -796,10 +800,20 @@ mod target {
         None
     }
 
+    fn next_association_epoch() -> usize {
+        let epoch = NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed);
+        if epoch == 0 {
+            NEXT_ASSOCIATION_EPOCH.fetch_add(1, Ordering::Relaxed)
+        } else {
+            epoch
+        }
+    }
+
     unsafe fn release_peer(peer: &[u8; 6]) -> bool {
         for slot in &PEERS {
             if slot.claimed.load(Ordering::Acquire) && station_mac(slot) == *peer {
                 ptr::write_bytes(slot.station.get().cast::<u8>(), 0, PINNED_STATION_SIZE);
+                slot.association_epoch.store(0, Ordering::Release);
                 slot.claimed.store(false, Ordering::Release);
                 return true;
             }
@@ -1845,8 +1859,11 @@ mod target {
         }
         let mut owned_peer = [0; 6];
         owned_peer.copy_from_slice(core::slice::from_raw_parts(peer, 6));
-        let existed = release_peer(&owned_peer);
+        // Publish while the association generation is still available.
+        // `ap_power_save` keys the removal edge by both MAC and generation so
+        // an old disconnect cannot cancel traffic for a later reassociation.
         crate::ap_power_save::observe_peer_removed(&owned_peer);
+        let existed = release_peer(&owned_peer);
         if EVENTS
             .try_send(Wpa2ApPeerEvent::Removed { peer: owned_peer })
             .is_err()

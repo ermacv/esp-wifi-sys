@@ -1317,6 +1317,12 @@ paths are not yet fully Rust-owned. Key installation additionally
 requires no live RX fragment from the old key, because the stock cleanup path
 can call `wifi_log`.
 
+Peer readiness is an association-generation capability, not a MAC-only flag.
+RX publishes Active/PS-Poll only for the current fixed AP association, removal
+is published before that generation is released, and every retained unicast
+owner compares its captured generation before retry. A missing bounded event
+slot remains Pending; it is never interpreted as Active or Removed.
+
 The same ownership rule applies to local STA teardown. The command is accepted
 only after data TX reports zero queued/occupied/hardware-credit owners. It
 deletes hardware slots 4 and 1 through the recovered finite `ic_del_key` leaf,

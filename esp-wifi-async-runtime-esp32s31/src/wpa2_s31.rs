@@ -1901,6 +1901,13 @@ mod target {
             &mut self,
             cx: &mut core::task::Context<'_>,
         ) -> core::task::Poll<PendingCommandAction> {
+            if crate::wpa2_ap::wpa2_ap_peer_association_epoch(&self.ap_waiting_peer)
+                != Some(self.ap_waiting_association_epoch)
+            {
+                #[cfg(feature = "hil-vendor-tx")]
+                HIL_AP_WAITING_PEER_VALID.store(false, Ordering::Release);
+                return core::task::Poll::Ready(PendingCommandAction::Cancel);
+            }
             match crate::ap_power_save::poll_peer_edge(
                 self.ap_active_epoch,
                 self.ap_ps_poll_epoch,
