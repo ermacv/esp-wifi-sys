@@ -12,6 +12,7 @@ const DESCRIPTOR_NODE_NIBBLE_SHIFT: u32 = 12;
 const DESCRIPTOR_SECURITY_REPLACED_MASK: u32 = 0x000c_f000;
 const DESCRIPTOR_STA_STATE_BIT: u32 = 1 << 16;
 const HE_DESCRIPTOR_FLAG: u32 = 1 << 31;
+const OBSERVED_REQUEST_FLAGS: u32 = 0x08 | 0x10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DescriptorPolicyInput {
@@ -50,7 +51,11 @@ pub(crate) struct DescriptorPolicy {
 pub(crate) const fn ordinary_descriptor_policy(
     input: DescriptorPolicyInput,
 ) -> Option<DescriptorPolicy> {
-    if input.requested_flags & !0x08 != 0 {
+    // The pinned vendor leaf only branches on bit 3 and otherwise ORs the
+    // request into the descriptor. Strict STA data observes 0x08; strict AP
+    // cold-start management TX additionally observes 0x10. Keep all other
+    // request bits fail-closed until they are seen and qualified.
+    if input.requested_flags & !OBSERVED_REQUEST_FLAGS != 0 {
         return None;
     }
     let flags = input.existing_flags | input.requested_flags;
@@ -166,7 +171,7 @@ mod tests {
         );
         assert_eq!(
             ordinary_descriptor_policy(DescriptorPolicyInput {
-                requested_flags: 0x10,
+                requested_flags: 0x20,
                 ..BASE
             }),
             None
@@ -178,6 +183,17 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn ap_cold_start_request_flag_is_a_bounded_descriptor_or() {
+        let policy = ordinary_descriptor_policy(DescriptorPolicyInput {
+            role: Net80211InterfaceRole::AccessPoint,
+            requested_flags: 0x10,
+            ..BASE
+        })
+        .unwrap();
+        assert_eq!(policy.flags, BASE.existing_flags | 0x10);
     }
 
     #[test]

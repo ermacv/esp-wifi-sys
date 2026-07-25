@@ -730,8 +730,11 @@ from the pinned `libnet80211.a[ieee80211_output.o]` oracle as a pure Rust
 policy plus a target adapter. The pure policy reproduces the eight-priority
 WMM queue mapping, STA/AP rate-context selector, descriptor flag and security
 masks, bounded opaque node-bit transforms, TWT record selection, and the
-remaining finite descriptor bytes. HE descriptor bit 31, priorities above
-seven, and unobserved request flags trap before the first mutation.
+remaining finite descriptor bytes. Request bit `0x08` is used by strict STA
+data TX, while `0x10` was observed during strict AP cold-start management TX.
+The pinned leaf branches only on `0x08` and otherwise ORs both qualified bits
+into the descriptor. HE descriptor bit 31, priorities above seven, and every
+other request bit trap before the first mutation.
 
 Strict handoff now adopts two additional scalar inputs: the initialized
 configuration byte formerly read through `g_wifi_nvs+0x44a`, and
