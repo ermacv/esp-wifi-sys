@@ -14,7 +14,7 @@ pub const ROOTS: &[&str] = &[
     "rcTxUpdatePer",
     "hal_get_tsf_time",
     "ic_set_current_channel",
-    "phy_chip_set_chan_misc_new",
+    "phy_set_tx_gain_mem_new",
     "phy_chan14_mic_cfg_new",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",

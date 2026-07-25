@@ -1,13 +1,35 @@
-use core::{cell::UnsafeCell, ptr};
+use core::{cell::UnsafeCell, mem::size_of, ptr};
 
 const PHY_FREQUENCY_OFFSET: usize = 0x20;
 const PHY_CHANNEL_14_MIC: usize = 0x26;
 const PHY_11P_ENABLE: usize = 0x28;
 const PHY_11P_CONFIG: usize = 0x29;
 const PHY_XTAL_SELECTOR: usize = 0x4f;
+const PHY_TX_GAIN_SKIP: usize = 0x07;
+const PHY_TX_GAIN_SEED: usize = 0xa8;
+const PHY_TX_GAIN_CONFIG: usize = 0xd0;
+const PHY_TX_GAIN_CURVE: usize = 0xf1;
+const PHY_TX_GAIN_CORRECTION: usize = 0xf7;
+const PHY_TX_GAIN_BASE: usize = 0x123;
+const PHY_TX_GAIN_DELTA: usize = 0x1b2;
 const PHY_CURRENT_CHANNEL: usize = 0x11c;
 const PHY_INIT_COMPLETE: usize = 0x11e;
 const PHY_CURRENT_CBW: usize = 0x11f;
+
+// Pinned `phy_tx_gain.o` `.rodata` slices at offsets 0x6c, 0x90 and 0xb4.
+// Their semantic units are not public; the ROM oracle consumes 18 aligned
+// little-endian halfwords per table.
+const WIFI_TX_GAIN_TABLE_LOW: [u16; 18] = [
+    0x003f, 0x0037, 0x002f, 0x0027, 0x0027, 0x001f, 0x0017, 0x000f, 0x000f, 0x000d, 0x000c, 0x0007,
+    0x0006, 0x0005, 0x0004, 0x0003, 0x0002, 0x0001,
+];
+const WIFI_TX_GAIN_TABLE_MID: [u16; 18] = [
+    0x0100, 0x0100, 0x0100, 0x0100, 0x8000, 0x8000, 0x8000, 0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const WIFI_TX_GAIN_TABLE_HIGH: [u16; 18] = [
+    0x001b, 0x0018, 0x0014, 0x000e, 0x0006, 0x0000, 0xfff6, 0xffe9, 0xffe1, 0xffd7, 0xffd0, 0xffc9,
+    0xffc4, 0xffbe, 0xffb8, 0xffb0, 0xffa5, 0xff97,
+];
 
 unsafe extern "C" {
     static mut phy_param: u8;
@@ -18,7 +40,29 @@ unsafe extern "C" {
     fn phy_bbpll_cal(enable: u32);
     fn phy_tsens_temp_read();
     fn phy_set_channel_rfpll_freq(frequency_mhz: u16, xtal_selector: u8, offset: i16);
-    fn phy_chip_set_chan_misc_new(channel: u16);
+    fn phy_set_chan_reg(enable: u32);
+    fn phy_wifi_get_tx_gain(
+        channel: u16,
+        calibration_curve: *const u8,
+        correction: i32,
+        base_and_delta: i32,
+        low: *const u16,
+        mid: *const u16,
+        high: *const u16,
+        output_32: *mut u32,
+        output_64: *mut u32,
+        output_72: *mut u32,
+        mode: u32,
+    );
+    fn phy_set_tx_gain_mem_new(
+        bank: u32,
+        entries: u32,
+        output_72: *const u32,
+        output_64: *const u32,
+        output_32: *const u32,
+        seed: *const u32,
+        config: *const u16,
+    );
     fn phy_i2c_master_mem_txcap();
     fn phy_bb_cbw_chan_cfg(cbw: u8);
     fn phy_chan14_mic_cfg_new(enable: u32);
@@ -38,6 +82,13 @@ struct PhyChannelState {
     current_channel: u16,
     init_complete: bool,
     current_cbw: u8,
+    tx_gain_skip: bool,
+    tx_gain_seed: [u32; 6],
+    tx_gain_config: u16,
+    tx_gain_curve: [u8; 6],
+    tx_gain_correction: i8,
+    tx_gain_base: u8,
+    tx_gain_delta: u8,
 }
 
 impl PhyChannelState {
@@ -52,6 +103,13 @@ impl PhyChannelState {
             current_channel: 0,
             init_complete: false,
             current_cbw: 0,
+            tx_gain_skip: false,
+            tx_gain_seed: [0; 6],
+            tx_gain_config: 0,
+            tx_gain_curve: [0; 6],
+            tx_gain_correction: 0,
+            tx_gain_base: 0,
+            tx_gain_delta: 0,
         }
     }
 }
@@ -92,12 +150,59 @@ pub(crate) unsafe fn adopt_vendor_phy_channel_state() {
         .read_volatile();
     state.init_complete = source.add(PHY_INIT_COMPLETE).read_volatile() != 0;
     state.current_cbw = source.add(PHY_CURRENT_CBW).read_volatile();
+    state.tx_gain_skip = source.add(PHY_TX_GAIN_SKIP).read_volatile() != 0;
+    for (index, word) in state.tx_gain_seed.iter_mut().enumerate() {
+        *word = source
+            .add(PHY_TX_GAIN_SEED + index * size_of::<u32>())
+            .cast::<u32>()
+            .read_volatile();
+    }
+    state.tx_gain_config = source.add(PHY_TX_GAIN_CONFIG).cast::<u16>().read_volatile();
+    for (index, byte) in state.tx_gain_curve.iter_mut().enumerate() {
+        *byte = source.add(PHY_TX_GAIN_CURVE + index).read_volatile();
+    }
+    state.tx_gain_correction = source
+        .add(PHY_TX_GAIN_CORRECTION)
+        .cast::<i8>()
+        .read_volatile();
+    state.tx_gain_base = source.add(PHY_TX_GAIN_BASE).read_volatile();
+    state.tx_gain_delta = source.add(PHY_TX_GAIN_DELTA).read_volatile();
     state.adopted = true;
 }
 
 #[inline(never)]
 unsafe fn trap_invalid_phy_channel_state() -> ! {
     core::arch::asm!("ebreak", options(noreturn))
+}
+
+unsafe fn set_wifi_tx_gain(channel: u16, state: &PhyChannelState) {
+    let mut output_32 = [0_u32; 8];
+    let mut output_64 = [0_u32; 16];
+    let mut output_72 = [0_u32; 18];
+    phy_wifi_get_tx_gain(
+        channel,
+        state.tx_gain_curve.as_ptr(),
+        i32::from(state.tx_gain_correction),
+        i32::from(state.tx_gain_base.wrapping_add(state.tx_gain_delta) as i8),
+        WIFI_TX_GAIN_TABLE_LOW.as_ptr(),
+        WIFI_TX_GAIN_TABLE_MID.as_ptr(),
+        WIFI_TX_GAIN_TABLE_HIGH.as_ptr(),
+        output_32.as_mut_ptr(),
+        output_64.as_mut_ptr(),
+        output_72.as_mut_ptr(),
+        0,
+    );
+    if !state.tx_gain_skip {
+        phy_set_tx_gain_mem_new(
+            0,
+            32,
+            output_72.as_ptr(),
+            output_64.as_ptr(),
+            output_32.as_ptr(),
+            state.tx_gain_seed.as_ptr(),
+            ptr::addr_of!(state.tx_gain_config),
+        );
+    }
 }
 
 /// Strict channel-programming sequence recovered from the pinned
@@ -128,7 +233,8 @@ pub(crate) unsafe fn program_channel(frequency_mhz: u16, cbw: u8) {
     phy_bbpll_cal(1);
     phy_tsens_temp_read();
     phy_set_channel_rfpll_freq(frequency_mhz, state.xtal_selector, state.frequency_offset);
-    phy_chip_set_chan_misc_new(channel);
+    phy_set_chan_reg(1);
+    set_wifi_tx_gain(channel, state);
     phy_i2c_master_mem_txcap();
     phy_bb_cbw_chan_cfg(cbw);
     if state.channel_14_mic {
