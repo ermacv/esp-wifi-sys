@@ -274,6 +274,45 @@ the ordinary path; the multi-descriptor tail identity is currently established
 by the pinned instruction sequence, not by a separate multi-descriptor HIL
 case.
 
+## Completed slice: safe RX metadata layout boundary
+
+The first variable-offset operation inside the remaining 0x6a0-byte
+`wDev_ProcessRxSucData` aggregate is the pinned 0x146-byte
+`get_sublen_offset`. Its functional result is now reproduced by
+`decode_rx_metadata_layout`, a safe Rust function over a fixed 44-byte prefix:
+the base payload offset is 0x38; an optional seven-bit sublength plus the
+boolean high bits of byte 0x2a is rounded to four bytes; and, when MAC register
+`0x2010_4098` bit 23 is set, the ten-bit field in bytes 0x26..0x27 is rounded
+and added when nonzero or explicitly present. The vendor log and PPDU-dump
+side branches are intentionally absent under the already verified
+`WIFI_LOG_NONE` profile.
+
+As with the adjacent ROM leaves, GNU `--wrap` cannot safely interpose this
+absolute export. The late linker fragment retains `0x2f8010f4` only as
+`__real_wDev_ProcessRxSucData`, publishes
+`wifi_strict_wdev_process_rx_success_data` under the public name, and asserts
+the alias. The SRAM Rust boundary copies only the fixed metadata prefix,
+validates the computed status offset against the descriptor length, records
+bounded class counters, and currently delegates all protocol routing to the
+pinned ROM body. This is therefore an explicit migration/measurement boundary,
+not yet a claim that the aggregate itself has been replaced.
+
+Three new host tests cover the base layout, both rounded optional fields and a
+truncated prefix; the runtime suite now passes 265 tests. The fixed probe adds
+48 bytes of explicit internal-SRAM state, moving strict Rust static storage
+from 311,501 to 311,549 bytes while staying below the qualified baseline. It
+is diagnostic migration state and can be removed when the common route is
+fully Rust-owned.
+
+Hardware qualification observed 719/719 valid layouts, all with status zero,
+payload offset 0x38, no sublength and no extended field. The same run completed
+WPA2, 4,096/4,096 UDP datagrams and 4/4 HTTP transfers at 25.541 Mbit/s,
+balanced 4,786/4,786 TX and 691/691 network RX owners, and retained zero
+allocation and rejection counts. This establishes a narrow measured common
+AP/STA input class for the next port; it does not justify accepting optional
+sniffer, CSI, NAN, error-status, or extended-metadata classes without their own
+evidence.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
@@ -281,6 +320,9 @@ on mutable blob bytes:
 
 1. Continue replacing the remaining raw Radio-owned packet transitions in
    `wDev_ProcessRxSucData` one vertical boundary at a time.
+   Start with the measured status-zero/base-offset AP/STA route and fail closed
+   or delegate every optional metadata/status class until separately
+   qualified.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
    public `esp_wifi_internal_free_rx_buffer` release boundary are now
    Rust-owned. The adjacent `wDev_DiscardFrame` head publication and transfer
@@ -302,9 +344,11 @@ on mutable blob bytes:
    vendor image as a differential oracle until every adopted field and
    register sequence is qualified.
 
-The strict-runtime part of `wDevCtrl` is complete. Its remaining linked
-vendor body is cold/diagnostic debt and is no longer reachable from a strict
-runtime leaf.
+The strict-runtime descriptor head/tail ownership in `wDevCtrl` is explicit,
+but the object is not yet fully retired: the delegated RX aggregate still
+reads and updates metadata, mode and routing fields in it. Those accesses must
+move into typed Rust state together with the common RX route before the
+72-byte vendor object can be classified as cold-only.
 
 For every slice, record coexistence-related fields even when Wi-Fi-only policy
 does not use them. BT/BLE/802.15.4 support should be able to add a coordinator

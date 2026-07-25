@@ -935,6 +935,27 @@ allocation delta, and no queue or ESF rejection. Its WDEV probe validated
 hardware-qualified; the multi-descriptor contract remains a pinned
 disassembly proof until traffic that produces such a unit is captured.
 
+Every call now also crosses a unique SRAM Rust metadata boundary before the
+remaining ROM aggregate. The safe `decode_rx_metadata_layout` function
+reproduces the pinned 0x146-byte `get_sublen_offset` result from a fixed
+44-byte prefix and one explicit read of MAC register `0x2010_4098` bit 23.
+It bounds the computed status-byte offset by the descriptor length and records
+its finite layout/status class in 48 bytes of Rust-owned SRAM. The public
+absolute ROM name is late-aliased to that boundary; the original
+`0x2f8010f4` address remains reachable only through
+`__real_wDev_ProcessRxSucData`.
+
+The boundary deliberately still delegates protocol routing to the pinned
+0x6a0-byte body. It removes unsafe variable-offset arithmetic from the next
+porting step and supplies runtime evidence, but does not yet remove that body
+from the strict root graph. A full WPA2/network stress run decoded 719/719
+units with no rejected layout: every unit had status zero, offset 0x38 and
+neither optional field. It completed at 25.541 Mbit/s with balanced
+4,786/4,786 TX and 691/691 network RX ownership and zero allocations or
+rejections. The next inner-aggregate slice can therefore specialize the
+measured ordinary AP/STA class while continuing to reject or delegate
+unqualified sniffer, CSI, NAN and error classes.
+
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable
 `RxExecutorCapability` and moves it into the sole runtime dispatcher. Every
