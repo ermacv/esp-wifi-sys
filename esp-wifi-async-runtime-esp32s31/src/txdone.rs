@@ -536,20 +536,41 @@ unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneEr
     }
     let lengths = frame.add(0x14).cast::<u32>().read_unaligned();
     let layout = frame.add(0x24).cast::<u16>().read_unaligned();
+    let frame_control = tx_trace_frame_control(frame);
+    let buffer_flags = buffer.cast::<u32>().read_unaligned();
+    let descriptor_flags = descriptor.cast::<u32>().read_unaligned();
+    let descriptor_security = descriptor.add(0x10).cast::<u32>().read_unaligned();
+    let descriptor_callbacks = descriptor
+        .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
+        .cast::<u32>()
+        .read_unaligned();
+    let hardware_status = descriptor.add(19).read();
     if !is_ap_addba_response_completion_layout(
-        tx_trace_frame_control(frame),
+        frame_control,
         lengths as u16,
         (lengths >> 16) as u16,
         layout,
-        buffer.cast::<u32>().read_unaligned(),
-        descriptor.cast::<u32>().read_unaligned(),
-        descriptor.add(0x10).cast::<u32>().read_unaligned(),
-        descriptor
-            .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
-            .cast::<u32>()
-            .read_unaligned(),
-        descriptor.add(19).read(),
+        buffer_flags,
+        descriptor_flags,
+        descriptor_security,
+        descriptor_callbacks,
+        hardware_status,
     ) {
+        #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
+        ets_printf(
+            c"HIL ADDBA reject tuple: fc=%04x len=%04x:%04x layout=%04x buffer=%08x df=%08x ds=%08x cb=%08x hw=%02x\r\n"
+                .as_ptr()
+                .cast(),
+            u32::from(frame_control),
+            lengths as u16 as u32,
+            (lengths >> 16) as u16 as u32,
+            u32::from(layout),
+            buffer_flags,
+            descriptor_flags,
+            descriptor_security,
+            descriptor_callbacks,
+            u32::from(hardware_status),
+        );
         return Err(TxDoneError::StrictCallbackFailed);
     }
     let mut header = buffer.add(4).cast::<*mut u8>().read_unaligned();
