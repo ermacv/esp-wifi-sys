@@ -16,6 +16,12 @@ const PHY_RX_COMP_LOW_ADDRESS: usize = 0x2010_702c;
 const PHY_DC_MEMORY_CONTROL_ADDRESS: usize = 0x2010_703c;
 const PHY_RX_COMP_HIGH_ADDRESS: usize = 0x2010_70a0;
 const PHY_DC_MEMORY_CLEAR_BIT: u32 = 1 << 20;
+const PHY_GAIN_MEMORY_INDEX_SOURCE_ADDRESS: usize = 0x2010_0408;
+const PHY_GAIN_MEMORY_CONTROL_ADDRESS: usize = 0x2010_0844;
+const PHY_GAIN_MEMORY_WORD0_ADDRESS: usize = 0x2010_0848;
+const PHY_GAIN_MEMORY_WORD1_ADDRESS: usize = 0x2010_084c;
+const PHY_GAIN_MEMORY_WORD2_ADDRESS: usize = 0x2010_0850;
+const PHY_GAIN_MEMORY_MAX_ENTRIES: u32 = 32;
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
@@ -55,6 +61,49 @@ const fn with_phy_rx_comp_low(value: u32) -> u32 {
 
 const fn with_phy_rx_comp_high(value: u32) -> u32 {
     (value & 0x00ff_ffff) | 0xed00_0000
+}
+
+const fn tx_baseband_gain_index(gain: u16) -> usize {
+    match gain {
+        0x0080 => 1,
+        0x0100 => 2,
+        0x0020 => 3,
+        0x00a0 => 4,
+        _ => 0,
+    }
+}
+
+const fn encode_phy_gain_memory_words(
+    gain_72: u16,
+    gain_64: u16,
+    gain_32: u8,
+    seed_0: u16,
+    seed_1: u16,
+    seed_2: u16,
+    seed_3: u16,
+    config: u16,
+) -> (u32, u32, u32) {
+    let gain_72 = gain_72 as u32;
+    let gain_64 = gain_64 as u32;
+    let word_0 = ((config & 0x1fff) as u32)
+        | ((seed_2 as u32) << 22)
+        | ((seed_1 as u32) << 31)
+        | ((seed_3 as u32) << 13);
+    let word_1 = ((seed_0 as u32) << 8)
+        | ((seed_1 as u32) >> 1)
+        | (((gain_64 >> 6) & 0xff) << 17)
+        | ((gain_72 & 7) << 31)
+        | ((gain_64 & 0x3f) << 20)
+        | 0x1000_0000;
+    let word_2 = ((gain_72 & 7) >> 1)
+        | ((gain_72 >> 1) & 0x1c)
+        | ((gain_32 as u32) << 15)
+        | 0x0000_7f80;
+    (word_0, word_1, word_2)
+}
+
+const fn with_phy_gain_memory_index(value: u32, index: u8) -> u32 {
+    (value & 0xfff0_0000) | ((index as u32) << 11) | 0x0008_0000
 }
 
 /// Read one of the two MAC TSF domains through the hardware latch.
@@ -197,12 +246,94 @@ pub unsafe extern "C" fn wifi_strict_phy_dc_mem_clr() {
     control.write_volatile(control.read_volatile() & !PHY_DC_MEMORY_CLEAR_BIT);
 }
 
+/// Encode and publish a finite PHY transmit-gain table.
+///
+/// Reference: pinned
+/// `libphy.a[phy_tx_gain.o]::phy_set_tx_gain_mem_new`, size `0x130`, plus the
+/// complete rev0 ROM leaves `phy_txbbgain_to_index` at `0x2f826ac8` and
+/// `phy_write_gain_mem` at `0x2f8274f0`.
+///
+/// The vendor body accepts 16 BT or 32 Wi-Fi entries. The strict runtime only
+/// calls the 32-entry Wi-Fi form, but this ABI boundary preserves both finite
+/// counts and traps any larger input rather than admitting an unbounded raw
+/// pointer walk. `seed_and_output_32` names the start of the vendor's
+/// contiguous `6 * u32` seed followed immediately by its `8 * u32` 32-byte
+/// gain output. This unusual overlap is part of the recovered ABI: baseband
+/// gain indices three and four select words in the latter region.
+///
+/// Every iteration performs three ordinary input reads, selects four
+/// halfwords from that contiguous layout, encodes three register words, then
+/// writes `0x2010_0848`, `0x2010_084c`, `0x2010_0850` and finally updates
+/// `0x2010_0844`. There is no allocation, wait, indirect call, hidden state,
+/// or hardware-dependent loop exit.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_set_tx_gain_mem_new(
+    bank: u32,
+    entries: u32,
+    output_72: *const u32,
+    output_64: *const u32,
+    output_32: *const u32,
+    seed_and_output_32: *const u32,
+    config: *const u16,
+) {
+    if entries > PHY_GAIN_MEMORY_MAX_ENTRIES
+        || (entries != 0
+            && (output_72.is_null()
+                || output_64.is_null()
+                || output_32.is_null()
+                || seed_and_output_32.is_null()
+                || config.is_null()))
+    {
+        core::arch::asm!("ebreak", options(noreturn));
+    }
+
+    let hardware_base =
+        ((PHY_GAIN_MEMORY_INDEX_SOURCE_ADDRESS as *const u32).read_volatile() >> 24) as u8;
+    let memory_base = hardware_base.wrapping_add(if bank == 0 { 0 } else { 32 });
+    let seed_halfwords = seed_and_output_32.cast::<u16>();
+    let output_72_halfwords = output_72.cast::<u16>();
+    let output_64_halfwords = output_64.cast::<u16>();
+    let output_32_bytes = output_32.cast::<u8>();
+
+    let mut entry = 0_u32;
+    while entry != entries {
+        let entry_index = entry as usize;
+        let gain_72 = output_72_halfwords.add(entry_index).read();
+        let gain_64 = output_64_halfwords.add(entry_index).read();
+        let gain_32 = output_32_bytes.add(entry_index).read();
+        let seed_index = tx_baseband_gain_index(gain_64) * 4;
+        let (word_0, word_1, word_2) = encode_phy_gain_memory_words(
+            gain_72,
+            gain_64,
+            gain_32,
+            seed_halfwords.add(seed_index).read(),
+            seed_halfwords.add(seed_index + 1).read(),
+            seed_halfwords.add(seed_index + 2).read(),
+            seed_halfwords.add(seed_index + 3).read(),
+            config.read(),
+        );
+
+        (PHY_GAIN_MEMORY_WORD0_ADDRESS as *mut u32).write_volatile(word_0);
+        (PHY_GAIN_MEMORY_WORD1_ADDRESS as *mut u32).write_volatile(word_1);
+        (PHY_GAIN_MEMORY_WORD2_ADDRESS as *mut u32).write_volatile(word_2);
+        let control = PHY_GAIN_MEMORY_CONTROL_ADDRESS as *mut u32;
+        control.write_volatile(with_phy_gain_memory_index(
+            control.read_volatile(),
+            memory_base.wrapping_add(entry as u8),
+        ));
+        entry += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        join_rx_descriptor_address, tsf_latch_mask, tx_queue_control_address, tx_queue_is_valid,
-        with_phy_rx_comp_high, with_phy_rx_comp_low, with_tx_cca, without_tx_queue_enable,
-        without_tx_queue_valid,
+        encode_phy_gain_memory_words, join_rx_descriptor_address, tsf_latch_mask,
+        tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid,
+        with_phy_gain_memory_index, with_phy_rx_comp_high, with_phy_rx_comp_low, with_tx_cca,
+        without_tx_queue_enable, without_tx_queue_valid,
     };
 
     #[test]
@@ -248,5 +379,33 @@ mod tests {
         assert_eq!(with_phy_rx_comp_low(u32::MAX), 0xffff_ffed);
         assert_eq!(with_phy_rx_comp_high(0x1234_5678), 0xed34_5678);
         assert_eq!(with_phy_rx_comp_high(u32::MAX), 0xedff_ffff);
+    }
+
+    #[test]
+    fn phy_baseband_gain_indices_match_the_rom_leaf() {
+        assert_eq!(tx_baseband_gain_index(0x0080), 1);
+        assert_eq!(tx_baseband_gain_index(0x0100), 2);
+        assert_eq!(tx_baseband_gain_index(0x0020), 3);
+        assert_eq!(tx_baseband_gain_index(0x00a0), 4);
+        assert_eq!(tx_baseband_gain_index(0), 0);
+        assert_eq!(tx_baseband_gain_index(u16::MAX), 0);
+    }
+
+    #[test]
+    fn phy_gain_words_match_the_complete_vendor_transform() {
+        assert_eq!(
+            encode_phy_gain_memory_words(0, 0, 0, 0, 0, 0, 0, 0),
+            (0, 0x1000_0000, 0x0000_7f80)
+        );
+        assert_eq!(
+            encode_phy_gain_memory_words(
+                0x0007, 0x00bf, 0xa5, 0x1234, 0x5678, 0x9abc, 0xdef0, 0xffff,
+            ),
+            (0xbfde_1fff, 0x93f6_3f3c, 0x0052_ff83)
+        );
+        assert_eq!(
+            with_phy_gain_memory_index(0xabc5_4321, 0x12),
+            0xabc8_9000
+        );
     }
 }

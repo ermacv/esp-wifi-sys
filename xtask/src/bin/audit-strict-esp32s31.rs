@@ -40,6 +40,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "hal_mac_set_csi_cbw",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
+    "phy_set_tx_gain_mem_new",
     "lmacProcessTxComplete",
     "lmacProcessTxSuccess",
     "lmacProcessCtsTimeout",
@@ -133,9 +134,6 @@ const PINNED_INDIRECT_TARGETS: &[(&str, &str)] = &[
 const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
     &[("wDev_ProcessRxSucData", 0x5fe, "wifi_strict_env_is_chip")];
 
-// `phy_wifi_set_tx_gain_new` calls its leaf with count=32. Its outer loop is
-// exactly that count and its inner loop copies four u16 words (offset 0..8 by
-// two), so neither cycle observes hardware state or has an unbounded exit.
 // `rc_get_trc` clears one set bit from a local u32 peer bitmap per iteration,
 // and compares exactly six address bytes, so it exits after at most 32 steps.
 // `is_ndpa_to_dut` scans four-byte HE user-info records. Its record count is
@@ -150,8 +148,6 @@ const PINNED_INDIRECT_SITES: &[(&str, u64, &str)] =
 // The ROM-to-ROM call is not GNU-wrap interposable, so this proof belongs at
 // the real Rust caller rather than behind a link-only wrapper.
 const PINNED_BOUNDED_CYCLE_SITES: &[(&str, u64)] = &[
-    ("phy_set_tx_gain_mem_new", 0xaa),
-    ("phy_set_tx_gain_mem_new", 0x12e),
     ("rc_get_trc", 0x74),
     ("is_ndpa_to_dut", 0x66),
     ("wDev_IndicateFrame", 0x184),
@@ -1363,16 +1359,16 @@ mod tests {
     #[test]
     fn bounded_cycle_proofs_are_instruction_specific() {
         assert!(is_pinned_bounded_cycle(
-            "phy_set_tx_gain_mem_new",
-            "aa: bne a5, s8, 0x94 <.L10>"
+            "rc_get_trc",
+            "74: bnez a5, 0x60 <.L10>"
         ));
         assert!(!is_pinned_bounded_cycle(
-            "phy_set_tx_gain_mem_new",
-            "ac: j 0xac <.Lassert>"
+            "rc_get_trc",
+            "76: j 0x60 <.Lassert>"
         ));
         assert!(!is_pinned_bounded_cycle(
             "different_function",
-            "aa: bne a5, s8, 0x94 <.L10>"
+            "74: bnez a5, 0x60 <.L10>"
         ));
     }
 

@@ -187,6 +187,14 @@ phy_dc_mem_clr = wifi_strict_phy_dc_mem_clr;
 ASSERT(phy_dc_mem_clr == wifi_strict_phy_dc_mem_clr,
        "ESP32-S31 phy_dc_mem_clr Rust boundary is inactive");
 
+/* The final TX-gain-table root is a bounded scalar transform followed by four
+ * MMIO writes per entry. Rust owns the complete transform, including the two
+ * former ROM helpers; no ROM/vendor call remains under this public symbol. */
+EXTERN(wifi_strict_phy_set_tx_gain_mem_new);
+phy_set_tx_gain_mem_new = wifi_strict_phy_set_tx_gain_mem_new;
+ASSERT(phy_set_tx_gain_mem_new == wifi_strict_phy_set_tx_gain_mem_new,
+       "ESP32-S31 phy_set_tx_gain_mem_new Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */

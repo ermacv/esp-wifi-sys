@@ -89,6 +89,27 @@ struct PhyChannelState {
     tx_gain_delta: u8,
 }
 
+/// Exact stack layout passed by pinned `phy_wifi_set_tx_gain_new`.
+///
+/// `phy_set_tx_gain_mem_new` treats `seed` as the start of a 40-byte lookup
+/// region: gain indices zero through two read `seed`, while indices three and
+/// four deliberately continue into the adjacent `output_32` field.
+#[repr(C)]
+struct TxGainScratch {
+    seed: [u32; 6],
+    output_32: [u32; 8],
+    output_64: [u32; 16],
+    output_72: [u32; 18],
+}
+
+const _: () = {
+    assert!(core::mem::offset_of!(TxGainScratch, seed) == 0);
+    assert!(core::mem::offset_of!(TxGainScratch, output_32) == 24);
+    assert!(core::mem::offset_of!(TxGainScratch, output_64) == 56);
+    assert!(core::mem::offset_of!(TxGainScratch, output_72) == 120);
+    assert!(size_of::<TxGainScratch>() == 192);
+};
+
 impl PhyChannelState {
     const fn new() -> Self {
         Self {
@@ -187,9 +208,12 @@ unsafe fn trap_invalid_phy_channel_state() -> ! {
 }
 
 unsafe fn set_wifi_tx_gain(channel: u16, state: &PhyChannelState) {
-    let mut output_32 = [0_u32; 8];
-    let mut output_64 = [0_u32; 16];
-    let mut output_72 = [0_u32; 18];
+    let mut scratch = TxGainScratch {
+        seed: state.tx_gain_seed,
+        output_32: [0; 8],
+        output_64: [0; 16],
+        output_72: [0; 18],
+    };
     phy_wifi_get_tx_gain(
         channel,
         state.tx_gain_curve.as_ptr(),
@@ -198,19 +222,19 @@ unsafe fn set_wifi_tx_gain(channel: u16, state: &PhyChannelState) {
         WIFI_TX_GAIN_TABLE_LOW.as_ptr(),
         WIFI_TX_GAIN_TABLE_MID.as_ptr(),
         WIFI_TX_GAIN_TABLE_HIGH.as_ptr(),
-        output_32.as_mut_ptr(),
-        output_64.as_mut_ptr(),
-        output_72.as_mut_ptr(),
+        scratch.output_32.as_mut_ptr(),
+        scratch.output_64.as_mut_ptr(),
+        scratch.output_72.as_mut_ptr(),
         0,
     );
     if !state.tx_gain_skip {
         phy_set_tx_gain_mem_new(
             0,
             32,
-            output_72.as_ptr(),
-            output_64.as_ptr(),
-            output_32.as_ptr(),
-            state.tx_gain_seed.as_ptr(),
+            scratch.output_72.as_ptr(),
+            scratch.output_64.as_ptr(),
+            scratch.output_32.as_ptr(),
+            scratch.seed.as_ptr(),
             ptr::addr_of!(state.tx_gain_config),
         );
     }
