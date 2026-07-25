@@ -303,6 +303,13 @@ impl PpDispatcher for VendorPpDispatcher {
             }
 
             #[cfg(feature = "strict-no-wait")]
+            if crate::net80211_tx::is_power_save_continuation(event.kind) {
+                crate::net80211_tx::dispatch_power_save_continuation(event.argument)
+                    .map_err(VendorDispatchError::Net80211Tx)?;
+                return Ok(DispatchControl::Continue);
+            }
+
+            #[cfg(feature = "strict-no-wait")]
             if crate::lmac::is_continuation(event.kind) {
                 crate::lmac::dispatch_continuation()
                     .map_err(VendorDispatchError::LmacContinuation)?;

@@ -11,6 +11,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr::{self, NonNull},
+    task::{Context, Poll},
 };
 
 const ESF_QUEUE_LINK_OFFSET: usize = 0x30;
@@ -56,6 +57,7 @@ const ETHER_TYPE_WAPI: u16 = 0x88b4;
 const POST_REJECTED: u32 = 0x3012;
 const INVALID_STRICT_FRAME: u32 = 0x3002;
 const NET80211_TX_EVENT: u32 = 5;
+pub(crate) const NET80211_POWER_SAVE_CONTINUATION: u32 = u32::MAX - 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Net80211TxError {
@@ -63,6 +65,7 @@ pub enum Net80211TxError {
     VendorPendingFrame,
     InvalidOrdinaryFrame,
     UnsupportedPowerSave,
+    PowerSaveQueueFull,
     ContinuationPostRejected,
 }
 
@@ -169,6 +172,136 @@ impl RustTxQueueCell {
 )]
 static RUST_TX_QUEUE: RustTxQueueCell = RustTxQueueCell::new();
 
+struct DeferredPeerQueue {
+    peer: [u8; 6],
+    head: *mut u8,
+    tail: *mut u8,
+    active_after: usize,
+    ps_poll_after: usize,
+    removal_after: usize,
+}
+
+impl DeferredPeerQueue {
+    const fn new() -> Self {
+        Self {
+            peer: [0; 6],
+            head: ptr::null_mut(),
+            tail: ptr::null_mut(),
+            active_after: 0,
+            ps_poll_after: 0,
+            removal_after: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
+
+    unsafe fn pop(&mut self) -> Option<NonNull<u8>> {
+        let buffer = NonNull::new(self.head)?;
+        let next = buffer
+            .as_ptr()
+            .add(ESF_QUEUE_LINK_OFFSET)
+            .cast::<*mut u8>();
+        self.head = next.read();
+        next.write(ptr::null_mut());
+        if self.head.is_null() {
+            self.tail = ptr::null_mut();
+        }
+        Some(buffer)
+    }
+
+    fn clear_identity(&mut self) {
+        debug_assert!(self.is_empty());
+        self.peer = [0; 6];
+        self.active_after = 0;
+        self.ps_poll_after = 0;
+        self.removal_after = 0;
+    }
+}
+
+struct DeferredPeerQueues(
+    UnsafeCell<[DeferredPeerQueue; crate::wpa2_ap::WPA2_AP_ASSOC_CAPACITY]>,
+);
+
+// The queues and their ESF links are touched only by the serialized radio
+// owner. RX publication changes only the atomic peer epochs in
+// `ap_power_save` and wakes this owner's executor waker.
+unsafe impl Sync for DeferredPeerQueues {}
+
+impl DeferredPeerQueues {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(
+            [const { DeferredPeerQueue::new() };
+                crate::wpa2_ap::WPA2_AP_ASSOC_CAPACITY],
+        ))
+    }
+
+    unsafe fn defer(&self, buffer: NonNull<u8>, peer: [u8; 6]) -> bool {
+        let queues = &mut *self.0.get();
+        let slot_index = queues
+            .iter()
+            .position(|slot| !slot.is_empty() && slot.peer == peer)
+            .or_else(|| queues.iter().position(DeferredPeerQueue::is_empty));
+        let Some(slot_index) = slot_index else {
+            return false;
+        };
+        let slot = &mut queues[slot_index];
+
+        let next = buffer.as_ptr().add(ESF_QUEUE_LINK_OFFSET).cast::<*mut u8>();
+        next.write(ptr::null_mut());
+        if slot.is_empty() {
+            slot.peer = peer;
+            slot.head = buffer.as_ptr();
+            slot.active_after = crate::ap_power_save::active_epoch(&peer);
+            slot.ps_poll_after = crate::ap_power_save::ps_poll_epoch(&peer);
+            slot.removal_after = crate::ap_power_save::removal_epoch(&peer);
+        } else {
+            slot.tail
+                .add(ESF_QUEUE_LINK_OFFSET)
+                .cast::<*mut u8>()
+                .write(buffer.as_ptr());
+        }
+        slot.tail = buffer.as_ptr();
+        true
+    }
+
+    unsafe fn is_idle(&self) -> bool {
+        (*self.0.get()).iter().all(DeferredPeerQueue::is_empty)
+    }
+
+    unsafe fn ready_slot(&self, cx: &mut Context<'_>) -> Option<usize> {
+        (*self.0.get())
+            .iter()
+            .enumerate()
+            .find_map(|(index, slot)| {
+                if slot.is_empty() {
+                    return None;
+                }
+                match crate::ap_power_save::poll_peer_edge(
+                    slot.active_after,
+                    slot.ps_poll_after,
+                    slot.removal_after,
+                    &slot.peer,
+                    cx,
+                ) {
+                    Poll::Ready(_) => Some(index),
+                    Poll::Pending => None,
+                }
+            })
+    }
+
+    unsafe fn slot_mut(&self, index: usize) -> Option<&mut DeferredPeerQueue> {
+        (*self.0.get()).get_mut(index)
+    }
+}
+
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.net80211_power_save"
+)]
+static DEFERRED_PEER_QUEUES: DeferredPeerQueues = DeferredPeerQueues::new();
+
 unsafe extern "C" {
     static mut s_tx_cacheq: VendorTailQueue;
     static mut net80211_funcs: *mut usize;
@@ -244,7 +377,7 @@ pub(crate) unsafe fn vendor_mailbox_empty() -> bool {
 }
 
 pub(crate) unsafe fn rust_mailbox_empty() -> bool {
-    RUST_TX_QUEUE.is_idle()
+    RUST_TX_QUEUE.is_idle() && DEFERRED_PEER_QUEUES.is_idle()
 }
 
 unsafe fn read_mac(source: *const u8) -> [u8; 6] {
@@ -269,14 +402,17 @@ unsafe fn arm_next_event() -> Result<(), Net80211TxError> {
 
 /// Encapsulate one validated Ethernet ESF as an ordinary STA/AP MPDU.
 ///
-/// This is the finite non-mesh, non-NAN, non-power-save branch recovered from
+/// This is the finite non-mesh, non-NAN branch recovered from
 /// `libnet80211.a[ieee80211_output.o]::ieee80211_encap_esfbuf`. Rust-owned
-/// ADDBA state remains downstream at `ppMapTxQueue`, so the vendor BA request
-/// and per-node aggregation-record branches are intentionally absent.
+/// power-save continuation may supply one already-observed active/PS-Poll
+/// credit; no node-state wait or vendor PS queue is entered. Rust-owned ADDBA
+/// state remains downstream at `ppMapTxQueue`, so the vendor BA request and
+/// per-node aggregation-record branches are intentionally absent.
 unsafe fn encapsulate_ordinary(
     node: NonNull<u8>,
     buffer: NonNull<u8>,
     interface_selector: u32,
+    allow_power_save_credit: bool,
 ) -> Result<(), Net80211TxError> {
     use crate::net80211_state::Net80211InterfaceRole;
 
@@ -348,8 +484,11 @@ unsafe fn encapsulate_ordinary(
     let queue_class = crate::net80211_encap::queue_class(priority as u8)
         .ok_or(Net80211TxError::InvalidOrdinaryFrame)?;
     let node_flags = node.add(NODE_FLAGS_OFFSET).cast::<u32>().read();
-    if matches!(role, Net80211InterfaceRole::AccessPoint) && node_flags & NODE_POWER_SAVE_FLAG != 0
+    if matches!(role, Net80211InterfaceRole::AccessPoint)
+        && node_flags & NODE_POWER_SAVE_FLAG != 0
+        && !allow_power_save_credit
     {
+        crate::wpa2_ap::strict_update_ap_tim(node, true);
         return Err(Net80211TxError::UnsupportedPowerSave);
     }
     let interface_mac =
@@ -529,24 +668,128 @@ pub(crate) unsafe fn dispatch_one() -> Result<(), Net80211TxError> {
         &mut search_error,
     ));
     let result = if let Some(node) = node {
-        encapsulate_ordinary(node, buffer, interface)
+        encapsulate_ordinary(node, buffer, interface, false)
     } else {
         esf_buf_recycle(buffer.as_ptr().cast());
         Ok(())
     };
     if result == Err(Net80211TxError::UnsupportedPowerSave) {
-        // A station may enter power save between network-stack publication
-        // and this serialized event. That is a per-frame delivery outcome,
-        // not corruption of the radio owner. The vendor solution would move
-        // the ESF into its dynamic PS queue; until the equivalent Rust-owned
-        // async queue is connected, release this one fixed-pool object and
-        // keep servicing unrelated peers. No retry, wait, callback, or
-        // polling loop is entered here.
-        esf_buf_recycle(buffer.as_ptr().cast());
-        crate::ap_power_save::record_cancelled_transmit();
+        let mut peer = [0_u8; 6];
+        ptr::copy_nonoverlapping(ethernet, peer.as_mut_ptr(), peer.len());
+        if !DEFERRED_PEER_QUEUES.defer(buffer, peer) {
+            esf_buf_recycle(buffer.as_ptr().cast());
+            return Err(Net80211TxError::PowerSaveQueueFull);
+        }
+        crate::ap_power_save::record_deferred_transmit();
         return arm_next_event();
     }
     if let Err(error) = result {
+        esf_buf_recycle(buffer.as_ptr().cast());
+        return Err(error);
+    }
+    arm_next_event()
+}
+
+pub(crate) const fn is_power_save_continuation(kind: u32) -> bool {
+    kind == NET80211_POWER_SAVE_CONTINUATION
+}
+
+pub(crate) fn pending_power_save_continuation(cx: &mut Context<'_>) -> Option<crate::event::PpEvent> {
+    let index = unsafe { DEFERRED_PEER_QUEUES.ready_slot(cx)? };
+    Some(crate::event::PpEvent {
+        kind: NET80211_POWER_SAVE_CONTINUATION,
+        argument: (index + 1) as *mut c_void,
+    })
+}
+
+/// Advance one retained ordinary AP frame after a peer-bound RX readiness
+/// edge. Each continuation owns at most one ESF object; a persistent active
+/// or removal edge exposes the next object to the radio future without a
+/// status loop or timer.
+pub(crate) unsafe fn dispatch_power_save_continuation(
+    argument: *mut c_void,
+) -> Result<(), Net80211TxError> {
+    let Some(index) = (argument as usize).checked_sub(1) else {
+        return Err(Net80211TxError::InvalidOrdinaryFrame);
+    };
+    let Some(slot) = DEFERRED_PEER_QUEUES.slot_mut(index) else {
+        return Err(Net80211TxError::InvalidOrdinaryFrame);
+    };
+    if slot.is_empty() {
+        return Err(Net80211TxError::RustMailboxEmpty);
+    }
+
+    let peer = slot.peer;
+    let active_epoch = crate::ap_power_save::active_epoch(&peer);
+    let ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
+    let removal_epoch = crate::ap_power_save::removal_epoch(&peer);
+    let removed = removal_epoch != slot.removal_after;
+    let active = active_epoch != slot.active_after;
+    let ps_poll = ps_poll_epoch != 0 && ps_poll_epoch != slot.ps_poll_after;
+    if !removed && !active && !ps_poll {
+        return Ok(());
+    }
+
+    let buffer = slot
+        .pop()
+        .ok_or(Net80211TxError::RustMailboxEmpty)?;
+    let last = slot.is_empty();
+    if ps_poll && !active {
+        // A PS-Poll authorizes exactly one retained frame. An active-mode
+        // edge remains valid until every already-retained frame has moved.
+        slot.ps_poll_after = ps_poll_epoch;
+    }
+    if last {
+        slot.clear_identity();
+    }
+
+    if removed {
+        esf_buf_recycle(buffer.as_ptr().cast());
+        crate::ap_power_save::record_cancelled_transmit();
+        return Ok(());
+    }
+
+    let descriptor = NonNull::new(
+        buffer
+            .as_ptr()
+            .add(ESF_DESCRIPTOR_OFFSET)
+            .cast::<*mut u8>()
+            .read(),
+    )
+    .ok_or_else(|| recycle_invalid(buffer, Net80211TxError::InvalidOrdinaryFrame))?;
+    let control = descriptor
+        .as_ptr()
+        .add(TX_DESCRIPTOR_CONTROL_OFFSET)
+        .cast::<u32>()
+        .read();
+    let interface = (control >> TX_DESCRIPTOR_INTERFACE_SHIFT) & TX_DESCRIPTOR_INTERFACE_MASK;
+    if interface != 1 {
+        return Err(recycle_invalid(
+            buffer,
+            Net80211TxError::InvalidOrdinaryFrame,
+        ));
+    }
+    let Some((_, ethernet, _)) = ordinary_ethernet_header(buffer.as_ptr()) else {
+        return Err(recycle_invalid(
+            buffer,
+            Net80211TxError::InvalidOrdinaryFrame,
+        ));
+    };
+    let mut search_error = 0_u32;
+    let Some(node) = NonNull::new(ieee80211_search_node(
+        interface,
+        ethernet,
+        &mut search_error,
+    )) else {
+        esf_buf_recycle(buffer.as_ptr().cast());
+        crate::ap_power_save::record_cancelled_transmit();
+        return arm_next_event();
+    };
+
+    if active || last {
+        crate::wpa2_ap::strict_update_ap_tim(node.as_ptr(), false);
+    }
+    if let Err(error) = encapsulate_ordinary(node, buffer, interface, true) {
         esf_buf_recycle(buffer.as_ptr().cast());
         return Err(error);
     }
@@ -753,3 +996,55 @@ pub unsafe extern "C" fn wifi_strict_ieee80211_post_hmac_tx(buffer: *mut u8) -> 
 }
 
 const _: () = assert!(core::mem::size_of::<VendorTailQueue>() == 8);
+
+#[cfg(test)]
+mod tests {
+    use super::{DeferredPeerQueues, ESF_QUEUE_LINK_OFFSET};
+    use core::ptr::NonNull;
+
+    #[repr(align(8))]
+    struct TestBuffer([u8; 64]);
+
+    #[test]
+    fn deferred_peer_queues_preserve_per_peer_fifo_ownership() {
+        let queues = DeferredPeerQueues::new();
+        let mut first = TestBuffer([0; 64]);
+        let mut second = TestBuffer([0; 64]);
+        let mut other = TestBuffer([0; 64]);
+        let peer = [1, 2, 3, 4, 5, 6];
+        let other_peer = [6, 5, 4, 3, 2, 1];
+
+        unsafe {
+            let first_ptr = NonNull::new(first.0.as_mut_ptr()).unwrap();
+            let second_ptr = NonNull::new(second.0.as_mut_ptr()).unwrap();
+            let other_ptr = NonNull::new(other.0.as_mut_ptr()).unwrap();
+            assert!(queues.defer(first_ptr, peer));
+            assert!(queues.defer(second_ptr, peer));
+            assert!(queues.defer(other_ptr, other_peer));
+
+            let peer_slot = (*queues.0.get())
+                .iter_mut()
+                .find(|slot| slot.peer == peer)
+                .unwrap();
+            assert_eq!(peer_slot.pop(), Some(first_ptr));
+            assert_eq!(peer_slot.pop(), Some(second_ptr));
+            assert!(peer_slot.pop().is_none());
+
+            let other_slot = (*queues.0.get())
+                .iter_mut()
+                .find(|slot| slot.peer == other_peer)
+                .unwrap();
+            assert_eq!(other_slot.pop(), Some(other_ptr));
+            assert!(other_slot.pop().is_none());
+            assert_eq!(
+                first
+                    .0
+                    .as_ptr()
+                    .add(ESF_QUEUE_LINK_OFFSET)
+                    .cast::<*mut u8>()
+                    .read(),
+                core::ptr::null_mut()
+            );
+        }
+    }
+}

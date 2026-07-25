@@ -48,6 +48,16 @@ fn pending_rx_continuation() -> Option<PpEvent> {
     None
 }
 
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+fn pending_net80211_power_save(cx: &mut Context<'_>) -> Option<PpEvent> {
+    crate::net80211_tx::pending_power_save_continuation(cx)
+}
+
+#[cfg(not(all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn pending_net80211_power_save(_cx: &mut Context<'_>) -> Option<PpEvent> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DispatchControl {
     Continue,
@@ -118,12 +128,13 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
 
         for _ in 0..self.event_budget {
             let mut selected = None;
-            for offset in 0..3 {
-                let source = (self.next_source + offset) % 3;
+            for offset in 0..4 {
+                let source = (self.next_source + offset) % 4;
                 let event = match source {
                     0 => self.queue.try_pop(),
                     1 => self.internal_queue.try_pop(),
                     2 => pending_rx_continuation(),
+                    3 => pending_net80211_power_save(cx),
                     _ => unreachable!(),
                 };
                 if let Some(event) = event {
@@ -138,10 +149,10 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
                     Poll::Pending
                 };
             };
-            self.next_source = (source + 1) % 3;
+            self.next_source = (source + 1) % 4;
             match source {
                 0 => VENDOR_EVENTS.fetch_add(1, Ordering::Relaxed),
-                1 => INTERNAL_EVENTS.fetch_add(1, Ordering::Relaxed),
+                1 | 3 => INTERNAL_EVENTS.fetch_add(1, Ordering::Relaxed),
                 2 => RX_CONTINUATIONS.fetch_add(1, Ordering::Relaxed),
                 _ => unreachable!(),
             };
@@ -161,6 +172,7 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
         let vendor_pending = !self.queue.is_empty();
         let internal_pending = !self.internal_queue.is_empty();
         let rx_pending = pending_rx_continuation().is_some();
+        let net80211_power_save_pending = pending_net80211_power_save(cx).is_some();
         if vendor_pending {
             SELF_WAKES_VENDOR.fetch_add(1, Ordering::Relaxed);
         }
@@ -170,7 +182,12 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
         if rx_pending {
             SELF_WAKES_RX.fetch_add(1, Ordering::Relaxed);
         }
-        if self.stop_requested || vendor_pending || internal_pending || rx_pending {
+        if self.stop_requested
+            || vendor_pending
+            || internal_pending
+            || rx_pending
+            || net80211_power_save_pending
+        {
             cx.waker().wake_by_ref();
         }
         Poll::Pending
