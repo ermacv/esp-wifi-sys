@@ -901,3 +901,39 @@ retained balanced TX/RX/PP ownership and zero allocations.
 Final ELF verification must continue to use a non-empty STA configuration;
 otherwise the HIL binary deliberately enters `pending()` before Wi-Fi
 initialization and LTO removes the unreachable strict runtime.
+
+The base-layout multi-descriptor indication body is now Rust-owned as well.
+The recovered hardware and ESF length fields are fourteen bits, so safe Rust
+accepts only chains of two through 64 descriptors whose joined length is at
+most `0x3fff`. It computes the complete copy plan before the raw-pointer leaf:
+the first 0x38-byte control prefix, the remainder of the first full segment,
+every complete middle segment, and the tail's actual received length. The
+leaf validates the exact chain terminus, recycles the detached hardware
+prefix once, and publishes one kind-7 owner. Copy-mode-one split frames retain
+the pinned immediate-discard result.
+
+This rare path has two fixed owners rather than increasing all 32 ordinary RX
+objects. Each owner has a 0x90-byte ESF header and its two-word ownership
+bitmap in internal SRAM; two 16-KiB payloads are placed in initialized PSRAM.
+The hard RX interrupt only queues through the intrusive link inside the SRAM
+header. Payload access begins on the radio executor and remains behind the
+typed Radio -> Network -> Free owner. Aggregate reorder IDs occupy a separate
+two-entry suffix and therefore do not increase the normal network-channel
+credit derived from the kind-7 pool.
+
+The configured final image contained the aggregate ownership bitmap at
+`0x2f0353a8`, aggregate headers at `0x2f0353b0`, and the payload arena at
+`0x50001038`. Its state audit reported zero mutable blob bytes and zero
+ROM-ABI indirection cells reachable from strict leaves. The intentional SRAM
+cost raised the qualified strict-static ceiling from 311,745 to 311,922
+bytes; the 32-KiB PSRAM arena is excluded from that internal-SRAM metric. The
+strict audit still inspected 6,407 functions under 25 roots with zero
+no-wait/no-heap violations.
+
+The following hardware regression completed WPA2, DHCP, DNS, TCP/HTTP,
+4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at 26.343 Mbit/s. It
+balanced 4,787/4,787 TX and 692/692 RX owners with zero allocations, ESF
+rejects, or vendor indication fallbacks. Ordinary 1,500-byte Ethernet traffic
+kept `max_descriptors=1` and `rust_multi_indicate_routes=0`; consequently the
+hardware run proves whole-path non-regression and memory placement, while a
+real multi-descriptor MPDU remains a separate jumbo/A-MSDU HIL qualification.

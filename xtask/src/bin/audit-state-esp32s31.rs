@@ -653,7 +653,10 @@ const PRIMARY_STATE_BASELINE: StateMetrics = StateMetrics {
     runtime_rom_indirections: 0,
     cold_phy_mutable_blob_bytes: 512,
     linked_other_mutable_blob_bytes: 22_203,
-    strict_static_bytes: 311_745,
+    // Two multi-descriptor RX owners add 288 bytes of ISR-visible ESF headers
+    // and eight bytes of ownership state. Their 32-KiB payload arena is in
+    // PSRAM and is intentionally excluded from the internal-SRAM metric.
+    strict_static_bytes: 311_922,
 };
 
 fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {

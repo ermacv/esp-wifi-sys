@@ -587,8 +587,17 @@ bounded copy and descriptor stores, recycles the hardware descriptor, and
 publishes the new ESF owner directly through `wifi_strict_lmac_rx_done`.
 Exhaustion returns immediately and discards the input unit; it never enters a
 dynamic allocator or waits. Probe Requests in the STA-only profile take their
-recovered direct-discard route. Multi-descriptor, CSI, optional-metadata, and
-other unqualified variants retain an explicit ROM fallback.
+recovered direct-discard route. Base-layout copy-mode-zero MPDUs spanning two
+or more hardware descriptors are now joined by the same Rust boundary. Safe
+Rust validates a maximum of 64 links and the 14-bit (`0x3fff`) ESF length,
+then a finite pointer leaf copies into one of two fixed aggregate owners. Each
+owner keeps its 0x90-byte intrusive header and ownership word in internal
+SRAM, while its 16-KiB payload is in initialized PSRAM and is never touched by
+the hard RX ISR. Reorder and network ownership use a distinct aggregate slot
+ID range, so those rare owners do not inflate the ordinary kind-7 RX credit.
+Copy-mode-one multi frames preserve the recovered immediate-discard behavior.
+CSI, extended metadata, optional-sublength multi frames, and other
+unqualified variants retain an explicit ROM fallback.
 
 The qualifying WPA2/network HIL validated 715/715 RX units. Rust indicated
 699 data and 13 management frames, including three Action frames, discarded
@@ -598,6 +607,18 @@ workload balanced all 4,795 TX and 695 network RX owners. The primary
 firmware also compiles out unsupported vendor benchmark-statistics calls, so
 the allocation probe remained exactly zero for allocations, failed attempts,
 reallocations, and frees.
+
+The multi-descriptor image passed 274 host tests and the final 6,407-function
+strict audit with 25 roots and zero violations. The configured HIL image
+placed the 32-KiB aggregate payload arena at `0x50001038` in PSRAM and only
+296 aggregate header/ownership bytes in ISR-visible SRAM. Its full WPA2 STA
+stress run completed 4,096/4,096 UDP datagrams and 4/4 HTTP transfers at
+26.343 Mbit/s, balanced 4,787/4,787 TX and 692/692 RX owners, and retained
+zero allocator calls and ESF rejects. Normal Ethernet MTU traffic observed
+`max_descriptors=1`, so this run proves regression and placement invariants;
+the multi copy itself is presently qualified by pinned disassembly, safe host
+copy-plan tests, and target code generation rather than an observed jumbo
+MPDU.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
 posts another event for a captured remainder. `hal_mac_get_txq_complete` is
