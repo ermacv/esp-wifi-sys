@@ -16,6 +16,14 @@ use crate::{
 /// application command.
 pub const RADIO_COMMAND_CONTEXT_EVENT: u32 = u32::MAX - 32;
 
+static COMMAND_BUDGET_SELF_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of explicit owner self-wakes caused by a still-nonempty command
+/// queue after consuming its bounded per-poll budget.
+pub fn command_budget_self_wakes() -> usize {
+    COMMAND_BUDGET_SELF_WAKES.load(Ordering::Acquire)
+}
+
 /// Fixed-capacity ownership channel for application-to-radio commands.
 ///
 /// Producers never call the vendor API and never wait for the radio owner.
@@ -320,6 +328,7 @@ where
         }
 
         if received == self.command_budget && !self.commands.is_empty() {
+            COMMAND_BUDGET_SELF_WAKES.fetch_add(1, Ordering::Relaxed);
             cx.waker().wake_by_ref();
         }
         match Pin::new(&mut self.wifi).poll(cx) {
