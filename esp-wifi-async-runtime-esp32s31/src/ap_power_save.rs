@@ -18,7 +18,11 @@ static ACTIVE_EDGE: WakerCell = WakerCell::new();
 static PS_POLL_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static PEER_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static GROUP_DTIM_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static BEACON_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+static BEACON_PARSE_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static GROUP_DTIM_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+static LAST_DTIM_COUNT: AtomicU8 = AtomicU8::new(u8::MAX);
+static LAST_DTIM_PERIOD: AtomicU8 = AtomicU8::new(0);
 static SLEEP_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static REMOVAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -145,7 +149,11 @@ pub struct ApPowerSaveSnapshot {
     pub sleep_observations: usize,
     pub active_observations: usize,
     pub ps_poll_observations: usize,
+    pub beacon_observations: usize,
+    pub beacon_parse_failures: usize,
     pub group_dtim_observations: usize,
+    pub last_dtim_count: u8,
+    pub last_dtim_period: u8,
     pub removal_observations: usize,
     pub deferred_transmits: usize,
     pub cancelled_transmits: usize,
@@ -159,7 +167,11 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
         sleep_observations: SLEEP_OBSERVATIONS.load(Ordering::Acquire),
         active_observations: ACTIVE_OBSERVATIONS.load(Ordering::Acquire),
         ps_poll_observations: PS_POLL_EPOCH.load(Ordering::Acquire),
+        beacon_observations: BEACON_OBSERVATIONS.load(Ordering::Acquire),
+        beacon_parse_failures: BEACON_PARSE_FAILURES.load(Ordering::Acquire),
         group_dtim_observations: GROUP_DTIM_OBSERVATIONS.load(Ordering::Acquire),
+        last_dtim_count: LAST_DTIM_COUNT.load(Ordering::Acquire),
+        last_dtim_period: LAST_DTIM_PERIOD.load(Ordering::Acquire),
         removal_observations: REMOVAL_OBSERVATIONS.load(Ordering::Acquire),
         deferred_transmits: DEFERRED_TRANSMITS.load(Ordering::Acquire),
         cancelled_transmits: CANCELLED_TRANSMITS.load(Ordering::Acquire),
@@ -244,10 +256,21 @@ pub(crate) fn observe_peer_removed(peer: &[u8; 6]) {
 /// This is called from the strict beacon TX-done continuation, never from a
 /// timer poll. One retained edge remains visible until the radio owner has
 /// moved every group frame which preceded that beacon.
-pub(crate) fn observe_group_dtim() {
-    GROUP_DTIM_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
-    GROUP_DTIM_EPOCH.store(next_peer_event_epoch(), Ordering::Release);
-    ACTIVE_EDGE.wake();
+pub(crate) fn observe_beacon_dtim(dtim: Option<(u8, u8)>) {
+    BEACON_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+    let Some((count, period)) = dtim else {
+        BEACON_PARSE_FAILURES.fetch_add(1, Ordering::Relaxed);
+        LAST_DTIM_COUNT.store(u8::MAX, Ordering::Relaxed);
+        LAST_DTIM_PERIOD.store(0, Ordering::Relaxed);
+        return;
+    };
+    LAST_DTIM_COUNT.store(count, Ordering::Relaxed);
+    LAST_DTIM_PERIOD.store(period, Ordering::Relaxed);
+    if count == 0 {
+        GROUP_DTIM_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+        GROUP_DTIM_EPOCH.store(next_peer_event_epoch(), Ordering::Release);
+        ACTIVE_EDGE.wake();
+    }
 }
 
 pub(crate) fn record_cancelled_transmit() {

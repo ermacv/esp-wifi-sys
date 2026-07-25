@@ -921,7 +921,7 @@ unsafe fn strict_ap_beacon_txdone(frame: *mut u8) -> Result<(), ()> {
     if TmpSTAAPCloseAP != 0 || !crate::net80211_state::ordinary_sta_ap_profile() {
         return Err(());
     }
-    let (dtim_count, _) = strict_beacon_dtim(frame).ok_or(())?;
+    let dtim = strict_beacon_dtim(frame);
     let interface = crate::net80211_state::access_point_interface()
         .map(|interface| interface.as_ptr())
         .unwrap_or(ptr::null_mut());
@@ -954,9 +954,7 @@ unsafe fn strict_ap_beacon_txdone(frame: *mut u8) -> Result<(), ()> {
     let timer = ptr::addr_of_mut!(BEACON_TIMER).cast::<c_void>();
     disarm(timer);
     arm_us(timer, interval, false);
-    if dtim_count == 0 {
-        crate::ap_power_save::observe_group_dtim();
-    }
+    crate::ap_power_save::observe_beacon_dtim(dtim);
     Ok(())
 }
 
