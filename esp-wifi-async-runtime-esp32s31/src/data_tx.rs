@@ -71,6 +71,8 @@ static TX_REJECTED_INVALID: AtomicUsize = AtomicUsize::new(0);
 static TX_REJECTED_SLOTS_FULL: AtomicUsize = AtomicUsize::new(0);
 static TX_REJECTED_CHANNEL_CONTENDED: AtomicUsize = AtomicUsize::new(0);
 static TX_REJECTED_HARDWARE_CREDIT: AtomicUsize = AtomicUsize::new(0);
+static TX_REJECTED_PEER_MISSING: AtomicUsize = AtomicUsize::new(0);
+static TX_LAST_MISSING_PEER_ERROR: AtomicUsize = AtomicUsize::new(0);
 static TX_OCCUPIED: AtomicUsize = AtomicUsize::new(0);
 static TX_OCCUPIED_HIGH_WATER: AtomicUsize = AtomicUsize::new(0);
 static TX_HARDWARE_COMMITTED: AtomicUsize = AtomicUsize::new(0);
@@ -95,6 +97,8 @@ pub struct WifiDataTxSnapshot {
     pub rejected_slots_full: usize,
     pub rejected_channel_contended: usize,
     pub rejected_hardware_credit: usize,
+    pub rejected_peer_missing: usize,
+    pub last_missing_peer_error: usize,
     pub occupied: usize,
     pub occupied_high_water: usize,
     pub queued: usize,
@@ -119,6 +123,8 @@ pub fn wifi_data_tx_snapshot() -> WifiDataTxSnapshot {
         rejected_slots_full: TX_REJECTED_SLOTS_FULL.load(Ordering::Acquire),
         rejected_channel_contended: TX_REJECTED_CHANNEL_CONTENDED.load(Ordering::Acquire),
         rejected_hardware_credit: TX_REJECTED_HARDWARE_CREDIT.load(Ordering::Acquire),
+        rejected_peer_missing: TX_REJECTED_PEER_MISSING.load(Ordering::Acquire),
+        last_missing_peer_error: TX_LAST_MISSING_PEER_ERROR.load(Ordering::Acquire),
         occupied: TX_OCCUPIED.load(Ordering::Acquire),
         occupied_high_water: TX_OCCUPIED_HIGH_WATER.load(Ordering::Acquire),
         queued: TX_CHANNEL.len(),
@@ -128,6 +134,17 @@ pub fn wifi_data_tx_snapshot() -> WifiDataTxSnapshot {
         hardware_committed: TX_HARDWARE_COMMITTED.load(Ordering::Acquire),
         hardware_released: TX_HARDWARE_RELEASED.load(Ordering::Acquire),
     }
+}
+
+/// Reject one already-owned network frame whose peer disappeared before the
+/// radio owner reached it.
+///
+/// This is a normal bounded link-transition race, not a reason to terminate
+/// the immortal radio executor. Dropping the command after this call returns
+/// its reserved static TX slot through `TxSlotToken::drop`.
+pub(crate) fn reject_wifi_data_tx_missing_peer(peer_error: u32) {
+    TX_LAST_MISSING_PEER_ERROR.store(peer_error as usize, Ordering::Release);
+    TX_REJECTED_PEER_MISSING.fetch_add(1, Ordering::Relaxed);
 }
 
 struct TxSlotToken {

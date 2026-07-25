@@ -1804,11 +1804,23 @@ mod target {
                     ) {
                         return Ok(());
                     }
-                    self.try_transmit_wifi_data(&frame)
-                        .map_err(|error| Wpa2IoFailure {
+                    match self.try_transmit_wifi_data(&frame) {
+                        Ok(()) => Ok(()),
+                        Err(S31Wpa2IoError::TxPeerNotFound(peer_error)) => {
+                            // Network ownership and peer ownership are sampled
+                            // at different async boundaries. A peer can vanish
+                            // after this frame was admitted but before the
+                            // radio owner handles it. Reject this one owned
+                            // frame and release its static slot; the radio
+                            // executor itself remains immortal.
+                            crate::data_tx::reject_wifi_data_tx_missing_peer(peer_error);
+                            Ok(())
+                        }
+                        Err(error) => Err(Wpa2IoFailure {
                             error,
                             command: Wpa2IoCommand::TransmitData(frame),
-                        })
+                        }),
+                    }
                 }
                 Wpa2IoCommand::InstallKey(install) => {
                     self.install_ccmp(install)
