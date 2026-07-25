@@ -38,6 +38,8 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
     "hal_mac_set_csi_cbw",
+    "phy_set_rx_comp_new",
+    "phy_dc_mem_clr",
     "lmacProcessTxComplete",
     "lmacProcessTxSuccess",
     "lmacProcessCtsTimeout",

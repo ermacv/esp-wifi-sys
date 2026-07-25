@@ -6,8 +6,6 @@ pub const ROOTS: &[&str] = &[
     "wDev_ProcessRxSucData",
     "ic_set_current_channel",
     "phy_set_tx_gain_mem_new",
-    "phy_set_rx_comp_new",
-    "phy_dc_mem_clr",
     "ic_mac_init",
     "ic_set_mac",
     "ic_set_rx_policy",
@@ -39,11 +37,7 @@ pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
     "wDev_Insert_KeyEntry",
 ];
 
-pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[
-    "phy_set_tx_gain_mem_new",
-    "phy_set_rx_comp_new",
-    "phy_dc_mem_clr",
-];
+pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &["phy_set_tx_gain_mem_new"];
 
 // The strict Rust PHY sequence calls several absolute ROM leaves whose bytes
 // are not present in the final ELF. Audit the pinned archive implementation as
@@ -186,6 +180,11 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "hal_mac_set_csi_cbw",
         "wifi_strict_hal_mac_set_csi_cbw",
     ),
+    (
+        "phy_set_rx_comp_new",
+        "wifi_strict_phy_set_rx_comp_new",
+    ),
+    ("phy_dc_mem_clr", "wifi_strict_phy_dc_mem_clr"),
     (
         "ieee80211_post_hmac_tx",
         "wifi_strict_ieee80211_post_hmac_tx",

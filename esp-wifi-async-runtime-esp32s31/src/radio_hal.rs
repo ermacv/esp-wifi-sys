@@ -12,6 +12,10 @@ const RX_DESCRIPTOR_LAST_HIGH_ADDRESS: usize = 0x2010_4c70;
 const TX_CCA_CONTROL_ADDRESS: usize = 0x2010_4c5c;
 const TX_QUEUE_CONTROL_BASE_ADDRESS: usize = 0x0100_4d70;
 const TX_QUEUE_CONTROL_STRIDE: usize = 0x10;
+const PHY_RX_COMP_LOW_ADDRESS: usize = 0x2010_702c;
+const PHY_DC_MEMORY_CONTROL_ADDRESS: usize = 0x2010_703c;
+const PHY_RX_COMP_HIGH_ADDRESS: usize = 0x2010_70a0;
+const PHY_DC_MEMORY_CLEAR_BIT: u32 = 1 << 20;
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
@@ -43,6 +47,14 @@ const fn without_tx_queue_valid(value: u32) -> u32 {
 
 const fn without_tx_queue_enable(value: u32) -> u32 {
     value & 0x3fff_ffff
+}
+
+const fn with_phy_rx_comp_low(value: u32) -> u32 {
+    (value & 0xffff_ff00) | 0xed
+}
+
+const fn with_phy_rx_comp_high(value: u32) -> u32 {
+    (value & 0x00ff_ffff) | 0xed00_0000
 }
 
 /// Read one of the two MAC TSF domains through the hardware latch.
@@ -151,11 +163,46 @@ pub unsafe extern "C" fn wifi_strict_hal_mac_txq_disable(queue: u8) {
 #[link_section = ".rwtext.wifi_strict.radio_hal"]
 pub unsafe extern "C" fn wifi_strict_hal_mac_set_csi_cbw(_cbw: u32) {}
 
+/// Program the two recovered PHY RX compensation fields.
+///
+/// Reference: pinned `libphy.a[phy_reg.o]::phy_set_rx_comp_new`, size `0x28`.
+/// The complete body replaces bits 7:0 of `0x2010_702c` and bits 31:24 of
+/// `0x2010_70a0` with `0xed`, in that order. The field meaning is not yet
+/// known; this function intentionally documents only the evidenced register
+/// transaction. It contains no call, loop, wait, allocation, or data-symbol
+/// access.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_set_rx_comp_new() {
+    let low = PHY_RX_COMP_LOW_ADDRESS as *mut u32;
+    low.write_volatile(with_phy_rx_comp_low(low.read_volatile()));
+
+    let high = PHY_RX_COMP_HIGH_ADDRESS as *mut u32;
+    high.write_volatile(with_phy_rx_comp_high(high.read_volatile()));
+}
+
+/// Pulse the recovered PHY DC-memory clear control bit.
+///
+/// Reference: pinned `libphy.a[phy_reg.o]::phy_dc_mem_clr`, size `0x1c`.
+/// The complete body sets then clears bit 20 of `0x2010_703c`, performing a
+/// fresh volatile read before each write. The exact hardware side effect is
+/// not yet documented beyond the vendor symbol name and this transaction.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_dc_mem_clr() {
+    let control = PHY_DC_MEMORY_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(control.read_volatile() | PHY_DC_MEMORY_CLEAR_BIT);
+    control.write_volatile(control.read_volatile() & !PHY_DC_MEMORY_CLEAR_BIT);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         join_rx_descriptor_address, tsf_latch_mask, tx_queue_control_address, tx_queue_is_valid,
-        with_tx_cca, without_tx_queue_enable, without_tx_queue_valid,
+        with_phy_rx_comp_high, with_phy_rx_comp_low, with_tx_cca, without_tx_queue_enable,
+        without_tx_queue_valid,
     };
 
     #[test]
@@ -193,5 +240,13 @@ mod tests {
         assert_eq!(tx_queue_is_valid(0x8000_0000), 0);
         assert_eq!(without_tx_queue_valid(u32::MAX), 0xbfff_ffff);
         assert_eq!(without_tx_queue_enable(u32::MAX), 0x3fff_ffff);
+    }
+
+    #[test]
+    fn phy_rx_comp_fields_match_the_pinned_leaf() {
+        assert_eq!(with_phy_rx_comp_low(0x1234_5678), 0x1234_56ed);
+        assert_eq!(with_phy_rx_comp_low(u32::MAX), 0xffff_ffed);
+        assert_eq!(with_phy_rx_comp_high(0x1234_5678), 0xed34_5678);
+        assert_eq!(with_phy_rx_comp_high(u32::MAX), 0xedff_ffff);
     }
 }
