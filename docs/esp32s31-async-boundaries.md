@@ -955,10 +955,10 @@ is not claimed as replaced.
 
 The pre-port HIL measurement saw 711/711 base-layout, status-zero STA units and
 only management/data frame classes (`bitmap=0x101`). After the change, a full
-WPA2/network stress run decoded 708/708 units: Rust owned 696 data routes and
-the ROM fallback handled 12 management routes. It completed 4,096/4,096 UDP
-datagrams and 4/4 HTTP transfers at 25.211 Mbit/s with balanced 4,786/4,786 TX
-and 693/693 network RX ownership, zero allocations and zero rejections. The
+WPA2/network stress run decoded 730/730 units: Rust owned 712 data routes and
+the ROM fallback handled 18 management routes. It completed 4,096/4,096 UDP
+datagrams and 4/4 HTTP transfers at 25.071 Mbit/s with balanced 4,786/4,786 TX
+and 690/690 network RX ownership, zero allocations and zero rejections. The
 host-tested aggregate decoder also corrected the earlier diagnostic
 approximation: this run contained only flag value zero. Management is the next
 measured aggregate slice; control, AP/NAN, optional metadata and error classes

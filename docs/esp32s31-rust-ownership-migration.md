@@ -312,10 +312,10 @@ Rust-owned.
 
 The pre-port measurement observed 711/711 status-zero base layouts, all on the
 STA route and with only management/data frame classes (`bitmap=0x101`). The
-post-port hardware run decoded 708/708 such units: 696 data aggregates used
-the Rust route and the 12 management aggregates used the explicit fallback.
+post-port hardware run decoded 730/730 such units: 712 data aggregates used
+the Rust route and the 18 management aggregates used the explicit fallback.
 It completed WPA2, 4,096/4,096 UDP datagrams and 4/4 HTTP transfers at
-25.211 Mbit/s, balanced 4,786/4,786 TX and 693/693 network RX owners, and
+25.071 Mbit/s, balanced 4,786/4,786 TX and 690/690 network RX owners, and
 retained zero allocation and rejection counts. The exact decoder reported
 only aggregate-flag value zero in that run. Optional sniffer, CSI, NAN,
 error-status and extended-metadata classes remain unqualified.
