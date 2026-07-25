@@ -65,6 +65,9 @@ impl<C, const N: usize> RadioCommandQueue<C, N> {
         }
     }
 
+    // Keep the single-attempt claim visible in final disassembly. The strict
+    // audit verifies that code generation contains no LR/SC retry cycle.
+    #[inline(never)]
     pub fn try_submit(&self, command: C) -> Result<(), TrySendError<C>> {
         match self.channel.try_send(command) {
             Ok(()) => {

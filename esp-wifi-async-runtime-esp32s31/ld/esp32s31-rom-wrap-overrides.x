@@ -67,6 +67,10 @@ EXTERN(wifi_strict_pp_recycle_rx_pkt);
 ppRecycleRxPkt = wifi_strict_pp_recycle_rx_pkt;
 ASSERT(ppRecycleRxPkt == wifi_strict_pp_recycle_rx_pkt,
        "ESP32-S31 ppRecycleRxPkt Rust boundary is inactive");
+/* The RX callback is published through a mutable WDEV table rather than a
+ * normal final-link relocation. Keep its unique symbol so the strict audit
+ * can prove both the publication target and its internal-SRAM placement. */
+EXTERN(wifi_strict_lmac_rx_done);
 
 __real_wDev_AppendRxBlocks = 0x2f8010c4;
 wDev_AppendRxBlocks = __wrap_wDev_AppendRxBlocks;
