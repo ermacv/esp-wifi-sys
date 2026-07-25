@@ -12,7 +12,7 @@ pub(crate) fn strict_sta_ap_treatment(
     // (`0x2000`, `0x2008`, `0x2010`, ...), not mapper state. Keep the adjacent
     // security leaf's upper-bit invariant but do not accidentally bind queue
     // policy to those opaque low bits.
-    if layout & 0xe000 != 0x2000 || state[4] != 0 {
+    if layout & 0xe000 != 0x2000 {
         return None;
     }
 
@@ -20,6 +20,7 @@ pub(crate) fn strict_sta_ap_treatment(
         && state[0] == 0
         && state[1] == 7
         && state[2] == 0
+        && state[4] == 0
         && ((state[3] == 0x80 && matches!(frame_control, 0x00b0 | 0x0000))
             || (state[3] == 0x81 && frame_control == 0x00d0));
     let eapol = rate == 0 && frame_control == 0x0188 && state == [0x0200_200c, 7, 0, 0x81, 0];
@@ -40,6 +41,12 @@ pub(crate) fn strict_sta_ap_treatment(
     // beacon/probe path rather than the STA management tuple above.
     let ap_authentication_response =
         rate == 12 && frame_control == 0x00b0 && state == [0, 7, 0x0004_0000, 0x83, 0];
+    // A successful AP association response observes the node after the vendor
+    // state transition: peer[0x0c] and peer[0x84] are therefore intentionally
+    // different from the pre-association authentication tuple.
+    let ap_association_response = rate == 11
+        && frame_control == 0x0010
+        && state == [0, 7, 0x0004_0000, 0x2100_0000, 1];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -51,7 +58,8 @@ pub(crate) fn strict_sta_ap_treatment(
         && state[0] == 0x0000_2009
         && matches!(priority_treatment, 7 | 0x20)
         && state[2] == 0x304
-        && state[3] == 0x81;
+        && state[3] == 0x81
+        && state[4] == 0;
     let legacy_qos =
         rate == 0 && frame_control == 0x4188 && state == [0x0200_2009, 7, 0x304, 0x81, 0];
 
@@ -60,6 +68,7 @@ pub(crate) fn strict_sta_ap_treatment(
         || ap_beacon
         || ap_probe_response
         || ap_authentication_response
+        || ap_association_response
         || ht_qos
         || legacy_qos
     {
@@ -236,6 +245,12 @@ mod tests {
             (12, 0x2001, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x83, 0]),
             (12, 0x2003, 0x0050, [0x0800_0010, 7, 0x0004_0000, 0x83, 0]),
             (12, 0x2730, 0x00b0, [0, 7, 0x0004_0000, 0x83, 0]),
+            (
+                11,
+                0x2731,
+                0x0010,
+                [0, 7, 0x0004_0000, 0x2100_0000, 1],
+            ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -286,6 +301,15 @@ mod tests {
         );
         assert_eq!(
             strict_sta_ap_treatment(12, 0x2730, 0x00b0, [0, 7, 0x0004_0000, 0x80, 0],),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                11,
+                0x2731,
+                0x0010,
+                [0, 7, 0x0004_0000, 0x2100_0000, 0],
+            ),
             None
         );
         assert_eq!(

@@ -808,6 +808,13 @@ descriptor flags, priority `7`, selector `0x0004_0000`, and peer state `0x83`.
 As with the probe response, the low layout bits are a fixed-slot identity;
 only the already-proven upper `0x2000` headroom state affects mapping.
 
+After that response, the laptop join reached the AP association-response
+mapper with frame control `0x0010`, rate `11`, layout `0x2731`, zero descriptor
+flags, priority `7`, selector `0x0004_0000`, peer word `0x2100_0000`, and
+peer flag `1`. The nonzero flag is admitted only as part of this complete
+post-association tuple; all earlier mapper classes retain their zero-flag
+requirement.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
