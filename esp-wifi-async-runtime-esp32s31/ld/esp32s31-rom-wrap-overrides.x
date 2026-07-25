@@ -115,6 +115,20 @@ hal_mac_get_txq_complete = __wrap_hal_mac_get_txq_complete;
 __real_lmacTxDone = 0x2f800dec;
 lmacTxDone = __wrap_lmacTxDone;
 
+/* TXOP admission is a three-slot state machine, not a hardware leaf. Route
+ * both archive callers and WDEV callback-table relocations to the Rust owner;
+ * this also lets section GC discard libpp.a[lmac.o]'s private three-byte
+ * g_txop_queue_status object. */
+EXTERN(wifi_strict_lmac_request_txop_queue);
+lmacRequestTxopQueue = wifi_strict_lmac_request_txop_queue;
+ASSERT(lmacRequestTxopQueue == wifi_strict_lmac_request_txop_queue,
+       "ESP32-S31 lmacRequestTxopQueue Rust boundary is inactive");
+
+EXTERN(wifi_strict_lmac_release_txop_queue);
+lmacReleaseTxopQueue = wifi_strict_lmac_release_txop_queue;
+ASSERT(lmacReleaseTxopQueue == wifi_strict_lmac_release_txop_queue,
+       "ESP32-S31 lmacReleaseTxopQueue Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */

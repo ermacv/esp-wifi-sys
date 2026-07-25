@@ -29,6 +29,8 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacTxDone",
     "hal_mac_get_txq_state",
     "hal_mac_get_txq_complete",
+    "lmacRequestTxopQueue",
+    "lmacReleaseTxopQueue",
     "lmacProcessTxComplete",
     "lmacProcessTxSuccess",
     "lmacProcessCtsTimeout",

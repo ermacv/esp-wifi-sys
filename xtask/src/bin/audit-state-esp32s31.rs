@@ -48,7 +48,10 @@ const ROM_ABI_BACKINGS: &[(&str, &str)] = &[
     ("trc_ctl_ptr", "trc_ctl"),
     ("g_pm_cfg_ptr", "g_pm_cfg"),
     ("g_pm_ptr", "g_pm"),
-    ("g_txop_queue_status_ptr", "g_txop_queue_status"),
+    (
+        "g_txop_queue_status_ptr",
+        "wifi_strict_txop_queue_status",
+    ),
     ("g_pm_cnt_ptr", "g_pm_cnt"),
     ("g_pp_timer_info_ptr", "g_pp_timer_info"),
     ("g_rts_threshold_bytes_ptr", "g_rts_threshold_bytes"),

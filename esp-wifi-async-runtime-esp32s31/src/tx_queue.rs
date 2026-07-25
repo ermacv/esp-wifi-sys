@@ -7,7 +7,9 @@
 //! adopts the four fixed vendor masks once, then all sixteen intrusive queue
 //! heads, tails, and rotation cursors live in one Rust-owned single-hart state.
 
-use crate::tx_queue_state::{select_ready_logical_queue, LogicalQueue, TX_FRAME_NEXT_OFFSET};
+use crate::tx_queue_state::{
+    select_ready_logical_queue, LogicalQueue, TxopQueueState, TX_FRAME_NEXT_OFFSET,
+};
 #[cfg(feature = "hil-vendor-tx")]
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::{
@@ -48,9 +50,11 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TxQueueStateAdoptionError {
     TxRxUnavailable,
+    InstancesUnavailable,
     QueueNotEmpty(u8),
     InvalidEmptyTailLink(u8),
     QueueBusy(u8),
+    InvalidTxopClass { queue: u8, class: u8 },
 }
 
 struct StrictTxQueueState {
@@ -84,6 +88,25 @@ static STRICT_TX_QUEUE_STATE: StrictTxQueueStateCell =
     StrictTxQueueStateCell(UnsafeCell::new(StrictTxQueueState::empty()));
 static STRICT_TX_QUEUE_STATE_ADOPTED: AtomicBool = AtomicBool::new(false);
 
+#[repr(transparent)]
+struct TxopQueueStateCell(UnsafeCell<TxopQueueState>);
+
+// The three bytes are both the typed Rust allocator state and the object
+// published through `g_txop_queue_status_ptr`. The pinned vendor object used
+// the same `[1, 1, 1]` representation, so no duplicate compatibility mirror
+// exists and no synchronization between C and Rust state is required.
+unsafe impl Sync for TxopQueueStateCell {}
+
+#[no_mangle]
+#[used]
+#[link_section = ".critical.data.wifi_strict.txop_queue_status"]
+static wifi_strict_txop_queue_status: TxopQueueStateCell =
+    TxopQueueStateCell(UnsafeCell::new(TxopQueueState::all_available()));
+
+pub(crate) fn txop_queue_status_abi_ptr() -> *mut u8 {
+    wifi_strict_txop_queue_status.0.get().cast::<u8>()
+}
+
 /// Adopt only the finite TX scheduler policy from the vendor `pTxRx` object.
 ///
 /// The handoff is intentionally fail-closed: no frame or busy queue may cross
@@ -102,6 +125,10 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
     let txrx = ptr::addr_of!(pTxRx).read();
     if txrx.is_null() {
         return Err(TxQueueStateAdoptionError::TxRxUnavailable);
+    }
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    if instances.is_null() {
+        return Err(TxQueueStateAdoptionError::InstancesUnavailable);
     }
 
     let state = &mut *STRICT_TX_QUEUE_STATE.0.get();
@@ -130,6 +157,15 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
 
     let mut hardware = 0_usize;
     while hardware < HARDWARE_QUEUE_COUNT {
+        let class = instances
+            .add(hardware * TX_QUEUE_STATE_SIZE + TX_QUEUE_KIND_OFFSET)
+            .read();
+        if class != 3 {
+            return Err(TxQueueStateAdoptionError::InvalidTxopClass {
+                queue: hardware as u8,
+                class,
+            });
+        }
         state.hardware_masks[hardware] = txrx
             .add(TXRX_HARDWARE_MASKS_OFFSET + hardware * 4)
             .cast::<u32>()
@@ -138,6 +174,7 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
         hardware += 1;
     }
     state.queues = [LogicalQueue::empty(); LOGICAL_QUEUE_COUNT];
+    (&mut *wifi_strict_txop_queue_status.0.get()).reset();
     STRICT_TX_QUEUE_STATE_ADOPTED.store(true, AtomicOrdering::Release);
     Ok(())
 }
@@ -156,6 +193,89 @@ unsafe fn strict_tx_queue_state() -> Option<&'static mut StrictTxQueueState> {
     STRICT_TX_QUEUE_STATE_ADOPTED
         .load(AtomicOrdering::Acquire)
         .then(|| &mut *STRICT_TX_QUEUE_STATE.0.get())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxopQueueError {
+    UnsupportedHardwareQueue(u8),
+    InstancesUnavailable,
+    QueueAlreadyOwnsClass { queue: u8, class: u8 },
+    InvalidOwnedClass { queue: u8, class: u8 },
+}
+
+/// Allocate the first free TXOP class and publish it into one hardware queue.
+///
+/// This is the exact finite state transform recovered from
+/// `libpp.a[lmac.o]::lmacRequestTxopQueue`, with explicit ownership and bounds
+/// checks added around the original two stores.
+pub(crate) unsafe fn request_txop_queue(queue: u8) -> Result<bool, TxopQueueError> {
+    if usize::from(queue) >= HARDWARE_QUEUE_COUNT {
+        return Err(TxopQueueError::UnsupportedHardwareQueue(queue));
+    }
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    if instances.is_null() {
+        return Err(TxopQueueError::InstancesUnavailable);
+    }
+    let queue_kind = instances
+        .add(usize::from(queue) * TX_QUEUE_STATE_SIZE + TX_QUEUE_KIND_OFFSET);
+    let current = queue_kind.read();
+    if current != 3 {
+        return Err(TxopQueueError::QueueAlreadyOwnsClass {
+            queue,
+            class: current,
+        });
+    }
+
+    let Some(class) = (&mut *wifi_strict_txop_queue_status.0.get()).request() else {
+        return Ok(false);
+    };
+    queue_kind.write(class);
+    Ok(true)
+}
+
+/// Return a hardware queue's TXOP class to the Rust-owned three-slot pool.
+pub(crate) unsafe fn release_txop_queue(queue: u8) -> Result<(), TxopQueueError> {
+    if usize::from(queue) >= HARDWARE_QUEUE_COUNT {
+        return Err(TxopQueueError::UnsupportedHardwareQueue(queue));
+    }
+    let instances = ptr::addr_of!(our_instances_ptr).read();
+    if instances.is_null() {
+        return Err(TxopQueueError::InstancesUnavailable);
+    }
+    let queue_kind = instances
+        .add(usize::from(queue) * TX_QUEUE_STATE_SIZE + TX_QUEUE_KIND_OFFSET);
+    let class = queue_kind.read();
+    if !(&mut *wifi_strict_txop_queue_status.0.get()).release(class) {
+        return Err(TxopQueueError::InvalidOwnedClass { queue, class });
+    }
+    queue_kind.write(3);
+    Ok(())
+}
+
+#[cfg(target_arch = "riscv32")]
+#[cold]
+#[inline(never)]
+unsafe fn txop_abi_invariant_failure() -> ! {
+    core::arch::asm!("ebreak", options(noreturn))
+}
+
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".critical.text.wifi_strict.lmac_request_txop_queue"]
+pub unsafe extern "C" fn wifi_strict_lmac_request_txop_queue(queue: u8) -> u32 {
+    match request_txop_queue(queue) {
+        Ok(allocated) => u32::from(allocated),
+        Err(_) => txop_abi_invariant_failure(),
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".critical.text.wifi_strict.lmac_release_txop_queue"]
+pub unsafe extern "C" fn wifi_strict_lmac_release_txop_queue(queue: u8) {
+    if release_txop_queue(queue).is_err() {
+        txop_abi_invariant_failure();
+    }
 }
 
 /// Read the exact finite `lmacIsIdle` state without entering its vendor leaf.

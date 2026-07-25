@@ -106,7 +106,6 @@ unsafe extern "C" {
     fn hal_mac_is_txq_valid(queue: u8) -> u32;
     fn hal_mac_set_txq_invalid(queue: u8);
     fn hal_mac_txq_disable(queue: u8);
-    fn lmacReleaseTxopQueue(queue: u8);
     fn lmacTxDone(frame: *mut c_void, mode: u32);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
@@ -126,6 +125,7 @@ pub enum LmacAsyncError {
     PreviousContinuationFailure,
     UnsupportedAggregatedFrame(u32),
     TxRxUnavailable,
+    TxopQueue(crate::tx_queue::TxopQueueError),
     InvalidDiscardContinuation,
     TxDone(crate::txdone::TxDoneError),
     TxQueueSplitFailed,
@@ -2891,7 +2891,7 @@ unsafe fn finish_discard_frame_step(state: &mut TxTimeoutState) -> Result<(), Lm
         // would enter the fatal/default `ppTask` arm. Resume the hardware queue
         // which raised this timeout instead.
         if queue_state.add(TX_QUEUE_KIND_OFFSET).read() <= 2 {
-            lmacReleaseTxopQueue(queue);
+            crate::tx_queue::release_txop_queue(queue).map_err(LmacAsyncError::TxopQueue)?;
         }
         if pp_post(u32::from(state.current_queue), ptr::null_mut()) != 0 {
             return Err(LmacAsyncError::InternalQueueFull);

@@ -7,6 +7,52 @@
 use core::ptr;
 
 pub(crate) const TX_FRAME_NEXT_OFFSET: usize = 0x30;
+pub(crate) const TXOP_CLASS_COUNT: usize = 3;
+
+/// Exact three-byte TXOP allocator state published through the S31 ROM ABI.
+///
+/// The pinned `libpp.a[lmac.o]` object initializes the bytes to `[1, 1, 1]`.
+/// `lmacRequestTxopQueue` takes the first non-zero byte and clears it;
+/// `lmacReleaseTxopQueue` restores that byte to one. Keeping the recovered byte
+/// representation lets the compatibility pointer refer directly to
+/// Rust-owned storage instead of maintaining a shadow C object.
+#[repr(C)]
+pub(crate) struct TxopQueueState {
+    available: [u8; TXOP_CLASS_COUNT],
+}
+
+impl TxopQueueState {
+    pub(crate) const fn all_available() -> Self {
+        Self {
+            available: [1; TXOP_CLASS_COUNT],
+        }
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub(crate) fn reset(&mut self) {
+        self.available = [1; TXOP_CLASS_COUNT];
+    }
+
+    pub(crate) fn request(&mut self) -> Option<u8> {
+        let mut class = 0_usize;
+        while class < TXOP_CLASS_COUNT {
+            if self.available[class] != 0 {
+                self.available[class] = 0;
+                return Some(class as u8);
+            }
+            class += 1;
+        }
+        None
+    }
+
+    pub(crate) fn release(&mut self, class: u8) -> bool {
+        let Some(available) = self.available.get_mut(usize::from(class)) else {
+            return false;
+        };
+        *available = 1;
+        true
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct LogicalQueue {
@@ -127,7 +173,9 @@ pub(crate) const fn select_ready_logical_queue(
 
 #[cfg(test)]
 mod tests {
-    use super::{select_ready_logical_queue, LogicalQueue, TX_FRAME_NEXT_OFFSET};
+    use super::{
+        select_ready_logical_queue, LogicalQueue, TxopQueueState, TX_FRAME_NEXT_OFFSET,
+    };
 
     unsafe fn next(frame: *mut u8) -> *mut u8 {
         frame.add(TX_FRAME_NEXT_OFFSET).cast::<*mut u8>().read()
@@ -211,5 +259,25 @@ mod tests {
     fn hardware_zero_preserves_the_recovered_latency_fallback() {
         assert_eq!(select_ready_logical_queue(0, 0, 0, 0x0004, false), Some(2));
         assert_eq!(select_ready_logical_queue(1, 0, 0, 0x0004, false), None);
+    }
+
+    #[test]
+    fn txop_allocator_preserves_vendor_first_available_order() {
+        let mut state = TxopQueueState::all_available();
+        assert_eq!(state.request(), Some(0));
+        assert_eq!(state.request(), Some(1));
+        assert_eq!(state.request(), Some(2));
+        assert_eq!(state.request(), None);
+    }
+
+    #[test]
+    fn txop_release_is_idempotent_and_rejects_invalid_classes() {
+        let mut state = TxopQueueState::all_available();
+        assert_eq!(state.request(), Some(0));
+        assert!(state.release(0));
+        assert!(state.release(0));
+        assert!(!state.release(3));
+        assert_eq!(state.request(), Some(0));
+        assert_eq!(state.request(), Some(1));
     }
 }

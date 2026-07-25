@@ -69,8 +69,9 @@ impl StaticVendorBindingError {
     }
 }
 
-/// Evidence that all 43 ROM ABI cells refer to their exact fixed archive
-/// backing objects.
+/// Evidence that all 43 ROM ABI cells refer to their qualified fixed backing
+/// objects. Forty-two remain pinned archive storage; TXOP availability is
+/// Rust-owned.
 pub struct StaticVendorBindings {
     _private: (),
 }
@@ -110,6 +111,7 @@ macro_rules! fixed_bindings {
                     ptr::addr_of_mut!($wdev_backing).cast::<u8>(),
                 );
             )+
+            write_rust_txop_queue_status_binding();
         }
 
         unsafe fn validate_fixed_bindings(
@@ -132,9 +134,30 @@ macro_rules! fixed_bindings {
                     });
                 }
             )+
+            validate_rust_txop_queue_status_binding()?;
             Ok(StaticVendorBindings { _private: () })
         }
     };
+}
+
+unsafe extern "C" {
+    static mut g_txop_queue_status_ptr: *mut u8;
+}
+
+unsafe fn write_rust_txop_queue_status_binding() {
+    ptr::addr_of_mut!(g_txop_queue_status_ptr)
+        .write_volatile(crate::tx_queue::txop_queue_status_abi_ptr());
+}
+
+unsafe fn validate_rust_txop_queue_status_binding() -> Result<(), StaticVendorBindingError> {
+    if ptr::addr_of!(g_txop_queue_status_ptr).read_volatile()
+        != crate::tx_queue::txop_queue_status_abi_ptr()
+    {
+        return Err(StaticVendorBindingError {
+            binding: StaticVendorBinding::TxopQueueStatus,
+        });
+    }
+    Ok(())
 }
 
 // The order mirrors the pinned disassembly: first
@@ -173,7 +196,6 @@ fixed_bindings! {
         TrcControl: trc_ctl_ptr => trc_ctl,
         PowerManagementConfig: g_pm_cfg_ptr => g_pm_cfg,
         PowerManagement: g_pm_ptr => g_pm,
-        TxopQueueStatus: g_txop_queue_status_ptr => g_txop_queue_status,
         PowerManagementCounters: g_pm_cnt_ptr => g_pm_cnt,
         PpTimerInfo: g_pp_timer_info_ptr => g_pp_timer_info,
         RtsThresholds: g_rts_threshold_bytes_ptr => g_rts_threshold_bytes,
@@ -205,6 +227,10 @@ fixed_bindings! {
 pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticVendorBindingError> {
     net80211_data_ptr_init();
     let _ = wdev_data_init();
+    // The vendor publisher selects its private three-byte object. Replace that
+    // one binding immediately: TXOP allocation is now Rust-owned in every
+    // profile that uses this audited boundary.
+    write_rust_txop_queue_status_binding();
     validate_static_vendor_bindings()
 }
 
@@ -212,7 +238,9 @@ pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticV
 ///
 /// Unlike the vendor net80211 leaf, this has no hidden one-shot guard: the
 /// stores are idempotent and serialized ownership is an explicit caller
-/// precondition. It performs no calls, allocation, waiting, or hardware access.
+/// precondition. The TXOP cell deliberately selects the Rust-owned three-byte
+/// state rather than the private archive object. It performs no calls,
+/// allocation, waiting, or hardware access.
 ///
 /// # Safety
 ///

@@ -263,7 +263,6 @@ unsafe extern "C" {
     fn esf_buf_recycle(frame: *mut c_void);
     #[link_name = "rcUpdateTxDone"]
     fn vendor_rc_update_tx_done(rate_control: *mut c_void, descriptor: *mut c_void);
-    fn lmacReleaseTxopQueue(queue: u8);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
 
@@ -287,6 +286,7 @@ pub enum TxDoneError {
     UnsupportedLmacDescriptorFlags(u32),
     UnsupportedLmacMode(u32),
     InstancesUnavailable,
+    TxopQueue(crate::tx_queue::TxopQueueError),
     TxTimeRecordingEnabled,
     InvalidPhase,
     StrictCallbackFailed,
@@ -1746,7 +1746,8 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
             .read()
             <= 2
         {
-            lmacReleaseTxopQueue(resume_event);
+            crate::tx_queue::release_txop_queue(resume_event)
+                .map_err(TxDoneError::TxopQueue)?;
         }
         if pp_post(u32::from(resume_event), ptr::null_mut()) != 0 {
             return Err(TxDoneError::InternalQueueFull);

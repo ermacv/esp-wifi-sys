@@ -512,14 +512,18 @@ The ownership model, reverse-engineering evidence, completed channel-manager
 slice, and next state-migration priorities are maintained in
 [`../docs/esp32s31-rust-ownership-migration.md`](../docs/esp32s31-rust-ownership-migration.md).
 The two leaves contain exactly 43 pointer publications: 12 net80211 bindings
-and 31 PP/WDEV bindings. `bind_static_vendor_state` exposes the audited vendor
-leaves as a serialized cold-init operation, while
+and 31 PP/WDEV bindings. Forty-two still select their pinned archive backing;
+`g_txop_queue_status_ptr` selects the equivalent Rust-owned three-byte TXOP
+pool. `bind_static_vendor_state` exposes the audited vendor leaves as a
+serialized cold-init operation and immediately replaces that one publication,
+while
 `bind_static_vendor_state_in_rust` performs the same two ordered groups of
 volatile stores without entering either vendor body. The
 `rust-static-bindings-interpose` feature exports matching
-`__wrap_net80211_data_ptr_init` and `__wrap_wdev_data_init` boundaries for an
-A/B hardware image. The ordinary vendor bring-up still owns the surrounding
-initialization sequence; before handoff,
+`__wrap_net80211_data_ptr_init` and `__wrap_wdev_data_init` boundaries. The
+heap-free primary profile uses those Rust publishers; the vendor-publisher
+path remains an explicit A/B oracle. The surrounding initialization sequence
+is still temporary vendor code; before handoff,
 `prepare_strict_runtime_before_handoff` independently verifies all 43 cells
 against their exact fixed backing objects.
 The adjacent `pm_funcs_init` leaf previously obtained one zeroed 0x44-byte
@@ -636,6 +640,17 @@ leaf plus the unobserved RTS-error and generic TX-error outcomes remain strict
 audit roots. It is expected to fail
 until all reported roots are replaced or their exact indirect target and loop
 bound are proven.
+
+TXOP admission and release are now Rust-owned as well. The recovered vendor
+state is exactly three availability bytes initialized to `[1, 1, 1]`; request
+takes the first non-zero slot and stores its index at hardware-queue offset
+`0x1d`, while release restores the slot and writes the sentinel `3`. Safe Rust
+owns that finite transform and the persistent bytes. The ABI adapters validate
+the four hardware queues and trap on invalid pointers or class values. Late
+link aliases replace both `lmacRequestTxopQueue` and
+`lmacReleaseTxopQueue`, including their WDEV callback-table addresses, so the
+old bodies and private `g_txop_queue_status` object are absent from the primary
+ELF.
 
 The next blocking boundary is the contents of classified TX callbacks and the
 remaining TX/RX completion handlers, not event 22. The strict timeout/discard

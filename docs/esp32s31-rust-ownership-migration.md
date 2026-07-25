@@ -568,10 +568,11 @@ directly. The three writes formerly performed by
 `hal_he_set_bf_report_rate` and four byte-field writes from
 `hal_he_set_ersu_ack_rate` are likewise direct, finite Rust MMIO sequences.
 
-The strict final-ELF audit now reports 21 vendor roots, 34 reachable vendor
-functions, zero mutable blob globals reachable from strict leaves and zero
-violations. Ownership debt is `1 fallback + 10 stateful/unproven + 10 temporary
-MMIO`. Linking all currently admissible schedule arenas retains one additional
+At this checkpoint the strict final-ELF audit reported 21 vendor roots, 34
+reachable vendor functions, zero mutable blob globals reachable from strict
+leaves and zero violations. Ownership debt was
+`1 fallback + 10 stateful/unproven + 10 temporary MMIO`. Linking all currently
+admissible schedule arenas retains one additional
 12-byte compatibility object (`BAROFDMSched`), while the Rust transition adds
 320 bytes of internal executable/read-only storage. Both costs are explicit in
 the primary state baseline and are temporary until schedule contents move into
@@ -583,6 +584,37 @@ completed. An 8 MiB device-to-host TCP transfer completed at approximately
 20 Mbit/s in the ordinary non-throughput profile. TX ownership balanced at
 5,946/5,946, the 32-credit pool reached its full qualified high-water mark, and
 all invalid/full/contended/credit/peer rejection counters remained zero.
+
+## Completed runtime slice: TXOP queue ownership
+
+The pinned `libpp.a[lmac.o]` implementation uses a three-byte availability
+array initialized to `[1, 1, 1]`. `lmacRequestTxopQueue` takes the first
+non-zero byte, clears it, and writes the selected class `0..=2` to byte
+`0x1d` of one 0x38-byte hardware-queue record. If no class is free it returns
+zero without mutation. `lmacReleaseTxopQueue` restores that byte and writes
+the sentinel class `3` back to the queue.
+
+`TxopQueueState` now owns this finite transform in safe Rust. The persistent
+three bytes are a single internal-SRAM object, published directly through
+`g_txop_queue_status_ptr`; there is no C shadow or duplicated synchronization
+state. Quiescent handoff proves all four hardware queues contain sentinel
+class `3` before resetting the pool. The two narrow ABI adapters additionally
+validate the queue index, `our_instances_ptr`, and old class, and trap on an
+ownership invariant violation rather than indexing arbitrary memory.
+
+Late linker aliases redirect both request and release, including the function
+addresses installed in the WDEV callback table. The heap-free primary profile
+now enables the already-qualified Rust implementation of all 43 static pointer
+publications, which is required to publish the Rust TXOP object. The resulting
+ELF contains `wifi_strict_txop_queue_status` (three bytes) and neither the
+vendor request/release bodies nor private `g_txop_queue_status`.
+
+The full strict audit covers 6,407 functions with zero violations. Runtime
+vendor debt decreases to 20 roots and
+`1 fallback + 9 stateful/unproven + 10 temporary MMIO`; reachable vendor
+functions decrease to 33. The linked-state audit reports all 43/43 fixed
+bindings, zero mutable blob globals reachable from strict leaves, and one
+fewer outside blob object (181 objects / 22,132 bytes).
 
 ## Completed strict-runtime slice: `wDevCtrl`
 
