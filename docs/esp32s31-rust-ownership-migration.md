@@ -937,3 +937,24 @@ rejects, or vendor indication fallbacks. Ordinary 1,500-byte Ethernet traffic
 kept `max_descriptors=1` and `rust_multi_indicate_routes=0`; consequently the
 hardware run proves whole-path non-regression and memory placement, while a
 real multi-descriptor MPDU remains a separate jumbo/A-MSDU HIL qualification.
+
+The remaining RX compatibility boundary is now classified by seventeen
+mutually exclusive fixed counters. This exposed a false fallback after link:
+`g_wdev_csi_rx` became non-null even though every received unit reported a
+zero CSI length. The pinned `wDev_IndicateFrame` disassembly proves that the
+callback pointer is irrelevant for this admitted profile. At
+`+0xf4..+0x10a`, `s5` is overwritten with the ten-bit CSI length from metadata
+bytes `0x26..0x27`; the call to `wdev_csi_rx_process` at `+0x298` is guarded
+by `beqz s5`. The Rust admission predicate already rejects every value other
+than `Some(0)`, so reading the callback pointer introduced a stricter condition
+than the binary and was removed.
+
+The resulting image passed 275 host tests and the 6,407-function/25-root
+strict audit with zero violations. Its strict graph reaches no mutable blob
+global or ROM-ABI state cell. Seventeen diagnostic counters raise the
+temporary strict-static baseline from 311,922 to 311,990 bytes. Hardware then
+processed all 709 RX units through Rust: 695 data routes, 14 management routes,
+zero vendor fallbacks, zero indication fallbacks, and zero copy/allocation
+rejects. WPA2, DHCP, ICMP, DNS, TCP/HTTP, 4,096/4,096 UDP datagrams and 4/4
+HTTP transfers passed at 30.332 Mbit/s with 4,787/4,787 TX owners returned and
+an all-zero allocation snapshot.

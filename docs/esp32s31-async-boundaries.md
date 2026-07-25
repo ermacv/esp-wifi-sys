@@ -1333,3 +1333,20 @@ stock allocating `esp_send_assoc_resp` and ioctl envelope are bypassed.
 Use `--elf final.elf --enforce` after linking. Presence of a forbidden symbol,
 a missing direct-heap wrapper, or a replaced vendor entry is a build failure;
 `--verbose` prints every archive path.
+
+RX fallback accounting now assigns every compatibility call one of seventeen
+fixed reasons. The first measurement isolated all 692 post-link fallbacks to
+a non-null `g_wdev_csi_rx`, while the same units had zero CSI metadata. This
+was a false dependency: pinned `wDev_IndicateFrame+0xf4..0x10a` loads the
+ten-bit CSI length from metadata bytes `0x26..0x27` into `s5`, and the
+`wdev_csi_rx_process` call at `+0x298` is skipped when `s5` is zero. Because
+the Rust copy plan already requires `csi_length == Some(0)`, callback
+registration cannot affect any admitted frame. The hot path no longer reads
+that global; nonzero CSI metadata still fails closed before pointer ownership
+changes.
+
+Hardware qualification of the corrected boundary routed 709/709 RX units
+through Rust with zero vendor or indication fallback. The complete taskless
+WPA2/network stress completed 4,096/4,096 UDP datagrams and 4/4 HTTP transfers
+at 30.332 Mbit/s, balanced all 4,787 TX owners, and retained zero allocation,
+ESF rejection, blocking, task-delay, and direct-delay observations.
