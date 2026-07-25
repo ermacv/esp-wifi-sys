@@ -114,6 +114,16 @@ pub(crate) const fn rx_sta_management_copy_mode(frame_control: u16) -> Option<u3
     }
 }
 
+/// Identify the Probe Request that the pinned STA-only path reroutes to AP.
+///
+/// `wDev_ProcessRxSucData+0x25a..=0x268` replaces the descriptor route bits
+/// with AP, optionally calls the separately disabled observation callback,
+/// and later discards the unit when no AP interface is enabled. The caller
+/// owns those profile invariants and the unique discard authority.
+pub(crate) const fn rx_sta_probe_request_is_discarded(frame_control: u16) -> bool {
+    frame_control & 0x0f == 0 && (frame_control >> 4) & 0x0f == 4
+}
+
 /// Reproduce the pinned S31 RX recycle descriptor transformation.
 ///
 /// This leaf is deliberately independent of global state, registers and raw
@@ -167,10 +177,11 @@ mod tests {
     use core::ptr;
 
     use super::{
+        decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
+        restore_received_packet_buffer_view, rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
+        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
-        ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout,
-        descriptor_buffer_length, recycled_descriptor_word, restore_received_packet_buffer_view,
-        rx_indicate_aggregate_flag, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
+        ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
 
     #[test]
@@ -317,5 +328,14 @@ mod tests {
         assert_eq!(rx_sta_management_copy_mode(0x0040), None);
         assert_eq!(rx_sta_management_copy_mode(0x00d0), None);
         assert_eq!(rx_sta_management_copy_mode(0x0008), None);
+    }
+
+    #[test]
+    fn sta_probe_request_classifier_is_exact_and_flag_independent() {
+        assert!(rx_sta_probe_request_is_discarded(0x0040));
+        assert!(rx_sta_probe_request_is_discarded(0x0c40));
+        assert!(!rx_sta_probe_request_is_discarded(0x0041));
+        assert!(!rx_sta_probe_request_is_discarded(0x0050));
+        assert!(!rx_sta_probe_request_is_discarded(0x0008));
     }
 }
