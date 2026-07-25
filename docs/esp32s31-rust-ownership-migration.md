@@ -866,6 +866,14 @@ callback policy now accepts that exact status alongside the two previously
 measured group-CCMP outcomes. It remains a no-op only after the complete
 bounded geometry is checked; nearby selector/status values are rejected.
 
+Associating a second WPA2 station while the first Android peer remained active
+later returned group-key status `0x0404_0342` for the same frame control
+`0x4208`, lengths `0x0020:0x0068`, changing static-slot layout `0x202a`,
+buffer equation `0xc022_0082`, descriptor flags `0x0000_200b`, and callback
+bit 12. That complete measured outcome is now admitted alongside the older
+group completions; `0x0405_0342` and any change to the bounded geometry remain
+fail-closed.
+
 After DHCP made the AP network ready, the client requested RX aggregation.
 The existing bounded Rust ADDBA response reached the mapper as frame control
 `0x00d0`, rate `11`, layout `0x2732`, zero descriptor flags, priority `7`,

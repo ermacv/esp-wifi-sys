@@ -90,7 +90,7 @@ pub(crate) const fn strict_ap_group_power_save_completion(
         || !crate::tx_proto::is_ap_group_ccmp_descriptor(descriptor_flags)
         || !matches!(
             descriptor_security,
-            0x0104_0342 | 0x0114_0342 | 0x0414_0342
+            0x0104_0342 | 0x0114_0342 | 0x0404_0342 | 0x0414_0342
         )
         || header_len != 0x0020
         || remaining_len < 20
@@ -1280,7 +1280,9 @@ mod tests {
                     }),
                 );
                 for descriptor_flags in [0x0000_200b, 0x0200_200b] {
-                    for descriptor_security in [0x0104_0342, 0x0114_0342, 0x0414_0342] {
+                    for descriptor_security in
+                        [0x0104_0342, 0x0114_0342, 0x0404_0342, 0x0414_0342]
+                    {
                         assert!(strict_ap_group_power_save_completion(
                             0x4208,
                             0x0020,
@@ -1302,6 +1304,15 @@ mod tests {
             0xc022_0082,
             0x0000_200b,
             0x0105_0342,
+        ));
+        assert!(!strict_ap_group_power_save_completion(
+            0x4208,
+            0x0020,
+            0x0068,
+            0x2000,
+            0xc022_0082,
+            0x0000_200b,
+            0x0405_0342,
         ));
         let max_mpdu_len = super::AP_GROUP_MAX_MPDU_LEN;
         let max_input_flags =
