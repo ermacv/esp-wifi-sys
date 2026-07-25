@@ -7,7 +7,10 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::queue::WakerCell;
+use crate::{
+    atomic_once::{compare_exchange_once_acquire, compare_exchange_once_relaxed},
+    queue::WakerCell,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TrySendError<T>(pub T);
@@ -69,11 +72,7 @@ impl<T, const N: usize> BoundedChannel<T, N> {
         // 0 empty, 1 producer owns it, 2 full, 3 consumer owns it.
         if N == 1 {
             let slot = &self.slots[0];
-            if slot
-                .sequence
-                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
+            if compare_exchange_once_acquire(&slot.sequence, 0, 1).is_err() {
                 return Err(TrySendError(value));
             }
             unsafe { (*slot.value.get()).write(value) };
@@ -87,14 +86,7 @@ impl<T, const N: usize> BoundedChannel<T, N> {
         let slot = &self.slots[position % N];
         let sequence = slot.sequence.load(Ordering::Acquire);
         if sequence.wrapping_sub(position) as isize != 0
-            || self
-                .enqueue
-                .compare_exchange(
-                    position,
-                    position.wrapping_add(1),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
+            || compare_exchange_once_relaxed(&self.enqueue, position, position.wrapping_add(1))
                 .is_err()
         {
             return Err(TrySendError(value));

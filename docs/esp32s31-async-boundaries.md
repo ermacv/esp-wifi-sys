@@ -139,6 +139,15 @@ boundary. Producers move typed commands into a fixed-capacity channel. Only
 the owner handles them under virtual Wi-Fi identity, with a finite per-poll
 budget before PP/timer work is polled.
 
+The queue claim cannot rely on Rust `compare_exchange_weak` alone: the pinned
+LLVM RV32 backend lowers both weak and strong operations to an `lr.w`/`sc.w`
+retry loop. `atomic_once` instead emits exactly one reservation and one
+store-conditional. A failed store-conditional is reported as contention, the
+producer retains the typed command, and `submit` yields until a Rust async
+capacity wake. The final-image audit locates the live
+`RadioCommandQueue::try_submit` monomorphization and rejects every
+control-flow cycle in it, including compiler-introduced LR/SC retries.
+
 The production initialization path prevents the task from existing at all.
 Before `esp_wifi_init_internal`, the stable OSI table is patched in place. Its
 task-create callback recognizes only the pinned `ppTask` entry, publishes a

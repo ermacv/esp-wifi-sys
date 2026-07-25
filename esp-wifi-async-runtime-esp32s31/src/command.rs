@@ -6,6 +6,7 @@ use core::{
 };
 
 use crate::{
+    atomic_once::compare_exchange_once_relaxed,
     channel::{BoundedChannel, Receive, TrySendError},
     context::RadioContextGuard,
     queue::WakerCell,
@@ -41,7 +42,7 @@ fn record_high_water(counter: &AtomicUsize, value: usize) {
     if value > observed {
         // One failed diagnostic CAS is acceptable; retrying here would break
         // the fixed-cost command-producer contract.
-        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+        let _ = compare_exchange_once_relaxed(counter, observed, value);
     }
 }
 

@@ -148,6 +148,14 @@ COMMANDS.try_submit(Command::Disconnect)?;
 
 Commands are transferred by value. A full queue returns the original command;
 it never turns into a hidden semaphore wait or a vendor call from the producer.
+The producer claim is machine-code bounded as well. LLVM currently lowers both
+strong and weak Rust `compare_exchange` on RV32 to an `lr.w`/`sc.w` retry
+loop. The channel therefore uses a small inline `atomic_once` leaf which emits
+one reservation and one store-conditional only. Reservation loss is returned
+as ordinary contention with command ownership intact; `submit` waits for the
+next Rust async capacity wake before trying again. The final-ELF auditor
+rejects any control-flow cycle in the live monomorphized
+`RadioCommandQueue::try_submit`.
 
 Call `disable_vendor_nvs` before `esp_wifi_init` when the application owns
 persistence. `disable_dynamic_wifi_buffers` also clears the explicit dynamic

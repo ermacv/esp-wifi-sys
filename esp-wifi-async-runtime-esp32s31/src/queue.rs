@@ -5,7 +5,10 @@ use core::{
     task::Waker,
 };
 
-use crate::event::PpEvent;
+use crate::{
+    atomic_once::{compare_exchange_once_acquire, compare_exchange_once_relaxed},
+    event::PpEvent,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PushError(pub PpEvent);
@@ -60,7 +63,7 @@ fn record_high_water(counter: &AtomicUsize, value: usize) {
     if value > observed {
         // Queue producers are wait-free. A diagnostic update gets one CAS
         // attempt and never turns contention into a retry loop.
-        let _ = counter.compare_exchange(observed, value, Ordering::Relaxed, Ordering::Relaxed);
+        let _ = compare_exchange_once_relaxed(counter, observed, value);
     }
 }
 
@@ -103,11 +106,7 @@ impl<const N: usize> RadioQueue<N> {
     pub(crate) fn try_push_deferred_wake(&self, event: PpEvent) -> Result<(), PushError> {
         if N == 1 {
             let slot = &self.slots[0];
-            if slot
-                .sequence
-                .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
+            if compare_exchange_once_acquire(&slot.sequence, 0, 1).is_err() {
                 self.rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(PushError(event));
             }
@@ -123,14 +122,7 @@ impl<const N: usize> RadioQueue<N> {
         let slot = &self.slots[position % N];
         let sequence = slot.sequence.load(Ordering::Acquire);
         if sequence.wrapping_sub(position) as isize != 0
-            || self
-                .enqueue
-                .compare_exchange(
-                    position,
-                    position.wrapping_add(1),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
+            || compare_exchange_once_relaxed(&self.enqueue, position, position.wrapping_add(1))
                 .is_err()
         {
             self.rejected.fetch_add(1, Ordering::Relaxed);

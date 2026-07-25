@@ -565,7 +565,9 @@ fn parse_object(disassembly: &str, object: &str, graph: &mut BTreeMap<String, Fu
 
 fn definition_name(line: &str) -> Option<&str> {
     let start = line.find('<')? + 1;
-    let end = line[start..].find(">:")? + start;
+    // Demangled Rust symbols may contain nested `<Type<Args>>::method`
+    // delimiters. Only the final `>:` terminates the objdump definition.
+    let end = line[start..].rfind(">:")? + start;
     line[..start - 1]
         .trim()
         .chars()
@@ -927,8 +929,25 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
     }
 
     let disassembly = text(checked(
-        Command::new("llvm-objdump").arg("-d").arg("-C").arg(elf),
+        Command::new("llvm-objdump")
+            .arg("-d")
+            .arg("-C")
+            .arg("--no-show-raw-insn")
+            .arg(elf),
     )?)?;
+    let (command_claim_found, command_claim_cycles) = final_command_claim_cycles(&disassembly);
+    if !command_claim_found {
+        violations.insert(Violation::ElfSymbol {
+            category: "missing strict retry-free command claim",
+            symbol: "RadioCommandQueue::try_submit".to_owned(),
+        });
+    }
+    for (function, site) in command_claim_cycles {
+        violations.insert(Violation::ElfSymbol {
+            category: "retrying strict command claim",
+            symbol: format!("{function}: {site}"),
+        });
+    }
     for replaced in REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS {
         if calls_symbol(&disassembly, replaced) {
             violations.insert(Violation::ElfSymbol {
@@ -1124,6 +1143,24 @@ fn calls_symbol(disassembly: &str, symbol: &str) -> bool {
     })
 }
 
+fn final_command_claim_cycles(disassembly: &str) -> (bool, Vec<(String, String)>) {
+    let mut graph = BTreeMap::new();
+    parse_object(disassembly, "final ELF", &mut graph);
+    let mut found = false;
+    let mut cycles = Vec::new();
+    for (function, info) in graph {
+        if function.contains("RadioCommandQueue") && function.ends_with("::try_submit") {
+            found = true;
+            cycles.extend(
+                info.control_flow_cycles
+                    .into_iter()
+                    .map(|site| (function.clone(), site)),
+            );
+        }
+    }
+    (found, cycles)
+}
+
 fn print_report(
     graph: &BTreeMap<String, FunctionInfo>,
     violations: &BTreeSet<Violation>,
@@ -1247,10 +1284,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        calls_symbol, definition_name, direct_relocation_target, final_call_owners, indirect_site,
-        is_code_symbol_kind, is_internal_sram_code, is_invariant_excluded_indirect_site,
-        is_pinned_bounded_cycle, parse_linked_code_locations, parse_object, parse_readelf_le_word,
-        pinned_indirect_site_target,
+        calls_symbol, definition_name, direct_relocation_target, final_call_owners,
+        final_command_claim_cycles, indirect_site, is_code_symbol_kind, is_internal_sram_code,
+        is_invariant_excluded_indirect_site, is_pinned_bounded_cycle, parse_linked_code_locations,
+        parse_object, parse_readelf_le_word, pinned_indirect_site_target,
     };
 
     #[test]
@@ -1408,6 +1445,33 @@ mod tests {
         );
         assert_eq!(graph["looping"].control_flow_cycles.len(), 1);
         assert!(graph["layout"].control_flow_cycles.is_empty());
+    }
+
+    #[test]
+    fn final_command_claim_rejects_lr_sc_retry_but_accepts_one_attempt() {
+        let retrying = r#"
+00000010 <esp::command::RadioCommandQueue<u8, 2>::try_submit>:
+      10: lr.w a0, (a1)
+      14: sc.w a2, a3, (a1)
+      18: bnez a2, 0x10
+      1c: ret
+"#;
+        let (found, cycles) = final_command_claim_cycles(retrying);
+        assert!(found);
+        assert_eq!(cycles.len(), 1);
+
+        let one_attempt = r#"
+00000010 <esp::command::RadioCommandQueue<u8, 2>::try_submit>:
+      10: lr.w a0, (a1)
+      14: bne a0, a2, 0x20
+      18: sc.w a3, a4, (a1)
+      1c: j 0x24
+      20: li a3, 1
+      24: ret
+"#;
+        let (found, cycles) = final_command_claim_cycles(one_attempt);
+        assert!(found);
+        assert!(cycles.is_empty());
     }
 
     #[test]
