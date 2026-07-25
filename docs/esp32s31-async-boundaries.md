@@ -369,6 +369,9 @@ scripts assign their public symbols after `--wrap` rewriting. The late
 `pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, `ppRecycleRxPkt`, and
 `esp_test_tx_enab_statistics` to Rust wrappers while pinning their
 `__real_*` names to the audited ROM addresses.
+The adjacent archive-only `esp_wifi_internal_free_rx_buffer` export is also a
+direct public alias to its unique Rust owner, but needs no `__real_*` symbol:
+pre-handoff behavior delegates through `__real_ppRecycleRxPkt`.
 
 The AP-beacon replacement uses
 `ld/esp32s31-net80211-locals.x` to name the pinned local timer/flag sections.
@@ -869,6 +872,24 @@ loads and two byte stores. A second hardware qualification completed
 remained 0 to 0 and all allocation, blocking, delay, and queue-rejection
 probes remained zero. No PP receive-protocol or receive-rate vendor leaf
 remains on the strict RX path.
+
+The public network-buffer release leaf is now Rust-owned too.
+`libpp.a[if_hwctrl.o]::esp_wifi_internal_free_rx_buffer` is exactly eight
+bytes and only tail-calls `ppRecycleRxPkt` with the unchanged ESF pointer.
+The late linker fragment publishes
+`wifi_strict_esp_wifi_internal_free_rx_buffer` under that public name, so the
+archive object is not extracted. The strict data-RX callback calls the unique
+Rust function directly; it consumes the same fixed-pool owner used by
+`ppRecycleRxPkt`, with no mutex, queue operation, allocation, wait, or hidden
+state. Cold calls still delegate through the pinned real PP recycler before
+strict handoff.
+
+The hardware qualification completed WPA2, 4,096/4,096 UDP datagrams and 4/4
+HTTP transfers at 25.535 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
+690/690, and PP at 20,623/20,623. ESF rejection stayed 0 to 0; all allocation
+and queue-rejection probes remained zero. The final audit reports 6,407
+functions and zero violations and rejects any instruction that calls the old
+public release leaf.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

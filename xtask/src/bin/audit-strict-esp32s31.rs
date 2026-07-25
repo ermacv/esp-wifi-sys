@@ -239,6 +239,7 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "__wrap_wDev_AppendRxBlocks",
     "wifi_strict_pp_rx_proto_proc",
     "wifi_strict_pp_recycle_rx_pkt",
+    "wifi_strict_esp_wifi_internal_free_rx_buffer",
     "wifi_strict_rc_get_trc",
     "wifi_strict_rc_update_rx_done",
     "__wrap_ppTxPkt",
