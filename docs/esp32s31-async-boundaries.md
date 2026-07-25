@@ -837,6 +837,26 @@ Its first hardware stress run completed WPA2, 4,096/4,096 UDP datagrams and
 4/4 HTTP transfers with 4,786/4,786 TX, 694/694 RX, 20,601/20,601 PP events,
 no reject or allocation delta, and 27.477 Mbit/s.
 
+The waker handoff has an additional priority-inversion rule. Every producer
+publishes durable readiness before calling `WakerCell::wake`, and the sole
+consumer registers before checking that readiness. If the radio bottom half
+preempts a lower-priority producer while the producer owns the waker's short
+atomic lock, registration sets the pending bit and returns immediately. It
+must not wake the same software interrupt: doing so would repeatedly re-enter
+the bottom half and prevent the producer from ever releasing the lock. The
+published ready state, an older registered waker, or the pending bit preserves
+the edge after the producer resumes.
+
+This failure was isolated by JTAG after an intermittent stress stall produced
+about 2.5 million software-interrupt entries and wake-by-reference calls while
+processing only about 350 real events. After the bounded contention return was
+installed, six consecutive cold-start runs completed scan, WPA2, DHCP,
+ping/DNS/TCP/HTTP and 4,096 UDP datagrams plus four HTTP transfers. Every run
+balanced approximately 4,787 TX owners and 692 RX owners, drained about 20,600
+PP events, and recorded no allocation or queue rejection. JTAG observed one
+real registration contention in the final passing run, directly exercising
+the repaired path rather than merely failing to reproduce the race.
+
 There is no S31 hardware register from which this bottom half can infer cache
 availability. Espressif's upstream `cache_ll.h` declares
 `CACHE_LL_ENABLE_DISABLE_STATE_SW` and requires software-maintained state.

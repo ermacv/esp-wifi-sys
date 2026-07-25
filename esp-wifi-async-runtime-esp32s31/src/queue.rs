@@ -209,6 +209,13 @@ impl<const N: usize> Default for RadioQueue<N> {
     }
 }
 
+/// Single-consumer waker with bounded, interrupt-safe registration.
+///
+/// Every producer must publish its durable ready state before calling
+/// [`WakerCell::wake`], and every consumer must register before testing that
+/// state. These two ordering rules let lock contention return immediately:
+/// readiness or a previously registered waker preserves progress without
+/// spinning or re-pending the interrupt that is performing registration.
 pub(crate) struct WakerCell {
     locked: AtomicBool,
     pending: AtomicBool,

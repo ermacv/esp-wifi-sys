@@ -670,6 +670,15 @@ the object remains a cold-initialization and one-shot handoff oracle until
 those initializers are ported. The remaining RX vendor boundaries are
 `ppRxProtoProc` and `ppRecycleRxPkt`.
 
+The interrupt waker now also has an explicit ownership-ordering contract:
+producers publish readiness before waking, and the consumer registers before
+testing readiness. Registration contention returns with a durable pending bit
+instead of re-pending the same software interrupt. This prevents the
+high-priority radio bottom half from starving a preempted producer that owns
+the short waker lock. Six cold-start stress cycles passed after this change;
+JTAG recorded one actual contention in the final passing cycle. All cycles
+retained balanced TX/RX/PP ownership and zero allocations.
+
 Final ELF verification must continue to use a non-empty STA configuration;
 otherwise the HIL binary deliberately enters `pending()` before Wi-Fi
 initialization and LTO removes the unreachable strict runtime.
