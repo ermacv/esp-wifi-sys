@@ -86,7 +86,7 @@ unsafe fn map_strict_frame(frame: *mut u8) -> i32 {
     #[cfg(not(feature = "hil-ampdu-intercept"))]
     {
         if !crate::tx_mapper::apply_strict_sta_ap(frame) {
-            trap_invalid_tx_submit(frame, 0x3001);
+            crate::tx_mapper::trap_unadmitted_strict_sta_ap(frame);
         }
         0
     }

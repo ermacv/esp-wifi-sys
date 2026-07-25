@@ -120,6 +120,89 @@ pub(crate) unsafe fn apply_strict_sta_ap(frame: *mut u8) -> bool {
     true
 }
 
+/// Fail closed while preserving the complete mapper input in the trap frame.
+///
+/// The register contract is intentionally stable for hardware qualification:
+/// `a0=frame`, `a1=detail`, `a2=rate|(layout<<8)`,
+/// `a3=frame_control|(peer[0x84]<<16)`, and `a4..a7` are the four remaining
+/// state words consumed by [`strict_sta_ap_treatment`].
+#[cfg(target_arch = "riscv32")]
+#[inline(never)]
+pub(crate) unsafe fn trap_unadmitted_strict_sta_ap(frame: *mut u8) -> ! {
+    const FRAME_FIRST_BUFFER_OFFSET: usize = 0x04;
+    const FRAME_LAYOUT_FLAGS_OFFSET: usize = 0x24;
+    const FRAME_PEER_OFFSET: usize = 0x2c;
+    const FRAME_DESCRIPTOR_OFFSET: usize = 0x34;
+    const BUFFER_DATA_OFFSET: usize = 0x04;
+    const DESCRIPTOR_RATE_OFFSET: usize = 0x0c;
+
+    #[inline(always)]
+    unsafe fn trap(
+        frame: *mut u8,
+        detail: u32,
+        rate_layout: u32,
+        frame_control_peer_flag: u32,
+        descriptor_flags: u32,
+        descriptor_priority: u32,
+        descriptor_control: u32,
+        peer_state: u32,
+    ) -> ! {
+        core::arch::asm!(
+            "ebreak",
+            in("a0") frame,
+            in("a1") detail,
+            in("a2") rate_layout,
+            in("a3") frame_control_peer_flag,
+            in("a4") descriptor_flags,
+            in("a5") descriptor_priority,
+            in("a6") descriptor_control,
+            in("a7") peer_state,
+            options(noreturn)
+        )
+    }
+
+    if frame.is_null() {
+        trap(frame, 0x3010, 0, 0, 0, 0, 0, 0);
+    }
+    let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
+    let peer = frame.add(FRAME_PEER_OFFSET).cast::<*mut u8>().read();
+    let first_buffer = frame
+        .add(FRAME_FIRST_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if descriptor.is_null() || peer.is_null() || first_buffer.is_null() {
+        trap(frame, 0x3011, 0, 0, 0, 0, 0, 0);
+    }
+    let layout = frame
+        .add(FRAME_LAYOUT_FLAGS_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    let mut header = first_buffer
+        .add(BUFFER_DATA_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if header.is_null() {
+        trap(frame, 0x3012, u32::from(layout) << 8, 0, 0, 0, 0, 0);
+    }
+    if layout & 0x2000 != 0 {
+        header = header.add(8);
+    }
+    let rate_layout =
+        u32::from(descriptor.add(DESCRIPTOR_RATE_OFFSET).read()) | (u32::from(layout) << 8);
+    let frame_control_peer_flag =
+        u32::from(header.cast::<u16>().read_unaligned()) | (u32::from(peer.add(0x84).read()) << 16);
+    trap(
+        frame,
+        0x3001,
+        rate_layout,
+        frame_control_peer_flag,
+        descriptor.cast::<u32>().read_unaligned(),
+        descriptor.add(4).cast::<u32>().read_unaligned(),
+        descriptor.add(0x10).cast::<u32>().read_unaligned(),
+        peer.add(0x0c).cast::<u32>().read_unaligned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::strict_sta_ap_treatment;
