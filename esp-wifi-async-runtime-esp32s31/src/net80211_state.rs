@@ -8,7 +8,7 @@
 
 use core::{
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 #[cfg(target_arch = "riscv32")]
@@ -31,6 +31,8 @@ pub enum Net80211StateAdoptionError {
     MeshModeActive,
     PendingTxActive,
     CachedTxEnabled,
+    MissingWifiConfig,
+    InvalidIndividualTwtFlowId(u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,12 +62,16 @@ pub struct Net80211InterfaceRegistrySnapshot {
     pub adopted: bool,
     pub station: Option<usize>,
     pub access_point: Option<usize>,
+    pub descriptor_config_0x44a: Option<u8>,
+    pub individual_twt_flow_id: Option<u8>,
 }
 
 struct Net80211InterfaceRegistry {
     adopted: AtomicBool,
     station: AtomicUsize,
     access_point: AtomicUsize,
+    descriptor_config_0x44a: AtomicU8,
+    individual_twt_flow_id: AtomicU8,
 }
 
 impl Net80211InterfaceRegistry {
@@ -74,6 +80,8 @@ impl Net80211InterfaceRegistry {
             adopted: AtomicBool::new(false),
             station: AtomicUsize::new(0),
             access_point: AtomicUsize::new(0),
+            descriptor_config_0x44a: AtomicU8::new(0),
+            individual_twt_flow_id: AtomicU8::new(0),
         }
     }
 
@@ -84,6 +92,8 @@ impl Net80211InterfaceRegistry {
         mesh_state: usize,
         pending_tx_head: usize,
         cached_tx_enabled: bool,
+        descriptor_config_0x44a: u8,
+        individual_twt_flow_id: u8,
     ) -> Result<(), Net80211StateAdoptionError> {
         if station == 0 && access_point == 0 {
             return Err(Net80211StateAdoptionError::MissingInterfaces);
@@ -106,9 +116,18 @@ impl Net80211InterfaceRegistry {
         if cached_tx_enabled {
             return Err(Net80211StateAdoptionError::CachedTxEnabled);
         }
+        if individual_twt_flow_id > 7 {
+            return Err(Net80211StateAdoptionError::InvalidIndividualTwtFlowId(
+                individual_twt_flow_id,
+            ));
+        }
 
         self.station.store(station, Ordering::Relaxed);
         self.access_point.store(access_point, Ordering::Relaxed);
+        self.descriptor_config_0x44a
+            .store(descriptor_config_0x44a, Ordering::Relaxed);
+        self.individual_twt_flow_id
+            .store(individual_twt_flow_id, Ordering::Relaxed);
         self.adopted.store(true, Ordering::Release);
         Ok(())
     }
@@ -134,6 +153,10 @@ impl Net80211InterfaceRegistry {
             access_point: adopted
                 .then(|| self.access_point.load(Ordering::Acquire))
                 .filter(|address| *address != 0),
+            descriptor_config_0x44a: adopted
+                .then(|| self.descriptor_config_0x44a.load(Ordering::Acquire)),
+            individual_twt_flow_id: adopted
+                .then(|| self.individual_twt_flow_id.load(Ordering::Acquire)),
         }
     }
 }
@@ -149,6 +172,19 @@ pub(crate) fn access_point_interface() -> Option<Net80211InterfaceHandle> {
     INTERFACES.interface(Net80211InterfaceRole::AccessPoint)
 }
 
+pub(crate) fn role_for_interface(interface: *mut u8) -> Option<Net80211InterfaceRole> {
+    if interface.is_null() {
+        return None;
+    }
+    if station_interface().is_some_and(|registered| registered.as_ptr() == interface) {
+        Some(Net80211InterfaceRole::Station)
+    } else if access_point_interface().is_some_and(|registered| registered.as_ptr() == interface) {
+        Some(Net80211InterfaceRole::AccessPoint)
+    } else {
+        None
+    }
+}
+
 pub fn net80211_interface_registry_snapshot() -> Net80211InterfaceRegistrySnapshot {
     INTERFACES.snapshot()
 }
@@ -157,6 +193,15 @@ pub fn net80211_interface_registry_snapshot() -> Net80211InterfaceRegistrySnapsh
 /// vendor cached-TX path disabled. No post-handoff API can change this policy.
 pub(crate) fn ordinary_sta_ap_profile() -> bool {
     INTERFACES.adopted.load(Ordering::Acquire)
+}
+
+pub(crate) fn descriptor_config() -> Option<(u8, u8)> {
+    INTERFACES.adopted.load(Ordering::Acquire).then(|| {
+        (
+            INTERFACES.descriptor_config_0x44a.load(Ordering::Acquire),
+            INTERFACES.individual_twt_flow_id.load(Ordering::Acquire),
+        )
+    })
 }
 
 /// Check the vendor off-channel TX head which strict handoff requires to stay
@@ -173,14 +218,18 @@ pub(crate) unsafe fn vendor_pending_tx_empty() -> bool {
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static g_ic: u8;
+    static mut g_itwt_fid: u8;
+    static mut g_wifi_nvs: *mut u8;
 }
 
-/// Adopt only the two interface publications from initialized `g_ic`.
+/// Adopt the ordinary STA/AP interface publications and the two bounded
+/// descriptor-policy scalars needed after handoff.
 ///
 /// # Safety
 /// Vendor initialization must be complete and no interface publication may
 /// change concurrently. The fixed interface storage must outlive strict
-/// runtime operation.
+/// runtime operation. `g_wifi_nvs` is sampled once here; it is not an NVS
+/// operation and is not read from the runtime descriptor path.
 #[cfg(target_arch = "riscv32")]
 pub(crate) unsafe fn adopt_vendor_interface_registry() -> Result<(), Net80211StateAdoptionError> {
     let state = core::ptr::addr_of!(g_ic);
@@ -201,12 +250,20 @@ pub(crate) unsafe fn adopt_vendor_interface_registry() -> Result<(), Net80211Sta
         .cast::<usize>()
         .read_unaligned();
     let cached_tx_enabled = state.add(CACHED_TX_ENABLED_OFFSET).read() != 0;
+    let wifi_config = core::ptr::addr_of!(g_wifi_nvs).read_volatile();
+    if wifi_config.is_null() {
+        return Err(Net80211StateAdoptionError::MissingWifiConfig);
+    }
+    let descriptor_config_0x44a = wifi_config.add(0x44a).read();
+    let individual_twt_flow_id = core::ptr::addr_of!(g_itwt_fid).read_volatile();
     INTERFACES.adopt(
         station,
         access_point,
         mesh_state,
         pending_tx_head,
         cached_tx_enabled,
+        descriptor_config_0x44a,
+        individual_twt_flow_id,
     )
 }
 
@@ -217,46 +274,52 @@ mod tests {
     #[test]
     fn publication_is_role_checked_and_null_role_remains_absent() {
         let registry = Net80211InterfaceRegistry::new();
-        registry.adopt(0x1000, 0, 0, 0, false).unwrap();
+        registry.adopt(0x1000, 0, 0, 0, false, 3, 5).unwrap();
 
         let station = registry.interface(Net80211InterfaceRole::Station).unwrap();
         assert_eq!(station.role(), Net80211InterfaceRole::Station);
         assert_eq!(station.as_ptr() as usize, 0x1000);
         assert_eq!(registry.interface(Net80211InterfaceRole::AccessPoint), None);
+        assert_eq!(registry.snapshot().descriptor_config_0x44a, Some(3));
+        assert_eq!(registry.snapshot().individual_twt_flow_id, Some(5));
     }
 
     #[test]
     fn invalid_publication_is_not_observable() {
         let registry = Net80211InterfaceRegistry::new();
         assert_eq!(
-            registry.adopt(0, 0, 0, 0, false),
+            registry.adopt(0, 0, 0, 0, false, 0, 0),
             Err(Net80211StateAdoptionError::MissingInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1001, 0, 0, 0, false),
+            registry.adopt(0x1001, 0, 0, 0, false, 0, 0),
             Err(Net80211StateAdoptionError::MisalignedStationInterface)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0x1000, 0, 0, false),
+            registry.adopt(0x1000, 0x1000, 0, 0, false, 0, 0),
             Err(Net80211StateAdoptionError::AliasedInterfaces)
         );
         assert!(!registry.snapshot().adopted);
 
         assert_eq!(
-            registry.adopt(0x1000, 0, 0x2000, 0, false),
+            registry.adopt(0x1000, 0, 0x2000, 0, false, 0, 0),
             Err(Net80211StateAdoptionError::MeshModeActive)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, 0x2000, false),
+            registry.adopt(0x1000, 0, 0, 0x2000, false, 0, 0),
             Err(Net80211StateAdoptionError::PendingTxActive)
         );
         assert_eq!(
-            registry.adopt(0x1000, 0, 0, 0, true),
+            registry.adopt(0x1000, 0, 0, 0, true, 0, 0),
             Err(Net80211StateAdoptionError::CachedTxEnabled)
+        );
+        assert_eq!(
+            registry.adopt(0x1000, 0, 0, 0, false, 0, 8),
+            Err(Net80211StateAdoptionError::InvalidIndividualTwtFlowId(8))
         );
         assert!(!registry.snapshot().adopted);
     }

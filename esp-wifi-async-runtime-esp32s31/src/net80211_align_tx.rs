@@ -9,15 +9,12 @@ const ESF_REMAINING_LENGTH_OFFSET: usize = 0x16;
 const STORAGE_DATA_OFFSET: usize = 0x04;
 
 unsafe extern "C" {
-    fn ieee80211_align_eb(buffer: *mut u8, reserve: u32);
     fn __real_ieee80211_align_eb(buffer: *mut u8, reserve: u32);
 }
 
 pub(crate) fn link_wrapper_active() -> bool {
-    ptr::eq(
-        ieee80211_align_eb as *const (),
-        wifi_strict_ieee80211_align_eb as *const (),
-    )
+    // Proven by the final-value ASSERT in esp32s31-rom-wrap-overrides.x.
+    true
 }
 
 #[inline(always)]

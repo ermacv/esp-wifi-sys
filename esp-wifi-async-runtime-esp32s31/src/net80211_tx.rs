@@ -149,7 +149,6 @@ static RUST_TX_QUEUE: RustTxQueueCell = RustTxQueueCell::new();
 unsafe extern "C" {
     static mut s_tx_cacheq: VendorTailQueue;
     static mut net80211_funcs: *mut usize;
-    fn ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
     fn __real_ieee80211_post_hmac_tx(buffer: *mut u8) -> u32;
     fn ieee80211_classify(node: *mut u8, buffer: *mut u8) -> u32;
     fn __real_ieee80211_classify(node: *mut u8, buffer: *mut u8) -> u32;
@@ -159,10 +158,8 @@ unsafe extern "C" {
 }
 
 pub(crate) fn link_wrapper_active() -> bool {
-    ptr::eq(
-        ieee80211_post_hmac_tx as *const (),
-        wifi_strict_ieee80211_post_hmac_tx as *const (),
-    )
+    // Proven by the final-value ASSERT in esp32s31-rom-wrap-overrides.x.
+    true
 }
 
 pub(crate) fn classification_link_wrapper_active() -> bool {

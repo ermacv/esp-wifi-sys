@@ -71,6 +71,7 @@ pub enum StrictRuntimeError {
     Net80211ClassificationLinkWrapperMissing,
     Net80211AlignmentLinkWrapperMissing,
     Net80211CryptoEncapLinkWrapperMissing,
+    Net80211DescriptorLinkWrapperMissing,
     Net80211TxMailboxNotEmpty,
     Net80211RustTxMailboxNotEmpty,
     Net80211TimerLinkWrapperMissing,
@@ -427,6 +428,10 @@ pub unsafe fn prepare_strict_runtime(
         || !crate::net80211_crypto_tx::callback_active()
     {
         return Err(StrictRuntimeError::Net80211CryptoEncapLinkWrapperMissing);
+    }
+    #[cfg(feature = "strict-no-wait")]
+    if !crate::net80211_descriptor_tx::link_wrapper_active() {
+        return Err(StrictRuntimeError::Net80211DescriptorLinkWrapperMissing);
     }
     #[cfg(feature = "strict-no-wait")]
     if !crate::net80211_tx::vendor_mailbox_empty() {

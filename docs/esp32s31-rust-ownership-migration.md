@@ -271,6 +271,48 @@ Rust boundary and retains the ROM address only for pre-strict delegation.
 The final ELF records both addresses explicitly, and the hardware image passed
 WPA2 plus post-link traffic without entering the invalid-layout trap.
 
+The ordinary non-HE part of `ieee80211_set_tx_desc` has now been recovered
+from the pinned `libnet80211.a[ieee80211_output.o]` oracle as a pure Rust
+policy plus a target adapter. The pure policy reproduces the eight-priority
+WMM queue mapping, STA/AP rate-context selector, descriptor flag and security
+masks, bounded opaque node-bit transforms, TWT record selection, and the
+remaining finite descriptor bytes. HE descriptor bit 31, priorities above
+seven, and unobserved request flags trap before the first mutation.
+
+Strict handoff now adopts two additional scalar inputs: the initialized
+configuration byte formerly read through `g_wifi_nvs+0x44a`, and
+`g_itwt_fid`, which is rejected above seven. This is a transitional one-time
+cold-state read, not an NVS call: the strict descriptor path reads only the
+Rust registry. A later cold-initialization slice should construct both values
+directly from Rust configuration and remove the vendor publications entirely.
+
+The public `ieee80211_set_tx_desc` name is another absolute ROM export
+(`0x2f800c98`). GNU `--wrap` cannot interpose it reliably because the ROM
+linker fragment captures the generated `__wrap_*` name. The late linker
+fragment therefore retains the ROM address as
+`__real_ieee80211_set_tx_desc`, aliases the public name to the unique Rust
+entrypoint, and has a final-value `ASSERT` for the alias. Equivalent assertions
+now protect the existing post-HMAC, CCMP, and ESF-alignment ROM aliases. Runtime
+Rust pointer comparisons are intentionally not used as link proofs because
+LLVM does not model linker-script aliases.
+
+This alias immediately replaces direct management-frame calls from Rust.
+The STA HIL completed passive scan, open authentication, HT20/WMM association,
+the Rust WPA2 four-way handshake, DHCP, gateway ping, DNS, TCP, and HTTP.
+Allocation counters were unchanged across strict authentication and
+association, all 19 post-link TX frames released their static credits, and
+the one-shot critical snapshot reported zero other-core stalls and zero
+wrong-hart entries.
+
+The Ethernet-to-802.11 geometry adjacent to the descriptor leaf is also
+encoded as a pure Rust plan: STA/AP address selection, RFC 1042 LLC/SNAP,
+QoS/no-ack policy, multicast handling, sequence wrap, and the priority byte
+are bounded and allocation-free. It is not yet the live data encapsulator.
+The ROM/archive `ieee80211_output_process` consumer performs an internal call
+which cannot be redirected by an external symbol alias, so the data path still
+uses that compatibility consumer until the surrounding encapsulation stage is
+replaced.
+
 This consumer is not a leaf. An explicit strict-auditor probe with
 `ieee80211_output_process` as the sole root currently finds 23 control-flow
 cycles and 14 indirect calls. Several branches are expected to be unreachable
@@ -278,14 +320,17 @@ under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
 expectation is not a proof and the compatibility stage must not be described
 as fully strict yet. Queue ownership, the one-frame presentation boundary,
 role-checked node lookup, classification, CCMP key/header construction, and
-ESF alignment are now implemented. The next slices replace the remaining
-reachable Ethernet address/LLC geometry, sequence/descriptor construction,
-and hardware-submit branches explicitly. Only after that work should
-`ieee80211_set_tx_desc` become the final `g_ic` leaf.
+ESF alignment are live. Address/LLC geometry and sequence/descriptor
+construction are now recovered as pure policies, while only direct management
+descriptor calls are live. The next slice must replace the surrounding data
+encapsulator and then the remaining hardware-submit branches explicitly.
 
-After the event-5 consumer and the remaining descriptor leaf have Rust
+After the event-5 consumer and its internal data-descriptor call have Rust
 replacements, the linked-state audit should no longer report `g_ic` as
 strict-vendor-reachable even while cold initialization still retains its
 backing. Until the consumer is added to the enforced graph, the generated
 linked-state table intentionally describes only the current declared vendor
-roots and is narrower than the complete Rust-to-vendor runtime graph.
+roots and is narrower than the complete Rust-to-vendor runtime graph. Final
+ELF verification must use a non-empty STA configuration; otherwise the HIL
+binary deliberately enters `pending()` before Wi-Fi initialization and LTO
+removes the unreachable strict runtime.

@@ -53,6 +53,10 @@ mod net80211_classify;
 mod net80211_crypto;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_crypto_tx;
+mod net80211_descriptor;
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+mod net80211_descriptor_tx;
+mod net80211_encap;
 mod net80211_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_timer;

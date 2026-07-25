@@ -13,11 +13,23 @@ ieee80211_set_tx_pti = __wrap_ieee80211_set_tx_pti;
 __real_ieee80211_search_node = 0x2f800ca8;
 ieee80211_search_node = __wrap_ieee80211_search_node;
 
+/* The ROM linker fragment exports ieee80211_set_tx_desc as an absolute
+ * assignment and consequently captures GNU --wrap's generated __wrap symbol.
+ * Route the public name through a unique Rust boundary and retain the pinned
+ * ROM address only for calls made before strict ownership handoff. */
+__real_ieee80211_set_tx_desc = 0x2f800c98;
+EXTERN(wifi_strict_ieee80211_set_tx_desc);
+ieee80211_set_tx_desc = wifi_strict_ieee80211_set_tx_desc;
+ASSERT(ieee80211_set_tx_desc == wifi_strict_ieee80211_set_tx_desc,
+       "ESP32-S31 ieee80211_set_tx_desc Rust boundary is inactive");
+
 /* ESF alignment is another absolute ROM export. The strict Rust leaf keeps
  * the original address only for pre-handoff delegation. */
 __real_ieee80211_align_eb = 0x2f800c7c;
 EXTERN(wifi_strict_ieee80211_align_eb);
 ieee80211_align_eb = wifi_strict_ieee80211_align_eb;
+ASSERT(ieee80211_align_eb == wifi_strict_ieee80211_align_eb,
+       "ESP32-S31 ieee80211_align_eb Rust boundary is inactive");
 
 /* Like ieee80211_post_hmac_tx below, this ROM export captures the generated
  * __wrap symbol. Use a unique Rust boundary and keep the pinned ROM leaf only
@@ -25,6 +37,8 @@ ieee80211_align_eb = wifi_strict_ieee80211_align_eb;
 __real_ieee80211_crypto_encap = 0x2f800cac;
 EXTERN(wifi_strict_ieee80211_crypto_encap);
 ieee80211_crypto_encap = wifi_strict_ieee80211_crypto_encap;
+ASSERT(ieee80211_crypto_encap == wifi_strict_ieee80211_crypto_encap,
+       "ESP32-S31 ieee80211_crypto_encap Rust boundary is inactive");
 
 /* GNU --wrap cannot be used for this ROM export: it aliases the generated
  * __wrap symbol itself to 0x2f800cc0. Keep a separate pre-strict entry and
@@ -32,6 +46,8 @@ ieee80211_crypto_encap = wifi_strict_ieee80211_crypto_encap;
 __real_ieee80211_post_hmac_tx = 0x2f800cc0;
 EXTERN(wifi_strict_ieee80211_post_hmac_tx);
 ieee80211_post_hmac_tx = wifi_strict_ieee80211_post_hmac_tx;
+ASSERT(ieee80211_post_hmac_tx == wifi_strict_ieee80211_post_hmac_tx,
+       "ESP32-S31 ieee80211_post_hmac_tx Rust boundary is inactive");
 
 __real_ets_delay_us = 0x2f80003c;
 ets_delay_us = __wrap_ets_delay_us;

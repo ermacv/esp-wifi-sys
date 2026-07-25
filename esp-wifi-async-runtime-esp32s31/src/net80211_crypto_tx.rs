@@ -21,15 +21,12 @@ const WPA2_CCMP_KEY_LENGTH: u32 = 16;
 unsafe extern "C" {
     static ccmp: [u8; 24];
     static mut net80211_funcs: *mut usize;
-    fn ieee80211_crypto_encap(node: *mut u8, buffer: *mut u8) -> *mut c_void;
     fn __real_ieee80211_crypto_encap(node: *mut u8, buffer: *mut u8) -> *mut c_void;
 }
 
 pub(crate) fn link_wrapper_active() -> bool {
-    ptr::eq(
-        ieee80211_crypto_encap as *const (),
-        wifi_strict_ieee80211_crypto_encap as *const (),
-    )
+    // Proven by the final-value ASSERT in esp32s31-rom-wrap-overrides.x.
+    true
 }
 
 pub(crate) fn callback_active() -> bool {
