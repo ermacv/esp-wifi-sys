@@ -1,7 +1,7 @@
 # ESP32-S31 linked state and interposition audit
 
 - final ELF: `wifi-sta`
-- ELF SHA-256: `d13784f0da3b0c9479a0deb8590e91cfa339bdde25589958a0f352afc93e6225`
+- ELF SHA-256: `35ff411e64d37ed96edb46f532a863c2f743092331a79499323773ce9245ce95`
 - strict vendor roots: 26
 - reference-only control-flow roots: `phy_change_channel`
 - separately auditable static-binding roots: `net80211_data_ptr_init`, `wdev_data_init`
@@ -239,12 +239,12 @@ These are the exact direct stores recovered from the two separately audited cold
 | `pp_post` | `0x400c1532` | GNU `--wrap` boundary | - |
 | `rcGetSched` | `0x2f0029ce` | retained replacement only | - |
 | `realloc` | `0x400c248c` | GNU `--wrap` boundary | - |
-| `sleep` | `0x400bc17c` | GNU `--wrap` boundary | - |
+| `sleep` | `0x400bc16a` | GNU `--wrap` boundary | - |
 | `sta_rx_cb` | `0x400add1c` | GNU `--wrap` boundary | - |
 | `trc_deinit` | `0x400cfea0` | retained replacement only | - |
 | `trc_init` | `0x400cfee6` | retained replacement only | - |
-| `usleep` | `0x400bc1d8` | GNU `--wrap` boundary | - |
-| `vTaskDelay` | `0x400bc204` | GNU `--wrap` boundary | - |
+| `usleep` | `0x400bc1c6` | GNU `--wrap` boundary | - |
+| `vTaskDelay` | `0x400bc1f2` | GNU `--wrap` boundary | - |
 | `wDev_AppendRxBlocks` | `0x2f005196` | direct public alias | `0x2f8010c4` (ROM export) |
 | `wDev_IndicateCtrlFrame` | `0x2f005178` | GNU `--wrap` boundary | - |
 | `wDev_SnifferRxData` | `0x400c3656` | retained replacement only | - |
