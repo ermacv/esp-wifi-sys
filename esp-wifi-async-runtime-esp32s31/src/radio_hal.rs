@@ -10,7 +10,7 @@ const TSF_HIGH_ADDRESS: usize = 0x2010_d824;
 const RX_DESCRIPTOR_LAST_LOW_ADDRESS: usize = 0x2010_408c;
 const RX_DESCRIPTOR_LAST_HIGH_ADDRESS: usize = 0x2010_4c70;
 const TX_CCA_CONTROL_ADDRESS: usize = 0x2010_4c5c;
-const TX_QUEUE_CONTROL_BASE_ADDRESS: usize = 0x0100_4d70;
+const TX_QUEUE_CONTROL_BASE_ADDRESS: usize = 0x2010_4d70;
 const TX_QUEUE_CONTROL_STRIDE: usize = 0x10;
 const PHY_RX_COMP_LOW_ADDRESS: usize = 0x2010_702c;
 const PHY_DC_MEMORY_CONTROL_ADDRESS: usize = 0x2010_703c;
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn wifi_strict_hal_mac_tx_set_cca(cca: u32) -> u32 {
 /// Return the recovered TX queue valid bit.
 ///
 /// Reference: pinned `libpp.a[hal_mac.o]::hal_mac_is_txq_valid`, size `0x14`.
-/// Queue zero starts at `0x0100_4d70`; successive queue registers descend by
+/// Queue zero starts at `0x2010_4d70`; successive queue registers descend by
 /// 16 bytes. The result is register bit 30 normalized to zero or one.
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
@@ -355,9 +355,9 @@ mod tests {
 
     #[test]
     fn tx_queue_registers_descend_by_the_recovered_stride() {
-        assert_eq!(tx_queue_control_address(0), 0x0100_4d70);
-        assert_eq!(tx_queue_control_address(1), 0x0100_4d60);
-        assert_eq!(tx_queue_control_address(3), 0x0100_4d40);
+        assert_eq!(tx_queue_control_address(0), 0x2010_4d70);
+        assert_eq!(tx_queue_control_address(1), 0x2010_4d60);
+        assert_eq!(tx_queue_control_address(3), 0x2010_4d40);
     }
 
     #[test]
