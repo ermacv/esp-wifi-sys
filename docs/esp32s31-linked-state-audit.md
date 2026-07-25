@@ -1,18 +1,18 @@
 # ESP32-S31 linked state and interposition audit
 
 - final ELF: `wifi-sta`
-- ELF SHA-256: `89ce0c5bdce9c985ffe08063dc2289f8f7db817b0b302ce171dfe7762cb54fa3`
-- strict vendor roots: 27
+- ELF SHA-256: `379351ba9a80a4a7291ed2ab94ce24cad15e25f6a2618a9cbe4c9e42fef94445`
+- strict vendor roots: 26
 - reference-only control-flow roots: `phy_change_channel`
 - separately auditable static-binding roots: `net80211_data_ptr_init`, `wdev_data_init`
 - separately auditable static-PM root: `pm_beacon_offset_funcs_init`
 - separately auditable Rust caller-task cold init: `wifi_init_in_caller_task`, `wifi_deinit_in_caller_task`
-- vendor functions reachable from those roots: 43
-- live mutable blob globals reached by strict leaves: 2 symbols / 512 bytes
+- vendor functions reachable from those roots: 39
+- live mutable blob globals reached by strict leaves: 0 symbols / 0 bytes
 - ROM-ABI mutable indirection cells reached by strict leaves: 0 cells / 0 inferred bytes
 - fixed cold-init bindings live in this ELF: 43 / 43
-- live mutable blob globals outside the strict-root graph: 183 symbols / 21691 bytes
-- Rust strict static sections: 53 sections / 182950 bytes
+- live mutable blob globals outside the strict-root graph: 185 symbols / 22203 bytes
+- Rust strict static sections: 53 sections / 182992 bytes
 - retained code wrappers: 58
 
 The archive relocation graph supplies `vendor function -> data symbol`; the final ELF supplies liveness, address, size and section. A wrapper boundary stops traversal into the replaced vendor body. “Outside strict roots” means linked but not proven runtime-reachable by this vendor-leaf graph; it is not automatically safe to delete because cold initialization and non-Wi-Fi owners can still use it.
@@ -23,8 +23,7 @@ The application `wifi-rust-static-cold-init-hil` final-ELF audit additionally pr
 
 | symbol | size | placement | archive owner | strict referrers |
 |---|---:|---|---|---|
-| `phy_param` | 508 | `internal SRAM` / `.data` | `libphy.a[phy_init.o]` | `phy_chan14_mic_cfg_new`, `phy_wifi_set_tx_gain_new` |
-| `g_phyFuns` | 4 | `internal SRAM` / `.bss` | `libphy.a[phy_init.o]` | `phy_wifi_set_tx_gain_new` |
+| _none_ | 0 | - | - | - |
 
 ## Mutable ROM-ABI indirection cells reached by strict leaves
 
@@ -90,125 +89,125 @@ These are the exact direct stores recovered from the two separately audited cold
 | `.data.wifi` | `0x2f0190b0` | 408 | `internal SRAM` |
 | `.critical.data.wifi_strict.radio_executor` | `0x2f019248` | 940 | `internal SRAM` |
 | `.critical.data.wifi_strict.commands` | `0x2f0195f4` | 17196 | `internal SRAM` |
-| `.critical.bss.wifi_strict.channel_resources` | `0x2f01e974` | 256 | `internal SRAM` |
-| `.critical.data.wifi_strict.rx_queue` | `0x2f01ea74` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.esf_large_rx_slots` | `0x2f01ea78` | 59008 | `internal SRAM` |
-| `.critical.bss.wifi_strict.esf_management_slots` | `0x2f02d0f8` | 27904 | `internal SRAM` |
-| `.critical.bss.wifi_strict.esf_large_rx_claims` | `0x2f033df8` | 4 | `internal SRAM` |
-| `.critical.data.wifi_strict.esf_prearm_hart` | `0x2f033dfc` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.esf_rejections` | `0x2f033e00` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.esf_management_claims` | `0x2f033e04` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_ampdu_owners` | `0x2f033e08` | 1424 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_ampdu_completion_state` | `0x2f034398` | 584 | `internal SRAM` |
-| `.critical.data.wifi_strict.tx_backoff` | `0x2f0345e0` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_recycle_probe` | `0x2f0345e4` | 32 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_recycle_timer` | `0x2f034604` | 20 | `internal SRAM` |
-| `.critical.bss.wifi_strict.indicate_frame_probe` | `0x2f034618` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_done_registry` | `0x2f034624` | 40 | `internal SRAM` |
-| `.critical.data.wifi_strict.init_global_lock` | `0x2f03464c` | 12 | `internal SRAM` |
-| `.critical.data.wifi_strict.init_mac_list_lock` | `0x2f034658` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.data_rx_channel` | `0x2f034664` | 788 | `internal SRAM` |
-| `.critical.bss.wifi_strict.data_rx_slots` | `0x2f034978` | 4160 | `internal SRAM` |
-| `.critical.bss.wifi_strict.data_tx_channel` | `0x2f0359b8` | 276 | `internal SRAM` |
-| `.critical.bss.wifi_strict.data_tx_slots` | `0x2f035acc` | 51584 | `internal SRAM` |
-| `.critical.data.wifi_strict.basic_secondary_schedule` | `0x2f04244c` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.critical_probe` | `0x2f042458` | 24 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_queue_process_hil` | `0x2f042470` | 156 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_queue_state` | `0x2f04250c` | 236 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_trace` | `0x2f0425f8` | 2312 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rate_contexts` | `0x2f042f00` | 2432 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rate_table_scratch` | `0x2f043880` | 212 | `internal SRAM` |
-| `.critical.bss.wifi_strict.deferred_ap_management` | `0x2f043954` | 288 | `internal SRAM` |
-| `.critical.bss.wifi_strict.management_tx_rejection` | `0x2f043a74` | 64 | `internal SRAM` |
-| `.critical.bss.wifi_strict.ap_assoc_rejection` | `0x2f043ab4` | 44 | `internal SRAM` |
-| `.critical.bss.wifi_strict.ap_assoc_response_capture` | `0x2f043ae0` | 272 | `internal SRAM` |
-| `.critical.data.wifi_strict.critical_hart` | `0x2f043bf0` | 4 | `internal SRAM` |
-| `.critical.bss.wifi_strict.critical_state` | `0x2f043bf4` | 8 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_addba` | `0x2f043bfc` | 15 | `internal SRAM` |
-| `.critical.bss.wifi_strict.sta_node` | `0x2f043c0c` | 1544 | `internal SRAM` |
-| `.critical.bss.wifi_strict.ap_nodes` | `0x2f044214` | 10400 | `internal SRAM` |
-| `.critical.bss.wifi_strict.net80211_tx_queue` | `0x2f046acc` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.phy_channel` | `0x2f046ad8` | 6 | `internal SRAM` |
-| `.critical.bss.wifi_strict.net80211_interfaces` | `0x2f046ae0` | 28 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_queue` | `0x2f046afc` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_registry` | `0x2f046b08` | 8 | `internal SRAM` |
-| `.critical.bss.wifi_strict.rx_recycle_state` | `0x2f046b10` | 24 | `internal SRAM` |
-| `.critical.bss.wifi_strict.lmac_tx_done_state` | `0x2f046b28` | 16 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_done_state` | `0x2f046b38` | 12 | `internal SRAM` |
-| `.critical.bss.wifi_strict.data_tx_wakers` | `0x2f046b44` | 24 | `internal SRAM` |
-| `.critical.bss.wifi_strict.ap_join_diagnostics` | `0x2f046b5c` | 8 | `internal SRAM` |
-| `.critical.bss.wifi_strict.critical_callbacks` | `0x2f046b64` | 16 | `internal SRAM` |
-| `.critical.bss.wifi_strict.tx_block_ack` | `0x2f046b74` | 48 | `internal SRAM` |
-| `.bss.esp_wifi_async_net80211` | `0x2f046ba4` | 33 | `internal SRAM` |
+| `.critical.bss.wifi_strict.phy_channel` | `0x2f01e974` | 48 | `internal SRAM` |
+| `.critical.bss.wifi_strict.channel_resources` | `0x2f01e9a4` | 256 | `internal SRAM` |
+| `.critical.data.wifi_strict.rx_queue` | `0x2f01eaa4` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.esf_large_rx_slots` | `0x2f01eaa8` | 59008 | `internal SRAM` |
+| `.critical.bss.wifi_strict.esf_management_slots` | `0x2f02d128` | 27904 | `internal SRAM` |
+| `.critical.bss.wifi_strict.esf_large_rx_claims` | `0x2f033e28` | 4 | `internal SRAM` |
+| `.critical.data.wifi_strict.esf_prearm_hart` | `0x2f033e2c` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.esf_rejections` | `0x2f033e30` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.esf_management_claims` | `0x2f033e34` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_ampdu_owners` | `0x2f033e38` | 1424 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_ampdu_completion_state` | `0x2f0343c8` | 584 | `internal SRAM` |
+| `.critical.data.wifi_strict.tx_backoff` | `0x2f034610` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_recycle_probe` | `0x2f034614` | 32 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_recycle_timer` | `0x2f034634` | 20 | `internal SRAM` |
+| `.critical.bss.wifi_strict.indicate_frame_probe` | `0x2f034648` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_done_registry` | `0x2f034654` | 40 | `internal SRAM` |
+| `.critical.data.wifi_strict.init_global_lock` | `0x2f03467c` | 12 | `internal SRAM` |
+| `.critical.data.wifi_strict.init_mac_list_lock` | `0x2f034688` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.data_rx_channel` | `0x2f034694` | 788 | `internal SRAM` |
+| `.critical.bss.wifi_strict.data_rx_slots` | `0x2f0349a8` | 4160 | `internal SRAM` |
+| `.critical.bss.wifi_strict.data_tx_channel` | `0x2f0359e8` | 276 | `internal SRAM` |
+| `.critical.bss.wifi_strict.data_tx_slots` | `0x2f035afc` | 51584 | `internal SRAM` |
+| `.critical.data.wifi_strict.basic_secondary_schedule` | `0x2f04247c` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.critical_probe` | `0x2f042488` | 24 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_queue_process_hil` | `0x2f0424a0` | 156 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_queue_state` | `0x2f04253c` | 236 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_trace` | `0x2f042628` | 2312 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rate_contexts` | `0x2f042f30` | 2432 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rate_table_scratch` | `0x2f0438b0` | 212 | `internal SRAM` |
+| `.critical.bss.wifi_strict.deferred_ap_management` | `0x2f043984` | 288 | `internal SRAM` |
+| `.critical.bss.wifi_strict.management_tx_rejection` | `0x2f043aa4` | 64 | `internal SRAM` |
+| `.critical.bss.wifi_strict.ap_assoc_rejection` | `0x2f043ae4` | 44 | `internal SRAM` |
+| `.critical.bss.wifi_strict.ap_assoc_response_capture` | `0x2f043b10` | 272 | `internal SRAM` |
+| `.critical.data.wifi_strict.critical_hart` | `0x2f043c20` | 4 | `internal SRAM` |
+| `.critical.bss.wifi_strict.critical_state` | `0x2f043c24` | 8 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_addba` | `0x2f043c2c` | 15 | `internal SRAM` |
+| `.critical.bss.wifi_strict.sta_node` | `0x2f043c3c` | 1544 | `internal SRAM` |
+| `.critical.bss.wifi_strict.ap_nodes` | `0x2f044244` | 10400 | `internal SRAM` |
+| `.critical.bss.wifi_strict.net80211_tx_queue` | `0x2f046afc` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.net80211_interfaces` | `0x2f046b08` | 28 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_queue` | `0x2f046b24` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_registry` | `0x2f046b30` | 8 | `internal SRAM` |
+| `.critical.bss.wifi_strict.rx_recycle_state` | `0x2f046b38` | 24 | `internal SRAM` |
+| `.critical.bss.wifi_strict.lmac_tx_done_state` | `0x2f046b50` | 16 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_done_state` | `0x2f046b60` | 12 | `internal SRAM` |
+| `.critical.bss.wifi_strict.data_tx_wakers` | `0x2f046b6c` | 24 | `internal SRAM` |
+| `.critical.bss.wifi_strict.ap_join_diagnostics` | `0x2f046b84` | 8 | `internal SRAM` |
+| `.critical.bss.wifi_strict.critical_callbacks` | `0x2f046b8c` | 16 | `internal SRAM` |
+| `.critical.bss.wifi_strict.tx_block_ack` | `0x2f046b9c` | 48 | `internal SRAM` |
+| `.bss.esp_wifi_async_net80211` | `0x2f046bcc` | 33 | `internal SRAM` |
 
 ## Final-link interposition
 
 | boundary | replacement | mode | `__real_*` target |
 |---|---:|---|---|
-| `calloc` | `0x400c6304` | GNU `--wrap` boundary | - |
-| `chm_return_home_channel` | `0x400c5d18` | GNU `--wrap` boundary | - |
-| `chm_start_op` | `0x400c5c60` | GNU `--wrap` boundary | - |
+| `calloc` | `0x400c62bc` | GNU `--wrap` boundary | - |
+| `chm_return_home_channel` | `0x400c5cd0` | GNU `--wrap` boundary | - |
+| `chm_start_op` | `0x400c5c18` | GNU `--wrap` boundary | - |
 | `cnx_add_to_blacklist` | `0x2f004f4a` | retained replacement only | - |
 | `cnx_check_bssid_in_blacklist` | `0x2f004f46` | retained replacement only | - |
 | `cnx_clear_blacklist` | `0x2f004f4c` | retained replacement only | - |
-| `cnx_node_alloc` | `0x400d24fe` | GNU `--wrap` boundary | - |
-| `cnx_node_search` | `0x400d2650` | retained replacement only | - |
+| `cnx_node_alloc` | `0x400d25e4` | GNU `--wrap` boundary | - |
+| `cnx_node_search` | `0x400d2736` | retained replacement only | - |
 | `cnx_remove_from_blacklist` | `0x2f004f4a` | retained replacement only | - |
-| `dbg_dump_rx_ppdu` | `0x400c757a` | retained replacement only | - |
-| `dbg_dump_rx_sigb` | `0x400c757c` | retained replacement only | - |
-| `dbg_read_tx_ppdu` | `0x400c757c` | retained replacement only | - |
+| `dbg_dump_rx_ppdu` | `0x400c7532` | retained replacement only | - |
+| `dbg_dump_rx_sigb` | `0x400c7534` | retained replacement only | - |
+| `dbg_read_tx_ppdu` | `0x400c7534` | retained replacement only | - |
 | `esf_buf_alloc` | `0x2f0043da` | direct public alias | `0x2f800d1c` (ROM export) |
 | `esf_buf_recycle` | `0x2f004672` | direct public alias | `0x2f800d24` (ROM export) |
-| `esp_test_rx_parse_mu` | `0x400c757a` | direct public alias | `0x2f801178` (ROM export) |
-| `esp_test_rx_process_complete` | `0x400c7588` | direct public alias | `0x2f801158` (ROM export) |
-| `esp_test_tx_enab_statistics` | `0x400c7580` | direct public alias | `0x2f801144` (ROM export) |
-| `ets_delay_us` | `0x400c6512` | direct public alias | `0x2f80003c` (ROM export) |
-| `free` | `0x400c64a2` | GNU `--wrap` boundary | - |
-| `hal_crypto_set_key_entry` | `0x400c6cec` | retained replacement only | - |
+| `esp_test_rx_parse_mu` | `0x400c7532` | direct public alias | `0x2f801178` (ROM export) |
+| `esp_test_rx_process_complete` | `0x400c7540` | direct public alias | `0x2f801158` (ROM export) |
+| `esp_test_tx_enab_statistics` | `0x400c7538` | direct public alias | `0x2f801144` (ROM export) |
+| `ets_delay_us` | `0x400c64ca` | direct public alias | `0x2f80003c` (ROM export) |
+| `free` | `0x400c645a` | GNU `--wrap` boundary | - |
+| `hal_crypto_set_key_entry` | `0x400c6ca4` | retained replacement only | - |
 | `hal_mac_get_txq_complete` | `0x2f004d5c` | direct public alias | `0x2f800d44` (ROM export) |
-| `hal_mac_get_txq_state` | `0x400c6608` | direct public alias | `0x2f800d3c` (ROM export) |
-| `ic_get_next_tbtt` | `0x400c6892` | retained replacement only | - |
-| `ieee80211_classify` | `0x400c58b2` | GNU `--wrap` boundary | - |
-| `ieee80211_hostapd_beacon_txcb` | `0x400c667e` | GNU `--wrap` boundary | - |
-| `ieee80211_mgmt_output` | `0x400c5d9a` | GNU `--wrap` boundary | - |
-| `ieee80211_search_node` | `0x400d2658` | direct public alias | `0x2f800ca8` (ROM export) |
-| `ieee80211_set_tx_pti` | `0x400c5fb4` | direct public alias | `0x2f800cb8` (ROM export) |
-| `ieee80211_timer_process` | `0x400c5b10` | GNU `--wrap` boundary | - |
-| `ieee80211_tx_mgt_cb` | `0x400c6756` | retained replacement only | - |
+| `hal_mac_get_txq_state` | `0x400c65c0` | direct public alias | `0x2f800d3c` (ROM export) |
+| `ic_get_next_tbtt` | `0x400c684a` | retained replacement only | - |
+| `ieee80211_classify` | `0x400c586a` | GNU `--wrap` boundary | - |
+| `ieee80211_hostapd_beacon_txcb` | `0x400c6636` | GNU `--wrap` boundary | - |
+| `ieee80211_mgmt_output` | `0x400c5d52` | GNU `--wrap` boundary | - |
+| `ieee80211_search_node` | `0x400d273e` | direct public alias | `0x2f800ca8` (ROM export) |
+| `ieee80211_set_tx_pti` | `0x400c5f6c` | direct public alias | `0x2f800cb8` (ROM export) |
+| `ieee80211_timer_process` | `0x400c5ac8` | GNU `--wrap` boundary | - |
+| `ieee80211_tx_mgt_cb` | `0x400c670e` | retained replacement only | - |
 | `lmacTxDone` | `0x2f004eae` | direct public alias | `0x2f800dec` (ROM export) |
-| `malloc` | `0x400c61ae` | GNU `--wrap` boundary | - |
-| `os_sleep` | `0x400c6594` | GNU `--wrap` boundary | - |
-| `pm_on_beacon_rx` | `0x400c75a2` | direct public alias | `0x2f800e98` (ROM export) |
+| `malloc` | `0x400c6166` | GNU `--wrap` boundary | - |
+| `os_sleep` | `0x400c654c` | GNU `--wrap` boundary | - |
+| `pm_on_beacon_rx` | `0x400c755a` | direct public alias | `0x2f800e98` (ROM export) |
 | `pm_on_coex_schm_status_config` | `0x2f005162` | retained replacement only | - |
-| `pm_on_data_rx` | `0x400c75a4` | direct public alias | `0x2f800e9c` (ROM export) |
-| `pm_on_data_tx` | `0x400c75a6` | direct public alias | `0x2f800ea0` (ROM export) |
-| `pm_set_beacon_duration` | `0x400c75a8` | retained replacement only | - |
+| `pm_on_data_rx` | `0x400c755c` | direct public alias | `0x2f800e9c` (ROM export) |
+| `pm_on_data_tx` | `0x400c755e` | direct public alias | `0x2f800ea0` (ROM export) |
+| `pm_set_beacon_duration` | `0x400c7560` | retained replacement only | - |
 | `ppTxPkt` | `0x2f0073fe` | retained replacement only | - |
-| `pp_post` | `0x400c5530` | GNU `--wrap` boundary | - |
+| `pp_post` | `0x400c54e8` | GNU `--wrap` boundary | - |
 | `rcGetSched` | `0x2f0029ce` | retained replacement only | - |
-| `realloc` | `0x400c63d8` | GNU `--wrap` boundary | - |
-| `sleep` | `0x400bf5b0` | GNU `--wrap` boundary | - |
-| `sta_rx_cb` | `0x400b01ac` | GNU `--wrap` boundary | - |
-| `usleep` | `0x400bf65a` | GNU `--wrap` boundary | - |
-| `vTaskDelay` | `0x400bf686` | GNU `--wrap` boundary | - |
+| `realloc` | `0x400c6390` | GNU `--wrap` boundary | - |
+| `sleep` | `0x400bf578` | GNU `--wrap` boundary | - |
+| `sta_rx_cb` | `0x400b01d6` | GNU `--wrap` boundary | - |
+| `usleep` | `0x400bf622` | GNU `--wrap` boundary | - |
+| `vTaskDelay` | `0x400bf64e` | GNU `--wrap` boundary | - |
 | `wDev_AppendRxBlocks` | `0x2f005182` | direct public alias | `0x2f8010c4` (ROM export) |
 | `wDev_IndicateCtrlFrame` | `0x2f005164` | GNU `--wrap` boundary | - |
-| `wDev_SnifferRxData` | `0x400c75a6` | retained replacement only | - |
-| `wDev_ftm_set_t1t4` | `0x400c75aa` | retained replacement only | - |
-| `wDev_isNANPktInValidSlot` | `0x400c75ba` | GNU `--wrap` boundary | - |
-| `wDev_record_ftm_data` | `0x400c7592` | retained replacement only | - |
-| `wdev_csi_rx_process` | `0x400c75a6` | retained replacement only | - |
-| `wifi_assert` | `0x400c758a` | retained replacement only | - |
-| `wifi_gpio_debug` | `0x400c757e` | retained replacement only | - |
-| `wifi_log` | `0x400c75a6` | retained replacement only | - |
-| `wpa_ap_rx_eapol` | `0x400c6caa` | retained replacement only | - |
-| `wpa_sm_rx_eapol` | `0x400c6c6c` | retained replacement only | - |
-| `esp_test_set_rx_error_occurs` | `0x400c7584` | direct public alias | `0x2f801164` (ROM export) |
-| `rcUpdateTxDone` | `0x400c6916` | direct public alias | `0x2f80106c` (ROM export) |
-| `ieee80211_post_hmac_tx` | `0x400d2840` | direct public alias | `0x2f800cc0` (ROM export) |
-| `ieee80211_crypto_encap` | `0x400c5a38` | direct public alias | `0x2f800cac` (ROM export) |
-| `ieee80211_align_eb` | `0x400d2760` | direct public alias | `0x2f800c7c` (ROM export) |
-| `ieee80211_set_tx_desc` | `0x400d293c` | direct public alias | `0x2f800c98` (ROM export) |
+| `wDev_SnifferRxData` | `0x400c755e` | retained replacement only | - |
+| `wDev_ftm_set_t1t4` | `0x400c7562` | retained replacement only | - |
+| `wDev_isNANPktInValidSlot` | `0x400c7572` | GNU `--wrap` boundary | - |
+| `wDev_record_ftm_data` | `0x400c754a` | retained replacement only | - |
+| `wdev_csi_rx_process` | `0x400c755e` | retained replacement only | - |
+| `wifi_assert` | `0x400c7542` | retained replacement only | - |
+| `wifi_gpio_debug` | `0x400c7536` | retained replacement only | - |
+| `wifi_log` | `0x400c755e` | retained replacement only | - |
+| `wpa_ap_rx_eapol` | `0x400c6c62` | retained replacement only | - |
+| `wpa_sm_rx_eapol` | `0x400c6c24` | retained replacement only | - |
+| `esp_test_set_rx_error_occurs` | `0x400c753c` | direct public alias | `0x2f801164` (ROM export) |
+| `rcUpdateTxDone` | `0x400c68ce` | direct public alias | `0x2f80106c` (ROM export) |
+| `ieee80211_post_hmac_tx` | `0x400d2926` | direct public alias | `0x2f800cc0` (ROM export) |
+| `ieee80211_crypto_encap` | `0x400c59f0` | direct public alias | `0x2f800cac` (ROM export) |
+| `ieee80211_align_eb` | `0x400d2846` | direct public alias | `0x2f800c7c` (ROM export) |
+| `ieee80211_set_tx_desc` | `0x400d2a22` | direct public alias | `0x2f800c98` (ROM export) |
 | `ppTxProtoProc` | `0x2f0029fc` | direct public alias | - |
 | `ppProcTxSecFrame` | `0x2f0029f4` | direct public alias | - |
 
@@ -261,6 +260,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `esp_test_tx_addba_request` | 1 | `internal SRAM` / `.data` | `libnet80211.a[wl_cnx.o]` | - |
 | `g_dynamic_cs` | 12 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_sta.o]` | - |
 | `send_deauth` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_sta.o]` | - |
+| `phy_param` | 508 | `internal SRAM` / `.data` | `libphy.a[phy_init.o]` | `bt_agc_gain_set`, `phy_11p_set`, `phy_ble_set_chan_base`, `phy_bt_get_tx_tab_new`, `phy_bt_power_track`, +48 |
 | `g_pp_timer_info` | 136 | `internal SRAM` / `.data` | `libpp.a[pp_timer.o]` | `wdev_data_init` |
 | `g_pm_cfg` | 88 | `internal SRAM` / `.data` | `libpp.a[pm.o]` | `ic_update_light_sleep_wake_ahead_time`, `pm_beacon_offset_reset`, `pm_coex_pwr_configure`, `pm_twt_set_config`, `wdev_data_init` |
 | `TxRxCxt` | 1044 | `internal SRAM` / `.data` | `libpp.a[pp.o]` | `SigSpaceFree`, `SigSpaceMalloc`, `lmacStopTransmit`, `ppCalTxopDur`, `ppCheckTxHEAMPDUlength`, +37 |
@@ -370,6 +370,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `g_store_rx_trig` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
 | `g_store_rx_trig_print` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
 | `test_rx_trig_bfrp` | 1200 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
+| `g_phyFuns` | 4 | `internal SRAM` / `.bss` | `libphy.a[phy_init.o]` | `phy_bt_set_tx_gain_new`, `phy_bt_tx_pwctrl_init`, `phy_start_tx_tone_step_new`, `phy_tx_cap_init`, `phy_tx_gain_print`, +3 |
 | `g_pm` | 1176 | `internal SRAM` / `.bss` | `libpp.a[pm.o]` | `hal_get_time_to_sta_next_tbtt`, `ic_update_light_sleep_wake_ahead_time`, `pm_beacon_offset_check`, `pm_beacon_offset_get_average`, `pm_beacon_offset_get_expect`, +35 |
 | `g_rts_threshold_bytes` | 120 | `internal SRAM` / `.bss` | `libpp.a[if_hwctrl.o]` | `wdev_data_init` |
 | `if_ctrl` | 40 | `internal SRAM` / `.bss` | `libpp.a[if_hwctrl.o]` | `wdev_data_init` |

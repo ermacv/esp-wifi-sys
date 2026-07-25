@@ -206,6 +206,9 @@ adopts only the instruction-evidenced fields:
 - channel-14 MIC gate at `0x26`;
 - 802.11p policy bytes at `0x28..=0x29`;
 - crystal selector at `0x4f`;
+- TX-gain skip, seed, configuration, calibration curve, correction, base, and
+  delta fields at `0x07`, `0xa8..=0xbf`, `0xd0..=0xd1`, `0xf1..=0xf7`,
+  `0x123`, and `0x1b2`;
 - current channel/init/CBW at `0x11c..=0x11f`.
 
 The qualified `phy_i2c_enter_critical` and `phy_i2c_exit_critical` bindings
@@ -221,19 +224,41 @@ oracle. The linked-state auditor uses only the real Rust runtime roots. This
 distinction prevents the removed `phy_chip_set_chan` body from being reported
 as live while retaining conservative checking of its lower calls.
 
-The next actual dependency is narrower than the 508-byte symbol suggests.
-`phy_chip_set_chan_misc_new` reaches `phy_wifi_set_tx_gain_new`, which reads
-the calibrated TX-gain tables in `phy_param` and dispatches the cold-published
-`g_phyFuns+0x24` callback. The optional channel-14 path also reads its two
-power bytes. These calibrated values must become a typed Rust-owned gain
-profile; copying the complete opaque `phy_param` object would hide rather
-than solve the ownership problem.
+The normal TX-gain path is now Rust-owned as well. The three pinned
+`phy_tx_gain.o` tables are represented as typed aligned halfword arrays.
+Rust calls the absolute-ROM `phy_wifi_get_tx_gain` oracle with the adopted
+calibration profile and stack-owned fixed output arrays, then calls the finite
+`phy_set_tx_gain_mem_new` register leaf directly. This removes
+`phy_wifi_set_tx_gain_new` and the cold-published `g_phyFuns+0x24` callback
+from the strict runtime graph. It adds 42 bytes to the explicit PHY state
+(the aligned section grows from 6 to 48 bytes) instead of retaining an opaque
+508-byte owner.
 
-The partially migrated sequence passed the strict hardware workload: passive
+JTAG inspection after the qualified DE cold initialization measured
+`phy_param[0x26] == 0`: the optional channel-14 MIC/power mode was disabled.
+Strict handoff now checks that byte and returns
+`PhyChannelStateAdoptionError::Channel14MicEnabled` instead of adopting an
+unsupported profile. The runtime therefore supports the qualified channel
+range 1 through 13 and does not call `phy_chan14_mic_cfg_new`. This is
+deliberately fail-closed: channel 14 can be added later as a separate typed
+power profile after the complete ROM calibration contract is known.
+
+The final linked-state audit consequently reports zero mutable blob globals
+reachable from strict runtime leaves. This does not yet remove `phy_param`
+from the image: Rust still reads its evidenced fields once during cold
+handoff, and the remaining cold vendor PHY initialization still owns and
+populates the object.
+
+The migrated sequence passed the strict hardware workload: passive
 scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
 UDP datagrams and four HTTP transfers. All 4786 TX credits and 690 RX credits
 were returned, no PP post was rejected, and post-handoff allocation counters
-were unchanged. Measured UDP payload throughput was 25.024 Mbit/s.
+were unchanged. The first channel-state qualification measured 25.024 Mbit/s.
+The subsequent Rust-owned TX-gain qualification returned all 4786 TX and 691
+RX credits, rejected no PP publication, and measured 26.309 Mbit/s. The final
+channel-14-invariant build repeated the complete workload, returned all 4786
+TX and 691 RX credits, rejected no PP publication, and measured
+28.278 Mbit/s.
 
 ## In-progress slice: `g_ic`
 
