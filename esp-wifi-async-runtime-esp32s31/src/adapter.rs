@@ -38,7 +38,7 @@ const MUTEX_CAPACITY: usize = 64;
 const EVENT_GROUP_CAPACITY: usize = 32;
 const NO_SEMAPHORE: usize = usize::MAX;
 
-static STATE: AdapterState = AdapterState::new();
+static STATE: RadioResources = RadioResources::new();
 static TIME_SOURCE: AtomicUsize = AtomicUsize::new(0);
 static TASK_DELAY_CALLER: AtomicUsize = AtomicUsize::new(0);
 static TASK_DELAY_TICKS: AtomicU32 = AtomicU32::new(0);
@@ -146,7 +146,17 @@ pub enum InitializationDrainError {
     },
 }
 
-struct AdapterState {
+/// Fixed storage shared with the vendor ABI and exclusively driven by one
+/// Rust radio owner after handoff.
+///
+/// The storage must have a stable address because C callbacks cannot carry a
+/// Rust context pointer. `owner` is therefore the ownership boundary: ABI
+/// callbacks may publish finite work into these queues, but only the future
+/// returned by `take_radio_future` or `take_wifi_runtime` may consume and
+/// mutate the logical radio state. A claim is deliberately never recycled
+/// yet; a complete async stop transition must be implemented before reuse can
+/// be sound.
+struct RadioResources {
     queue: RadioQueue<PP_QUEUE_CAPACITY>,
     internal_queue: RadioQueue<INTERNAL_EVENT_QUEUE_CAPACITY>,
     probe: BlockingCallProbe,
@@ -156,12 +166,12 @@ struct AdapterState {
     event_groups: EventGroupPool<EVENT_GROUP_CAPACITY>,
     timers: RuntimeTimerPool<TIMER_CAPACITY>,
     callbacks_patched: AtomicBool,
-    radio_future_taken: AtomicBool,
+    owner: RadioOwnerClaim,
     shutdown_processed: AtomicBool,
     queue_descriptor: QueueDescriptor,
 }
 
-impl AdapterState {
+impl RadioResources {
     const fn new() -> Self {
         Self {
             queue: RadioQueue::new(),
@@ -173,7 +183,7 @@ impl AdapterState {
             event_groups: EventGroupPool::new(),
             timers: RuntimeTimerPool::new(),
             callbacks_patched: AtomicBool::new(false),
-            radio_future_taken: AtomicBool::new(false),
+            owner: RadioOwnerClaim::new(),
             shutdown_processed: AtomicBool::new(false),
             queue_descriptor: QueueDescriptor::new(),
         }
@@ -189,6 +199,30 @@ impl AdapterState {
 
     fn queue_bridge(&self) -> OsiPpQueue<'_, PP_QUEUE_CAPACITY> {
         OsiPpQueue::new(&self.queue, &self.probe)
+    }
+}
+
+/// One-way ownership handoff from cold initialization to a Rust radio future.
+///
+/// Dropping the future does not release the claim. At present the vendor cold
+/// state and interrupt publications cannot be proven reset merely because a
+/// future was dropped. Keeping this transition one-way makes accidental
+/// construction of two mutable radio owners impossible.
+struct RadioOwnerClaim(AtomicBool);
+
+impl RadioOwnerClaim {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn try_take(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn is_taken(&self) -> bool {
+        self.0.load(Ordering::Acquire)
     }
 }
 
@@ -706,10 +740,7 @@ pub unsafe extern "C" fn __wrap_pp_create_task() -> i32 {
 ))]
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_pp_delete_task() -> i32 {
-    if STATE.radio_future_taken.load(Ordering::Acquire)
-        || !STATE.queue.is_empty()
-        || !STATE.internal_queue.is_empty()
-    {
+    if STATE.owner.is_taken() || !STATE.queue.is_empty() || !STATE.internal_queue.is_empty() {
         return 0x101;
     }
     if !static_pp_task_bound() {
@@ -890,11 +921,7 @@ pub fn take_radio_future(
 ) -> Option<
     RadioFuture<'static, VendorPpDispatcher, PP_QUEUE_CAPACITY, INTERNAL_EVENT_QUEUE_CAPACITY>,
 > {
-    if STATE
-        .radio_future_taken
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    if !STATE.owner.try_take() {
         return None;
     }
     Some(RadioFuture::new(
@@ -923,11 +950,7 @@ pub fn take_wifi_runtime(
         TIMER_CAPACITY,
     >,
 > {
-    if STATE
-        .radio_future_taken
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    if !STATE.owner.try_take() {
         return None;
     }
     TIME_SOURCE.store(now as usize, Ordering::Release);
@@ -1645,7 +1668,7 @@ unsafe extern "C" fn task_max_priority() -> i32 {
 mod tests {
     use core::{ptr, sync::atomic::Ordering};
 
-    use super::{queue_send, MutexPool, SemaphorePool, NO_SEMAPHORE, STATE};
+    use super::{queue_send, MutexPool, RadioOwnerClaim, SemaphorePool, NO_SEMAPHORE, STATE};
     use crate::event::PpEvent;
 
     #[test]
@@ -1685,6 +1708,16 @@ mod tests {
         assert!(!pool.lock(recursive, 2));
         assert!(pool.unlock(recursive, 1));
         assert!(pool.lock(recursive, 2));
+    }
+
+    #[test]
+    fn radio_owner_claim_is_one_way_and_single_consumer() {
+        let owner = RadioOwnerClaim::new();
+
+        assert!(!owner.is_taken());
+        assert!(owner.try_take());
+        assert!(owner.is_taken());
+        assert!(!owner.try_take());
     }
 
     #[test]

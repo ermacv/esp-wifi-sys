@@ -1,9 +1,11 @@
 #![no_std]
-#![doc = "Experimental stackless runtime for the ESP32-S31 vendor Wi-Fi blobs."]
+#![doc = "Experimental heap-free async Wi-Fi runtime for ESP32-S31."]
 #![doc = ""]
-#![doc = "This crate deliberately does not initialize Wi-Fi hardware. It replaces the"]
-#![doc = "top-level `ppTask` scheduling loop with a wake-driven Rust `Future` while"]
-#![doc = "continuing to call the original run-to-completion blob handlers."]
+#![doc = "The primary profile replaces the top-level `ppTask`, OS timers, WPA2"]
+#![doc = "continuations, queue ownership, and a growing set of MAC/LMAC/PHY leaves"]
+#![doc = "with wake-driven Rust state machines. Remaining finite vendor leaves and"]
+#![doc = "cold hardware initialization are isolated behind audited compatibility"]
+#![doc = "boundaries; no RTOS Wi-Fi task or runtime allocator is required."]
 
 #[cfg(test)]
 extern crate std;

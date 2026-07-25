@@ -86,6 +86,7 @@ struct Section {
 fn main() -> Result<()> {
     let mut elf = None;
     let mut write = None;
+    let mut enforce_primary_baseline = false;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -99,6 +100,7 @@ fn main() -> Result<()> {
                     arguments.next().context("--write requires a path")?,
                 ));
             }
+            "--enforce-primary-baseline" => enforce_primary_baseline = true,
             _ => bail!("unknown argument: {argument}"),
         }
     }
@@ -112,7 +114,7 @@ fn main() -> Result<()> {
         .context("xtask must be inside the workspace")?
         .to_path_buf();
     let library_dir = workspace.join("esp-wifi-sys-esp32s31/libs");
-    let report = build_report(&library_dir, &elf)?;
+    let report = build_report(&library_dir, &elf, enforce_primary_baseline)?;
     if let Some(path) = write {
         let path = if path.is_absolute() {
             path
@@ -127,7 +129,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
+fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) -> Result<String> {
     let inventory = inventory_archives(library_dir)?;
     let final_symbols = parse_posix_symbols(&text(checked(
         Command::new("llvm-nm")
@@ -254,6 +256,19 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
         })
         .count();
 
+    if enforce_primary_baseline {
+        enforce_primary_state_baseline(StateMetrics {
+            vendor_roots: ROOTS.len(),
+            reachable_vendor_functions: reachable.len(),
+            runtime_mutable_blob_symbols: runtime_globals.len(),
+            runtime_mutable_blob_bytes: runtime_bytes,
+            runtime_rom_indirections: runtime_indirections.len(),
+            cold_phy_mutable_blob_bytes: cold_phy_bytes,
+            linked_other_mutable_blob_bytes: other_bytes,
+            strict_static_bytes,
+        })?;
+    }
+
     let mut report = String::new();
     pushln(
         &mut report,
@@ -363,6 +378,10 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(
         &mut report,
         "Run `audit-strict-esp32s31 --include-static-binding-init --include-static-pm-init --enforce` to prove the fixed-storage cold-init leaves together with the runtime roots.",
+    );
+    pushln(
+        &mut report,
+        "Run this auditor with `--enforce-primary-baseline` to reject growth beyond the qualified heap-free image while allowing vendor roots, linked blob state, and Rust static storage to shrink.",
     );
     pushln(
         &mut report,
@@ -607,6 +626,101 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     }
 
     Ok(report)
+}
+
+/// Improvement-friendly limits from the qualified heap-free primary image.
+///
+/// Reducing any upper bound is allowed. Runtime mutable blob state and ROM
+/// indirection cells are exact zero invariants: reintroducing either would
+/// silently undo the Rust ownership handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StateMetrics {
+    vendor_roots: usize,
+    reachable_vendor_functions: usize,
+    runtime_mutable_blob_symbols: usize,
+    runtime_mutable_blob_bytes: u64,
+    runtime_rom_indirections: usize,
+    cold_phy_mutable_blob_bytes: u64,
+    linked_other_mutable_blob_bytes: u64,
+    strict_static_bytes: u64,
+}
+
+const PRIMARY_STATE_BASELINE: StateMetrics = StateMetrics {
+    vendor_roots: 26,
+    reachable_vendor_functions: 39,
+    runtime_mutable_blob_symbols: 0,
+    runtime_mutable_blob_bytes: 0,
+    runtime_rom_indirections: 0,
+    cold_phy_mutable_blob_bytes: 512,
+    linked_other_mutable_blob_bytes: 22_203,
+    strict_static_bytes: 311_745,
+};
+
+fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {
+    let baseline = PRIMARY_STATE_BASELINE;
+    let regressions = [
+        (
+            actual.vendor_roots > baseline.vendor_roots,
+            format!(
+                "strict vendor roots {} > {}",
+                actual.vendor_roots, baseline.vendor_roots
+            ),
+        ),
+        (
+            actual.reachable_vendor_functions > baseline.reachable_vendor_functions,
+            format!(
+                "reachable vendor functions {} > {}",
+                actual.reachable_vendor_functions, baseline.reachable_vendor_functions
+            ),
+        ),
+        (
+            actual.runtime_mutable_blob_symbols != 0 || actual.runtime_mutable_blob_bytes != 0,
+            format!(
+                "runtime mutable blob state is {} symbols / {} bytes, expected exact zero",
+                actual.runtime_mutable_blob_symbols, actual.runtime_mutable_blob_bytes
+            ),
+        ),
+        (
+            actual.runtime_rom_indirections != 0,
+            format!(
+                "runtime ROM indirection cells {}, expected exact zero",
+                actual.runtime_rom_indirections
+            ),
+        ),
+        (
+            actual.cold_phy_mutable_blob_bytes > baseline.cold_phy_mutable_blob_bytes,
+            format!(
+                "cold PHY mutable blob state {} > {} bytes",
+                actual.cold_phy_mutable_blob_bytes, baseline.cold_phy_mutable_blob_bytes
+            ),
+        ),
+        (
+            actual.linked_other_mutable_blob_bytes > baseline.linked_other_mutable_blob_bytes,
+            format!(
+                "linked mutable blob state outside strict roots {} > {} bytes",
+                actual.linked_other_mutable_blob_bytes, baseline.linked_other_mutable_blob_bytes
+            ),
+        ),
+        (
+            actual.strict_static_bytes > baseline.strict_static_bytes,
+            format!(
+                "Rust strict static storage {} > {} bytes",
+                actual.strict_static_bytes, baseline.strict_static_bytes
+            ),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(failed, message)| failed.then_some(message))
+    .collect::<Vec<_>>();
+
+    if regressions.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "ESP32-S31 primary state baseline regressed:\n- {}",
+            regressions.join("\n- ")
+        )
+    }
 }
 
 fn inventory_archives(library_dir: &Path) -> Result<ArchiveInventory> {
@@ -1074,9 +1188,10 @@ fn text(output: Output) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        definition_name, linked_code_referrers, local_data_aliases, parse_archive_relocations,
-        parse_archive_symbol, parse_posix_symbols, parse_sections, placement,
-        reachable_vendor_functions, ArchiveInventory, Symbol, ROM_ABI_BACKINGS,
+        definition_name, enforce_primary_state_baseline, linked_code_referrers, local_data_aliases,
+        parse_archive_relocations, parse_archive_symbol, parse_posix_symbols, parse_sections,
+        placement, reachable_vendor_functions, ArchiveInventory, StateMetrics, Symbol,
+        PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1093,6 +1208,34 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(cells.len(), ROM_ABI_BACKINGS.len());
         assert_eq!(backings.len(), ROM_ABI_BACKINGS.len());
+    }
+
+    #[test]
+    fn primary_state_baseline_accepts_equal_or_smaller_graphs() {
+        enforce_primary_state_baseline(PRIMARY_STATE_BASELINE).unwrap();
+        enforce_primary_state_baseline(StateMetrics {
+            vendor_roots: 20,
+            reachable_vendor_functions: 30,
+            runtime_mutable_blob_symbols: 0,
+            runtime_mutable_blob_bytes: 0,
+            runtime_rom_indirections: 0,
+            cold_phy_mutable_blob_bytes: 0,
+            linked_other_mutable_blob_bytes: 10_000,
+            strict_static_bytes: 250_000,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn primary_state_baseline_rejects_runtime_blob_state() {
+        let error = enforce_primary_state_baseline(StateMetrics {
+            runtime_mutable_blob_symbols: 1,
+            runtime_mutable_blob_bytes: 4,
+            ..PRIMARY_STATE_BASELINE
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected exact zero"));
     }
 
     #[test]

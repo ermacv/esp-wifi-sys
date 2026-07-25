@@ -50,6 +50,14 @@ publish edges or data into bounded static channels. Cross-context scalar
 snapshots use atomics; they do not disable interrupts or enter a vendor
 critical section.
 
+`adapter::RadioResources` is now the first explicit composition root. Its
+address remains static because the retained C ABI callbacks have no context
+parameter, but static placement is no longer treated as ownership. A one-way
+`RadioOwnerClaim` permits exactly one `RadioFuture` or `WifiRuntimeFuture` to
+consume the queues and timers. Dropping that future does not release the
+claim: reuse will be added only with a complete async stop transition that
+proves interrupts, descriptors, timers, and cold publications quiescent.
+
 ## Deferred atomic retry debt
 
 A diagnostic scan of the qualified stress ELF found compiler-generated
@@ -130,19 +138,47 @@ the WPA2 four-way handshake, DHCP, gateway ping, DNS, TCP, and post-link data
 all completed. The allocation counters remained zero through association and
 post-link operation.
 
+## Current qualified baseline
+
+The 2026-07-25 primary ELF has no mutable blob global or ROM-ABI mutable
+indirection cell reachable from a strict runtime leaf. The remaining direct
+cold PHY graph reaches two objects (`phy_param` and `g_phyFuns`) totalling 512
+bytes. Other linked mutable blob state totals 22,203 bytes.
+
+Rust-owned strict sections total 311,745 bytes. The largest storage is in the
+RX path: the 59,008-byte runtime ESF pool, 56,320-byte cold ESF pool, and
+54,784-byte WDEV payload pool. These are not assumed redundant merely because
+their capacities are similar; their simultaneous lifetimes and transfer of
+descriptor ownership must be proved before storage is overlaid or removed.
+
+`audit-state-esp32s31 --enforce-primary-baseline` makes these numbers
+improvement-friendly build limits. It requires runtime mutable blob state and
+ROM indirections to stay exactly zero, and rejects growth in strict static
+storage, the vendor call graph, cold PHY state, or other linked mutable blob
+state.
+
 ## Next slices
 
-Priority is based on current strict reachable bytes and how much unsafe state
-each slice can remove:
+Priority is now based on ownership leverage and total SRAM, rather than only
+on mutable blob bytes:
 
-1. `g_ic` net80211/interface state: split association, peer/interface, scan,
-   and configuration ownership before attempting one monolithic replacement.
-2. `TxRxCxt` and `pTxRx`: isolate descriptor queues, completion state, and
-   hardware ring ownership.
-3. `phy_param`: recover the channel/rate/calibration subset used by the
-   qualified profile, keeping calibration and coexistence fields explicit.
-4. Replace channel-manager cold init so `gChmCxt` can be removed from the
-   image, not merely from runtime reachability.
+1. Complete the `RadioResources` composition root by moving RX resources under
+   a unique owner while retaining a minimal ISR publication view.
+2. Trace the RX lifetime vertically from the hardware descriptor through WDEV
+   and ESF to the network consumer. Port `wDev_ProcessRxSucData`,
+   `ppRxProtoProc`, `ppRecycleRxPkt`, and the free-buffer boundary as their
+   ownership contracts become explicit.
+3. Use measured high-water marks to overlay or remove only storage whose
+   lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
+   new throughput qualification because it has reached full occupancy.
+4. Replace NVS-shaped cold configuration storage with typed Rust
+   configuration, then remove channel/function-table/interface cold ABI
+   publishers one group at a time.
+5. Move finite register leaves (TSF, TXQ state, CCA, CSI bandwidth, key table,
+   and descriptor ownership) behind an experimental ESP32-S31 radio HAL.
+6. Port full PHY calibration and `register_chipv7_phy` last, keeping the
+   vendor image as a differential oracle until every adopted field and
+   register sequence is qualified.
 
 The strict-runtime part of `wDevCtrl` is complete. Its remaining linked
 vendor body is cold/diagnostic debt and is no longer reachable from a strict

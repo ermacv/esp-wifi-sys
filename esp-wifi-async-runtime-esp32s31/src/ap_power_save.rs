@@ -272,9 +272,20 @@ mod tests {
         ps_poll_credit_after, ps_poll_epoch, removal_epoch, PeerEdge,
     };
     use core::task::{Context, Poll, Waker};
+    use std::sync::{Mutex, MutexGuard};
+
+    // The production state is intentionally one global radio-owner resource.
+    // Serialize tests which mutate that resource so the host test scheduler
+    // cannot make per-test counter deltas observe another test's frame.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_guard() -> MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn only_to_ds_data_publishes_power_state() {
+        let _guard = test_guard();
         let before = ap_power_save_snapshot();
         let mut frame = [0_u8; 24];
         frame[..2].copy_from_slice(&0x1108_u16.to_le_bytes());
@@ -290,6 +301,7 @@ mod tests {
 
     #[test]
     fn ps_poll_credit_is_bound_to_transmitter() {
+        let _guard = test_guard();
         let peer = [1, 2, 3, 4, 5, 6];
         let before = ps_poll_epoch(&peer);
         let mut frame = [0_u8; 16];
@@ -303,6 +315,7 @@ mod tests {
 
     #[test]
     fn ps_poll_events_for_two_peers_remain_independent() {
+        let _guard = test_guard();
         let first = [20, 2, 3, 4, 5, 6];
         let second = [21, 2, 3, 4, 5, 6];
         let first_before = ps_poll_epoch(&first);
@@ -319,6 +332,7 @@ mod tests {
 
     #[test]
     fn peer_active_edges_do_not_wake_a_different_peer() {
+        let _guard = test_guard();
         let peer = [7, 2, 3, 4, 5, 6];
         let other = [8, 2, 3, 4, 5, 6];
         let before = active_epoch(&peer);
@@ -333,6 +347,7 @@ mod tests {
 
     #[test]
     fn peer_removal_cancels_only_the_matching_waiter() {
+        let _guard = test_guard();
         let peer = [30, 2, 3, 4, 5, 6];
         let other = [31, 2, 3, 4, 5, 6];
         let active_before = active_epoch(&peer);
