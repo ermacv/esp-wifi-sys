@@ -911,9 +911,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
         );
     }
     let aggregate_flag = if prefix[1] as i8 >= 0 && prefix[1] & 0xc0 == 0x40 {
-        usize::from(
-            u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]) >> 27 & 1,
-        )
+        (u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]) >> 27 & 1) as usize
     } else {
         1
     };
