@@ -71,6 +71,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wDev_ftm_set_t1t4",
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
+    "wDev_DiscardFrame",
     "ppRxProtoProc",
     "ppRecycleRxPkt",
     "esp_wifi_internal_free_rx_buffer",

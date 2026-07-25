@@ -245,6 +245,9 @@ unsafe extern "C" {
     #[link_name = "wDev_AppendRxBlocks"]
     fn vendor_append_rx_blocks(head: *mut u8, tail: *mut u8, count: u32);
     fn __real_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8, count: u32);
+    #[link_name = "wDev_DiscardFrame"]
+    fn vendor_discard_frame(tail: *mut u8, count: u32);
+    fn __real_wDev_DiscardFrame(tail: *mut u8, count: u32);
     fn hal_mac_rx_get_last_dscr() -> *mut u8;
     fn hal_mac_rx_get_end_state() -> u32;
     fn hal_mac_rx_is_dscr_reload() -> u32;
@@ -683,6 +686,85 @@ pub unsafe extern "C" fn __wrap_wDev_AppendRxBlocks(head: *mut u8, tail: *mut u8
     }
 }
 
+/// A detached RX descriptor prefix with one remaining recycle authority.
+///
+/// Construction removes the prefix from `wDevCtrl.head`; consuming this token
+/// is the only path into the fixed Rust descriptor recycler.
+#[cfg(target_arch = "riscv32")]
+struct DetachedRxPrefix {
+    head: *mut u8,
+    tail: *mut u8,
+    count: u32,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl DetachedRxPrefix {
+    #[link_section = ".rwtext.wifi_strict.rx_recycle"]
+    unsafe fn recycle(self) {
+        __wrap_wDev_AppendRxBlocks(self.head, self.tail, self.count);
+    }
+}
+
+/// Detach the completed RX prefix from the software descriptor frontier.
+///
+/// This is the exact state transform recovered from the 0x20-byte pinned
+/// `wDev_DiscardFrame` leaf: retain the old `wDevCtrl.head`, publish
+/// `tail.next` as the new head, clear `tail.next`, and transfer the detached
+/// `(head, tail)` prefix to one Rust owner. A local interrupt mask makes that
+/// publication one finite critical section; it never waits for the MAC.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+unsafe fn detach_completed_rx_prefix(
+    tail: *mut u8,
+    count: u32,
+) -> Result<DetachedRxPrefix, RxRecycleError> {
+    if tail.is_null() {
+        return Err(RxRecycleError::MissingTail);
+    }
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let control = ptr::addr_of_mut!(wDevCtrl);
+    let head = control.cast::<*mut u8>().read_unaligned();
+    if head.is_null() {
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+        return Err(RxRecycleError::MissingHead);
+    }
+    let next = tail
+        .add(RX_DESCRIPTOR_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    tail.add(RX_DESCRIPTOR_NEXT_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(ptr::null_mut());
+    control.cast::<*mut u8>().write_unaligned(next);
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    Ok(DetachedRxPrefix { head, tail, count })
+}
+
+/// Allocation-free Rust replacement for the RX discard ownership leaf.
+///
+/// The vendor body contains no protocol work: it only detaches one completed
+/// intrusive prefix and tail-calls `wDev_AppendRxBlocks`. Strict mode performs
+/// the same transform through a non-`Copy` Rust token and then enters the
+/// already qualified asynchronous descriptor recycler. There is no allocator,
+/// OSI primitive, polling loop, delay, or task handoff.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_recycle"]
+pub unsafe extern "C" fn __wrap_wDev_DiscardFrame(tail: *mut u8, count: u32) {
+    if !crate::critical::strict_wifi_hart_armed() {
+        __real_wDev_DiscardFrame(tail, count);
+        return;
+    }
+    let state = &mut *RX_RECYCLE_STATE.0.get();
+    if state.failed || !crate::critical::on_strict_wifi_hart() {
+        fail_rx_recycle(state, RxRecycleError::WrongHart);
+    }
+    match detach_completed_rx_prefix(tail, count) {
+        Ok(prefix) => prefix.recycle(),
+        Err(error) => fail_rx_recycle(state, error),
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
     let control = ptr::addr_of!(wDevCtrl);
@@ -745,6 +827,9 @@ fn runtime_rx_recycle_link_wrapper_active() -> bool {
     core::ptr::eq(
         vendor_append_rx_blocks as *const (),
         __wrap_wDev_AppendRxBlocks as *const (),
+    ) && core::ptr::eq(
+        vendor_discard_frame as *const (),
+        __wrap_wDev_DiscardFrame as *const (),
     ) && crate::esf::rx_packet_recycle_link_wrapper_active()
 }
 
