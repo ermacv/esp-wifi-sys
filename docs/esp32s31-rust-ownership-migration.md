@@ -916,6 +916,12 @@ and peer two uses `0x49` (slot 9). Security now admits both measured selectors,
 while the mapper binds `0x348` only to peer one and `0x349` only to peer two;
 slot 10 and crossed peer/selector combinations remain rejected.
 
+The first acknowledged peer-two downlink retained frame control `0x4288`,
+lengths `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
+descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned
+status `0x0104_0349`. Only that measured slot-nine completion is admitted;
+the adjacent `0x0114_0349` retry outcome remains rejected until observed.
+
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
 descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned

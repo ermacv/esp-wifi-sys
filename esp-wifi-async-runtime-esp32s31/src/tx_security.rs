@@ -120,6 +120,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
         || !matches!(
             descriptor_security,
             0x0104_0348
+                | 0x0104_0349
                 | 0x0114_0348
                 | 0x01a4_0348
                 | 0x0204_0348
@@ -1455,6 +1456,24 @@ mod tests {
             0xc01c_806a,
             0x0000_3009,
             0x04a4_0348,
+        ));
+        assert!(strict_ap_pairwise_power_save_completion(
+            0x4288,
+            expected.header_len,
+            expected.remaining_len,
+            expected.layout,
+            expected.buffer_flags,
+            0x0000_3009,
+            0x0104_0349,
+        ));
+        assert!(!strict_ap_pairwise_power_save_completion(
+            0x4288,
+            expected.header_len,
+            expected.remaining_len,
+            expected.layout,
+            expected.buffer_flags,
+            0x0000_3009,
+            0x0114_0349,
         ));
         assert!(!strict_ap_pairwise_power_save_completion(
             0x4288,
