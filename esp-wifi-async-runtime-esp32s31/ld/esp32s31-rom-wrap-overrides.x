@@ -147,6 +147,33 @@ hal_mac_rx_get_last_dscr = wifi_strict_hal_mac_rx_get_last_dscr;
 ASSERT(hal_mac_rx_get_last_dscr == wifi_strict_hal_mac_rx_get_last_dscr,
        "ESP32-S31 hal_mac_rx_get_last_dscr Rust boundary is inactive");
 
+/* Complete finite MAC-register leaves recovered from the pinned libpp.a.
+ * None contains a call, loop, delay, allocation, or data-symbol reference. */
+EXTERN(wifi_strict_hal_mac_tx_set_cca);
+hal_mac_tx_set_cca = wifi_strict_hal_mac_tx_set_cca;
+ASSERT(hal_mac_tx_set_cca == wifi_strict_hal_mac_tx_set_cca,
+       "ESP32-S31 hal_mac_tx_set_cca Rust boundary is inactive");
+
+EXTERN(wifi_strict_hal_mac_is_txq_valid);
+hal_mac_is_txq_valid = wifi_strict_hal_mac_is_txq_valid;
+ASSERT(hal_mac_is_txq_valid == wifi_strict_hal_mac_is_txq_valid,
+       "ESP32-S31 hal_mac_is_txq_valid Rust boundary is inactive");
+
+EXTERN(wifi_strict_hal_mac_set_txq_invalid);
+hal_mac_set_txq_invalid = wifi_strict_hal_mac_set_txq_invalid;
+ASSERT(hal_mac_set_txq_invalid == wifi_strict_hal_mac_set_txq_invalid,
+       "ESP32-S31 hal_mac_set_txq_invalid Rust boundary is inactive");
+
+EXTERN(wifi_strict_hal_mac_txq_disable);
+hal_mac_txq_disable = wifi_strict_hal_mac_txq_disable;
+ASSERT(hal_mac_txq_disable == wifi_strict_hal_mac_txq_disable,
+       "ESP32-S31 hal_mac_txq_disable Rust boundary is inactive");
+
+EXTERN(wifi_strict_hal_mac_set_csi_cbw);
+hal_mac_set_csi_cbw = wifi_strict_hal_mac_set_csi_cbw;
+ASSERT(hal_mac_set_csi_cbw == wifi_strict_hal_mac_set_csi_cbw,
+       "ESP32-S31 hal_mac_set_csi_cbw Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */

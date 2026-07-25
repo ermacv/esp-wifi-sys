@@ -4,15 +4,10 @@
 
 pub const ROOTS: &[&str] = &[
     "wDev_ProcessRxSucData",
-    "hal_mac_tx_set_cca",
-    "hal_mac_is_txq_valid",
-    "hal_mac_set_txq_invalid",
-    "hal_mac_txq_disable",
     "ic_set_current_channel",
     "phy_set_tx_gain_mem_new",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
-    "hal_mac_set_csi_cbw",
     "ic_mac_init",
     "ic_set_mac",
     "ic_set_rx_policy",
@@ -45,14 +40,9 @@ pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
 ];
 
 pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[
-    "hal_mac_tx_set_cca",
-    "hal_mac_is_txq_valid",
-    "hal_mac_set_txq_invalid",
-    "hal_mac_txq_disable",
     "phy_set_tx_gain_mem_new",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
-    "hal_mac_set_csi_cbw",
 ];
 
 // The strict Rust PHY sequence calls several absolute ROM leaves whose bytes
@@ -178,6 +168,23 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     (
         "hal_mac_rx_get_last_dscr",
         "wifi_strict_hal_mac_rx_get_last_dscr",
+    ),
+    ("hal_mac_tx_set_cca", "wifi_strict_hal_mac_tx_set_cca"),
+    (
+        "hal_mac_is_txq_valid",
+        "wifi_strict_hal_mac_is_txq_valid",
+    ),
+    (
+        "hal_mac_set_txq_invalid",
+        "wifi_strict_hal_mac_set_txq_invalid",
+    ),
+    (
+        "hal_mac_txq_disable",
+        "wifi_strict_hal_mac_txq_disable",
+    ),
+    (
+        "hal_mac_set_csi_cbw",
+        "wifi_strict_hal_mac_set_csi_cbw",
     ),
     (
         "ieee80211_post_hmac_tx",
