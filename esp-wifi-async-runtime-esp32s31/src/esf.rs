@@ -122,6 +122,8 @@ unsafe extern "C" {
     fn __real_esf_buf_recycle(frame: *mut c_void);
     fn ppRecycleRxPkt(frame: *mut u8);
     fn __real_ppRecycleRxPkt(frame: *mut u8);
+    #[link_name = "esp_wifi_internal_free_rx_buffer"]
+    fn linked_esp_wifi_internal_free_rx_buffer(frame: *mut c_void);
 }
 
 pub(crate) fn link_wrappers_active() -> bool {
@@ -138,6 +140,9 @@ pub(crate) fn rx_packet_recycle_link_wrapper_active() -> bool {
     ptr::eq(
         ppRecycleRxPkt as *const (),
         wifi_strict_pp_recycle_rx_pkt as *const (),
+    ) && ptr::eq(
+        linked_esp_wifi_internal_free_rx_buffer as *const (),
+        wifi_strict_esp_wifi_internal_free_rx_buffer as *const (),
     )
 }
 
@@ -823,6 +828,31 @@ pub unsafe extern "C" fn wifi_strict_pp_recycle_rx_pkt(frame: *mut u8) {
         return;
     }
     recycle_received_packet(frame);
+}
+
+/// Rust-owned implementation of the public RX-buffer release API.
+///
+/// The pinned `libpp.a[if_hwctrl.o]` body is exactly eight bytes and only
+/// tail-calls `ppRecycleRxPkt` with the unchanged argument. Keep that ABI, but
+/// route it through the already qualified fixed-pool Rust owner. This boundary
+/// contains no mutex, wait, queue operation, allocation, or hidden state.
+///
+/// The public `esp_wifi_internal_free_rx_buffer` name is assigned to this
+/// unique symbol by the late linker fragment. A unique implementation name
+/// also lets the final-ELF audit distinguish this code from the unextracted
+/// archive leaf.
+///
+/// # Safety
+///
+/// `frame` must be the outstanding ESF owner supplied as the third argument of
+/// a registered Wi-Fi RX callback. The call consumes that owner exactly once.
+#[no_mangle]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub unsafe extern "C" fn wifi_strict_esp_wifi_internal_free_rx_buffer(frame: *mut c_void) {
+    wifi_strict_pp_recycle_rx_pkt(frame.cast());
 }
 
 pub fn rejected_esf_operations() -> usize {

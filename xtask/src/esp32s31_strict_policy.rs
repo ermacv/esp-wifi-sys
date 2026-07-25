@@ -23,7 +23,6 @@ pub const ROOTS: &[&str] = &[
     "ic_set_rx_policy",
     "ic_set_rx_policy_ubssid_check",
     "ieee80211_getmgtframe",
-    "esp_wifi_internal_free_rx_buffer",
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
@@ -74,6 +73,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wDev_AppendRxBlocks",
     "ppRxProtoProc",
     "ppRecycleRxPkt",
+    "esp_wifi_internal_free_rx_buffer",
     "rc_get_trc",
     "rcUpdateRxDone",
     "wDev_IndicateCtrlFrame",
@@ -114,6 +114,10 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
     ("ppRecycleRxPkt", "wifi_strict_pp_recycle_rx_pkt"),
+    (
+        "esp_wifi_internal_free_rx_buffer",
+        "wifi_strict_esp_wifi_internal_free_rx_buffer",
+    ),
     (
         "esp_test_set_rx_error_occurs",
         "wifi_strict_esp_test_set_rx_error_occurs",

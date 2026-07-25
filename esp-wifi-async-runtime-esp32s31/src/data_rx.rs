@@ -383,8 +383,8 @@ mod target {
     use core::ffi::c_void;
 
     use esp_wifi_sys_esp32s31::include::{
-        esp_wifi_internal_free_rx_buffer, esp_wifi_internal_reg_rxcb, wifi_interface_t_WIFI_IF_AP,
-        wifi_interface_t_WIFI_IF_STA, ESP_ERR_NO_MEM, ESP_OK,
+        esp_wifi_internal_reg_rxcb, wifi_interface_t_WIFI_IF_AP, wifi_interface_t_WIFI_IF_STA,
+        ESP_ERR_NO_MEM, ESP_OK,
     };
 
     use super::*;
@@ -478,7 +478,7 @@ mod target {
             // compact owned pool, then recycle while still on the radio owner.
             let accepted = copy_into_slot(interface, buffer.cast(), length);
             if !vendor_buffer.is_null() {
-                esp_wifi_internal_free_rx_buffer(vendor_buffer);
+                crate::esf::wifi_strict_esp_wifi_internal_free_rx_buffer(vendor_buffer);
             }
             accepted
         };

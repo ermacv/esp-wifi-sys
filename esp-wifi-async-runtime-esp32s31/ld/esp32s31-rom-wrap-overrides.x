@@ -67,6 +67,17 @@ EXTERN(wifi_strict_pp_recycle_rx_pkt);
 ppRecycleRxPkt = wifi_strict_pp_recycle_rx_pkt;
 ASSERT(ppRecycleRxPkt == wifi_strict_pp_recycle_rx_pkt,
        "ESP32-S31 ppRecycleRxPkt Rust boundary is inactive");
+
+/* libpp.a[if_hwctrl.o]::esp_wifi_internal_free_rx_buffer is only an
+ * eight-byte tail-call to ppRecycleRxPkt. Publish the Rust owner directly so
+ * the archive object is not extracted and no redundant vendor boundary
+ * remains on the network-buffer Drop path. */
+EXTERN(wifi_strict_esp_wifi_internal_free_rx_buffer);
+esp_wifi_internal_free_rx_buffer =
+    wifi_strict_esp_wifi_internal_free_rx_buffer;
+ASSERT(esp_wifi_internal_free_rx_buffer ==
+           wifi_strict_esp_wifi_internal_free_rx_buffer,
+       "ESP32-S31 free RX buffer Rust boundary is inactive");
 /* The RX callback is published through a mutable WDEV table rather than a
  * normal final-link relocation. Keep its unique symbol so the strict audit
  * can prove both the publication target and its internal-SRAM placement. */
