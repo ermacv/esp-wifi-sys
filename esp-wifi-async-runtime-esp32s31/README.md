@@ -206,7 +206,6 @@ definitions use LLD wrapping:
 -Wl,--wrap=dbg_dump_rx_sigb
 -Wl,--wrap=wifi_gpio_debug
 -Wl,--wrap=wDev_SnifferRxData
--Wl,--wrap=wDev_DiscardFrame
 -Wl,--wrap=wdev_csi_rx_process
 -Wl,--wrap=wpa_sm_rx_eapol
 -Wl,--wrap=wpa_ap_rx_eapol

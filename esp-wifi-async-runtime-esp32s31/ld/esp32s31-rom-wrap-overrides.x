@@ -86,6 +86,16 @@ EXTERN(wifi_strict_lmac_rx_done);
 __real_wDev_AppendRxBlocks = 0x2f8010c4;
 wDev_AppendRxBlocks = __wrap_wDev_AppendRxBlocks;
 
+/* wDev_DiscardFrame is the adjacent absolute ROM export. GNU --wrap would
+ * capture the generated __wrap symbol at 0x2f8010c8 and discard the Rust
+ * body. Retain that address only for cold delegation and publish the unique
+ * SRAM Rust ownership boundary after all ROM fragments. */
+__real_wDev_DiscardFrame = 0x2f8010c8;
+EXTERN(wifi_strict_wdev_discard_frame);
+wDev_DiscardFrame = wifi_strict_wdev_discard_frame;
+ASSERT(wDev_DiscardFrame == wifi_strict_wdev_discard_frame,
+       "ESP32-S31 wDev_DiscardFrame Rust boundary is inactive");
+
 __real_hal_mac_get_txq_state = 0x2f800d3c;
 hal_mac_get_txq_state = __wrap_hal_mac_get_txq_state;
 

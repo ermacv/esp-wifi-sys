@@ -750,7 +750,7 @@ unsafe fn detach_completed_rx_prefix(
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
 #[link_section = ".rwtext.wifi_strict.rx_recycle"]
-pub unsafe extern "C" fn __wrap_wDev_DiscardFrame(tail: *mut u8, count: u32) {
+pub unsafe extern "C" fn wifi_strict_wdev_discard_frame(tail: *mut u8, count: u32) {
     if !crate::critical::strict_wifi_hart_armed() {
         __real_wDev_DiscardFrame(tail, count);
         return;
@@ -829,7 +829,7 @@ fn runtime_rx_recycle_link_wrapper_active() -> bool {
         __wrap_wDev_AppendRxBlocks as *const (),
     ) && core::ptr::eq(
         vendor_discard_frame as *const (),
-        __wrap_wDev_DiscardFrame as *const (),
+        wifi_strict_wdev_discard_frame as *const (),
     ) && crate::esf::rx_packet_recycle_link_wrapper_active()
 }
 

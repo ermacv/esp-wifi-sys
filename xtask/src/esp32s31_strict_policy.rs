@@ -71,7 +71,6 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "wDev_ftm_set_t1t4",
     "wDev_isNANPktInValidSlot",
     "wDev_AppendRxBlocks",
-    "wDev_DiscardFrame",
     "ppRxProtoProc",
     "ppRecycleRxPkt",
     "esp_wifi_internal_free_rx_buffer",
@@ -114,6 +113,10 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
 pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
+    (
+        "wDev_DiscardFrame",
+        "wifi_strict_wdev_discard_frame",
+    ),
     ("ppRecycleRxPkt", "wifi_strict_pp_recycle_rx_pkt"),
     (
         "esp_wifi_internal_free_rx_buffer",
