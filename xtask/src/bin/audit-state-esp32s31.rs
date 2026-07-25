@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 mod strict_policy;
 use strict_policy::{
     REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
-    WRAPPED_VENDOR_BOUNDARIES,
+    STRICT_REFERENCE_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
 };
 
 // Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
@@ -251,6 +251,13 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(
         &mut report,
         &format!("- strict vendor roots: {}", ROOTS.len()),
+    );
+    pushln(
+        &mut report,
+        &format!(
+            "- reference-only control-flow roots: `{}`",
+            STRICT_REFERENCE_ROOTS.join("`, `")
+        ),
     );
     pushln(
         &mut report,

@@ -14,20 +14,10 @@ pub const ROOTS: &[&str] = &[
     "rcTxUpdatePer",
     "hal_get_tsf_time",
     "ic_set_current_channel",
-    "phy_chan_to_freq",
-    "phy_mhz2ieee",
-    "phy_disable_agc",
-    "phy_bbpll_cal",
-    "phy_tsens_temp_read",
-    "phy_set_channel_rfpll_freq",
     "phy_chip_set_chan_misc_new",
-    "phy_i2c_master_mem_txcap",
-    "phy_bb_cbw_chan_cfg",
     "phy_chan14_mic_cfg_new",
-    "phy_11p_set",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
-    "phy_enable_agc",
     "hal_mac_set_csi_cbw",
     "ic_mac_init",
     "ic_set_mac",
@@ -41,6 +31,12 @@ pub const ROOTS: &[&str] = &[
     "ic_set_key",
     "wDev_Insert_KeyEntry",
 ];
+
+// The strict Rust PHY sequence calls several absolute ROM leaves whose bytes
+// are not present in the final ELF. Audit the pinned archive implementation as
+// a conservative control-flow oracle, but do not report its `phy_param` body
+// as runtime-reachable state: `channel_switch` no longer calls this function.
+pub const STRICT_REFERENCE_ROOTS: &[&str] = &["phy_change_channel"];
 
 // Channel-manager getters are intentionally absent. Strict handoff adopts the
 // finite `gChmCxt` selector/table state once; runtime channel lookup and

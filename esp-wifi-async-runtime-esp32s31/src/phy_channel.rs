@@ -22,7 +22,6 @@ unsafe extern "C" {
     fn phy_i2c_master_mem_txcap();
     fn phy_bb_cbw_chan_cfg(cbw: u8);
     fn phy_chan14_mic_cfg_new(enable: u32);
-    fn phy_11p_set(enable: u8, config: u8);
     fn phy_set_rx_comp_new();
     fn phy_dc_mem_clr();
     fn phy_enable_agc();
@@ -135,9 +134,8 @@ pub(crate) unsafe fn program_channel(frequency_mhz: u16, cbw: u8) {
     if state.channel_14_mic {
         phy_chan14_mic_cfg_new(u32::from(channel == 14));
     }
-    if state.dot11p_enable != 0 {
-        phy_11p_set(state.dot11p_enable, state.dot11p_config);
-    }
+    // The pinned `phy_11p_set` body only writes these same two values back to
+    // `phy_param[0x28..=0x29]`; Rust already owns them after handoff.
     phy_set_rx_comp_new();
     phy_bbpll_cal(0);
     phy_dc_mem_clr();

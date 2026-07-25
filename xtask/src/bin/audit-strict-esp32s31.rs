@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 mod strict_policy;
 use strict_policy::{
     REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
-    WRAPPED_VENDOR_BOUNDARIES,
+    STRICT_REFERENCE_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
 };
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
@@ -389,7 +389,11 @@ fn main() -> Result<()> {
         }
     }
     let mut roots = if requested_roots.is_empty() {
-        ROOTS.iter().map(|root| (*root).to_owned()).collect()
+        ROOTS
+            .iter()
+            .chain(STRICT_REFERENCE_ROOTS)
+            .map(|root| (*root).to_owned())
+            .collect()
     } else {
         requested_roots
     };
