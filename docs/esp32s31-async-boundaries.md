@@ -361,13 +361,14 @@ state wrapper reads pinned MMIO without test/log hooks and exposes one
 completion/collision bitmap bit per event. The original archive sections must
 not remain in the final ELF.
 
-Eleven ROM-exported entries cannot use LLD wrapping because the ROM linker
+Twelve ROM-exported entries cannot use LLD wrapping because the ROM linker
 scripts assign their public symbols after `--wrap` rewriting. The late
 `esp32s31-rom-wrap-overrides.x` fragment instead aliases
 `ieee80211_set_tx_pti`, `esf_buf_alloc`, `esf_buf_recycle`,
 `hal_mac_get_txq_state`, `hal_mac_get_txq_complete`, `lmacTxDone`,
-`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, `ppRecycleRxPkt`, and
-`esp_test_tx_enab_statistics` to Rust wrappers while pinning their
+`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, `ppRecycleRxPkt`,
+`wDev_DiscardFrame`, and `esp_test_tx_enab_statistics` to Rust wrappers while
+pinning their
 `__real_*` names to the audited ROM addresses.
 The adjacent archive-only `esp_wifi_internal_free_rx_buffer` export is also a
 direct public alias to its unique Rust owner, but needs no `__real_*` symbol:
@@ -890,6 +891,31 @@ HTTP transfers at 25.535 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
 and queue-rejection probes remained zero. The final audit reports 6,407
 functions and zero violations and rejects any instruction that calls the old
 public release leaf.
+
+The adjacent `wDev_DiscardFrame` ownership transition is now Rust-owned.
+The pinned 0x20-byte reference body only detaches the completed descriptor
+prefix: it retains `wDevCtrl.head`, reads and clears `tail.next`, publishes
+that next descriptor as the new head, and transfers
+`(old_head, tail, count)` to `wDev_AppendRxBlocks`. Rust represents the
+detached prefix as a non-`Copy` token and performs the head publication under
+one finite local Wi-Fi interrupt mask before consuming the token into the
+fixed asynchronous recycler. It introduces no allocation, poll, wait, delay,
+RTOS primitive, task handoff, or new static object.
+
+Because the ESP32-S31 ROM script exports `wDev_DiscardFrame` absolutely at
+`0x2f8010c8`, GNU `--wrap` would bind the generated wrapper name back to the
+ROM address. The late override fragment instead keeps that address only as
+the cold `__real_wDev_DiscardFrame` oracle and asserts that the public symbol
+equals the unique SRAM function `wifi_strict_wdev_discard_frame`. The final
+audit rejects the old leaf as a call target and proves the Rust entry is code
+in internal SRAM.
+
+The qualified hardware run completed taskless cold init, passive scan, WPA2,
+DHCP and post-link checks, then 4,096/4,096 UDP datagrams and 4/4 HTTP
+transfers at 23.778 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
+692/692, and PP at 20,691/20,691, with zero ESF rejection or allocation
+delta. The complete static-binding, static-PM and runtime audit reports 6,407
+functions and zero violations.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

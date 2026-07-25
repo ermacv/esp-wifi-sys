@@ -212,6 +212,38 @@ a second consumer. This change adds no static storage, allocation, wait,
 delay, retry loop, or RTOS primitive; the capability has a host-tested size of
 zero.
 
+## Completed slice: RX discard ownership transition
+
+The pinned `libpp.a[wdev.o]::wDev_DiscardFrame` reference body is exactly
+0x20 bytes. It contains no protocol work or hardware wait: it retains
+`wDevCtrl.head`, reads `tail.next`, clears `tail.next`, publishes that next
+descriptor as the new software head, and tail-calls
+`wDev_AppendRxBlocks(old_head, tail, count)`.
+
+Strict Rust now performs that state transform under one finite local Wi-Fi
+interrupt mask. Detaching the prefix creates a non-`Copy`
+`DetachedRxPrefix`; consuming that token is the only path into the already
+qualified fixed descriptor recycler. This makes the ownership transition
+explicit without adding a queue, allocation, polling loop, delay, task
+handoff, or static storage.
+
+`wDev_DiscardFrame` is an absolute ESP32-S31 ROM export at `0x2f8010c8`.
+GNU `--wrap` cannot interpose it because LLD also rewrites the ROM linker
+assignment and captures the generated wrapper name. The late
+`esp32s31-rom-wrap-overrides.x` fragment therefore retains the address only
+as `__real_wDev_DiscardFrame`, aliases the public name to the unique SRAM
+symbol `wifi_strict_wdev_discard_frame`, and asserts that equality at final
+link. The strict auditor additionally rejects any call to the old public
+leaf.
+
+Hardware qualification completed taskless cold init, passive scan, WPA2
+association and four-way handshake, DHCP and the post-link network checks.
+The stress phase completed 4,096/4,096 UDP datagrams and 4/4 HTTP transfers
+at 23.778 Mbit/s. TX ownership balanced at 4,786/4,786, RX at 692/692, and PP
+publication at 20,691/20,691; ESF rejection and all allocation counters
+remained zero. The full final-ELF audit, including static binding and PM init,
+reports 6,407 functions and zero violations.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
@@ -221,7 +253,10 @@ on mutable blob bytes:
    `wDev_ProcessRxSucData` one vertical boundary at a time.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
    public `esp_wifi_internal_free_rx_buffer` release boundary are now
-   Rust-owned.
+   Rust-owned. The adjacent `wDev_DiscardFrame` head publication and transfer
+   into the recycler are Rust-owned as a non-duplicable token as well; the
+   remaining target is the aggregate frame-indication/dispatch body rather
+   than this list transition.
    Move the 22 `g_per_conn_trc` publications and the three route bitmaps out of
    the ROM ABI table before claiming complete rate-control ownership.
 2. Use the separate Radio/Network ownership counts and existing high-water
