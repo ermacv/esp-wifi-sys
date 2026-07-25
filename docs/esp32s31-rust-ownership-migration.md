@@ -802,6 +802,12 @@ probe-response mapper class: frame control `0x0050`, rate `12`, layout
 `0x0004_0000`, and peer state `0x83`. The mapper admits only that complete
 tuple; changing the peer state or any descriptor role still fails closed.
 
+The first laptop join then qualified the plaintext AP authentication-response
+mapper tuple: frame control `0x00b0`, rate `12`, layout `0x2730`, zero
+descriptor flags, priority `7`, selector `0x0004_0000`, and peer state `0x83`.
+As with the probe response, the low layout bits are a fixed-slot identity;
+only the already-proven upper `0x2000` headroom state affects mapping.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

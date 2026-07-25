@@ -35,6 +35,11 @@ pub(crate) fn strict_sta_ap_treatment(
     // ownership word already admitted by the security leaf.
     let ap_probe_response =
         rate == 12 && frame_control == 0x0050 && state == [0x0800_0010, 7, 0x0004_0000, 0x83, 0];
+    // Open-system authentication is still plaintext, but an AP-generated
+    // response uses the same fixed AP selector and peer context as the
+    // beacon/probe path rather than the STA management tuple above.
+    let ap_authentication_response =
+        rate == 12 && frame_control == 0x00b0 && state == [0, 7, 0x0004_0000, 0x83, 0];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -50,7 +55,14 @@ pub(crate) fn strict_sta_ap_treatment(
     let legacy_qos =
         rate == 0 && frame_control == 0x4188 && state == [0x0200_2009, 7, 0x304, 0x81, 0];
 
-    if management || eapol || ap_beacon || ap_probe_response || ht_qos || legacy_qos {
+    if management
+        || eapol
+        || ap_beacon
+        || ap_probe_response
+        || ap_authentication_response
+        || ht_qos
+        || legacy_qos
+    {
         Some(7)
     } else {
         None
@@ -223,6 +235,7 @@ mod tests {
             (12, 0x2000, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x83, 0]),
             (12, 0x2001, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x83, 0]),
             (12, 0x2003, 0x0050, [0x0800_0010, 7, 0x0004_0000, 0x83, 0]),
+            (12, 0x2730, 0x00b0, [0, 7, 0x0004_0000, 0x83, 0]),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -269,6 +282,10 @@ mod tests {
         );
         assert_eq!(
             strict_sta_ap_treatment(12, 0x2003, 0x0050, [0x0800_0010, 7, 0x0004_0000, 0x80, 0],),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(12, 0x2730, 0x00b0, [0, 7, 0x0004_0000, 0x80, 0],),
             None
         );
         assert_eq!(
