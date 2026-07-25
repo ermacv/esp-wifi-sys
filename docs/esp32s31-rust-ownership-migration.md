@@ -865,6 +865,14 @@ descriptor-security `0x0104_0000` with status byte `1`. That exact successful
 pair is admitted in addition to the two older measured ADDBA outcomes; changing
 either the status or any structural field remains rejected.
 
+The first protected pairwise AP downlink then reached the mapper as QoS data
+frame control `0x4288`, HT rate `33`, layout `0x2000`, descriptor flags
+`0x0000_2009`, fresh priority byte `0x20`, pairwise selector
+`0x0004_0348`, associated-peer word `0x2100_0000`, and peer flag `1`. The
+finite mapper admits only this complete measured tuple and rewrites descriptor
+byte four to the recovered treatment `7`; the group-key selector, an already
+mapped priority, and a pre-association peer remain independently rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

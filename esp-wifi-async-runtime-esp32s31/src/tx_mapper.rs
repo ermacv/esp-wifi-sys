@@ -128,6 +128,14 @@ pub(crate) fn strict_sta_ap_treatment(
     let ap_addba_response = rate == 11
         && frame_control == 0x00d0
         && state == [0, 7, 0x0004_0000, 0x2100_0000, 1];
+    // The first protected unicast network packet from the AP is a pairwise
+    // CCMP QoS downlink. It uses the associated peer rather than the AP's
+    // group/broadcast pseudo-peer and reaches the mapper after the security
+    // leaf has installed the measured pairwise selector in descriptor word
+    // four. Keep this separate from the STA uplink HT-QoS class below.
+    let ap_pairwise_ht_qos = rate == 33
+        && frame_control == 0x4288
+        && state == [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 1];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -153,6 +161,7 @@ pub(crate) fn strict_sta_ap_treatment(
         || ap_eapol_message_one
         || ap_group_ccmp_data
         || ap_addba_response
+        || ap_pairwise_ht_qos
         || ht_qos
         || legacy_qos
     {
@@ -369,6 +378,12 @@ mod tests {
             ),
             (12, 0x2000, 0x4208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
             (11, 0x2732, 0x00d0, [0, 7, 0x0004_0000, 0x2100_0000, 1]),
+            (
+                33,
+                0x2000,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 1],
+            ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -463,6 +478,33 @@ mod tests {
                 0x2732,
                 0x00d0,
                 [0, 7, 0x0004_0000, 0x2100_0000, 0],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2000,
+                0x4288,
+                [0x0000_2009, 7, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2000,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0342, 0x2100_0000, 1],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2000,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 0],
             ),
             None
         );
