@@ -51,6 +51,109 @@ pub(crate) struct MultiRxCopyPlan {
     pub(crate) indicated_length: usize,
 }
 
+/// Mutually exclusive reason why a decoded RX unit cannot enter the currently
+/// Rust-owned ordinary-STA indication route.
+///
+/// The first four variants are recorded by the raw-pointer boundary before a
+/// complete set of safe facts exists. Every later variant is selected by
+/// [`rx_vendor_fallback_reason`]. Keeping the decision independent of
+/// pointers and MMIO makes both precedence and accounting host-testable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub(crate) enum RxVendorFallbackReason {
+    MissingHead,
+    InvalidDescriptor,
+    InvalidMetadataLayout,
+    InvalidStatusOffset,
+    NonSuccessStatus,
+    InvalidChain,
+    ExtendedMetadata,
+    CsiMetadata,
+    CopyPlanRejected,
+    ApRoute,
+    NanRoute,
+    OtherRoute,
+    OptionalControl30,
+    OptionalControl46,
+    CsiCallback,
+    NonOrdinaryProfile,
+    MissingStationInterface,
+    UnclassifiedFrame,
+}
+
+impl RxVendorFallbackReason {
+    pub(crate) const COUNT: usize = Self::UnclassifiedFrame as usize + 1;
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Pointer-free facts used to classify the final `wDev_ProcessRxSucData`
+/// compatibility boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RxVendorFallbackFacts {
+    pub(crate) status: u8,
+    pub(crate) chain_valid: bool,
+    pub(crate) has_extra_field: bool,
+    pub(crate) csi_length: Option<u16>,
+    pub(crate) copy_plan_valid: bool,
+    pub(crate) route: u8,
+    pub(crate) optional_control_30: bool,
+    pub(crate) optional_control_46: bool,
+    pub(crate) csi_callback_enabled: bool,
+    pub(crate) ordinary_profile: bool,
+    pub(crate) station_interface_present: bool,
+    pub(crate) frame_classified: bool,
+}
+
+/// Select exactly one remaining vendor fallback reason in pinned predicate
+/// order, or return `None` when the facts describe the Rust-owned STA route.
+pub(crate) const fn rx_vendor_fallback_reason(
+    facts: RxVendorFallbackFacts,
+) -> Option<RxVendorFallbackReason> {
+    if facts.status != 0 {
+        return Some(RxVendorFallbackReason::NonSuccessStatus);
+    }
+    if !facts.chain_valid {
+        return Some(RxVendorFallbackReason::InvalidChain);
+    }
+    if facts.has_extra_field {
+        return Some(RxVendorFallbackReason::ExtendedMetadata);
+    }
+    if !matches!(facts.csi_length, Some(0)) {
+        return Some(RxVendorFallbackReason::CsiMetadata);
+    }
+    if !facts.copy_plan_valid {
+        return Some(RxVendorFallbackReason::CopyPlanRejected);
+    }
+    match facts.route {
+        0x10 => {}
+        0x20 => return Some(RxVendorFallbackReason::ApRoute),
+        0x40 => return Some(RxVendorFallbackReason::NanRoute),
+        _ => return Some(RxVendorFallbackReason::OtherRoute),
+    }
+    if facts.optional_control_30 {
+        return Some(RxVendorFallbackReason::OptionalControl30);
+    }
+    if facts.optional_control_46 {
+        return Some(RxVendorFallbackReason::OptionalControl46);
+    }
+    if facts.csi_callback_enabled {
+        return Some(RxVendorFallbackReason::CsiCallback);
+    }
+    if !facts.ordinary_profile {
+        return Some(RxVendorFallbackReason::NonOrdinaryProfile);
+    }
+    if !facts.station_interface_present {
+        return Some(RxVendorFallbackReason::MissingStationInterface);
+    }
+    if !facts.frame_classified {
+        return Some(RxVendorFallbackReason::UnclassifiedFrame);
+    }
+    None
+}
+
 fn round_up_four(value: usize) -> Option<usize> {
     value.checked_add(3).map(|rounded| rounded & !3)
 }
@@ -333,7 +436,8 @@ mod tests {
         indicated_rx_descriptor_word, indicated_rx_flags_word, multi_rx_copy_plan,
         recycled_descriptor_word, restore_received_packet_buffer_view, rx_csi_length,
         rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
-        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, single_rx_copy_plan,
+        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, rx_vendor_fallback_reason,
+        single_rx_copy_plan, RxVendorFallbackFacts, RxVendorFallbackReason,
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
@@ -574,5 +678,146 @@ mod tests {
         assert!(!rx_sta_probe_request_is_discarded(0x0041));
         assert!(!rx_sta_probe_request_is_discarded(0x0050));
         assert!(!rx_sta_probe_request_is_discarded(0x0008));
+    }
+
+    #[test]
+    fn vendor_fallback_classifier_is_mutually_exclusive_in_pinned_order() {
+        let admitted = RxVendorFallbackFacts {
+            status: 0,
+            chain_valid: true,
+            has_extra_field: false,
+            csi_length: Some(0),
+            copy_plan_valid: true,
+            route: 0x10,
+            optional_control_30: false,
+            optional_control_46: false,
+            csi_callback_enabled: false,
+            ordinary_profile: true,
+            station_interface_present: true,
+            frame_classified: true,
+        };
+        assert_eq!(rx_vendor_fallback_reason(admitted), None);
+
+        let cases = [
+            (
+                RxVendorFallbackFacts {
+                    status: 0xf5,
+                    chain_valid: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::NonSuccessStatus,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    chain_valid: false,
+                    has_extra_field: true,
+                    ..admitted
+                },
+                RxVendorFallbackReason::InvalidChain,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    has_extra_field: true,
+                    csi_length: Some(1),
+                    ..admitted
+                },
+                RxVendorFallbackReason::ExtendedMetadata,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    csi_length: Some(1),
+                    copy_plan_valid: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::CsiMetadata,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    csi_length: None,
+                    ..admitted
+                },
+                RxVendorFallbackReason::CsiMetadata,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    copy_plan_valid: false,
+                    route: 0x20,
+                    ..admitted
+                },
+                RxVendorFallbackReason::CopyPlanRejected,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    route: 0x20,
+                    ..admitted
+                },
+                RxVendorFallbackReason::ApRoute,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    route: 0x40,
+                    ..admitted
+                },
+                RxVendorFallbackReason::NanRoute,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    route: 0,
+                    ..admitted
+                },
+                RxVendorFallbackReason::OtherRoute,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    optional_control_30: true,
+                    optional_control_46: true,
+                    ..admitted
+                },
+                RxVendorFallbackReason::OptionalControl30,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    optional_control_46: true,
+                    csi_callback_enabled: true,
+                    ..admitted
+                },
+                RxVendorFallbackReason::OptionalControl46,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    csi_callback_enabled: true,
+                    ordinary_profile: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::CsiCallback,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    ordinary_profile: false,
+                    station_interface_present: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::NonOrdinaryProfile,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    station_interface_present: false,
+                    frame_classified: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::MissingStationInterface,
+            ),
+            (
+                RxVendorFallbackFacts {
+                    frame_classified: false,
+                    ..admitted
+                },
+                RxVendorFallbackReason::UnclassifiedFrame,
+            ),
+        ];
+        for (facts, expected) in cases {
+            assert_eq!(rx_vendor_fallback_reason(facts), Some(expected));
+        }
+        assert_eq!(RxVendorFallbackReason::COUNT, 18);
     }
 }

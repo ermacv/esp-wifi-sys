@@ -22,8 +22,8 @@ use crate::{
         decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
         multi_rx_copy_plan, recycled_descriptor_word, rx_csi_length, rx_indicate_aggregate_flag,
         rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
-        rx_sta_probe_request_is_discarded, single_rx_copy_plan, SingleRxCopyPlan,
-        RX_METADATA_PREFIX_BYTES,
+        rx_sta_probe_request_is_discarded, rx_vendor_fallback_reason, single_rx_copy_plan,
+        RxVendorFallbackFacts, RxVendorFallbackReason, SingleRxCopyPlan, RX_METADATA_PREFIX_BYTES,
     },
     timer::RawOsiTimer,
 };
@@ -206,6 +206,7 @@ struct RxMetadataProbe {
     rust_indicate_population_rejects: AtomicUsize,
     vendor_indicate_fallbacks: AtomicUsize,
     vendor_fallbacks: AtomicUsize,
+    vendor_fallback_reasons: [AtomicUsize; RxVendorFallbackReason::COUNT],
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -242,7 +243,61 @@ impl RxMetadataProbe {
             rust_indicate_population_rejects: AtomicUsize::new(0),
             vendor_indicate_fallbacks: AtomicUsize::new(0),
             vendor_fallbacks: AtomicUsize::new(0),
+            vendor_fallback_reasons: [const { AtomicUsize::new(0) }; RxVendorFallbackReason::COUNT],
         }
+    }
+
+    #[inline(always)]
+    fn record_vendor_fallback(&self, reason: RxVendorFallbackReason) {
+        self.vendor_fallbacks.fetch_add(1, Ordering::Relaxed);
+        self.vendor_fallback_reasons[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WdevRxVendorFallbackSnapshot {
+    pub missing_head: usize,
+    pub invalid_descriptor: usize,
+    pub invalid_metadata_layout: usize,
+    pub invalid_status_offset: usize,
+    pub non_success_status: usize,
+    pub invalid_chain: usize,
+    pub extended_metadata: usize,
+    pub csi_metadata: usize,
+    pub copy_plan_rejected: usize,
+    pub ap_route: usize,
+    pub nan_route: usize,
+    pub other_route: usize,
+    pub optional_control_30: usize,
+    pub optional_control_46: usize,
+    pub csi_callback: usize,
+    pub non_ordinary_profile: usize,
+    pub missing_station_interface: usize,
+    pub unclassified_frame: usize,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl WdevRxVendorFallbackSnapshot {
+    pub const fn total(self) -> usize {
+        self.missing_head
+            + self.invalid_descriptor
+            + self.invalid_metadata_layout
+            + self.invalid_status_offset
+            + self.non_success_status
+            + self.invalid_chain
+            + self.extended_metadata
+            + self.csi_metadata
+            + self.copy_plan_rejected
+            + self.ap_route
+            + self.nan_route
+            + self.other_route
+            + self.optional_control_30
+            + self.optional_control_46
+            + self.csi_callback
+            + self.non_ordinary_profile
+            + self.missing_station_interface
+            + self.unclassified_frame
     }
 }
 
@@ -279,6 +334,7 @@ pub struct WdevRxMetadataSnapshot {
     pub rust_indicate_population_rejects: usize,
     pub vendor_indicate_fallbacks: usize,
     pub vendor_fallbacks: usize,
+    pub vendor_fallback_reasons: WdevRxVendorFallbackSnapshot,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1034,6 +1090,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);
+        RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::MissingHead);
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     }
@@ -1051,6 +1108,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);
+        RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::InvalidDescriptor);
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     }
@@ -1064,6 +1122,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);
+        RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::InvalidMetadataLayout);
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     };
@@ -1071,6 +1130,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);
+        RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::InvalidStatusOffset);
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     };
@@ -1078,6 +1138,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);
+        RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::InvalidStatusOffset);
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     }
@@ -1144,20 +1205,32 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     let probe_request_discard = frame_control.is_some_and(rx_sta_probe_request_is_discarded);
     let copy_mode = data_copy_mode.or(management_copy_mode).or(action_copy_mode);
     let control = ptr::addr_of_mut!(wDevCtrl);
-    let copy_plan = rx_csi_length(&prefix)
+    let csi_length = rx_csi_length(&prefix);
+    let copy_plan = csi_length
         .and_then(|csi_length| single_rx_copy_plan(descriptor_length, layout, csi_length));
-    let strict_sta_base_route = status == 0
-        && !tail.is_null()
-        && count != 0
-        && count <= MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32
-        && !layout.has_extra_field
-        && copy_plan.is_some()
-        && prefix[3] & 0x70 == 0x10
-        && control.add(0x30).read() == 0
-        && control.add(0x46).read() == 0
-        && ptr::addr_of!(g_wdev_csi_rx).read() == 0
-        && crate::net80211_state::ordinary_sta_ap_profile()
-        && crate::net80211_state::station_interface().is_some();
+    let chain_valid =
+        !tail.is_null() && count != 0 && count <= MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32;
+    let route = prefix[3] & 0x70;
+    let optional_control_30 = control.add(0x30).read() != 0;
+    let optional_control_46 = control.add(0x46).read() != 0;
+    let csi_callback_enabled = ptr::addr_of!(g_wdev_csi_rx).read() != 0;
+    let ordinary_profile = crate::net80211_state::ordinary_sta_ap_profile();
+    let station_interface_present = crate::net80211_state::station_interface().is_some();
+    let base_facts = RxVendorFallbackFacts {
+        status,
+        chain_valid,
+        has_extra_field: layout.has_extra_field,
+        csi_length,
+        copy_plan_valid: copy_plan.is_some(),
+        route,
+        optional_control_30,
+        optional_control_46,
+        csi_callback_enabled,
+        ordinary_profile,
+        station_interface_present,
+        frame_classified: true,
+    };
+    let strict_sta_base_route = rx_vendor_fallback_reason(base_facts).is_none();
     let strict_sta_probe_request_discard = strict_sta_base_route
         && probe_request_discard
         && crate::net80211_state::access_point_interface().is_none();
@@ -1172,9 +1245,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     let strict_sta_common_route = strict_sta_base_route && copy_mode.is_some();
     if strict_sta_common_route {
         let Some(copy_plan) = copy_plan else {
-            RX_METADATA_PROBE
-                .vendor_fallbacks
-                .fetch_add(1, Ordering::Relaxed);
+            RX_METADATA_PROBE.record_vendor_fallback(RxVendorFallbackReason::CopyPlanRejected);
             __real_wDev_ProcessRxSucData(tail, count);
             return;
         };
@@ -1247,9 +1318,12 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         return;
     }
 
-    RX_METADATA_PROBE
-        .vendor_fallbacks
-        .fetch_add(1, Ordering::Relaxed);
+    let fallback_reason = rx_vendor_fallback_reason(RxVendorFallbackFacts {
+        frame_classified: copy_mode.is_some(),
+        ..base_facts
+    })
+    .unwrap_or(RxVendorFallbackReason::UnclassifiedFrame);
+    RX_METADATA_PROBE.record_vendor_fallback(fallback_reason);
     __real_wDev_ProcessRxSucData(tail, count);
 }
 
@@ -1711,6 +1785,29 @@ pub fn indicate_frame_snapshot() -> WdevIndicateFrameSnapshot {
 
 #[cfg(target_arch = "riscv32")]
 pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
+    let fallback_count = |reason: RxVendorFallbackReason| {
+        RX_METADATA_PROBE.vendor_fallback_reasons[reason.index()].load(Ordering::Acquire)
+    };
+    let vendor_fallback_reasons = WdevRxVendorFallbackSnapshot {
+        missing_head: fallback_count(RxVendorFallbackReason::MissingHead),
+        invalid_descriptor: fallback_count(RxVendorFallbackReason::InvalidDescriptor),
+        invalid_metadata_layout: fallback_count(RxVendorFallbackReason::InvalidMetadataLayout),
+        invalid_status_offset: fallback_count(RxVendorFallbackReason::InvalidStatusOffset),
+        non_success_status: fallback_count(RxVendorFallbackReason::NonSuccessStatus),
+        invalid_chain: fallback_count(RxVendorFallbackReason::InvalidChain),
+        extended_metadata: fallback_count(RxVendorFallbackReason::ExtendedMetadata),
+        csi_metadata: fallback_count(RxVendorFallbackReason::CsiMetadata),
+        copy_plan_rejected: fallback_count(RxVendorFallbackReason::CopyPlanRejected),
+        ap_route: fallback_count(RxVendorFallbackReason::ApRoute),
+        nan_route: fallback_count(RxVendorFallbackReason::NanRoute),
+        other_route: fallback_count(RxVendorFallbackReason::OtherRoute),
+        optional_control_30: fallback_count(RxVendorFallbackReason::OptionalControl30),
+        optional_control_46: fallback_count(RxVendorFallbackReason::OptionalControl46),
+        csi_callback: fallback_count(RxVendorFallbackReason::CsiCallback),
+        non_ordinary_profile: fallback_count(RxVendorFallbackReason::NonOrdinaryProfile),
+        missing_station_interface: fallback_count(RxVendorFallbackReason::MissingStationInterface),
+        unclassified_frame: fallback_count(RxVendorFallbackReason::UnclassifiedFrame),
+    };
     WdevRxMetadataSnapshot {
         calls: RX_METADATA_PROBE.calls.load(Ordering::Acquire),
         decoded: RX_METADATA_PROBE.decoded.load(Ordering::Acquire),
@@ -1764,6 +1861,7 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
             .vendor_indicate_fallbacks
             .load(Ordering::Acquire),
         vendor_fallbacks: RX_METADATA_PROBE.vendor_fallbacks.load(Ordering::Acquire),
+        vendor_fallback_reasons,
     }
 }
 
