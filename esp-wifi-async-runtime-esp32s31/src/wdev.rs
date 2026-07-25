@@ -697,6 +697,28 @@ struct DetachedRxPrefix {
     count: u32,
 }
 
+/// One complete lower-MAC RX unit selected by the outer descriptor walk.
+///
+/// The pinned `wdevProcessRxSucDataAll+0x102` call passes the descriptor
+/// carrying the bit-30 completion marker, not the first descriptor in the
+/// unit. `wDev_ProcessRxSucData` obtains that first descriptor independently
+/// from `wDevCtrl.head` and retains this tail identity for discard/recycle.
+/// Keeping the pair in a non-`Copy` token prevents the Rust dispatcher from
+/// accidentally publishing the same completed unit twice.
+#[cfg(target_arch = "riscv32")]
+struct CompletedRxUnit {
+    tail: *mut u8,
+    count: u32,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl CompletedRxUnit {
+    #[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+    unsafe fn dispatch(self) {
+        wDev_ProcessRxSucData(self.tail, self.count);
+    }
+}
+
 #[cfg(target_arch = "riscv32")]
 impl DetachedRxPrefix {
     #[link_section = ".rwtext.wifi_strict.rx_recycle"]
@@ -870,7 +892,6 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
 
     let interrupt_state = crate::critical::strict_wifi_int_disable();
     let mut descriptor = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
-    let mut unit_head = descriptor;
     let mut subframe_count = 0_u32;
     let mut descriptors_seen = 0_usize;
     while !descriptor.is_null() {
@@ -907,6 +928,10 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
         };
 
         if descriptor.cast::<u32>().read_unaligned() & (1 << 30) != 0 {
+            let completed = CompletedRxUnit {
+                tail: descriptor,
+                count: subframe_count,
+            };
             INDICATE_FRAME_PROBE.calls.fetch_add(1, Ordering::Relaxed);
             INDICATE_FRAME_PROBE
                 .validated
@@ -916,11 +941,10 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
                 .fetch_max(subframe_count as usize, Ordering::Relaxed);
             crate::critical::strict_wifi_int_restore(interrupt_state);
             // Match the pinned vendor outer walk exactly: the decoder receives
-            // the first descriptor in the complete RX unit plus the number of
-            // linked descriptors ending at this bit-30 marker. Passing the
-            // tail happens to work for one-descriptor frames but corrupts a
-            // multi-descriptor unit after reconnect or under large RX input.
-            wDev_ProcessRxSucData(unit_head, subframe_count);
+            // the descriptor carrying this unit's bit-30 completion marker.
+            // It obtains the unit head from `wDevCtrl.head`; this argument is
+            // retained as the exact tail passed to discard/recycle.
+            completed.dispatch();
             subframe_count = 0;
             if descriptor == last {
                 let latest = hal_mac_rx_get_last_dscr();
@@ -945,7 +969,6 @@ pub(crate) unsafe fn process_rx_success() -> Result<(), WdevRxContinuationError>
             if descriptor.is_null() {
                 return Ok(());
             }
-            unit_head = descriptor;
             // Match the vendor outer walk: only the pointer publication is
             // protected; the per-unit decoder executes with interrupts on.
             let new_interrupt_state = crate::critical::strict_wifi_int_disable();
