@@ -142,8 +142,11 @@ pub(crate) fn strict_sta_ap_treatment(
     // The first network packet after AP authorization is the protected
     // broadcast response needed by the joining station. Security has already
     // expanded this exact group-CCMP descriptor before the mapper runs.
+    // A DTIM FIFO element which is not last carries IEEE 802.11 More Data
+    // (0x2000). The HIL-observed tuple is otherwise byte-for-byte identical
+    // to the already-qualified AP group CCMP class.
     let ap_group_ccmp_data = rate == 12
-        && frame_control == 0x4208
+        && matches!(frame_control, 0x4208 | 0x6208)
         && matches!(state[0], 0x0000_200b | 0x0200_200b)
         && state[1] == 7
         && state[2] == 0x0004_0342
@@ -432,6 +435,7 @@ mod tests {
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 2],
             ),
             (12, 0x2000, 0x4208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
+            (12, 0x2029, 0x6208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
             (
                 12,
                 0x2003,
