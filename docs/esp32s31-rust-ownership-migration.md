@@ -350,10 +350,18 @@ A full hardware stress run released 4,787/4,787 TX frames and 692/692 RX
 frames, drained 21,371 PP events without rejection, and changed no allocation
 counter.
 
-This does not yet make all of `pTxRx` obsolete. Its RX queue, TX-done callback
-registration/list, and two observed PPDU-format bytes are independent live
-slices. They should move one at a time; only then can `pTxRx`/`TxRxCxt` be
-removed from the static binding and linked-state inventory. Final ELF
+The TX-done registration/list slice has now moved as well. Handoff rejects a
+non-empty vendor completion queue or an invalid empty tail link, then copies
+the two callback masks and six strict-profile callback identities into one
+fixed SRAM `StrictTxDoneRegistry`. Completion append/dequeue and callback
+filtering no longer touch `pTxRx`. Hardware qualification completed WPA2,
+ADDBA, the full network workload, 4,096 UDP datagrams, and 4 HTTP transfers
+with balanced TX/RX/PP ownership and an unchanged allocation snapshot.
+
+This still does not make all of `pTxRx` obsolete. Its RX queue and two observed
+PPDU-format bytes are independent live slices. They should move one at a time;
+only then can `pTxRx`/`TxRxCxt` be removed from the static binding and
+linked-state inventory. Final ELF
 verification must continue to use a non-empty STA configuration; otherwise
 the HIL binary deliberately enters `pending()` before Wi-Fi initialization
 and LTO removes the unreachable strict runtime.

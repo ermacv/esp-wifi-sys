@@ -751,9 +751,7 @@ queues to be empty and idle, validates their intrusive empty-tail invariant,
 and adopts the four initialized scheduler masks and cursors. Producer append,
 hardware selection, dequeue, error requeue, and timeout-chain requeue then use
 one fixed SRAM `StrictTxQueueState`; no armed path calls `ppDequeueTxQ` or
-mutates the vendor logical queue links. RX, TX-done callback lists, and the two
-observed PPDU-format bytes remain in `pTxRx` and are deliberately treated as
-separate ownership slices.
+mutates the vendor logical queue links.
 
 The first hardware stress run after that split completed WPA2/DHCP/ping/DNS/
 TCP/HTTP/ADDBA, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers. It released
@@ -761,6 +759,18 @@ TCP/HTTP/ADDBA, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers. It released
 rejects, and preserved the allocation snapshot. The measured UDP payload rate
 was 17.514 Mbit/s; this run qualifies ownership and correctness, not a new
 throughput ceiling.
+
+The TX-done slice is now Rust-owned as well. Handoff requires the vendor
+completion list to be empty and validates its tail-link invariant, then copies
+the mode-0/mode-1 masks and only the six callback slots admitted by the strict
+profile. All later completion append, dequeue, callback filtering, and callback
+identity checks use a fixed SRAM `StrictTxDoneRegistry`; `txdone.rs` does not
+touch `pTxRx` after handoff. A hardware stress run completed WPA2, DHCP,
+ping/DNS/TCP/HTTP, ADDBA, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers. It
+released 4,786/4,786 TX and 692/692 RX owners, drained 21,295/21,295 PP events,
+and preserved the allocation snapshot. The measured correctness-run rate was
+19.517 Mbit/s. Only RX and the two observed PPDU-format bytes remain live
+`pTxRx` ownership slices.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,

@@ -238,8 +238,10 @@ vendor-initialized scheduler masks and cursors; all sixteen queue heads/tails
 then have one single-hart Rust owner. `ppTxPkt`, `ppMapTxQueue`,
 `ppDequeueTxQ`, `ic_interface_enabled`, `lmacIsIdle`, and
 `pp_process_hmac_waiting_txq` are absent from the armed runtime path. The
-remaining `pTxRx` bytes still provide RX, TX-done callback, and PPDU-format
-state and are a separate migration boundary.
+TX-done completion links, callback masks, and the six admitted callback
+identities are also adopted into a fixed Rust SRAM registry. The remaining
+`pTxRx` bytes provide only RX and two PPDU-format values and are separate
+migration boundaries.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.

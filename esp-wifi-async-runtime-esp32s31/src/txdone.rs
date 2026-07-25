@@ -45,8 +45,15 @@ const BASIC_MODE0_CALLBACKS: u32 = (1 << CALLBACK_MGMT)
     | (1 << CALLBACK_AP_BEACON)
     | (1 << CALLBACK_AP_DATA)
     | (1 << CALLBACK_AP_POWER_SAVE);
-const BASIC_MODE1_CALLBACKS: u32 =
-    (1 << CALLBACK_STA_EAPOL) | (1 << CALLBACK_ADDBA_RESPONSE);
+const BASIC_MODE1_CALLBACKS: u32 = (1 << CALLBACK_STA_EAPOL) | (1 << CALLBACK_ADDBA_RESPONSE);
+const SUPPORTED_CALLBACK_BITS: [u8; 6] = [
+    CALLBACK_MGMT,
+    CALLBACK_STA_EAPOL,
+    CALLBACK_AP_BEACON,
+    CALLBACK_AP_DATA,
+    CALLBACK_AP_POWER_SAVE,
+    CALLBACK_ADDBA_RESPONSE,
+];
 
 const PHASE_IDLE: u8 = 0;
 const PHASE_LOAD: u8 = 1;
@@ -245,6 +252,159 @@ pub enum TxDoneError {
     StrictCallbackFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxDoneStateAdoptionError {
+    TxRxUnavailable,
+    QueueNotEmpty,
+    InvalidEmptyTailLink,
+}
+
+struct StrictTxDoneRegistry {
+    head: *mut u8,
+    tail: *mut u8,
+    mode0_mask: u32,
+    mode1_mask: u32,
+    callbacks: [usize; SUPPORTED_CALLBACK_BITS.len()],
+}
+
+impl StrictTxDoneRegistry {
+    const fn empty() -> Self {
+        Self {
+            head: ptr::null_mut(),
+            tail: ptr::null_mut(),
+            mode0_mask: 0,
+            mode1_mask: 0,
+            callbacks: [0; SUPPORTED_CALLBACK_BITS.len()],
+        }
+    }
+
+    unsafe fn append(&mut self, frame: *mut u8) -> bool {
+        if frame.is_null() {
+            return false;
+        }
+        frame
+            .add(FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(ptr::null_mut());
+        if self.tail.is_null() {
+            if !self.head.is_null() {
+                return false;
+            }
+            self.head = frame;
+        } else {
+            self.tail
+                .add(FRAME_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .write(frame);
+        }
+        self.tail = frame;
+        true
+    }
+
+    unsafe fn pop_front(&mut self) -> *mut u8 {
+        let frame = self.head;
+        if frame.is_null() {
+            return frame;
+        }
+        self.head = frame.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
+        if self.head.is_null() {
+            self.tail = ptr::null_mut();
+        }
+        frame
+            .add(FRAME_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(ptr::null_mut());
+        frame
+    }
+
+    fn callback(&self, bit: u8) -> Option<usize> {
+        supported_callback_index(bit).map(|index| self.callbacks[index])
+    }
+}
+
+struct StrictTxDoneRegistryCell(UnsafeCell<StrictTxDoneRegistry>);
+
+// Handoff publishes this state once; afterwards only the strict Wi-Fi hart
+// mutates the intrusive queue or reads its adopted callback policy.
+unsafe impl Sync for StrictTxDoneRegistryCell {}
+
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.tx_done_registry"
+)]
+static STRICT_TX_DONE_REGISTRY: StrictTxDoneRegistryCell =
+    StrictTxDoneRegistryCell(UnsafeCell::new(StrictTxDoneRegistry::empty()));
+static STRICT_TX_DONE_REGISTRY_ADOPTED: AtomicBool = AtomicBool::new(false);
+
+const fn supported_callback_index(bit: u8) -> Option<usize> {
+    let mut index = 0;
+    while index < SUPPORTED_CALLBACK_BITS.len() {
+        if SUPPORTED_CALLBACK_BITS[index] == bit {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Adopt the initialized TX-done policy without retaining the mixed `pTxRx`
+/// object as runtime storage.
+///
+/// The ownership edge is fail-closed: the vendor completion list must be
+/// empty and its tail link must point at its own head slot. Only the two masks
+/// and six callback addresses admitted by the strict profile are copied.
+///
+/// # Safety
+///
+/// Wi-Fi initialization must be quiescent. No TX completion producer may run
+/// until this function returns and the strict radio owner is armed.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn adopt_vendor_tx_done_state() -> Result<(), TxDoneStateAdoptionError> {
+    if STRICT_TX_DONE_REGISTRY_ADOPTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let txrx = ptr::addr_of!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(TxDoneStateAdoptionError::TxRxUnavailable);
+    }
+    let head_slot = txrx.add(TX_DONE_HEAD_OFFSET).cast::<*mut u8>();
+    if !head_slot.read().is_null() {
+        return Err(TxDoneStateAdoptionError::QueueNotEmpty);
+    }
+    let tail_link = txrx
+        .add(TX_DONE_TAIL_LINK_OFFSET)
+        .cast::<*mut *mut u8>()
+        .read();
+    if tail_link != head_slot {
+        return Err(TxDoneStateAdoptionError::InvalidEmptyTailLink);
+    }
+
+    let state = &mut *STRICT_TX_DONE_REGISTRY.0.get();
+    state.head = ptr::null_mut();
+    state.tail = ptr::null_mut();
+    state.mode0_mask = txrx.add(TX_CALLBACK_MODE0_MASK_OFFSET).cast::<u32>().read();
+    state.mode1_mask = txrx.add(TX_CALLBACK_MODE1_MASK_OFFSET).cast::<u32>().read();
+    let mut index = 0;
+    while index < SUPPORTED_CALLBACK_BITS.len() {
+        let bit = SUPPORTED_CALLBACK_BITS[index];
+        state.callbacks[index] = txrx
+            .add(TX_CALLBACK_TABLE_FIRST_OFFSET + usize::from(bit) * 4)
+            .cast::<usize>()
+            .read();
+        index += 1;
+    }
+    STRICT_TX_DONE_REGISTRY_ADOPTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+#[inline(always)]
+unsafe fn tx_done_registry() -> Result<&'static mut StrictTxDoneRegistry, TxDoneError> {
+    if !STRICT_TX_DONE_REGISTRY_ADOPTED.load(Ordering::Acquire) {
+        return Err(TxDoneError::TxRxUnavailable);
+    }
+    Ok(&mut *STRICT_TX_DONE_REGISTRY.0.get())
+}
+
 #[derive(Clone, Copy)]
 struct TxDoneState {
     active: bool,
@@ -395,19 +555,15 @@ unsafe fn strict_ap_addba_response_txdone(frame: *mut u8) -> Result<(), TxDoneEr
     if header.add(24).read() != 3 || header.add(25).read() != 1 {
         return Err(TxDoneError::StrictCallbackFailed);
     }
-    let response_status =
-        u16::from_le_bytes([header.add(27).read(), header.add(28).read()]);
+    let response_status = u16::from_le_bytes([header.add(27).read(), header.add(28).read()]);
     if response_status == 0 {
         #[cfg(not(feature = "hil-rx-ampdu"))]
         return Err(TxDoneError::StrictCallbackFailed);
         #[cfg(feature = "hil-rx-ampdu")]
         {
-            let parameters =
-                u16::from_le_bytes([header.add(29).read(), header.add(30).read()]);
-            let timeout =
-                u16::from_le_bytes([header.add(31).read(), header.add(32).read()]);
-            let expected_parameters =
-                1_u16 << 1 | crate::rx_ampdu::RX_BLOCK_ACK_MAX_WINDOW << 6;
+            let parameters = u16::from_le_bytes([header.add(29).read(), header.add(30).read()]);
+            let timeout = u16::from_le_bytes([header.add(31).read(), header.add(32).read()]);
+            let expected_parameters = 1_u16 << 1 | crate::rx_ampdu::RX_BLOCK_ACK_MAX_WINDOW << 6;
             if parameters != expected_parameters || timeout != 0 {
                 return Err(TxDoneError::StrictCallbackFailed);
             }
@@ -662,8 +818,8 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     if descriptor_flags != 0x0080_0412 {
         return Err(TxDoneError::UnsupportedDescriptorFlags(descriptor_flags));
     }
-    let txrx = txrx()?;
-    let registered_mask = txrx.add(TX_CALLBACK_MODE0_MASK_OFFSET).cast::<u32>().read();
+    let registry = tx_done_registry()?;
+    let registered_mask = registry.mode0_mask;
     let callbacks = descriptor
         .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
         .cast::<u32>()
@@ -673,10 +829,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     if callbacks != expected {
         return Err(TxDoneError::UnexpectedBeaconCallbacks(callbacks));
     }
-    let registered = txrx
-        .add(TX_CALLBACK_TABLE_FIRST_OFFSET + usize::from(CALLBACK_AP_BEACON) * 4)
-        .cast::<usize>()
-        .read();
+    let registered = registry.callback(CALLBACK_AP_BEACON).unwrap_or(0);
     if registered != __wrap_ieee80211_hostapd_beacon_txcb as usize {
         return Err(TxDoneError::CallbackRegistryMismatch(CALLBACK_AP_BEACON));
     }
@@ -726,14 +879,14 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
     let layout_word = frame.add(0x24).cast::<u16>().read_unaligned();
     let buffer_flags = first_buffer.cast::<u32>().read_unaligned();
     let completion_input = crate::tx_security::TxSecurityLayoutInput {
-            header_len: lengths as u16,
-            remaining_len: (lengths >> 16) as u16,
-            layout: layout_word,
-            buffer_flags,
-            descriptor_flags,
-            descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
-            frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
-        };
+        header_len: lengths as u16,
+        remaining_len: (lengths >> 16) as u16,
+        layout: layout_word,
+        buffer_flags,
+        descriptor_flags,
+        descriptor_security: descriptor.add(0x10).cast::<u32>().read_unaligned(),
+        frame_control: metadata.add(8).cast::<u16>().read_unaligned(),
+    };
     let Some(layout) =
         crate::tx_security::strict_persistent_frame_completion_layout(completion_input)
     else {
@@ -755,10 +908,7 @@ pub(crate) unsafe fn complete_ap_beacon_success(frame: *mut u8) -> Result<(), Tx
         .add(0x14)
         .cast::<u32>()
         .write_unaligned(u32::from(layout.header_len) | (u32::from(layout.remaining_len) << 16));
-    frame
-        .add(0x24)
-        .cast::<u16>()
-        .write_unaligned(layout.layout);
+    frame.add(0x24).cast::<u16>().write_unaligned(layout.layout);
     first_buffer
         .add(4)
         .cast::<*mut u8>()
@@ -815,9 +965,7 @@ pub(crate) unsafe fn begin_from_tx_success(
 /// mask to be zero keeps management, EAPOL and AP completion policy on the
 /// ordinary staged path. The caller publishes the finite batch with
 /// `publish_callback_free_ampdu_batch` before yielding the radio executor.
-pub(crate) unsafe fn commit_callback_free_ampdu_success(
-    frame: *mut u8,
-) -> Result<(), TxDoneError> {
+pub(crate) unsafe fn commit_callback_free_ampdu_success(frame: *mut u8) -> Result<(), TxDoneError> {
     crate::channel_switch::tx_done_edge();
     let descriptor = descriptor(frame)?;
     let callbacks = descriptor
@@ -853,7 +1001,7 @@ pub(crate) unsafe fn commit_callback_free_ampdu_success(
         0,
         u32::from(descriptor.add(19).read()),
     );
-    append_tx_done(txrx()?, frame)?;
+    append_tx_done(frame)?;
     if flags & DESCRIPTOR_RATE_CONTROL_BIT != 0
         && flags & DESCRIPTOR_RATE_CONTROL_SKIP_MASK != DESCRIPTOR_RATE_CONTROL_SKIP_VALUE
     {
@@ -923,8 +1071,7 @@ unsafe fn begin_lmac(
             .read(),
         u32::from(descriptor.add(19).read()),
     );
-    let txrx = txrx()?;
-    let registered = txrx.add(TX_CALLBACK_MODE1_MASK_OFFSET).cast::<u32>().read();
+    let registered = tx_done_registry()?.mode1_mask;
     let callbacks = descriptor
         .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
         .cast::<u32>()
@@ -976,10 +1123,7 @@ unsafe fn dispatch_one_lmac_callback(state: &mut TxDoneState) -> Result<(), TxDo
     let bit = state.callbacks.trailing_zeros() as u8;
     let callback =
         lmac_callback_for_bit(bit).ok_or(TxDoneError::UnsupportedCallbackBits(1 << bit))?;
-    let registered = txrx()?
-        .add(TX_CALLBACK_TABLE_FIRST_OFFSET + usize::from(bit) * 4)
-        .cast::<usize>()
-        .read();
+    let registered = tx_done_registry()?.callback(bit).unwrap_or(0);
     if registered != callback as usize {
         return Err(TxDoneError::CallbackRegistryMismatch(bit));
     }
@@ -1062,7 +1206,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
         return Err(TxDoneError::TxTimeRecordingEnabled);
     }
 
-    append_tx_done(txrx()?, frame)?;
+    append_tx_done(frame)?;
     if flags & DESCRIPTOR_RATE_CONTROL_BIT != 0
         && flags & DESCRIPTOR_RATE_CONTROL_SKIP_MASK != DESCRIPTOR_RATE_CONTROL_SKIP_VALUE
     {
@@ -1230,23 +1374,12 @@ pub unsafe extern "C" fn __wrap_lmacTxDone(frame: *mut c_void, mode: u32) {
     }
 }
 
-unsafe fn append_tx_done(txrx: *mut u8, frame: *mut u8) -> Result<(), TxDoneError> {
-    let tail_link = txrx
-        .add(TX_DONE_TAIL_LINK_OFFSET)
-        .cast::<*mut *mut u8>()
-        .read();
-    if tail_link.is_null() {
-        return Err(TxDoneError::MissingTxDoneTail);
+unsafe fn append_tx_done(frame: *mut u8) -> Result<(), TxDoneError> {
+    if tx_done_registry()?.append(frame) {
+        Ok(())
+    } else {
+        Err(TxDoneError::MissingTxDoneTail)
     }
-    frame
-        .add(FRAME_NEXT_OFFSET)
-        .cast::<*mut u8>()
-        .write(ptr::null_mut());
-    tail_link.write(frame);
-    txrx.add(TX_DONE_TAIL_LINK_OFFSET)
-        .cast::<*mut *mut u8>()
-        .write(frame.add(FRAME_NEXT_OFFSET).cast());
-    Ok(())
 }
 
 fn enqueue_lmac_step() -> Result<(), TxDoneError> {
@@ -1320,25 +1453,16 @@ unsafe fn dispatch_quantum(state: &mut TxDoneState) -> Result<(), TxDoneError> {
 }
 
 unsafe fn load_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
-    let txrx = txrx()?;
-    let head = txrx.add(TX_DONE_HEAD_OFFSET).cast::<*mut u8>();
-    let frame = head.read();
+    let registry = tx_done_registry()?;
+    let frame = registry.pop_front();
     if frame.is_null() {
         state.active = false;
         state.phase = PHASE_IDLE;
         return Ok(());
     }
 
-    let next = frame.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().read();
-    head.write(next);
-    if next.is_null() {
-        txrx.add(TX_DONE_TAIL_LINK_OFFSET)
-            .cast::<*mut u8>()
-            .write(head.cast());
-    }
-
     let descriptor = descriptor(frame)?;
-    let registered = txrx.add(TX_CALLBACK_MODE0_MASK_OFFSET).cast::<u32>().read();
+    let registered = registry.mode0_mask;
     let callbacks = descriptor
         .add(DESCRIPTOR_CALLBACK_MASK_OFFSET)
         .cast::<u32>()
@@ -1362,11 +1486,7 @@ unsafe fn load_one(state: &mut TxDoneState) -> Result<(), TxDoneError> {
 unsafe fn dispatch_one_callback(state: &mut TxDoneState) -> Result<(), TxDoneError> {
     let bit = state.callbacks.trailing_zeros() as u8;
     let callback = callback_for_bit(bit).ok_or(TxDoneError::UnsupportedCallbackBits(1 << bit))?;
-    let txrx = txrx()?;
-    let registered = txrx
-        .add(TX_CALLBACK_TABLE_FIRST_OFFSET + usize::from(bit) * 4)
-        .cast::<usize>()
-        .read();
+    let registered = tx_done_registry()?.callback(bit).unwrap_or(0);
     if registered != callback as usize {
         return Err(TxDoneError::CallbackRegistryMismatch(bit));
     }
@@ -1734,15 +1854,6 @@ fn enqueue_step() -> Result<(), TxDoneError> {
     }
 }
 
-unsafe fn txrx() -> Result<*mut u8, TxDoneError> {
-    let txrx = ptr::addr_of!(pTxRx).read();
-    if txrx.is_null() {
-        Err(TxDoneError::TxRxUnavailable)
-    } else {
-        Ok(txrx)
-    }
-}
-
 unsafe fn descriptor(frame: *mut u8) -> Result<*mut u8, TxDoneError> {
     let descriptor = frame.add(FRAME_DESCRIPTOR_OFFSET).cast::<*mut u8>().read();
     if descriptor.is_null() {
@@ -1804,12 +1915,43 @@ fn lmac_callback_for_bit(bit: u8) -> Option<TxCallback> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_ap_addba_response_completion_layout, is_ap_deauthentication_completion, CALLBACK_MGMT,
-    };
-    use super::CALLBACK_ADDBA_RESPONSE;
     #[cfg(feature = "hil-vendor-tx")]
     use super::ieee80211_data_header_len;
+    use super::{
+        is_ap_addba_response_completion_layout, is_ap_deauthentication_completion,
+        supported_callback_index, StrictTxDoneRegistry, CALLBACK_ADDBA_RESPONSE,
+        CALLBACK_AP_POWER_SAVE, CALLBACK_MGMT, FRAME_NEXT_OFFSET,
+    };
+
+    #[test]
+    fn rust_tx_done_registry_owns_fifo_and_supported_callbacks() {
+        let mut first = [0_usize; 8];
+        let mut second = [0_usize; 8];
+        let first = first.as_mut_ptr().cast::<u8>();
+        let second = second.as_mut_ptr().cast::<u8>();
+        let mut registry = StrictTxDoneRegistry::empty();
+        let power_save = supported_callback_index(CALLBACK_AP_POWER_SAVE).unwrap();
+        registry.callbacks[power_save] = 0x1234;
+
+        unsafe {
+            assert!(registry.append(first));
+            assert!(registry.append(second));
+            assert_eq!(
+                first.add(FRAME_NEXT_OFFSET).cast::<*mut u8>().read(),
+                second
+            );
+            assert_eq!(registry.pop_front(), first);
+            assert!(first
+                .add(FRAME_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .read()
+                .is_null());
+            assert_eq!(registry.pop_front(), second);
+            assert!(registry.pop_front().is_null());
+        }
+        assert_eq!(registry.callback(CALLBACK_AP_POWER_SAVE), Some(0x1234));
+        assert_eq!(registry.callback(31), None);
+    }
 
     #[test]
     fn only_ap_direction_deauthentication_is_completion_only() {
@@ -1822,9 +1964,7 @@ mod tests {
     #[test]
     fn only_measured_terminal_ap_addba_completions_are_noops() {
         let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
-        for (descriptor_security, hardware_status) in
-            [(0x0114_0000, 1), (0x0214_0000, 2)]
-        {
+        for (descriptor_security, hardware_status) in [(0x0114_0000, 1), (0x0214_0000, 2)] {
             for frame_control in [0x00d0, 0x08d0] {
                 for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
                     assert!(is_ap_addba_response_completion_layout(

@@ -369,6 +369,8 @@ pub use tx_intercept::{
 pub use tx_proto::strict_pp_tx_proto_proc;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use tx_queue::{TxQueueProcessError, TxQueueStateAdoptionError};
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use txdone::TxDoneStateAdoptionError;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",
