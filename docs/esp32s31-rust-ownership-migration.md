@@ -777,6 +777,13 @@ applies the finite observed mapper table, and publishes the frame. It does not
 call `ic_interface_enabled`, `lmacIsIdle`, `ppMapTxQueue`, or the cached-HMAC
 queue consumer.
 
+The strict AP cold-start run additionally qualified the retained beacon mapper
+class: frame control `0x0080`, legacy rate `12`, descriptor flags
+`0x0080_0412`, AP selector `0x0004_0000`, peer state `0x80`, and descriptor
+byte four `0x07`. It is an existing bounded beacon layout already shared by
+the Rust security and completion policies; the mapper preserves byte four and
+does not enter aggregation or power-save search state.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

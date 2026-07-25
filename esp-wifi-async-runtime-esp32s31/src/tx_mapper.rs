@@ -23,6 +23,12 @@ pub(crate) fn strict_sta_ap_treatment(
         && ((state[3] == 0x80 && matches!(frame_control, 0x00b0 | 0x0000))
             || (state[3] == 0x81 && frame_control == 0x00d0));
     let eapol = rate == 0 && frame_control == 0x0188 && state == [0x0200_200c, 7, 0, 0x81, 0];
+    // The retained WPA2 AP beacon enters this leaf after the descriptor and
+    // security policies have applied their already-qualified fixed layout.
+    // Pinned ppMapTxQueue preserves descriptor byte four as 0x07 for this
+    // class; no aggregation or power-save search state is consulted.
+    let ap_beacon =
+        rate == 12 && frame_control == 0x0080 && state == [0x0080_0412, 7, 0x0004_0000, 0x80, 0];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -38,7 +44,7 @@ pub(crate) fn strict_sta_ap_treatment(
     let legacy_qos =
         rate == 0 && frame_control == 0x4188 && state == [0x0200_2009, 7, 0x304, 0x81, 0];
 
-    if management || eapol || ht_qos || legacy_qos {
+    if management || eapol || ap_beacon || ht_qos || legacy_qos {
         Some(7)
     } else {
         None
@@ -125,6 +131,8 @@ mod tests {
             (0, 0x2000, 0x0000, [0, 7, 0, 0x80, 0]),
             (0, 0x2000, 0x0188, [0x0200_200c, 7, 0, 0x81, 0]),
             (0, 0x2001, 0x0188, [0x0200_200c, 7, 0, 0x81, 0]),
+            (12, 0x2000, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x80, 0]),
+            (12, 0x2001, 0x0080, [0x0080_0412, 7, 0x0004_0000, 0x80, 0]),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
