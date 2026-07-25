@@ -82,6 +82,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "esf_buf_recycle",
     "ieee80211_mgmt_output",
     "ieee80211_set_tx_pti",
+    "ieee80211_classify",
     "ieee80211_search_node",
     "cnx_node_alloc",
     "cnx_node_search",

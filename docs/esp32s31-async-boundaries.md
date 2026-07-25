@@ -203,9 +203,15 @@ nested publication observes the already reserved token, so it cannot create a
 surplus empty event. Thus the stock shared-list drain cannot monopolize one
 executor turn and the vendor `g_ic+0x1ac/+0x1b0` off-channel queue cannot
 become live.
-Node lookup, classification, encapsulation, security selection, and `ppTxPkt`
-inside that one-frame stage are still migration work; this boundary does not
-claim that the complete event-5 call graph is strict yet.
+Node lookup is already constrained by the Rust STA/AP interface and node-table
+owners. Classification is now a finite Rust leaf: direct references are
+wrapped, and strict handoff replaces the ROM consumer's callback-table slot
+`net80211_funcs+0x24` after validating its previous value. EAPOL/WAPI, STA
+ARP, DHCP/DNS, IPv4/IPv6 priority, multicast, and the four-state WMM admission
+graph are handled without allocation, waiting, retry, or indirect calls.
+Encapsulation, security selection, and `ppTxPkt` inside the one-frame stage
+remain migration work; this boundary does not claim that the complete event-5
+call graph is strict yet.
 
 For timers, the original producer allocates an eight-byte envelope and posts
 event 7. The final-link timer wrapper replaces that producer with a sixteen-slot

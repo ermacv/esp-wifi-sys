@@ -48,6 +48,7 @@ mod lmac;
 pub mod michael;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_timer;
+mod net80211_classify;
 mod net80211_state;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod net80211_tx;

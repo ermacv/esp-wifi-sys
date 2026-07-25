@@ -92,9 +92,11 @@ Timer callbacks execute under the logical PP identity. This makes
 `esp_wifi_ipc_internal()` take its inline path instead of posting an ioctl to
 `ppTask` and synchronously waiting on a semaphore.
 
-PP events 5 through 7 are not accepted after the strict proof. Event 5 drains
-the stock net80211 output list in a loop; application data and strict
-management paths bypass that list. Event 6's vendor ioctl envelope
+Stock PP events 6 and 7 are not accepted after the strict proof. Event 5 is
+accepted only as the token for the Rust-owned net80211 TX queue: one executor
+action lends exactly one frame to the remaining output compatibility stage.
+The stock shared-list producer is replaced, so its loop cannot receive an
+unbounded batch. Event 6's vendor ioctl envelope
 contains an arbitrary callback, heap ownership flags, an optional completion
 semaphore, and PM wake/sleep bookkeeping. Configuration, mode changes,
 start/stop, and any API that would post such an ioctl must finish before
@@ -104,8 +106,8 @@ slots and posts a private one-action executor event. Only the `timer_connect`
 success action is completed locally. `chm_dwell` and vendor
 auth/assoc/handshake/reconnect/scan/beacon/hostap recovery timers can enter
 synchronous MAC teardown or channel switching and therefore fail closed;
-WPA2 retry timing remains Rust-owned. Any unexpected stock event 5, 6, or 7
-fails immediately.
+WPA2 retry timing remains Rust-owned. An event 5 without a reserved Rust queue
+token and any unexpected stock event 6 or 7 fail immediately.
 
 Every vendor handler must still return without waiting. NVS writes, direct
 delays, logging, and application-facing synchronous Wi-Fi calls need
@@ -194,6 +196,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=wpa_sm_rx_eapol
 -Wl,--wrap=wpa_ap_rx_eapol
 -Wl,--wrap=hal_crypto_set_key_entry
+-Wl,--wrap=ieee80211_classify
 -Wl,--wrap=ieee80211_search_node
 -Wl,--wrap=cnx_node_search
 -Wl,--wrap=vTaskDelay
@@ -550,6 +553,17 @@ strict dispatcher before their hidden node/key/channel state machines can run.
 Those three operations need explicit executor commands before they can be
 supported. Other RX/retry/connection paths still prevent certifying basic
 AP/STA for the stated zero-allocation/zero-wait requirement.
+
+The ordinary STA/AP `ieee80211_classify` leaf is also Rust-owned. Its finite
+port classifies EAPOL/WAPI, STA ARP, DHCP/DNS, IPv4, IPv6, multicast, and WMM
+admission-control traffic. The recovered admission graph is expressed with an
+explicit three-transition/four-state bound, and the fixed-per-packet-rate descriptor bit
+is written directly without entering PP/TRC code. Direct archive references
+use GNU wrapping, but the ESP32-S31 ROM output path calls callback-table slot
+`net80211_funcs+0x24`; strict handoff adopts that slot only when it still
+contains the pinned vendor classifier or the Rust replacement, then verifies
+both paths. JTAG inspection of the running final image confirmed that the ROM
+slot contained `__wrap_ieee80211_classify`.
 
 ## Remaining WPA scope
 

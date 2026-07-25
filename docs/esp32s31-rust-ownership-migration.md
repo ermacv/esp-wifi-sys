@@ -152,7 +152,7 @@ the event-5 consumer called directly by Rust, gives the narrower graph:
 | `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
 | `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
 | `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | replaced; ordinary STA/AP queue publication is Rust |
-| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; leaf replacement remains |
+| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; classifier replaced, leaf remains |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -215,16 +215,35 @@ Rust-owned home channel is rejected before queue ownership changes, so the
 vendor `g_ic+0x1ac/+0x1b0` pending-frame list remains an invariant instead of
 becoming live runtime state.
 
+The next leaf inside that compatibility stage is now Rust-owned.
+`ieee80211_classify` was recovered from the pinned
+`libnet80211.a[ieee80211_output.o]`: EAPOL and WAPI select the fixed-rate bit
+and priority 7; STA ARP and DHCP/DNS select the same fixed-rate policy; IPv4
+DSCP and the IPv6 traffic class select user priority; multicast or a non-QoS
+node use priority 7; and WMM admission control follows the recovered monotonic
+four-state downgrade graph. The Rust implementation writes descriptor bit
+`0x0200_0000` directly rather than calling the PP/TRC helper and bounds the
+four-state admission graph to three transitions.
+
+ESP32-S31 ROM does not reach this leaf through the exported symbol. JTAG and
+ROM disassembly establish that `ieee80211_output_process` calls
+`net80211_funcs+0x24`. Strict handoff therefore validates that slot against
+the pinned vendor address or the Rust replacement, writes the replacement,
+and reads it back. GNU wrapping remains mandatory for direct archive
+references. A JTAG snapshot of the running image showed the slot equal to
+`__wrap_ieee80211_classify`; the same image completed passive scan, WPA2
+association, DHCP, ping, DNS, TCP, and HTTP with zero allocation counters.
+
 This consumer is not a leaf. An explicit strict-auditor probe with
 `ieee80211_output_process` as the sole root currently finds 23 control-flow
 cycles and 14 indirect calls. Several branches are expected to be unreachable
 under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
 expectation is not a proof and the compatibility stage must not be described
-as fully strict yet. Queue ownership and the one-frame presentation boundary
-are now implemented. The next slices replace each remaining reachable node
-lookup, classification, encapsulation, encryption, and hardware-submit branch
-explicitly. Only after that work should `ieee80211_set_tx_desc` become the
-final `g_ic` leaf.
+as fully strict yet. Queue ownership, the one-frame presentation boundary,
+role-checked node lookup, and classification are now implemented. The next
+slices replace each remaining reachable encapsulation, encryption, and
+hardware-submit branch explicitly. Only after that work should
+`ieee80211_set_tx_desc` become the final `g_ic` leaf.
 
 After the event-5 consumer and the remaining descriptor leaf have Rust
 replacements, the linked-state audit should no longer report `g_ic` as
