@@ -62,7 +62,7 @@ const fn is_protected_ap_group_data(input: TxSecurityLayoutInput) -> bool {
 const fn is_protected_ap_pairwise_data(input: TxSecurityLayoutInput) -> bool {
     if input.frame_control != 0x4288
         || !crate::tx_proto::is_ap_pairwise_ccmp_descriptor(input.descriptor_flags)
-        || input.descriptor_security != 0x0004_0348
+        || !matches!(input.descriptor_security, 0x0004_0348 | 0x0004_0349)
         || input.header_len != 0x001a
         || input.remaining_len < 8
         || input.layout & 0xe000 != 0
@@ -1363,6 +1363,20 @@ mod tests {
             metadata_len: 0x0052,
         };
         assert_eq!(strict_tx_security_layout(measured), Some(expected));
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                descriptor_security: 0x0004_0349,
+                ..measured
+            }),
+            Some(expected),
+        );
+        assert_eq!(
+            strict_tx_security_layout(TxSecurityLayoutInput {
+                descriptor_security: 0x0004_034a,
+                ..measured
+            }),
+            None,
+        );
         for (remaining_len, layout, buffer_flags, expected) in [
             (
                 0x005b,
@@ -1484,7 +1498,7 @@ mod tests {
                 ..measured
             },
             TxSecurityLayoutInput {
-                descriptor_security: 0x0004_0349,
+                descriptor_security: 0x0004_034a,
                 ..measured
             },
             TxSecurityLayoutInput {

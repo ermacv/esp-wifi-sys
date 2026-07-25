@@ -906,6 +906,16 @@ the cancellation is counted, and the next queued frame is armed. This
 temporary bounded drop has no retry, wait, callback, vendor PS queue, or
 effect on traffic owned by another peer.
 
+Keeping the first Android peer active while associating the laptop exposed the
+second pairwise key selector before security headroom was changed:
+frame control `0x4288`, HT rate code `33`, descriptor flags `0x0000_2009`,
+priority `0x20`, descriptor control `0x0004_0349`, peer word
+`0x2100_0000`, and peer identity `2`. The low control byte is the AP pairwise
+hardware key index with the AP direction bit: peer one used `0x48` (slot 8)
+and peer two uses `0x49` (slot 9). Security now admits both measured selectors,
+while the mapper binds `0x348` only to peer one and `0x349` only to peer two;
+slot 10 and crossed peer/selector combinations remain rejected.
+
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
 descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned

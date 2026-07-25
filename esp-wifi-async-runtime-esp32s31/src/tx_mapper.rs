@@ -115,6 +115,15 @@ pub(crate) fn strict_sta_ap_treatment(
     // fail-closed.
     let bounded_ap_peer =
         state[3] == 0x2100_0000 && matches!(state[4], 1 | 2);
+    // The AP pairwise hardware slot is encoded in the low descriptor-control
+    // byte after CCMP setup: peer identity one used slot 8 (`0x48`) and peer
+    // identity two used slot 9 (`0x49`). Bind the two observations instead of
+    // accepting either key selector for either node.
+    let bounded_ap_pairwise_selector = bounded_ap_peer
+        && matches!(
+            (state[4], state[2]),
+            (1, 0x0004_0348) | (2, 0x0004_0349)
+        );
     let ap_association_response = rate == 11
         && frame_control == 0x0010
         && state[0] == 0
@@ -157,8 +166,7 @@ pub(crate) fn strict_sta_ap_treatment(
         && frame_control == 0x4288
         && state[0] == 0x0000_2009
         && state[1] == 0x20
-        && state[2] == 0x0004_0348
-        && bounded_ap_peer;
+        && bounded_ap_pairwise_selector;
     // Android exposed the adjacent first-downlink state before the selected
     // rate has converged to the fixed HT tuple above. The descriptor carries
     // the already-qualified fixed-per-packet-rate bit, internal rate code 11,
@@ -169,8 +177,7 @@ pub(crate) fn strict_sta_ap_treatment(
         && frame_control == 0x4288
         && state[0] == 0x0200_2009
         && state[1] == 7
-        && state[2] == 0x0004_0348
-        && bounded_ap_peer;
+        && bounded_ap_pairwise_selector;
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -443,7 +450,7 @@ mod tests {
                 33,
                 0x2001,
                 0x4288,
-                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 2],
+                [0x0000_2009, 0x20, 0x0004_0349, 0x2100_0000, 2],
             ),
             (
                 11,
@@ -455,7 +462,7 @@ mod tests {
                 11,
                 0x2003,
                 0x4288,
-                [0x0200_2009, 7, 0x0004_0348, 0x2100_0000, 2],
+                [0x0200_2009, 7, 0x0004_0349, 0x2100_0000, 2],
             ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -596,6 +603,24 @@ mod tests {
                 0x2001,
                 0x4288,
                 [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 3],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2001,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 2],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2000,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0349, 0x2100_0000, 1],
             ),
             None
         );
