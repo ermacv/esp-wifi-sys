@@ -856,8 +856,19 @@ The resulting ESP32-S31 run completed WPA2, 4,096/4,096 UDP datagrams and 4/4
 HTTP transfers at 25.033 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
 692/692, and PP at 20,589/20,589. ESF rejection remained 0 to 0, with zero
 allocation, blocking, task-delay, direct-delay, or queue-rejection probes.
-The final ELF contains no call to `ppRxProtoProc` or `rc_get_trc`; its strict
-vendor graph retains only `rcUpdateRxDone` for this rate-control tail.
+The final ELF contains no call to `ppRxProtoProc` or `rc_get_trc`.
+
+The remaining 0x66-byte `rcUpdateRxDone` tail is now Rust-owned too. Its two
+guard flags, wrapping calibration addition from `wDevCtrl+0x2e`, signed
+`(previous + sample) / 2` stage, and signed
+`(3 * previous + intermediate) / 4` stage are reproduced in a pure
+host-tested function. The target adapter performs only the four bounded byte
+loads and two byte stores. A second hardware qualification completed
+4,096/4,096 UDP and 4/4 HTTP transfers at 25.759 Mbit/s with balanced
+4,786/4,786 TX, 691/691 RX, and 20,611/20,611 PP ownership. ESF rejection
+remained 0 to 0 and all allocation, blocking, delay, and queue-rejection
+probes remained zero. No PP receive-protocol or receive-rate vendor leaf
+remains on the strict RX path.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

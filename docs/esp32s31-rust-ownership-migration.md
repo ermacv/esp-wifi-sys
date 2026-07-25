@@ -218,9 +218,9 @@ Priority is now based on ownership leverage and total SRAM, rather than only
 on mutable blob bytes:
 
 1. Replace the remaining raw Radio-owned packet transitions in
-   `wDev_ProcessRxSucData`, `rcUpdateRxDone`, and
-   `esp_wifi_internal_free_rx_buffer` one vertical boundary at a time.
-   `ppRxProtoProc`, `rc_get_trc`, and `ppRecycleRxPkt` are now Rust-owned.
+   `wDev_ProcessRxSucData` and `esp_wifi_internal_free_rx_buffer` one vertical
+   boundary at a time. `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, and
+   `ppRecycleRxPkt` are now Rust-owned.
    Move the 22 `g_per_conn_trc` publications and the three route bitmaps out of
    the ROM ABI table before claiming complete rate-control ownership.
 2. Use the separate Radio/Network ownership counts and existing high-water
@@ -672,7 +672,7 @@ and measured 19.634 Mbit/s. No strict-runtime path now dereferences `pTxRx`;
 the object remains a cold-initialization and one-shot handoff oracle until
 those initializers are ported. Packet recycling, PP protocol routing, and the
 bounded rate-context lookup are now Rust-owned. The remaining RX vendor
-boundaries are `rcUpdateRxDone`, `wDev_ProcessRxSucData`, and
+boundaries are `wDev_ProcessRxSucData` and
 `esp_wifi_internal_free_rx_buffer`.
 
 The interrupt waker now also has an explicit ownership-ordering contract:
