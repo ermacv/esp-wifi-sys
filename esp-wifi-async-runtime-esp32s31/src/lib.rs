@@ -290,6 +290,7 @@ pub use radio::{
     radio_future_snapshot, DispatchControl, PpDispatcher, RadioFuture, RadioFutureSnapshot,
 };
 pub use runtime::timer_budget_self_wakes;
+pub use queue::{waker_cell_snapshot, WakerCellSnapshot};
 pub use runtime::WifiRuntimeFuture;
 #[cfg(all(
     target_arch = "riscv32",

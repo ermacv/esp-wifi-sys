@@ -1,6 +1,7 @@
 use core::{
     cell::UnsafeCell,
     mem::MaybeUninit,
+    ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::Waker,
 };
@@ -214,6 +215,28 @@ pub(crate) struct WakerCell {
     waker: UnsafeCell<Option<Waker>>,
 }
 
+static WAKER_WAKE_DELIVERIES: AtomicUsize = AtomicUsize::new(0);
+static WAKER_LAST_DELIVERY_CELL: AtomicUsize = AtomicUsize::new(0);
+static WAKER_REGISTER_PENDING_WAKES: AtomicUsize = AtomicUsize::new(0);
+static WAKER_LAST_REGISTER_PENDING_CELL: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WakerCellSnapshot {
+    pub wake_deliveries: usize,
+    pub last_delivery_cell: usize,
+    pub register_pending_wakes: usize,
+    pub last_register_pending_cell: usize,
+}
+
+pub fn waker_cell_snapshot() -> WakerCellSnapshot {
+    WakerCellSnapshot {
+        wake_deliveries: WAKER_WAKE_DELIVERIES.load(Ordering::Acquire),
+        last_delivery_cell: WAKER_LAST_DELIVERY_CELL.load(Ordering::Acquire),
+        register_pending_wakes: WAKER_REGISTER_PENDING_WAKES.load(Ordering::Acquire),
+        last_register_pending_cell: WAKER_LAST_REGISTER_PENDING_CELL.load(Ordering::Acquire),
+    }
+}
+
 impl WakerCell {
     pub(crate) const fn new() -> Self {
         Self {
@@ -248,6 +271,8 @@ impl WakerCell {
         // A producer that ran while registration held the lock leaves this
         // flag set instead of spinning in an interrupt context.
         if self.pending.swap(false, Ordering::AcqRel) {
+            WAKER_REGISTER_PENDING_WAKES.fetch_add(1, Ordering::Relaxed);
+            WAKER_LAST_REGISTER_PENDING_CELL.store(ptr::from_ref(self) as usize, Ordering::Release);
             waker.wake_by_ref();
         }
     }
@@ -274,6 +299,8 @@ impl WakerCell {
         self.locked.store(false, Ordering::Release);
 
         if let Some(waker) = to_wake {
+            WAKER_WAKE_DELIVERIES.fetch_add(1, Ordering::Relaxed);
+            WAKER_LAST_DELIVERY_CELL.store(ptr::from_ref(self) as usize, Ordering::Release);
             waker.wake();
         }
     }
