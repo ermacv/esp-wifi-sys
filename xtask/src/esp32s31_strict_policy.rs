@@ -9,7 +9,6 @@ pub const ROOTS: &[&str] = &[
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
-    "hal_get_tsf_time",
     "ic_set_current_channel",
     "phy_set_tx_gain_mem_new",
     "phy_set_rx_comp_new",
@@ -52,7 +51,6 @@ pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
-    "hal_get_tsf_time",
     "phy_set_tx_gain_mem_new",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
@@ -178,6 +176,7 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "lmacReleaseTxopQueue",
         "wifi_strict_lmac_release_txop_queue",
     ),
+    ("hal_get_tsf_time", "wifi_strict_hal_get_tsf_time"),
     (
         "ieee80211_post_hmac_tx",
         "wifi_strict_ieee80211_post_hmac_tx",

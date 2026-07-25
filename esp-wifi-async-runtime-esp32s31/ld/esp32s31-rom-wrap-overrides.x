@@ -129,6 +129,15 @@ lmacReleaseTxopQueue = wifi_strict_lmac_release_txop_queue;
 ASSERT(lmacReleaseTxopQueue == wifi_strict_lmac_release_txop_queue,
        "ESP32-S31 lmacReleaseTxopQueue Rust boundary is inactive");
 
+/* The rev0 ROM TSF leaf is a complete three-register latch/read/unlatch
+ * sequence. Keep its address as a differential oracle and route all runtime
+ * callers to the equivalent SRAM Rust radio-HAL boundary. */
+__real_hal_get_tsf_time = 0x2f82b9f8;
+EXTERN(wifi_strict_hal_get_tsf_time);
+hal_get_tsf_time = wifi_strict_hal_get_tsf_time;
+ASSERT(hal_get_tsf_time == wifi_strict_hal_get_tsf_time,
+       "ESP32-S31 hal_get_tsf_time Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */
