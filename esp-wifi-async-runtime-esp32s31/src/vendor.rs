@@ -28,8 +28,6 @@ unsafe extern "C" {
     #[cfg(not(feature = "strict-no-wait"))]
     fn ppProcessTxQ(queue: u8) -> i32;
     #[cfg(feature = "strict-no-wait")]
-    fn ieee80211_output_process();
-    #[cfg(feature = "strict-no-wait")]
     fn ieee80211_ioctl_process(argument: *mut c_void) -> i32;
     #[cfg(not(feature = "strict-no-wait"))]
     fn pp_timer_do_process(argument: *mut c_void);
@@ -95,6 +93,8 @@ pub enum VendorDispatchError {
     UnexpectedInitializationConfigCallback(usize),
     #[cfg(feature = "strict-no-wait")]
     Net80211Timer(crate::net80211_timer::Net80211TimerError),
+    #[cfg(feature = "strict-no-wait")]
+    Net80211Tx(crate::net80211_tx::Net80211TxError),
     #[cfg(feature = "strict-no-wait")]
     RxPump(crate::rx::RxPumpError),
     #[cfg(feature = "strict-no-wait")]
@@ -391,13 +391,8 @@ impl PpDispatcher for VendorPpDispatcher {
                 PpAction::Net80211Tx => {
                     #[cfg(feature = "strict-no-wait")]
                     {
-                        // `ieee80211_output_init` registers this exact symbol
-                        // as `g_net80211_tx_func`. Calling it directly removes
-                        // the indirect callback edge. The strict init policy
-                        // disables cache TX, AMSDU and power save, while the
-                        // final-link ESF wrappers constrain the loop to the
-                        // finite static TX pool.
-                        ieee80211_output_process();
+                        crate::net80211_tx::dispatch_one()
+                            .map_err(VendorDispatchError::Net80211Tx)?;
                     }
                     #[cfg(not(feature = "strict-no-wait"))]
                     Self::registered_no_arg(

@@ -152,7 +152,7 @@ the event-5 consumer called directly by Rust, gives the narrower graph:
 | `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
 | `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
 | `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | replaced; ordinary STA/AP queue publication is Rust |
-| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | event-5 consumer remains to be split |
+| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; leaf replacement remains |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -197,23 +197,34 @@ hardware through passive scan, WPA2 association, DHCP, ping, DNS, TCP, and
 post-link data with zero recorded allocations. The final ELF still passes the
 strict no-wait/no-heap audit with zero violations.
 
-The Rust replacement validates the descriptor interface, appends through the
-recovered `frame+0x30` intrusive link, and posts PP event 5. It contains no
-allocation, wait, retry, indirect call, or `g_ic` access. The eight-byte
-`s_tx_cacheq` object deliberately remains a vendor-layout mailbox because the
-current event-5 consumer is still `ieee80211_output_process`. Migrating that
-consumer one frame per async continuation is the next ownership boundary; it
-must precede removal of the queue binding itself.
+The Rust replacement validates the descriptor interface, strict-hart and
+radio-owner identity, and home-channel state, appends through the recovered
+`frame+0x30` intrusive link, and reserves the sole PP event-5 token. Event
+publication occurs only on the empty-to-non-empty transition. It contains no
+allocation, wait, retry, indirect call, or `g_ic` access. The persistent input
+queue and its event-token state are now one explicit Rust object in internal
+SRAM.
+
+Event 5 removes exactly one frame from that queue and lends it through the
+eight-byte `s_tx_cacheq` ABI object to `ieee80211_output_process`. The vendor
+mailbox must be empty before and after the call; another Rust event token is
+reserved only when another frame remains and no nested publication already
+reserved it. This bounds the stock list drain to one owned frame per executor
+action without creating a surplus empty event. Publication away from the
+Rust-owned home channel is rejected before queue ownership changes, so the
+vendor `g_ic+0x1ac/+0x1b0` pending-frame list remains an invariant instead of
+becoming live runtime state.
 
 This consumer is not a leaf. An explicit strict-auditor probe with
 `ieee80211_output_process` as the sole root currently finds 23 control-flow
 cycles and 14 indirect calls. Several branches are expected to be unreachable
-under the no-cache/no-AMSDU/no-power-save profile, but that expectation is not
-a proof and the consumer must not be described as fully strict yet. The next
-slice therefore takes ownership of the queue, presents at most one frame to a
-temporary compatibility stage, and replaces each remaining reachable
-classification, encryption, and hardware-submit branch explicitly. Only after
-that work should `ieee80211_set_tx_desc` become the final `g_ic` leaf.
+under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
+expectation is not a proof and the compatibility stage must not be described
+as fully strict yet. Queue ownership and the one-frame presentation boundary
+are now implemented. The next slices replace each remaining reachable node
+lookup, classification, encapsulation, encryption, and hardware-submit branch
+explicitly. Only after that work should `ieee80211_set_tx_desc` become the
+final `g_ic` leaf.
 
 After the event-5 consumer and the remaining descriptor leaf have Rust
 replacements, the linked-state audit should no longer report `g_ic` as

@@ -159,6 +159,17 @@ pub(crate) fn ordinary_sta_ap_profile() -> bool {
     INTERFACES.adopted.load(Ordering::Acquire)
 }
 
+/// Check the vendor off-channel TX head which strict handoff requires to stay
+/// empty until its compatibility consumer is removed.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn vendor_pending_tx_empty() -> bool {
+    core::ptr::addr_of!(g_ic)
+        .add(PENDING_TX_HEAD_OFFSET)
+        .cast::<usize>()
+        .read_volatile()
+        == 0
+}
+
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static g_ic: u8;

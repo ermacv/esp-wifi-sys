@@ -191,14 +191,28 @@ loop. Strict dispatch now reports the unsupported action immediately and never
 enters that terminal body. The full WPA2/network stress workload produces none
 of these events.
 
-Stock net80211 output event 5 is rejected as well: its handler repeatedly
-drains a shared list, whereas all strict application/EAPOL/association paths
-submit one static frame directly. For timers, the original producer allocates
-an eight-byte envelope and posts event 7. The final-link timer wrapper replaces
-that producer with a sixteen-slot fixed pool and a private executor event. Only
-the proven `timer_connect` success action is completed locally. The
-`chm_dwell` action is rejected because its downstream `chm_end_op` contains an
-arbitrary completion callback and an OSI synchronization call.
+Net80211 output event 5 now owns an explicit Rust intrusive queue. The
+replacement `ieee80211_post_hmac_tx` accepts only a run-to-completion call on
+the strict Wi-Fi hart, an ordinary STA/AP descriptor, and the current home
+channel. A Rust-owned event-token bit ensures that publication posts event 5
+only on the empty-to-non-empty transition. Each event consumes that token,
+removes one frame, lends the single frame through `s_tx_cacheq` to the
+temporary vendor output stage, verifies that the mailbox is empty again, and
+reserves one follow-up token only if another Rust-owned frame remains. A
+nested publication observes the already reserved token, so it cannot create a
+surplus empty event. Thus the stock shared-list drain cannot monopolize one
+executor turn and the vendor `g_ic+0x1ac/+0x1b0` off-channel queue cannot
+become live.
+Node lookup, classification, encapsulation, security selection, and `ppTxPkt`
+inside that one-frame stage are still migration work; this boundary does not
+claim that the complete event-5 call graph is strict yet.
+
+For timers, the original producer allocates an eight-byte envelope and posts
+event 7. The final-link timer wrapper replaces that producer with a sixteen-slot
+fixed pool and a private executor event. Only the proven `timer_connect`
+success action is completed locally. The `chm_dwell` action is rejected
+because its downstream `chm_end_op` contains an arbitrary completion callback
+and an OSI synchronization call.
 Stock auth/assoc/handshake/reconnect/scan/beacon/hostap timeout recovery can
 reach synchronous MAC deinit or channel switching and therefore fails closed
 after the strict proof. WPA2 retry timing is Rust-owned and remains async.
