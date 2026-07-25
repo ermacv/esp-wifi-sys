@@ -75,7 +75,6 @@ pub(crate) enum RxVendorFallbackReason {
     OtherRoute,
     OptionalControl30,
     OptionalControl46,
-    CsiCallback,
     NonOrdinaryProfile,
     MissingStationInterface,
     UnclassifiedFrame,
@@ -101,7 +100,6 @@ pub(crate) struct RxVendorFallbackFacts {
     pub(crate) route: u8,
     pub(crate) optional_control_30: bool,
     pub(crate) optional_control_46: bool,
-    pub(crate) csi_callback_enabled: bool,
     pub(crate) ordinary_profile: bool,
     pub(crate) station_interface_present: bool,
     pub(crate) frame_classified: bool,
@@ -138,9 +136,6 @@ pub(crate) const fn rx_vendor_fallback_reason(
     }
     if facts.optional_control_46 {
         return Some(RxVendorFallbackReason::OptionalControl46);
-    }
-    if facts.csi_callback_enabled {
-        return Some(RxVendorFallbackReason::CsiCallback);
     }
     if !facts.ordinary_profile {
         return Some(RxVendorFallbackReason::NonOrdinaryProfile);
@@ -691,7 +686,6 @@ mod tests {
             route: 0x10,
             optional_control_30: false,
             optional_control_46: false,
-            csi_callback_enabled: false,
             ordinary_profile: true,
             station_interface_present: true,
             frame_classified: true,
@@ -778,18 +772,9 @@ mod tests {
             (
                 RxVendorFallbackFacts {
                     optional_control_46: true,
-                    csi_callback_enabled: true,
                     ..admitted
                 },
                 RxVendorFallbackReason::OptionalControl46,
-            ),
-            (
-                RxVendorFallbackFacts {
-                    csi_callback_enabled: true,
-                    ordinary_profile: false,
-                    ..admitted
-                },
-                RxVendorFallbackReason::CsiCallback,
             ),
             (
                 RxVendorFallbackFacts {
@@ -818,6 +803,6 @@ mod tests {
         for (facts, expected) in cases {
             assert_eq!(rx_vendor_fallback_reason(facts), Some(expected));
         }
-        assert_eq!(RxVendorFallbackReason::COUNT, 18);
+        assert_eq!(RxVendorFallbackReason::COUNT, 17);
     }
 }

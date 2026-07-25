@@ -654,9 +654,11 @@ const PRIMARY_STATE_BASELINE: StateMetrics = StateMetrics {
     cold_phy_mutable_blob_bytes: 512,
     linked_other_mutable_blob_bytes: 22_203,
     // Two multi-descriptor RX owners add 288 bytes of ISR-visible ESF headers
-    // and eight bytes of ownership state. Their 32-KiB payload arena is in
-    // PSRAM and is intentionally excluded from the internal-SRAM metric.
-    strict_static_bytes: 311_922,
+    // and eight bytes of ownership state. Seventeen temporary outer-RX
+    // fallback counters add another 68 bytes while the remaining vendor
+    // routes are measured. The 32-KiB aggregate payload arena is in PSRAM and is
+    // intentionally excluded from the internal-SRAM metric.
+    strict_static_bytes: 311_990,
 };
 
 fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {

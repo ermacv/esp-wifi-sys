@@ -271,7 +271,6 @@ pub struct WdevRxVendorFallbackSnapshot {
     pub other_route: usize,
     pub optional_control_30: usize,
     pub optional_control_46: usize,
-    pub csi_callback: usize,
     pub non_ordinary_profile: usize,
     pub missing_station_interface: usize,
     pub unclassified_frame: usize,
@@ -294,7 +293,6 @@ impl WdevRxVendorFallbackSnapshot {
             + self.other_route
             + self.optional_control_30
             + self.optional_control_46
-            + self.csi_callback
             + self.non_ordinary_profile
             + self.missing_station_interface
             + self.unclassified_frame
@@ -1213,7 +1211,6 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     let route = prefix[3] & 0x70;
     let optional_control_30 = control.add(0x30).read() != 0;
     let optional_control_46 = control.add(0x46).read() != 0;
-    let csi_callback_enabled = ptr::addr_of!(g_wdev_csi_rx).read() != 0;
     let ordinary_profile = crate::net80211_state::ordinary_sta_ap_profile();
     let station_interface_present = crate::net80211_state::station_interface().is_some();
     let base_facts = RxVendorFallbackFacts {
@@ -1225,11 +1222,16 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         route,
         optional_control_30,
         optional_control_46,
-        csi_callback_enabled,
         ordinary_profile,
         station_interface_present,
         frame_classified: true,
     };
+    // In pinned `wDev_IndicateFrame+0xf4..0x10a`, `s5` is overwritten with
+    // the ten-bit CSI length from metadata bytes 0x26..0x27. The call at
+    // +0x298 is gated by `beqz s5`, so `g_wdev_csi_rx` is unobservable for
+    // this route: `rx_vendor_fallback_reason` has already required
+    // `csi_length == Some(0)`. Do not turn a later callback registration into
+    // a false fallback for ordinary non-CSI STA traffic.
     let strict_sta_base_route = rx_vendor_fallback_reason(base_facts).is_none();
     let strict_sta_probe_request_discard = strict_sta_base_route
         && probe_request_discard
@@ -1803,7 +1805,6 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         other_route: fallback_count(RxVendorFallbackReason::OtherRoute),
         optional_control_30: fallback_count(RxVendorFallbackReason::OptionalControl30),
         optional_control_46: fallback_count(RxVendorFallbackReason::OptionalControl46),
-        csi_callback: fallback_count(RxVendorFallbackReason::CsiCallback),
         non_ordinary_profile: fallback_count(RxVendorFallbackReason::NonOrdinaryProfile),
         missing_station_interface: fallback_count(RxVendorFallbackReason::MissingStationInterface),
         unclassified_frame: fallback_count(RxVendorFallbackReason::UnclassifiedFrame),
