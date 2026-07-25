@@ -1523,7 +1523,7 @@ mod target {
                     // Rust leaf. The owned command remains with the Rust radio
                     // owner; no vendor PS queue or OSI primitive is entered.
                     unsafe { crate::wpa2_ap::strict_update_ap_tim(node, true) };
-                    crate::ap_power_save::record_deferred_transmit();
+                    crate::ap_power_save::record_deferred_transmit(&peer);
                     return Err(S31Wpa2IoError::TxPeerPowerSaveUnsupported(peer));
                 }
                 if let Some(epoch) = ps_poll_credit {

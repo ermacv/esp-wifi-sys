@@ -1223,7 +1223,7 @@ mod target {
         });
         slot.state.store(DEFERRED_SLOT_READY, Ordering::Release);
         strict_update_ap_tim(node, true);
-        crate::ap_power_save::record_deferred_transmit();
+        crate::ap_power_save::record_deferred_transmit(&peer);
         DEFERRED_AP_MANAGEMENT_CAPTURED.fetch_add(1, Ordering::Relaxed);
         esf_buf_recycle(buffer.cast());
         DEFERRED_AP_MANAGEMENT_READY.wake();

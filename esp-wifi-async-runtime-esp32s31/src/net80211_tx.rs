@@ -699,10 +699,10 @@ pub(crate) unsafe fn dispatch_one() -> Result<(), Net80211TxError> {
             // not a radio-owner failure. Drop only the newly arrived frame,
             // keep the older FIFO and leave half of the kind-1 pool available
             // to active peers and control traffic.
-            crate::ap_power_save::record_overflowed_transmit();
+            crate::ap_power_save::record_overflowed_transmit(&peer);
             return arm_next_event();
         }
-        crate::ap_power_save::record_deferred_transmit();
+        crate::ap_power_save::record_deferred_transmit(&peer);
         return arm_next_event();
     }
     if let Err(error) = result {

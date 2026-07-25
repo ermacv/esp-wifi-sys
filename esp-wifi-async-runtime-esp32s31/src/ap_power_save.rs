@@ -23,6 +23,8 @@ static REMOVAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEFERRED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
 static CANCELLED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
 static OVERFLOWED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
+static LAST_DEFERRED_PEER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
+static LAST_OVERFLOWED_PEER: [AtomicU8; 6] = [const { AtomicU8::new(0) }; 6];
 
 // This matches the fixed WPA2 AP association capacity. The table is written
 // only by serialized callbacks on the radio owner. Atomic fields keep waker
@@ -145,6 +147,8 @@ pub struct ApPowerSaveSnapshot {
     pub deferred_transmits: usize,
     pub cancelled_transmits: usize,
     pub overflowed_transmits: usize,
+    pub last_deferred_peer: [u8; 6],
+    pub last_overflowed_peer: [u8; 6],
 }
 
 pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
@@ -156,6 +160,8 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
         deferred_transmits: DEFERRED_TRANSMITS.load(Ordering::Acquire),
         cancelled_transmits: CANCELLED_TRANSMITS.load(Ordering::Acquire),
         overflowed_transmits: OVERFLOWED_TRANSMITS.load(Ordering::Acquire),
+        last_deferred_peer: read_diagnostic_peer(&LAST_DEFERRED_PEER),
+        last_overflowed_peer: read_diagnostic_peer(&LAST_OVERFLOWED_PEER),
     }
 }
 
@@ -208,7 +214,18 @@ pub(crate) fn observe_frame(frame: &[u8]) {
     }
 }
 
-pub(crate) fn record_deferred_transmit() {
+fn write_diagnostic_peer(destination: &[AtomicU8; 6], peer: &[u8; 6]) {
+    for (slot, value) in destination.iter().zip(peer) {
+        slot.store(*value, Ordering::Relaxed);
+    }
+}
+
+fn read_diagnostic_peer(source: &[AtomicU8; 6]) -> [u8; 6] {
+    core::array::from_fn(|index| source[index].load(Ordering::Relaxed))
+}
+
+pub(crate) fn record_deferred_transmit(peer: &[u8; 6]) {
+    write_diagnostic_peer(&LAST_DEFERRED_PEER, peer);
     DEFERRED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -222,7 +239,8 @@ pub(crate) fn record_cancelled_transmit() {
     CANCELLED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn record_overflowed_transmit() {
+pub(crate) fn record_overflowed_transmit(peer: &[u8; 6]) {
+    write_diagnostic_peer(&LAST_OVERFLOWED_PEER, peer);
     OVERFLOWED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
 
