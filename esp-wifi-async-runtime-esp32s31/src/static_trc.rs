@@ -39,8 +39,52 @@ static mut STATIC_TRC_CONTEXTS: [StaticTrcContext; TRC_CONTEXT_COUNT] = [
 unsafe extern "C" {
     static mut g_per_conn_trc: u8;
     static trc_ctl: u8;
+    static wDevCtrl: u8;
     static rc11BSchedTbl: u8;
     static rcP2P11GSchedTbl: u8;
+}
+
+/// Apply the finite receive-signal update from the pinned 0x66-byte
+/// `rcUpdateRxDone` leaf.
+///
+/// `wDevCtrl+0x2e` is the recovered signed-sample calibration byte. Its public
+/// field name is unknown, so the compatibility access remains explicit here
+/// until the WDEV backing moves into a typed Rust owner.
+///
+/// # Safety
+///
+/// `rate_control` must be a live context returned by
+/// [`wifi_strict_rc_get_trc`], and `rx_control` must name the current hardware
+/// RX-control block.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_proto"]
+pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(
+    rate_control: *mut u8,
+    rx_control: *mut u8,
+) {
+    if rate_control.is_null() || rx_control.is_null() {
+        return;
+    }
+    let context_flags = unsafe { rate_control.add(0x0c).cast::<u16>().read() };
+    let state_flags = unsafe { rate_control.add(0x1b).read() };
+    let calibration = unsafe { ptr::addr_of!(wDevCtrl).add(0x2e).read() };
+    let raw_sample = unsafe { rx_control.read() };
+    let previous_latest = unsafe { rate_control.add(2).cast::<i8>().read() };
+    let previous_smoothed = unsafe { rate_control.add(3).cast::<i8>().read() };
+    let Some(update) = crate::rx_proto::update_rx_rate_sample(
+        context_flags,
+        state_flags,
+        calibration,
+        raw_sample,
+        previous_latest,
+        previous_smoothed,
+    ) else {
+        return;
+    };
+    unsafe {
+        rate_control.add(2).cast::<i8>().write(update.latest);
+        rate_control.add(3).cast::<i8>().write(update.smoothed);
+    }
 }
 
 /// Select the live rate-control context for one received peer.

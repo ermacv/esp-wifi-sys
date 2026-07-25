@@ -36,9 +36,49 @@ pub(crate) const fn rate_control_route(rx_flags: u8) -> Option<RxRateControlRout
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RxRateSampleUpdate {
+    pub(crate) latest: i8,
+    pub(crate) smoothed: i8,
+}
+
+/// Reproduce the two-byte receive-signal filter from `rcUpdateRxDone`.
+///
+/// The first guard is rate-context flag `0x80`; the second is bit zero at
+/// context offset `0x1b`. The hardware sample and calibration byte add with
+/// eight-bit wrapping before interpretation as a signed RSSI value.
+pub(crate) const fn update_rx_rate_sample(
+    context_flags: u16,
+    state_flags: u8,
+    calibration: u8,
+    raw_sample: u8,
+    previous_latest: i8,
+    previous_smoothed: i8,
+) -> Option<RxRateSampleUpdate> {
+    if context_flags & 0x80 != 0 || state_flags & 1 != 0 {
+        return None;
+    }
+
+    let sample = raw_sample.wrapping_add(calibration) as i8;
+    let intermediate = if previous_latest == 127 {
+        sample
+    } else {
+        ((previous_latest as i16 + sample as i16) >> 1) as i8
+    };
+    let smoothed = if previous_smoothed == 127 {
+        intermediate
+    } else {
+        ((previous_smoothed as i16 * 3 + intermediate as i16) / 4) as i8
+    };
+    Some(RxRateSampleUpdate {
+        latest: sample,
+        smoothed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::rate_control_route;
+    use super::{rate_control_route, update_rx_rate_sample, RxRateSampleUpdate};
 
     fn route(flags: u8) -> Option<u8> {
         rate_control_route(flags).map(|route| route.index())
@@ -68,5 +108,36 @@ mod tests {
             assert_eq!(route(unrelated | 0x20), Some(1));
             assert_eq!(route(unrelated | 0x40), Some(2));
         }
+    }
+
+    #[test]
+    fn rate_sample_filter_reproduces_initial_and_running_updates() {
+        assert_eq!(
+            update_rx_rate_sample(0, 0, 3, 0xf6, 127, 127),
+            Some(RxRateSampleUpdate {
+                latest: -7,
+                smoothed: -7,
+            })
+        );
+        assert_eq!(
+            update_rx_rate_sample(0, 0, 0, 0xec, -10, -8),
+            Some(RxRateSampleUpdate {
+                latest: -20,
+                smoothed: -9,
+            })
+        );
+    }
+
+    #[test]
+    fn rate_sample_filter_preserves_guards_and_byte_wrapping() {
+        assert_eq!(update_rx_rate_sample(0x80, 0, 0, 1, 0, 0), None);
+        assert_eq!(update_rx_rate_sample(0, 1, 0, 1, 0, 0), None);
+        assert_eq!(
+            update_rx_rate_sample(0, 0, 20, 250, 127, 127),
+            Some(RxRateSampleUpdate {
+                latest: 14,
+                smoothed: 14,
+            })
+        );
     }
 }
