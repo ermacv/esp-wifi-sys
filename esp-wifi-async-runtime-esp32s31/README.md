@@ -575,6 +575,13 @@ Because `ieee80211_crypto_encap` is an absolute S31 ROM export, the supplied
 linker override aliases that public name to a unique Rust symbol rather than
 using GNU `--wrap`.
 
+The adjacent `ieee80211_align_eb` leaf is Rust-owned as well. It reserves only
+the recovered 24-byte legacy or 26-byte QoS header, validates the packed
+14-bit MPDU length, moves the frame by an alignment delta of at most three
+bytes, and commits the ESF pointer/length word only after validation. Its absolute S31
+ROM export is routed through the same direct-alias mechanism; invalid context,
+header geometry, or length traps instead of delegating after strict handoff.
+
 ## Remaining WPA scope
 
 The active secured scope is WPA2-Personal AP/STA. WPA3 SAE is not being

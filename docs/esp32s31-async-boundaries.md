@@ -214,9 +214,14 @@ leaf accepts only a key object in the fixed Rust key registry, selects the
 pairwise or group hardware index without reading the `g_ic` software-key
 table, advances the recovered 48-bit packet number by three, and inserts the
 eight-byte CCMP header without the vendor cipher-object indirect call. The
-remaining Ethernet-to-802.11/LLC geometry, sequence/descriptor construction,
-and `ppTxPkt` hardware-submit stage remain migration work; this boundary does
-not claim that the complete event-5 call graph is strict yet.
+following ESF header reservation and alignment leaf is Rust-owned too. It
+admits only the recovered 24-byte legacy or 26-byte QoS header, checks the
+14-bit MPDU length, shifts the MPDU by an alignment delta of at most three
+bytes, and publishes the packed storage word only after all arithmetic
+succeeds. The remaining
+Ethernet address/LLC construction, sequence/descriptor construction, and
+`ppTxPkt` hardware-submit stage remain migration work; this boundary does not
+claim that the complete event-5 call graph is strict yet.
 
 For timers, the original producer allocates an eight-byte envelope and posts
 event 7. The final-link timer wrapper replaces that producer with a sixteen-slot

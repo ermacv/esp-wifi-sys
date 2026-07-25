@@ -83,6 +83,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "ieee80211_mgmt_output",
     "ieee80211_set_tx_pti",
     "ieee80211_classify",
+    "ieee80211_align_eb",
     "ieee80211_crypto_encap",
     "ieee80211_search_node",
     "cnx_node_alloc",
@@ -109,6 +110,7 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "ieee80211_crypto_encap",
         "wifi_strict_ieee80211_crypto_encap",
     ),
+    ("ieee80211_align_eb", "wifi_strict_ieee80211_align_eb"),
     ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
     ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];

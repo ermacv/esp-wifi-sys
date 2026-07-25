@@ -152,7 +152,7 @@ the event-5 consumer called directly by Rust, gives the narrower graph:
 | `ieee80211_set_tx_desc` | `0x10`, `0x14` | identify STA versus AP interface | interface registry ready; leaf remains |
 | `ieee80211_hostapd_data_txcb` | `0x14`, `0x74` | find AP state and enter mesh-only activity update | replaced by exact non-mesh Rust no-op |
 | `ieee80211_post_hmac_tx` | `0x258` | select optional cached-TX path | replaced; ordinary STA/AP queue publication is Rust |
-| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; classifier and CCMP key/header leaf replaced, consumer remains |
+| `ieee80211_output_process` | `0x1ac`, `0x1b0` | optional pending-frame queue | one-frame compatibility stage; classifier, CCMP key/header, and ESF alignment leaves replaced; consumer remains |
 
 The reference objects are pinned
 `libnet80211.a[ieee80211_output.o]` and
@@ -255,16 +255,32 @@ both the alias and the callback-table adoption contract. Hardware verification
 completed passive scan, WPA2 association, DHCP, ping, DNS, TCP, and HTTP with
 zero allocations after this replacement.
 
+The subsequent `ieee80211_align_eb` leaf is also an exact finite Rust port.
+The pinned `libnet80211.a[ieee80211_output.o]` implementation reserves the
+802.11 header, moves the MPDU down by the resulting zero-to-three-byte
+alignment delta, and encodes the total length into bits 27:14 of the ESF
+storage word. The Rust policy admits only the ordinary STA/AP 24-byte legacy
+or 26-byte QoS headers, requires the caller's reservation to equal that header
+length, checks every subtraction and the 14-bit total length before mutation,
+then commits the data pointer and packed storage word. It performs no
+allocation, wait, retry, global-state read, or indirect callback.
+
+As with the CCMP leaf, `ieee80211_align_eb` is an absolute ESP32-S31 ROM export
+(`0x2f800c7c`). The final linker fragment aliases it directly to the unique
+Rust boundary and retains the ROM address only for pre-strict delegation.
+The final ELF records both addresses explicitly, and the hardware image passed
+WPA2 plus post-link traffic without entering the invalid-layout trap.
+
 This consumer is not a leaf. An explicit strict-auditor probe with
 `ieee80211_output_process` as the sole root currently finds 23 control-flow
 cycles and 14 indirect calls. Several branches are expected to be unreachable
 under the no-cache/no-AMSDU/no-power-save and home-channel profile, but that
 expectation is not a proof and the compatibility stage must not be described
 as fully strict yet. Queue ownership, the one-frame presentation boundary,
-role-checked node lookup, classification, and CCMP key/header construction are
-now implemented. The next slices replace the remaining reachable
-Ethernet-to-802.11/LLC geometry, sequence/descriptor construction, and
-hardware-submit branches explicitly. Only after that work should
+role-checked node lookup, classification, CCMP key/header construction, and
+ESF alignment are now implemented. The next slices replace the remaining
+reachable Ethernet address/LLC geometry, sequence/descriptor construction,
+and hardware-submit branches explicitly. Only after that work should
 `ieee80211_set_tx_desc` become the final `g_ic` leaf.
 
 After the event-5 consumer and the remaining descriptor leaf have Rust

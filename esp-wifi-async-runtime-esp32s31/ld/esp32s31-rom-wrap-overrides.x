@@ -13,6 +13,12 @@ ieee80211_set_tx_pti = __wrap_ieee80211_set_tx_pti;
 __real_ieee80211_search_node = 0x2f800ca8;
 ieee80211_search_node = __wrap_ieee80211_search_node;
 
+/* ESF alignment is another absolute ROM export. The strict Rust leaf keeps
+ * the original address only for pre-handoff delegation. */
+__real_ieee80211_align_eb = 0x2f800c7c;
+EXTERN(wifi_strict_ieee80211_align_eb);
+ieee80211_align_eb = wifi_strict_ieee80211_align_eb;
+
 /* Like ieee80211_post_hmac_tx below, this ROM export captures the generated
  * __wrap symbol. Use a unique Rust boundary and keep the pinned ROM leaf only
  * for pre-strict cold-init delegation. */
