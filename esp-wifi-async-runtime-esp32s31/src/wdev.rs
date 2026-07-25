@@ -9,7 +9,10 @@ static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(target_arch = "riscv32")]
 use crate::{
-    rx_descriptor::{descriptor_buffer_length, recycled_descriptor_word},
+    rx_descriptor::{
+        RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout, descriptor_buffer_length,
+        recycled_descriptor_word,
+    },
     timer::RawOsiTimer,
 };
 
@@ -38,6 +41,10 @@ const RX_DESCRIPTOR_SENTINEL: u32 = 0xdead_beef;
 const WIFI_MAC_RX_CONTROL_REGISTER: *const u32 = 0x2010_4080 as *const u32;
 #[cfg(target_arch = "riscv32")]
 const WIFI_MAC_RX_BASE_REGISTER: *const u32 = 0x2010_4084 as *const u32;
+#[cfg(target_arch = "riscv32")]
+const WIFI_MAC_RX_METADATA_CONTROL_REGISTER: *const u32 = 0x2010_4098 as *const u32;
+#[cfg(target_arch = "riscv32")]
+const WIFI_MAC_RX_EXTENDED_METADATA_BIT: u32 = 1 << 23;
 
 #[cfg(target_arch = "riscv32")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,6 +163,59 @@ struct IndicateFrameProbe {
 }
 
 #[cfg(target_arch = "riscv32")]
+struct RxMetadataProbe {
+    calls: AtomicUsize,
+    decoded: AtomicUsize,
+    rejected_layout: AtomicUsize,
+    status_success: AtomicUsize,
+    status_f5: AtomicUsize,
+    status_c6: AtomicUsize,
+    status_other: AtomicUsize,
+    base_only: AtomicUsize,
+    sublength_only: AtomicUsize,
+    extra_only: AtomicUsize,
+    sublength_and_extra: AtomicUsize,
+    max_payload_offset: AtomicUsize,
+}
+
+#[cfg(target_arch = "riscv32")]
+impl RxMetadataProbe {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            decoded: AtomicUsize::new(0),
+            rejected_layout: AtomicUsize::new(0),
+            status_success: AtomicUsize::new(0),
+            status_f5: AtomicUsize::new(0),
+            status_c6: AtomicUsize::new(0),
+            status_other: AtomicUsize::new(0),
+            base_only: AtomicUsize::new(0),
+            sublength_only: AtomicUsize::new(0),
+            extra_only: AtomicUsize::new(0),
+            sublength_and_extra: AtomicUsize::new(0),
+            max_payload_offset: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WdevRxMetadataSnapshot {
+    pub calls: usize,
+    pub decoded: usize,
+    pub rejected_layout: usize,
+    pub status_success: usize,
+    pub status_f5: usize,
+    pub status_c6: usize,
+    pub status_other: usize,
+    pub base_only: usize,
+    pub sublength_only: usize,
+    pub extra_only: usize,
+    pub sublength_and_extra: usize,
+    pub max_payload_offset: usize,
+}
+
+#[cfg(target_arch = "riscv32")]
 impl IndicateFrameProbe {
     const fn new() -> Self {
         Self {
@@ -196,6 +256,10 @@ static RX_RECYCLE_PROBE: RxRecycleProbe = RxRecycleProbe::new();
 #[cfg(target_arch = "riscv32")]
 #[link_section = ".critical.bss.wifi_strict.indicate_frame_probe"]
 static INDICATE_FRAME_PROBE: IndicateFrameProbe = IndicateFrameProbe::new();
+
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.rx_metadata_probe"]
+static RX_METADATA_PROBE: RxMetadataProbe = RxMetadataProbe::new();
 
 unsafe extern "C" {
     #[link_name = "wDev_record_ftm_data"]
@@ -258,7 +322,9 @@ unsafe extern "C" {
     fn hal_mac_rx_set_base(descriptor: *mut u8);
     fn hal_mac_rx_set_dscr_reload();
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
-    fn wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
+    #[link_name = "wDev_ProcessRxSucData"]
+    fn vendor_process_rx_success_data(descriptor: *mut u8, subframe_count: u32);
+    fn __real_wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -715,8 +781,102 @@ struct CompletedRxUnit {
 impl CompletedRxUnit {
     #[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
     unsafe fn dispatch(self) {
-        wDev_ProcessRxSucData(self.tail, self.count);
+        vendor_process_rx_success_data(self.tail, self.count);
     }
+}
+
+/// Observe the exact metadata layout at the remaining vendor aggregate
+/// boundary, then delegate without changing protocol behavior.
+///
+/// This is the first vertical slice of `wDev_ProcessRxSucData`: its
+/// `get_sublen_offset` pointer arithmetic is now expressed as safe Rust and
+/// measured in fixed SRAM. Normal/error routing still enters the pinned ROM
+/// body until the corresponding state transitions are ported.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
+    tail: *mut u8,
+    count: u32,
+) {
+    if !crate::critical::strict_wifi_hart_armed() {
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    }
+
+    RX_METADATA_PROBE.calls.fetch_add(1, Ordering::Relaxed);
+    let head = ptr::addr_of!(wDevCtrl)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    if head.is_null() {
+        RX_METADATA_PROBE
+            .rejected_layout
+            .fetch_add(1, Ordering::Relaxed);
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    }
+    let descriptor_word = head.cast::<u32>().read_unaligned();
+    let descriptor_length = descriptor_buffer_length(descriptor_word);
+    let metadata = head
+        .add(RX_DESCRIPTOR_BUFFER_OFFSET)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    if metadata.is_null() || descriptor_length < RX_METADATA_PREFIX_BYTES {
+        RX_METADATA_PROBE
+            .rejected_layout
+            .fetch_add(1, Ordering::Relaxed);
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    }
+
+    let mut prefix = [0_u8; RX_METADATA_PREFIX_BYTES];
+    ptr::copy_nonoverlapping(metadata, prefix.as_mut_ptr(), prefix.len());
+    let extended_metadata_enabled =
+        WIFI_MAC_RX_METADATA_CONTROL_REGISTER.read_volatile()
+            & WIFI_MAC_RX_EXTENDED_METADATA_BIT
+            != 0;
+    let Some(layout) = decode_rx_metadata_layout(&prefix, extended_metadata_enabled) else {
+        RX_METADATA_PROBE
+            .rejected_layout
+            .fetch_add(1, Ordering::Relaxed);
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    };
+    let Some(status_offset) = layout.payload_offset.checked_add(4) else {
+        RX_METADATA_PROBE
+            .rejected_layout
+            .fetch_add(1, Ordering::Relaxed);
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    };
+    if status_offset >= descriptor_length {
+        RX_METADATA_PROBE
+            .rejected_layout
+            .fetch_add(1, Ordering::Relaxed);
+        __real_wDev_ProcessRxSucData(tail, count);
+        return;
+    }
+
+    RX_METADATA_PROBE.decoded.fetch_add(1, Ordering::Relaxed);
+    RX_METADATA_PROBE
+        .max_payload_offset
+        .fetch_max(layout.payload_offset, Ordering::Relaxed);
+    match (layout.has_sublength, layout.has_extra_field) {
+        (false, false) => &RX_METADATA_PROBE.base_only,
+        (true, false) => &RX_METADATA_PROBE.sublength_only,
+        (false, true) => &RX_METADATA_PROBE.extra_only,
+        (true, true) => &RX_METADATA_PROBE.sublength_and_extra,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+    match metadata.add(status_offset).read() {
+        0 => &RX_METADATA_PROBE.status_success,
+        0xf5 => &RX_METADATA_PROBE.status_f5,
+        0xc6 => &RX_METADATA_PROBE.status_c6,
+        _ => &RX_METADATA_PROBE.status_other,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+
+    __real_wDev_ProcessRxSucData(tail, count);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -1040,6 +1200,20 @@ pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
         vendor_indicate_ctrl_frame as *const (),
         __wrap_wDev_IndicateCtrlFrame as *const (),
     ) && runtime_rx_recycle_link_wrapper_active()
+        && runtime_rx_success_decoder_link_wrapper_active()
+}
+
+#[cfg(target_arch = "riscv32")]
+fn runtime_rx_success_decoder_link_wrapper_active() -> bool {
+    core::ptr::eq(
+        vendor_process_rx_success_data as *const (),
+        wifi_strict_wdev_process_rx_success_data as *const (),
+    )
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn runtime_rx_success_decoder_link_wrapper_active() -> bool {
+    true
 }
 
 pub(crate) fn take_ftm_attempted() -> bool {
@@ -1126,6 +1300,28 @@ pub fn indicate_frame_snapshot() -> WdevIndicateFrameSnapshot {
         calls: INDICATE_FRAME_PROBE.calls.load(Ordering::Acquire),
         validated: INDICATE_FRAME_PROBE.validated.load(Ordering::Acquire),
         max_descriptors: INDICATE_FRAME_PROBE.max_descriptors.load(Ordering::Acquire),
+    }
+}
+
+#[cfg(target_arch = "riscv32")]
+pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
+    WdevRxMetadataSnapshot {
+        calls: RX_METADATA_PROBE.calls.load(Ordering::Acquire),
+        decoded: RX_METADATA_PROBE.decoded.load(Ordering::Acquire),
+        rejected_layout: RX_METADATA_PROBE.rejected_layout.load(Ordering::Acquire),
+        status_success: RX_METADATA_PROBE.status_success.load(Ordering::Acquire),
+        status_f5: RX_METADATA_PROBE.status_f5.load(Ordering::Acquire),
+        status_c6: RX_METADATA_PROBE.status_c6.load(Ordering::Acquire),
+        status_other: RX_METADATA_PROBE.status_other.load(Ordering::Acquire),
+        base_only: RX_METADATA_PROBE.base_only.load(Ordering::Acquire),
+        sublength_only: RX_METADATA_PROBE.sublength_only.load(Ordering::Acquire),
+        extra_only: RX_METADATA_PROBE.extra_only.load(Ordering::Acquire),
+        sublength_and_extra: RX_METADATA_PROBE
+            .sublength_and_extra
+            .load(Ordering::Acquire),
+        max_payload_offset: RX_METADATA_PROBE
+            .max_payload_offset
+            .load(Ordering::Acquire),
     }
 }
 

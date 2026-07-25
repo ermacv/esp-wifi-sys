@@ -5,6 +5,64 @@ const END_BITS: u32 = (1 << 30) | (1 << 29);
 const ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET: usize = 0x04;
 const ESF_BUFFER_DESCRIPTOR_DATA_OFFSET: usize = 0x04;
 const ESF_RX_CONTROL_POINTER_OFFSET: usize = 0x10;
+pub(crate) const RX_METADATA_PREFIX_BYTES: usize = 0x2c;
+const RX_METADATA_BASE_PAYLOAD_OFFSET: usize = 0x38;
+
+/// Byte-layout result produced by the pinned lower-MAC RX metadata prefix.
+///
+/// This is intentionally independent of pointers, MMIO and global WDEV state.
+/// The target boundary copies the fixed prefix and performs the one register
+/// read; all variable-offset arithmetic remains safe, host-tested Rust.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RxMetadataLayout {
+    pub(crate) payload_offset: usize,
+    pub(crate) sublength: u16,
+    pub(crate) has_sublength: bool,
+    pub(crate) has_extra_field: bool,
+}
+
+fn round_up_four(value: usize) -> Option<usize> {
+    value.checked_add(3).map(|rounded| rounded & !3)
+}
+
+/// Reproduce `libpp.a[wdev.o]::get_sublen_offset` without its disabled
+/// logging/dump side branches.
+///
+/// `extended_metadata_enabled` is bit 23 of MAC register `0x2010_4098`.
+/// Bytes 0x26..0x27 form a ten-bit optional field; bit 2 of byte 0x27 also
+/// makes that field present when its encoded length is zero.
+pub(crate) fn decode_rx_metadata_layout(
+    metadata: &[u8],
+    extended_metadata_enabled: bool,
+) -> Option<RxMetadataLayout> {
+    if metadata.len() < RX_METADATA_PREFIX_BYTES {
+        return None;
+    }
+
+    let has_sublength = metadata[0x2b] & 0x80 != 0;
+    let sublength = if has_sublength {
+        usize::from(metadata[0x2b] & 0x7f) + usize::from(metadata[0x2a] >> 5 != 0)
+    } else {
+        0
+    };
+    let rounded_sublength = round_up_four(sublength)?;
+    let mut payload_offset = RX_METADATA_BASE_PAYLOAD_OFFSET.checked_add(rounded_sublength)?;
+
+    let extra_length =
+        usize::from(metadata[0x26]) | (usize::from(metadata[0x27] & 0x03) << 8);
+    let has_extra_field =
+        extended_metadata_enabled && (metadata[0x27] & 0x04 != 0 || extra_length != 0);
+    if has_extra_field {
+        payload_offset = payload_offset.checked_add(round_up_four(extra_length)?)?;
+    }
+
+    Some(RxMetadataLayout {
+        payload_offset,
+        sublength: u16::try_from(rounded_sublength).ok()?,
+        has_sublength,
+        has_extra_field,
+    })
+}
 
 /// Reproduce the pinned S31 RX recycle descriptor transformation.
 ///
@@ -60,8 +118,8 @@ mod tests {
 
     use super::{
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
-        ESF_RX_CONTROL_POINTER_OFFSET, descriptor_buffer_length, recycled_descriptor_word,
-        restore_received_packet_buffer_view,
+        ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout,
+        descriptor_buffer_length, recycled_descriptor_word, restore_received_packet_buffer_view,
     };
 
     #[test]
@@ -120,5 +178,57 @@ mod tests {
             assert!(!restore_received_packet_buffer_view(ptr::null_mut()));
             assert!(!restore_received_packet_buffer_view(frame.as_mut_ptr()));
         }
+    }
+
+    #[test]
+    fn rx_metadata_layout_reproduces_base_and_rounded_sublength() {
+        let mut metadata = [0_u8; RX_METADATA_PREFIX_BYTES];
+        assert_eq!(
+            decode_rx_metadata_layout(&metadata, false)
+                .unwrap()
+                .payload_offset,
+            0x38
+        );
+
+        metadata[0x2b] = 0x81;
+        let one_byte = decode_rx_metadata_layout(&metadata, false).unwrap();
+        assert_eq!(one_byte.payload_offset, 0x3c);
+        assert_eq!(one_byte.sublength, 4);
+        assert!(one_byte.has_sublength);
+
+        metadata[0x2a] = 0x20;
+        metadata[0x2b] = 0xff;
+        let maximum = decode_rx_metadata_layout(&metadata, false).unwrap();
+        assert_eq!(maximum.payload_offset, 0xb8);
+        assert_eq!(maximum.sublength, 128);
+    }
+
+    #[test]
+    fn rx_metadata_layout_gates_and_rounds_the_ten_bit_extra_field() {
+        let mut metadata = [0_u8; RX_METADATA_PREFIX_BYTES];
+        metadata[0x26] = 1;
+        let disabled = decode_rx_metadata_layout(&metadata, false).unwrap();
+        assert_eq!(disabled.payload_offset, 0x38);
+        assert!(!disabled.has_extra_field);
+
+        let enabled = decode_rx_metadata_layout(&metadata, true).unwrap();
+        assert_eq!(enabled.payload_offset, 0x3c);
+        assert!(enabled.has_extra_field);
+
+        metadata[0x26] = 0xff;
+        metadata[0x27] = 0x03;
+        let maximum = decode_rx_metadata_layout(&metadata, true).unwrap();
+        assert_eq!(maximum.payload_offset, 0x438);
+
+        metadata[0x26] = 0;
+        metadata[0x27] = 0x04;
+        let present_zero_length = decode_rx_metadata_layout(&metadata, true).unwrap();
+        assert_eq!(present_zero_length.payload_offset, 0x38);
+        assert!(present_zero_length.has_extra_field);
+    }
+
+    #[test]
+    fn rx_metadata_layout_rejects_a_truncated_prefix() {
+        assert_eq!(decode_rx_metadata_layout(&[0_u8; 0x2b], true), None);
     }
 }

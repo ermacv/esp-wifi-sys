@@ -127,7 +127,8 @@ pub mod vendor;
 mod wdev;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use wdev::{
-    indicate_frame_snapshot, rx_recycle_snapshot, WdevIndicateFrameSnapshot, WdevRxRecycleSnapshot,
+    indicate_frame_snapshot, rx_metadata_snapshot, rx_recycle_snapshot, WdevIndicateFrameSnapshot,
+    WdevRxMetadataSnapshot, WdevRxRecycleSnapshot,
 };
 pub mod wpa2;
 pub mod wpa2_aes;

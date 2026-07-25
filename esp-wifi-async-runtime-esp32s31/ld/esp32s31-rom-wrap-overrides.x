@@ -96,6 +96,16 @@ wDev_DiscardFrame = wifi_strict_wdev_discard_frame;
 ASSERT(wDev_DiscardFrame == wifi_strict_wdev_discard_frame,
        "ESP32-S31 wDev_DiscardFrame Rust boundary is inactive");
 
+/* The remaining successful-RX aggregate is an absolute ROM export too.
+ * Retain its pinned body as the current protocol oracle, but force every
+ * caller through the SRAM Rust metadata decoder so each subsequently ported
+ * routing branch has an explicit, measurable boundary. */
+__real_wDev_ProcessRxSucData = 0x2f8010f4;
+EXTERN(wifi_strict_wdev_process_rx_success_data);
+wDev_ProcessRxSucData = wifi_strict_wdev_process_rx_success_data;
+ASSERT(wDev_ProcessRxSucData == wifi_strict_wdev_process_rx_success_data,
+       "ESP32-S31 wDev_ProcessRxSucData Rust boundary is inactive");
+
 __real_hal_mac_get_txq_state = 0x2f800d3c;
 hal_mac_get_txq_state = __wrap_hal_mac_get_txq_state;
 

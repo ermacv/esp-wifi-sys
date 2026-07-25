@@ -221,13 +221,13 @@ definitions use LLD wrapping:
 -Wl,--wrap=wifi_assert
 ```
 
-The other fourteen entries (`esf_buf_alloc`, `esf_buf_recycle`,
+The following fifteen entries (`esf_buf_alloc`, `esf_buf_recycle`,
 `ieee80211_set_tx_pti`, `lmacTxDone`, `hal_mac_get_txq_state`,
 `hal_mac_get_txq_complete`,
 `pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`,
 `esp_test_tx_enab_statistics`, `esp_test_set_rx_error_occurs`,
-`rcUpdateTxDone`, `wDev_AppendRxBlocks`, and `wDev_DiscardFrame`) are ECO0
-ROM exports.
+`rcUpdateTxDone`, `wDev_AppendRxBlocks`, `wDev_DiscardFrame`, and
+`wDev_ProcessRxSucData`) are ECO0 ROM exports.
 Do not pass them through
 LLD `--wrap`: `esp-rom-sys` defines them with absolute linker-script
 assignments, and LLD would rewrite the Rust `__wrap_*` definition itself to a
@@ -575,9 +575,10 @@ The ROM-resident `wDev_IndicateFrame` is called directly from ROM and cannot
 be truthfully interposed with GNU `--wrap`. Its precondition instead lives in
 the SRAM Rust caller: the event-25 continuation follows the completed segment
 under a short local interrupt mask, checks every payload, and admits only a
-final marker reached in at most 64 links. It passes the preserved segment head
-and the exact count ending at that checked tail to `wDev_ProcessRxSucData`,
-matching the pinned vendor outer walk; the segment remains owned by the
+final marker reached in at most 64 links. It passes that exact checked tail
+and the count ending there to `wDev_ProcessRxSucData`; the inner routine
+obtains the segment head independently from `wDevCtrl.head`, matching the
+pinned vendor outer walk. The segment remains owned by the
 current radio continuation until it is recycled. Consequently the two linked-copy
 backedges are finite data traversal, not polling or waiting. The exported
 frame-copy snapshot counts this real call boundary on hardware.

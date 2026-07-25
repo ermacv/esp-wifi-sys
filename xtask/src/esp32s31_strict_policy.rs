@@ -117,6 +117,10 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wDev_DiscardFrame",
         "wifi_strict_wdev_discard_frame",
     ),
+    (
+        "wDev_ProcessRxSucData",
+        "wifi_strict_wdev_process_rx_success_data",
+    ),
     ("ppRecycleRxPkt", "wifi_strict_pp_recycle_rx_pkt"),
     (
         "esp_wifi_internal_free_rx_buffer",

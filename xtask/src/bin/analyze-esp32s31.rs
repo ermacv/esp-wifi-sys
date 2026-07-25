@@ -51,7 +51,7 @@ const EXPECTED_LABELS: [&str; 34] = [
     ".L1024", ".L1017", ".L1023", ".L1022", ".L1021", ".L1020", ".L1018",
 ];
 
-const REQUIRED_GLOBALS: [(&str, &str); 52] = [
+const REQUIRED_GLOBALS: [(&str, &str); 53] = [
     ("ppTask", "0000023a"),
     ("pp_post", "00000160"),
     ("pp_sig_cnt", "00000024"),
@@ -106,6 +106,7 @@ const REQUIRED_GLOBALS: [(&str, &str); 52] = [
     // RX ownership contract: the outer walk passes its current bit-30
     // descriptor to the aggregate decoder, which retains it as the recycle
     // tail while obtaining the unit head independently from wDevCtrl.
+    ("get_sublen_offset", "00000146"),
     ("wdevProcessRxSucDataAll", "00000150"),
     ("wDev_ProcessRxSucData", "000006a0"),
     ("wDev_DiscardFrame", "00000020"),
