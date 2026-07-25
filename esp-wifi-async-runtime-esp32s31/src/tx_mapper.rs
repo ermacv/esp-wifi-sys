@@ -117,6 +117,12 @@ pub(crate) fn strict_sta_ap_treatment(
     let ap_eapol_message_one = rate == 11
         && frame_control == 0x0288
         && state == [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1];
+    // The first network packet after AP authorization is the protected
+    // broadcast response needed by the joining station. Security has already
+    // expanded this exact group-CCMP descriptor before the mapper runs.
+    let ap_group_ccmp_data = rate == 12
+        && frame_control == 0x4208
+        && state == [0x0000_200b, 7, 0x0004_0342, 0x83, 0];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -140,6 +146,7 @@ pub(crate) fn strict_sta_ap_treatment(
         || ap_authentication_response
         || ap_association_response
         || ap_eapol_message_one
+        || ap_group_ccmp_data
         || ht_qos
         || legacy_qos
     {
@@ -354,6 +361,7 @@ mod tests {
                 0x0288,
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1],
             ),
+            (12, 0x2000, 0x4208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -421,6 +429,24 @@ mod tests {
                 0x2000,
                 0x0288,
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 0],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                12,
+                0x2000,
+                0x4208,
+                [0x0200_200b, 7, 0x0004_0342, 0x83, 0],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                12,
+                0x2000,
+                0x4288,
+                [0x0000_200b, 7, 0x0004_0342, 0x83, 0],
             ),
             None
         );

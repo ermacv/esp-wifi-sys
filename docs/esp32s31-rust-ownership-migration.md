@@ -836,6 +836,14 @@ locking, waiting, accessing PSRAM, or relying on stack-heavy trap-frame
 formatting. This is qualification instrumentation only: it does not widen the
 accepted mapper domain or provide a vendor fallback.
 
+That record exposed the first post-authorization AP network frame as an exact
+group-CCMP mapper tuple: frame control `0x4208`, rate `12`, layout `0x2000`,
+descriptor flags `0x0000_200b`, priority `7`, security/control word
+`0x0004_0342`, AP peer state `0x83`, and peer flag `0`. The adjacent Rust
+security leaf had already qualified this descriptor and expanded its CCMP
+headroom. The mapper now admits only this complete observed state; the
+rate-control-bit variant and pairwise/QoS data remain separately fail-closed.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
