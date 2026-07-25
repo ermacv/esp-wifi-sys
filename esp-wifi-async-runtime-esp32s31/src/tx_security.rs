@@ -127,6 +127,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
                 | 0x0214_0348
                 | 0x02a4_0348
                 | 0x0404_0348
+                | 0x0404_0349
                 | 0x0414_0348
                 | 0x04a4_0348
         )
@@ -1485,6 +1486,24 @@ mod tests {
             expected.buffer_flags,
             0x0000_3009,
             0x0114_0349,
+        ));
+        assert!(strict_ap_pairwise_power_save_completion(
+            0x4288,
+            0x0022,
+            0x05ea,
+            0x2ad0,
+            0xc183_0604,
+            0x0000_3009,
+            0x0404_0349,
+        ));
+        assert!(!strict_ap_pairwise_power_save_completion(
+            0x4288,
+            0x0022,
+            0x05ea,
+            0x2ad0,
+            0xc183_0604,
+            0x0000_3009,
+            0x0405_0349,
         ));
         assert!(!strict_ap_pairwise_power_save_completion(
             0x4288,

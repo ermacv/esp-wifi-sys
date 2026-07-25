@@ -930,6 +930,13 @@ descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned
 status `0x0104_0349`. Only that measured slot-nine completion is admitted;
 the adjacent `0x0114_0349` retry outcome remains rejected until observed.
 
+Concurrent Android ICMP and AP-to-laptop TCP later exercised a maximum-MTU
+peer-two completion: frame control `0x4288`, lengths `0x0022:0x05ea`,
+changing static-slot layout `0x2ad0`, exact buffer equation `0xc183_0604`,
+descriptor flags `0x0000_3009`, callback bit 12, and pairwise hardware status
+`0x0404_0349`. The slot-nine completion is admitted only with the same bounded
+pairwise geometry; adjacent `0x0405_0349` remains rejected.
+
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
 descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned
