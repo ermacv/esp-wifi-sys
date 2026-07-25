@@ -22,7 +22,8 @@ use crate::{
         decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
         recycled_descriptor_word, rx_csi_length, rx_indicate_aggregate_flag,
         rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
-        rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
+        rx_sta_probe_request_is_discarded, single_rx_copy_plan, SingleRxCopyPlan,
+        RX_METADATA_PREFIX_BYTES,
     },
     timer::RawOsiTimer,
 };
@@ -843,11 +844,10 @@ impl CompletedRxUnit {
 /// Own the finite single-descriptor body of the pinned
 /// `wDev_IndicateFrame`.
 ///
-/// The admitted base layout makes `get_sublen_offset` exactly `0x38`, the
-/// sublength exactly zero, and `wdev_csi_len_align` exactly zero. The ROM's
-/// two adjacent copies therefore reduce to one bounded copy. Allocation is a
-/// claim from kind 7's Rust SRAM pool or kind 8's initialized static free
-/// list; exhaustion discards this RX unit immediately.
+/// The admitted layout has zero CSI/extended metadata. Its optional rounded
+/// sublength is removed by the same two finite copies as the pinned ROM leaf.
+/// Allocation is a claim from kind 7's Rust SRAM pool or kind 8's initialized
+/// static free list; exhaustion discards this RX unit immediately.
 ///
 /// Returning `false` leaves both input owners untouched and permits the
 /// explicit ROM fallback. Returning `true` consumes the completed descriptor
@@ -861,6 +861,7 @@ unsafe fn indicate_single_received_frame(
     metadata: *mut u8,
     descriptor_length: usize,
     copy_mode: u32,
+    copy_plan: SingleRxCopyPlan,
     aggregate: bool,
     timestamp: u32,
 ) -> bool {
@@ -873,19 +874,13 @@ unsafe fn indicate_single_received_frame(
     {
         return false;
     }
-    let (kind, allocated_length) = if copy_mode == 0 {
-        let Some(length) = crate::rx::strict_rx_descriptor_buffer_size() else {
-            return false;
-        };
-        if descriptor_length > length {
-            return false;
-        }
-        (7, length)
-    } else {
-        (8, descriptor_length)
+    let Some(large_length) = crate::rx::strict_rx_descriptor_buffer_size() else {
+        return false;
     };
 
-    let Some(frame) = crate::esf::allocate_strict_received_frame(kind, allocated_length) else {
+    let Some((frame, allocated_length)) =
+        crate::esf::allocate_strict_received_frame(copy_mode, descriptor_length, large_length)
+    else {
         RX_METADATA_PROBE
             .rust_indicate_allocation_rejects
             .fetch_add(1, Ordering::Relaxed);
@@ -898,6 +893,7 @@ unsafe fn indicate_single_received_frame(
         metadata,
         descriptor_length,
         allocated_length,
+        copy_plan,
         timestamp,
         control.add(0x2c).read(),
         control.add(0x2d).read(),
@@ -1062,13 +1058,14 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     let probe_request_discard = frame_control.is_some_and(rx_sta_probe_request_is_discarded);
     let copy_mode = data_copy_mode.or(management_copy_mode).or(action_copy_mode);
     let control = ptr::addr_of_mut!(wDevCtrl);
+    let copy_plan = rx_csi_length(&prefix)
+        .and_then(|csi_length| single_rx_copy_plan(descriptor_length, layout, csi_length));
     let strict_sta_base_route = status == 0
         && !tail.is_null()
         && count != 0
         && count <= MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32
-        && !layout.has_sublength
         && !layout.has_extra_field
-        && layout.payload_offset == 0x38
+        && copy_plan.is_some()
         && prefix[3] & 0x70 == 0x10
         && control.add(0x30).read() == 0
         && control.add(0x46).read() == 0
@@ -1088,6 +1085,13 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
 
     let strict_sta_common_route = strict_sta_base_route && copy_mode.is_some();
     if strict_sta_common_route {
+        let Some(copy_plan) = copy_plan else {
+            RX_METADATA_PROBE
+                .vendor_fallbacks
+                .fetch_add(1, Ordering::Relaxed);
+            __real_wDev_ProcessRxSucData(tail, count);
+            return;
+        };
         // Pinned prelude stores the current RX rate/channel fields into the
         // metadata envelope before publishing the frame pointer.
         metadata.add(0x1c).write(control.add(0x2c).read());
@@ -1123,18 +1127,17 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
                 .rust_data_routes
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if rx_csi_length(&prefix) == Some(0)
-            && indicate_single_received_frame(
-                head,
-                tail,
-                count,
-                metadata,
-                descriptor_length,
-                copy_mode,
-                aggregate_flag != 0,
-                timestamp,
-            )
-        {
+        if indicate_single_received_frame(
+            head,
+            tail,
+            count,
+            metadata,
+            descriptor_length,
+            copy_mode,
+            copy_plan,
+            aggregate_flag != 0,
+            timestamp,
+        ) {
             return;
         }
         RX_METADATA_PROBE

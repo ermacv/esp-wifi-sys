@@ -641,43 +641,47 @@ unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) ->
 
 /// Claim one fixed ESF object for the Rust-owned single-descriptor RX path.
 ///
-/// This is intentionally separate from the public allocator wrapper: the
-/// caller already holds the strict radio-owner capability, so there is no
-/// cold delegation branch and therefore no possible dynamic allocator edge.
-/// Kind 7 uses the Rust SRAM pool; kind 8 uses the initialized finite vendor
-/// small-RX free list. Exhaustion is an immediate `None`, never a wait.
+/// This reproduces the pinned selection order without entering the public
+/// allocator wrapper: copy mode zero uses kind 7; copy mode one first uses the
+/// finite kind-8 pool for inputs up to 500 bytes and immediately falls back to
+/// kind 7 when that pool is empty. No failed preferred-pool claim is reported
+/// as an allocation failure when the fallback succeeds.
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".rwtext.wifi_strict.esf"
 )]
 pub(crate) unsafe fn allocate_strict_received_frame(
-    kind: u32,
-    length: usize,
-) -> Option<*mut u8> {
+    copy_mode: u32,
+    descriptor_length: usize,
+    large_length: usize,
+) -> Option<(*mut u8, usize)> {
     if !crate::critical::strict_wifi_hart_armed() || !crate::critical::on_strict_wifi_hart() {
-        reject(kind, length);
+        reject(u32::MAX, descriptor_length);
         return None;
     }
-    let frame = match kind {
-        7 => allocate_large_rx(ptr::null(), length),
-        8 if length <= SMALL_RX_PAYLOAD_CAPACITY => {
-            allocate_vendor_static(ptr::null(), kind, length)
-        }
-        _ => None,
-    };
-    if frame.is_none() {
-        reject(kind, length);
+    if copy_mode > 1 || descriptor_length > large_length {
+        reject(u32::MAX, descriptor_length);
+        return None;
     }
-    frame
+    if copy_mode != 0 && descriptor_length <= SMALL_RX_PAYLOAD_CAPACITY {
+        if let Some(frame) = allocate_vendor_static(ptr::null(), 8, descriptor_length) {
+            return Some((frame, descriptor_length));
+        }
+    }
+    let frame = allocate_large_rx(ptr::null(), large_length);
+    if frame.is_none() {
+        reject(7, large_length);
+    }
+    frame.map(|frame| (frame, large_length))
 }
 
-/// Populate the pinned S31 ESF layout for one base-metadata RX descriptor.
+/// Populate the pinned S31 ESF layout for one singleton RX descriptor.
 ///
-/// `wDev_IndicateFrame` splits the copy at byte `0x38`; with the admitted
-/// zero-sublength/zero-extra layout those two ranges are contiguous, so one
-/// finite copy is byte-for-byte equivalent. All pointer chasing and ABI
-/// stores live in this stateless leaf. The caller owns both objects and must
-/// recycle `frame` if this function rejects malformed input.
+/// `wDev_IndicateFrame` copies the fixed 0x38-byte RX-control prefix, skips
+/// the optional rounded sublength, then copies the MPDU bytes. The safe copy
+/// plan owns every variable offset; this leaf contains only pointer chasing,
+/// two finite copies and recovered ABI stores. The caller owns both objects
+/// and must recycle `frame` if this function rejects malformed input.
 ///
 /// # Safety
 ///
@@ -693,6 +697,7 @@ pub(crate) unsafe fn populate_single_received_frame(
     source: *const u8,
     descriptor_length: usize,
     allocated_length: usize,
+    copy_plan: crate::rx_descriptor::SingleRxCopyPlan,
     timestamp: u32,
     rx_rate: u8,
     rx_channel: u8,
@@ -702,6 +707,9 @@ pub(crate) unsafe fn populate_single_received_frame(
         || source.is_null()
         || descriptor_length < 0x38
         || descriptor_length > allocated_length
+        || copy_plan.source_payload_offset > descriptor_length
+        || copy_plan.payload_length != descriptor_length - copy_plan.source_payload_offset
+        || copy_plan.indicated_length > allocated_length
     {
         return false;
     }
@@ -726,12 +734,17 @@ pub(crate) unsafe fn populate_single_received_frame(
     }
     let Some(descriptor_word) = crate::rx_descriptor::indicated_rx_descriptor_word(
         buffer_descriptor.cast::<u32>().read(),
-        descriptor_length,
+        copy_plan.indicated_length,
     ) else {
         return false;
     };
 
-    ptr::copy_nonoverlapping(source, destination, descriptor_length);
+    ptr::copy_nonoverlapping(source, destination, 0x38);
+    ptr::copy_nonoverlapping(
+        source.add(copy_plan.source_payload_offset),
+        destination.add(0x38),
+        copy_plan.payload_length,
+    );
     buffer_descriptor.cast::<u32>().write(descriptor_word);
     rx_descriptor.add(4).cast::<u32>().write(timestamp);
     rx_descriptor.add(8).write(rx_rate);

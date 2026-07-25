@@ -21,6 +21,19 @@ pub(crate) struct RxMetadataLayout {
     pub(crate) has_extra_field: bool,
 }
 
+/// Bounded copy plan for the singleton, zero-CSI indication path.
+///
+/// The pinned ROM leaf copies the fixed 0x38-byte RX-control prefix, skips
+/// the optional rounded sublength, then copies the remaining MPDU bytes back
+/// against the prefix. Keeping this arithmetic in safe Rust leaves the ESF
+/// boundary with only two finite non-overlapping copies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SingleRxCopyPlan {
+    pub(crate) source_payload_offset: usize,
+    pub(crate) payload_length: usize,
+    pub(crate) indicated_length: usize,
+}
+
 fn round_up_four(value: usize) -> Option<usize> {
     value.checked_add(3).map(|rounded| rounded & !3)
 }
@@ -60,6 +73,38 @@ pub(crate) fn decode_rx_metadata_layout(
         sublength: u16::try_from(rounded_sublength).ok()?,
         has_sublength,
         has_extra_field,
+    })
+}
+
+/// Produce the exact singleton copy/length transform for layouts whose only
+/// optional field is the rounded sublength.
+///
+/// CSI/extended metadata has a distinct alignment-versus-published-length
+/// contract and remains fail-closed until that format is qualified. A base
+/// layout is the zero-sublength member of this same transform.
+pub(crate) fn single_rx_copy_plan(
+    descriptor_length: usize,
+    layout: RxMetadataLayout,
+    csi_length: u16,
+) -> Option<SingleRxCopyPlan> {
+    if layout.has_extra_field || csi_length != 0 {
+        return None;
+    }
+    let rounded_sublength = usize::from(layout.sublength);
+    let expected_payload_offset = RX_METADATA_BASE_PAYLOAD_OFFSET.checked_add(rounded_sublength)?;
+    if layout.payload_offset != expected_payload_offset || layout.payload_offset > descriptor_length
+    {
+        return None;
+    }
+    let payload_length = descriptor_length.checked_sub(layout.payload_offset)?;
+    let indicated_length = descriptor_length.checked_sub(rounded_sublength)?;
+    if RX_METADATA_BASE_PAYLOAD_OFFSET.checked_add(payload_length)? != indicated_length {
+        return None;
+    }
+    Some(SingleRxCopyPlan {
+        source_payload_offset: layout.payload_offset,
+        payload_length,
+        indicated_length,
     })
 }
 
@@ -237,9 +282,9 @@ mod tests {
         indicated_rx_descriptor_word, indicated_rx_flags_word, recycled_descriptor_word,
         restore_received_packet_buffer_view, rx_csi_length, rx_indicate_aggregate_flag,
         rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
-        rx_sta_probe_request_is_discarded,
-        ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
-        ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
+        rx_sta_probe_request_is_discarded, single_rx_copy_plan, ESF_BUFFER_DESCRIPTOR_DATA_OFFSET,
+        ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET, ESF_RX_CONTROL_POINTER_OFFSET,
+        RX_METADATA_PREFIX_BYTES,
     };
 
     #[test]
@@ -377,6 +422,30 @@ mod tests {
     #[test]
     fn rx_metadata_layout_rejects_a_truncated_prefix() {
         assert_eq!(decode_rx_metadata_layout(&[0_u8; 0x2b], true), None);
+    }
+
+    #[test]
+    fn singleton_copy_plan_skips_only_the_rounded_sublength() {
+        let mut metadata = [0_u8; RX_METADATA_PREFIX_BYTES];
+        let base = decode_rx_metadata_layout(&metadata, false).unwrap();
+        let base_plan = single_rx_copy_plan(100, base, 0).unwrap();
+        assert_eq!(base_plan.source_payload_offset, 0x38);
+        assert_eq!(base_plan.payload_length, 44);
+        assert_eq!(base_plan.indicated_length, 100);
+
+        metadata[0x2b] = 0x81;
+        let sublength = decode_rx_metadata_layout(&metadata, false).unwrap();
+        let sublength_plan = single_rx_copy_plan(100, sublength, 0).unwrap();
+        assert_eq!(sublength_plan.source_payload_offset, 0x3c);
+        assert_eq!(sublength_plan.payload_length, 40);
+        assert_eq!(sublength_plan.indicated_length, 96);
+
+        assert_eq!(single_rx_copy_plan(0x3b, sublength, 0), None);
+        assert_eq!(single_rx_copy_plan(100, sublength, 1), None);
+
+        metadata[0x26] = 1;
+        let extra = decode_rx_metadata_layout(&metadata, true).unwrap();
+        assert_eq!(single_rx_copy_plan(100, extra, 0), None);
     }
 
     #[test]
