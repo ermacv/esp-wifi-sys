@@ -41,7 +41,6 @@ unsafe extern "C" {
 
     fn lmacRxDone(packet: *mut u8);
     fn ppRxProtoProc(packet: *mut u8, rx_control: *mut u8) -> i32;
-    fn ppRecycleRxPkt(packet: *mut u8);
     fn ap_rx_cb(packet: *mut u8, rssi: i32, signal_length: u32);
 }
 
@@ -711,7 +710,7 @@ unsafe fn process_one(packet: *mut u8) {
     let descriptor = unsafe { packet.add(0x34).cast::<*mut u8>().read() };
     if descriptor.is_null() {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
     // `wDev_IndicateAmpdu` has already split the hardware aggregate into
@@ -723,7 +722,7 @@ unsafe fn process_one(packet: *mut u8) {
     #[cfg(not(feature = "hil-rx-ampdu"))]
     if aggregate_kind7 {
         COUNTERS.block_error.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
 
@@ -731,7 +730,7 @@ unsafe fn process_one(packet: *mut u8) {
     let payload_owner = unsafe { packet.add(4).cast::<*mut u8>().read() };
     if rx_control.is_null() || payload_owner.is_null() {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
     unsafe {
@@ -750,13 +749,13 @@ unsafe fn process_one(packet: *mut u8) {
         unsafe { rx_signal_length(rx_control) }.checked_sub(RX_FRAME_CHECK_SEQUENCE_LEN)
     else {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     };
     if unsafe { packet.add(36).cast::<u16>().read_unaligned() } & 0x2000 != 0 {
         if raw_length < 8 {
             COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         raw_frame = unsafe { raw_frame.add(8) };
@@ -771,14 +770,14 @@ unsafe fn process_one(packet: *mut u8) {
             && raw_bytes[0] & 0x0c == 0
             && crate::sta_link::ingest_management_action(raw_bytes)
         {
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         if raw_length >= 24
             && is_frame_to_local_address(raw_bytes)
             && crate::wpa2_rx::ingest_sta_80211(raw_bytes)
         {
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         #[cfg(feature = "hil-rx-ampdu")]
@@ -787,7 +786,7 @@ unsafe fn process_one(packet: *mut u8) {
                 crate::rx_ampdu_ap::Ingress::Retained => return,
                 crate::rx_ampdu_ap::Ingress::Reject => {
                     COUNTERS.block_error.fetch_add(1, Ordering::Relaxed);
-                    unsafe { ppRecycleRxPkt(packet) };
+                    unsafe { crate::esf::recycle_received_packet(packet) };
                     return;
                 }
                 crate::rx_ampdu_ap::Ingress::Release(release) => {
@@ -808,7 +807,7 @@ unsafe fn process_one(packet: *mut u8) {
     #[cfg(feature = "hil-rx-ampdu")]
     if aggregate_kind7 {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
 
@@ -822,7 +821,7 @@ unsafe fn process_deaggregated(packet: *mut u8) {
     let payload_owner = unsafe { packet.add(4).cast::<*mut u8>().read() };
     if descriptor.is_null() || rx_control.is_null() || payload_owner.is_null() {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
     // The aggregate has already been deaggregated and reordered by Rust.
@@ -840,7 +839,7 @@ unsafe fn process_protocol(
 ) {
     if unsafe { ppRxProtoProc(packet, rx_control) } != 0 {
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
 
@@ -848,7 +847,7 @@ unsafe fn process_protocol(
     let length = unsafe { rx_control.add(20).read() as usize };
     if frame.is_null() || length < 2 {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
     let frame = if unsafe { packet.add(36).cast::<u16>().read() } & 0x2000 != 0 {
@@ -859,7 +858,7 @@ unsafe fn process_protocol(
 
     if is_fragmented(unsafe { core::slice::from_raw_parts(frame, length) }) {
         COUNTERS.fragmented.fetch_add(1, Ordering::Relaxed);
-        unsafe { ppRecycleRxPkt(packet) };
+        unsafe { crate::esf::recycle_received_packet(packet) };
         return;
     }
 
@@ -878,22 +877,22 @@ unsafe fn process_protocol(
         let protocol = unsafe { rx_control.add(60).read() };
         if protocol != 0 && protocol != 198 && protocol != 245 {
             COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         if protocol == 245 {
             COUNTERS.michael_mic_failure.fetch_add(1, Ordering::Relaxed);
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         if is_frame_from_local_address(frame, length) {
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         let callback = rx_registry().and_then(|registry| registry.station_callback);
         let Some(callback) = callback else {
             COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         };
         let rssi = unsafe { rx_control.cast::<i8>().read() } as i32;
@@ -909,7 +908,7 @@ unsafe fn process_protocol(
             .unwrap_or(false)
         {
             COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
-            unsafe { ppRecycleRxPkt(packet) };
+            unsafe { crate::esf::recycle_received_packet(packet) };
             return;
         }
         COUNTERS.auxiliary_callback.fetch_add(1, Ordering::Relaxed);
@@ -926,7 +925,7 @@ unsafe fn process_protocol(
         return;
     }
     COUNTERS.unrouted.fetch_add(1, Ordering::Relaxed);
-    unsafe { ppRecycleRxPkt(packet) };
+    unsafe { crate::esf::recycle_received_packet(packet) };
 }
 
 unsafe fn rx_signal_length(rx_control: *const u8) -> usize {

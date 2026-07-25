@@ -51,7 +51,7 @@ const EXPECTED_LABELS: [&str; 34] = [
     ".L1024", ".L1017", ".L1023", ".L1022", ".L1021", ".L1020", ".L1018",
 ];
 
-const REQUIRED_GLOBALS: [(&str, &str); 45] = [
+const REQUIRED_GLOBALS: [(&str, &str); 46] = [
     ("ppTask", "0000023a"),
     ("pp_post", "00000160"),
     ("pp_sig_cnt", "00000024"),
@@ -59,6 +59,7 @@ const REQUIRED_GLOBALS: [(&str, &str); 45] = [
     ("ppProcessRxPktHdr", "00000042"),
     ("ppProcTxDone", "000001f4"),
     ("ppRxPkt", "00000178"),
+    ("ppRecycleRxPkt", "0000000e"),
     ("ppResortTxAMPDU", "000005bc"),
     ("pp_default_event_handler", "0000002c"),
     ("pp_timer_do_process", "000000ba"),

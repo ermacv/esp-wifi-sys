@@ -120,6 +120,8 @@ unsafe extern "C" {
     fn __real_esf_buf_alloc(source: *const u8, kind: u32, length: u32) -> *mut u8;
     fn esf_buf_recycle(frame: *mut c_void);
     fn __real_esf_buf_recycle(frame: *mut c_void);
+    fn ppRecycleRxPkt(frame: *mut u8);
+    fn __real_ppRecycleRxPkt(frame: *mut u8);
 }
 
 pub(crate) fn link_wrappers_active() -> bool {
@@ -129,6 +131,13 @@ pub(crate) fn link_wrappers_active() -> bool {
     ) && ptr::eq(
         esf_buf_recycle as *const (),
         __wrap_esf_buf_recycle as *const (),
+    )
+}
+
+pub(crate) fn rx_packet_recycle_link_wrapper_active() -> bool {
+    ptr::eq(
+        ppRecycleRxPkt as *const (),
+        __wrap_ppRecycleRxPkt as *const (),
     )
 }
 
@@ -756,6 +765,62 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
         return;
     }
     recycle_vendor_static(frame, kind);
+}
+
+/// Allocation-free replacement for the pinned PP RX recycle leaf.
+///
+/// The packet must be owned by one of the admitted fixed ESF pools. Rust
+/// restores the original RX buffer view and transfers the object directly to
+/// the matching pool; no vendor PP state, allocator or OSI primitive remains.
+/// The linker interception below retains the cold pre-handoff delegation.
+///
+/// # Safety
+///
+/// `frame` must be an outstanding radio-owned RX ESF object. Calling this
+/// function transfers that ownership back to the fixed pool exactly once.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) unsafe fn recycle_received_packet(frame: *mut u8) {
+    if frame.is_null()
+        || !crate::critical::strict_wifi_hart_armed()
+        || !crate::critical::on_strict_wifi_hart()
+        || !is_strict_recyclable_frame(frame)
+    {
+        reject(u32::MAX, frame as usize);
+        return;
+    }
+    if !crate::rx_descriptor::restore_received_packet_buffer_view(frame) {
+        // The pool still owns the ESF object even when its protocol view was
+        // malformed. Record the invariant violation, then release that owner
+        // rather than leaking a finite RX credit.
+        reject(u32::MAX, frame as usize);
+    }
+    __wrap_esf_buf_recycle(frame.cast());
+}
+
+/// Linker interception for any remaining calls from the pinned archives.
+///
+/// Rust RX code calls [`recycle_received_packet`] directly. This ABI boundary
+/// remains only because another archive object may still reference the vendor
+/// leaf internally.
+///
+/// # Safety
+///
+/// `frame` follows the same ownership contract as
+/// [`recycle_received_packet`].
+#[no_mangle]
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub unsafe extern "C" fn __wrap_ppRecycleRxPkt(frame: *mut u8) {
+    if !crate::critical::strict_wifi_hart_armed() {
+        __real_ppRecycleRxPkt(frame);
+        return;
+    }
+    recycle_received_packet(frame);
 }
 
 pub fn rejected_esf_operations() -> usize {

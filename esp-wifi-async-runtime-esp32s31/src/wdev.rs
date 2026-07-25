@@ -745,7 +745,7 @@ fn runtime_rx_recycle_link_wrapper_active() -> bool {
     core::ptr::eq(
         vendor_append_rx_blocks as *const (),
         __wrap_wDev_AppendRxBlocks as *const (),
-    )
+    ) && crate::esf::rx_packet_recycle_link_wrapper_active()
 }
 
 #[cfg(not(target_arch = "riscv32"))]
