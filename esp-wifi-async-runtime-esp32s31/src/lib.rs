@@ -406,6 +406,7 @@ pub use tx_security::{
     strict_ap_beacon_completion_layout, strict_tx_security_layout, ApBeaconCompletionLayout,
     TxSecurityLayoutInput, TxSecurityLayoutOutput,
 };
+pub use tx_mapper::{tx_mapper_rejection_snapshot, TxMapperRejectionSnapshot};
 #[cfg(feature = "hil-vendor-tx")]
 pub use tx_trace::{
     freeze_tx_trace, mark_tx_trace_scenario, tx_trace_entry, tx_trace_snapshot, TxTraceEntry,

@@ -828,6 +828,14 @@ The next join edge reached WPA2 message one with frame control `0x0288`, rate
 post-association AP EAPOL mapper tuple; it reuses the already-qualified
 plaintext AP EAPOL security layout without admitting other data frames.
 
+Unknown mapper input now records all eight words of the finite decision input
+in a fixed `.critical.bss` SRAM object before executing the fail-closed trap.
+The detail word is release-published last, so the terminal panic path can
+print a coherent record with direct ROM output and without allocating,
+locking, waiting, accessing PSRAM, or relying on stack-heavy trap-frame
+formatting. This is qualification instrumentation only: it does not widen the
+accepted mapper domain or provide a vendor fallback.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

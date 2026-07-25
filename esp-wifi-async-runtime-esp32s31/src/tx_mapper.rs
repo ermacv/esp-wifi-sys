@@ -1,3 +1,67 @@
+use core::sync::atomic::{AtomicU32, Ordering};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TxMapperRejectionSnapshot {
+    pub detail: u32,
+    pub frame: u32,
+    pub rate_layout: u32,
+    pub frame_control_peer_flag: u32,
+    pub descriptor_flags: u32,
+    pub descriptor_priority: u32,
+    pub descriptor_control: u32,
+    pub peer_state: u32,
+}
+
+struct TxMapperRejectionRecord {
+    detail: AtomicU32,
+    frame: AtomicU32,
+    rate_layout: AtomicU32,
+    frame_control_peer_flag: AtomicU32,
+    descriptor_flags: AtomicU32,
+    descriptor_priority: AtomicU32,
+    descriptor_control: AtomicU32,
+    peer_state: AtomicU32,
+}
+
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.tx_mapper_rejection"
+)]
+static TX_MAPPER_REJECTION: TxMapperRejectionRecord = TxMapperRejectionRecord {
+    detail: AtomicU32::new(0),
+    frame: AtomicU32::new(0),
+    rate_layout: AtomicU32::new(0),
+    frame_control_peer_flag: AtomicU32::new(0),
+    descriptor_flags: AtomicU32::new(0),
+    descriptor_priority: AtomicU32::new(0),
+    descriptor_control: AtomicU32::new(0),
+    peer_state: AtomicU32::new(0),
+};
+
+/// Last fail-closed mapper input, retained in fixed SRAM for post-trap
+/// inspection without depending on stack-heavy trap-frame formatting.
+pub fn tx_mapper_rejection_snapshot() -> TxMapperRejectionSnapshot {
+    let detail = TX_MAPPER_REJECTION.detail.load(Ordering::Acquire);
+    TxMapperRejectionSnapshot {
+        detail,
+        frame: TX_MAPPER_REJECTION.frame.load(Ordering::Relaxed),
+        rate_layout: TX_MAPPER_REJECTION.rate_layout.load(Ordering::Relaxed),
+        frame_control_peer_flag: TX_MAPPER_REJECTION
+            .frame_control_peer_flag
+            .load(Ordering::Relaxed),
+        descriptor_flags: TX_MAPPER_REJECTION
+            .descriptor_flags
+            .load(Ordering::Relaxed),
+        descriptor_priority: TX_MAPPER_REJECTION
+            .descriptor_priority
+            .load(Ordering::Relaxed),
+        descriptor_control: TX_MAPPER_REJECTION
+            .descriptor_control
+            .load(Ordering::Relaxed),
+        peer_state: TX_MAPPER_REJECTION.peer_state.load(Ordering::Relaxed),
+    }
+}
+
 /// Decide the only descriptor treatment used by the guarded strict STA
 /// ordinary strict mapper states. Every admitted state maps to logical queue zero;
 /// `Some(7)` means descriptor byte four must contain the recovered treatment.
@@ -181,6 +245,32 @@ pub(crate) unsafe fn trap_unadmitted_strict_sta_ap(frame: *mut u8) -> ! {
         descriptor_control: u32,
         peer_state: u32,
     ) -> ! {
+        // Invalidate publication while populating the fixed record, then
+        // release-publish `detail` last. No formatter, callback, allocation,
+        // lock, or retry is entered on this terminal diagnostic path.
+        TX_MAPPER_REJECTION.detail.store(0, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .frame
+            .store(frame.addr() as u32, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .rate_layout
+            .store(rate_layout, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .frame_control_peer_flag
+            .store(frame_control_peer_flag, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .descriptor_flags
+            .store(descriptor_flags, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .descriptor_priority
+            .store(descriptor_priority, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .descriptor_control
+            .store(descriptor_control, Ordering::Relaxed);
+        TX_MAPPER_REJECTION
+            .peer_state
+            .store(peer_state, Ordering::Relaxed);
+        TX_MAPPER_REJECTION.detail.store(detail, Ordering::Release);
         core::arch::asm!(
             "ebreak",
             in("a0") frame,
