@@ -40,7 +40,6 @@ unsafe extern "C" {
     static mut g_ic: u8;
 
     fn lmacRxDone(packet: *mut u8);
-    fn rc_get_trc(route: u32, receiver: *mut u8) -> *mut u8;
     fn rcUpdateRxDone(rate_control: *mut u8, rx_control: *mut u8);
     fn ap_rx_cb(packet: *mut u8, rssi: i32, signal_length: u32);
 }
@@ -972,7 +971,9 @@ pub unsafe extern "C" fn wifi_strict_pp_rx_proto_proc(
         frame = unsafe { frame.add(8) };
     }
 
-    let rate_control = unsafe { rc_get_trc(u32::from(route.index()), frame.add(10)) };
+    let rate_control = unsafe {
+        crate::static_trc::wifi_strict_rc_get_trc(u32::from(route.index()), frame.add(10))
+    };
     unsafe { packet.add(0x2c).cast::<*mut u8>().write(rate_control) };
     if !rate_control.is_null() {
         unsafe { rcUpdateRxDone(rate_control, rx_control) };

@@ -10,7 +10,10 @@ use core::ptr;
 
 const TRC_CONTEXT_SIZE: usize = 0x98;
 const TRC_CONTEXT_COUNT: usize = 3;
+const TRC_TABLE_COUNT: usize = 22;
 const TRC_DEFAULT_INDEX: usize = 19;
+const TRC_ROUTE_COUNT: usize = 3;
+const TRC_PEER_ADDRESS_OFFSET: usize = 0x21;
 const PRIMARY_RATE_OFFSET: usize = 0x64;
 const SECONDARY_RATE_OFFSET: usize = 0x68;
 const FALLBACK_RATE_OFFSET: usize = 0x6c;
@@ -35,8 +38,68 @@ static mut STATIC_TRC_CONTEXTS: [StaticTrcContext; TRC_CONTEXT_COUNT] = [
 
 unsafe extern "C" {
     static mut g_per_conn_trc: u8;
+    static trc_ctl: u8;
     static rc11BSchedTbl: u8;
     static rcP2P11GSchedTbl: u8;
+}
+
+/// Select the live rate-control context for one received peer.
+///
+/// This is the complete state lookup from the pinned 0x76-byte
+/// `rc_get_trc`. `trc_ctl[(route + 1)]` is a bitmap of the 22 fixed ROM-ABI
+/// table slots at `g_per_conn_trc`; each live context stores its six-byte peer
+/// address at offset `0x21`. The public C enum names are unavailable, so the
+/// caller supplies only the recovered route number 0 through 2.
+///
+/// Unlike the vendor loop, the Rust boundary never follows a bitmap bit beyond
+/// the actual 22-slot ABI range and never dereferences a null publication.
+/// The scan has a compile-time bound and does not poll hardware or external
+/// progress.
+///
+/// # Safety
+///
+/// Cold rate-control initialization must have published the table, and
+/// `receiver` must point to six readable address bytes owned by the current RX
+/// frame.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_proto"]
+pub unsafe extern "C" fn wifi_strict_rc_get_trc(
+    route: u32,
+    receiver: *mut u8,
+) -> *mut u8 {
+    if route as usize >= TRC_ROUTE_COUNT || receiver.is_null() {
+        return ptr::null_mut();
+    }
+
+    let controls = ptr::addr_of!(trc_ctl).cast::<u32>();
+    let mut candidates = unsafe { controls.add(route as usize + 1).read() };
+    for _ in 0..TRC_TABLE_COUNT {
+        if candidates == 0 {
+            return ptr::null_mut();
+        }
+        let index = candidates.trailing_zeros() as usize;
+        if index >= TRC_TABLE_COUNT {
+            return ptr::null_mut();
+        }
+        candidates &= !(1_u32 << index);
+
+        let context = unsafe { table_slot(index).read() };
+        if context.is_null() {
+            return ptr::null_mut();
+        }
+        let peer = unsafe { context.add(TRC_PEER_ADDRESS_OFFSET) };
+        let mut matches = true;
+        for byte in 0..6 {
+            if unsafe { peer.add(byte).read() != receiver.add(byte).read() } {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            return context;
+        }
+    }
+    ptr::null_mut()
 }
 
 unsafe fn table_slot(index: usize) -> *mut *mut u8 {
