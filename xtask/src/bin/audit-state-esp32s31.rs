@@ -1112,7 +1112,9 @@ fn placement(address: u64) -> &'static str {
 
 fn target_placement(address: u64) -> &'static str {
     match address {
-        0x2f80_0000..=0x2f80_ffff => "ROM export",
+        // esp32s31_rev0_rom.elf has one executable LOAD segment covering
+        // .fixed.text, .init.text and .text: 0x2f80_0000..0x2f83_f700.
+        0x2f80_0000..=0x2f83_f6ff => "ROM export",
         _ => placement(address),
     }
 }
@@ -1229,7 +1231,8 @@ mod tests {
     use super::{
         definition_name, enforce_primary_state_baseline, linked_code_referrers, local_data_aliases,
         parse_archive_relocations, parse_archive_symbol, parse_posix_symbols, parse_sections,
-        placement, reachable_vendor_functions, ArchiveInventory, StateMetrics, Symbol,
+        placement, reachable_vendor_functions, target_placement, ArchiveInventory, StateMetrics,
+        Symbol,
         PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS, ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK,
         STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS, TEMPORARY_EVIDENCED_MMIO_ROOTS,
     };
@@ -1329,6 +1332,14 @@ mod tests {
         );
         assert_eq!(placement(0x2f01_0000), "internal SRAM");
         assert_eq!(placement(0x5000_0000), "PSRAM");
+    }
+
+    #[test]
+    fn recognizes_the_complete_rev0_rom_code_segment() {
+        assert_eq!(target_placement(0x2f80_0000), "ROM export");
+        assert_eq!(target_placement(0x2f82_b9f8), "ROM export");
+        assert_eq!(target_placement(0x2f83_f6ff), "ROM export");
+        assert_eq!(target_placement(0x2f83_f700), "internal SRAM");
     }
 
     #[test]

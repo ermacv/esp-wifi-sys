@@ -632,6 +632,44 @@ frames returned their static TX slots, all 16 received frames returned their
 static RX slots, the 32-credit TX pool was balanced, and no other-core stall
 was observed.
 
+## ROM ELF as a deblob oracle and the first direct radio-HAL leaf
+
+The rev0 ROM ELF is now treated as the primary oracle for replacing temporary
+ROM calls. The qualified artifact is `esp32s31_rev0_rom.elf`, SHA-256
+`a52ad7513deb656a910a5740125f1cce2c7941f11ce57213b7b43aea93d5ab87`.
+It is an unstripped 32-bit little-endian RISC-V ELF with 128 sections, 4,192
+defined symbols and 3,488 text functions. It has no DWARF type information,
+but its symbol sizes, complete machine code and named ROM-owned RAM sections
+are sufficient to distinguish finite stateless/MMIO leaves from functions
+that access hidden ROM ABI state. The artifact is reference material only and
+is not linked into the firmware.
+
+The first completed leaf is `hal_get_tsf_time` at ROM address `0x2f82b9f8`,
+size `0x3e`. Its complete body has no calls, cycles, wait, allocation or
+ROM-owned RAM access. It sets latch bit one for interface zero or bit two for
+any non-zero interface in `0x2010_d814`, reads the high and low TSF words from
+`0x2010_d824` and `0x2010_d820`, then clears the same latch bit.
+
+`wifi_strict_hal_get_tsf_time` reproduces this transaction with volatile MMIO
+in a 44-byte internal-SRAM Rust leaf. The final linker aliases the public
+`hal_get_tsf_time` symbol to this Rust address while retaining
+`__real_hal_get_tsf_time = 0x2f82b9f8` only as a differential oracle. The
+generated RV32 body preserves the ROM high-then-low read order and the `u64`
+return ABI, and contains no call or backward edge.
+
+The exact credentialed STA ELF passed the complete strict audit over 6,407
+functions with zero violations. Runtime vendor debt decreased to 19 roots and
+`1 fallback + 9 stateful/unproven + 9 temporary MMIO`; reachable vendor
+functions decreased to 32. Mutable blob state reachable from strict leaves
+remained zero, all 43 fixed cold-init bindings remained active, and the
+strict-static baseline remained 82 sections / 312,441 bytes.
+
+Hardware qualification completed passive scan, WPA2 association and four-way
+handshake, DHCP, gateway ping, DNS, TCP and HTTP 200 without entering
+`ppTask`. Allocation, reallocation, free and failure counters all remained
+zero. TX ownership balanced at 18/18, RX ownership at 15/15, the 32-credit TX
+pool returned to zero use, and no other-core stall was observed.
+
 ## Completed strict-runtime slice: `wDevCtrl`
 
 The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
