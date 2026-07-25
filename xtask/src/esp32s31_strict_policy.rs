@@ -4,7 +4,6 @@
 
 pub const ROOTS: &[&str] = &[
     "wDev_ProcessRxSucData",
-    "hal_mac_rx_get_last_dscr",
     "hal_mac_tx_set_cca",
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
@@ -46,7 +45,6 @@ pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
 ];
 
 pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[
-    "hal_mac_rx_get_last_dscr",
     "hal_mac_tx_set_cca",
     "hal_mac_is_txq_valid",
     "hal_mac_set_txq_invalid",
@@ -177,6 +175,10 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wifi_strict_lmac_release_txop_queue",
     ),
     ("hal_get_tsf_time", "wifi_strict_hal_get_tsf_time"),
+    (
+        "hal_mac_rx_get_last_dscr",
+        "wifi_strict_hal_mac_rx_get_last_dscr",
+    ),
     (
         "ieee80211_post_hmac_tx",
         "wifi_strict_ieee80211_post_hmac_tx",

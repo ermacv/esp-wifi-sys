@@ -32,6 +32,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "lmacRequestTxopQueue",
     "lmacReleaseTxopQueue",
     "hal_get_tsf_time",
+    "hal_mac_rx_get_last_dscr",
     "lmacProcessTxComplete",
     "lmacProcessTxSuccess",
     "lmacProcessCtsTimeout",

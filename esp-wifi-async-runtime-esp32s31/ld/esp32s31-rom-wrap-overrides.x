@@ -138,6 +138,15 @@ hal_get_tsf_time = wifi_strict_hal_get_tsf_time;
 ASSERT(hal_get_tsf_time == wifi_strict_hal_get_tsf_time,
        "ESP32-S31 hal_get_tsf_time Rust boundary is inactive");
 
+/* The rev0 ROM RX-tail leaf only joins two disjoint MMIO address fields.
+ * Retain the original address as an oracle and make the complete finite Rust
+ * implementation the only runtime definition. */
+__real_hal_mac_rx_get_last_dscr = 0x2f8386a2;
+EXTERN(wifi_strict_hal_mac_rx_get_last_dscr);
+hal_mac_rx_get_last_dscr = wifi_strict_hal_mac_rx_get_last_dscr;
+ASSERT(hal_mac_rx_get_last_dscr == wifi_strict_hal_mac_rx_get_last_dscr,
+       "ESP32-S31 hal_mac_rx_get_last_dscr Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */
