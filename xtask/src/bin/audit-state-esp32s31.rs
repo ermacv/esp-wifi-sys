@@ -673,12 +673,12 @@ fn reachable_vendor_functions(calls: &BTreeMap<String, BTreeSet<String>>) -> BTr
     let mut reachable = BTreeSet::new();
     let mut pending = VecDeque::from_iter(ROOTS.iter().map(|root| (*root).to_owned()));
     while let Some(function) = pending.pop_front() {
-        if !reachable.insert(function.clone()) {
-            continue;
-        }
         if !ROOTS.contains(&function.as_str())
             && WRAPPED_VENDOR_BOUNDARIES.contains(&function.as_str())
         {
+            continue;
+        }
+        if !reachable.insert(function.clone()) {
             continue;
         }
         if let Some(targets) = calls.get(&function) {
@@ -912,8 +912,9 @@ fn text(output: Output) -> Result<String> {
 mod tests {
     use super::{
         definition_name, parse_archive_symbol, parse_posix_symbols, parse_sections, placement,
-        ROM_ABI_BACKINGS,
+        reachable_vendor_functions, ROM_ABI_BACKINGS,
     };
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn pinned_cold_init_has_43_unique_bindings() {
@@ -964,5 +965,24 @@ mod tests {
         );
         assert_eq!(placement(0x2f01_0000), "internal SRAM");
         assert_eq!(placement(0x5000_0000), "PSRAM");
+    }
+
+    #[test]
+    fn wrapped_vendor_boundary_is_not_a_reachable_state_owner() {
+        let calls = BTreeMap::from([
+            (
+                "wDev_ProcessRxSucData".to_owned(),
+                BTreeSet::from(["esp_test_set_rx_error_occurs".to_owned()]),
+            ),
+            (
+                "esp_test_set_rx_error_occurs".to_owned(),
+                BTreeSet::from(["vendor_body_child".to_owned()]),
+            ),
+        ]);
+
+        let reachable = reachable_vendor_functions(&calls);
+        assert!(reachable.contains("wDev_ProcessRxSucData"));
+        assert!(!reachable.contains("esp_test_set_rx_error_occurs"));
+        assert!(!reachable.contains("vendor_body_child"));
     }
 }

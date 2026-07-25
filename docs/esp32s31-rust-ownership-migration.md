@@ -138,14 +138,14 @@ each slice can remove:
    and configuration ownership before attempting one monolithic replacement.
 2. `TxRxCxt` and `pTxRx`: isolate descriptor queues, completion state, and
    hardware ring ownership.
-3. `wDevCtrl`: separate RX/TX interrupt-visible fields from diagnostics and
-   optional modes. The strict runtime currently reaches only the immutable
-   ACK-SNR encoding offset and an optional RX test counter; this is the active
-   slice.
-4. `phy_param`: recover the channel/rate/calibration subset used by the
+3. `phy_param`: recover the channel/rate/calibration subset used by the
    qualified profile, keeping calibration and coexistence fields explicit.
-5. Replace channel-manager cold init so `gChmCxt` can be removed from the
+4. Replace channel-manager cold init so `gChmCxt` can be removed from the
    image, not merely from runtime reachability.
+
+The strict-runtime part of `wDevCtrl` is complete. Its remaining linked
+vendor body is cold/diagnostic debt and is no longer reachable from a strict
+runtime leaf.
 
 For every slice, record coexistence-related fields even when Wi-Fi-only policy
 does not use them. BT/BLE/802.15.4 support should be able to add a coordinator
@@ -157,7 +157,7 @@ Adopting them before the hardware/state boundaries are stable would combine a
 protocol migration with an ownership migration and make regressions harder to
 localize.
 
-## In-progress slice: `wDevCtrl`
+## Completed strict-runtime slice: `wDevCtrl`
 
 The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
 `0x2e` is `0x60`; archive-wide relocation inspection finds four readers and no
@@ -172,11 +172,28 @@ clamp is deliberately outside the basic AP/STA profile and is documented at
 the adapter. This removes `wDevCtrl` from ordinary TX completion without
 copying the opaque C object into Rust.
 
-The other strict referrer, `esp_test_set_rx_error_occurs`, only increments
+The other former strict referrer, `esp_test_set_rx_error_occurs`, only increments
 external diagnostic counters when test byte `wDevCtrl[0x44]` is nonzero. The
 strict profile replaces it with its successful no-op result, consistently
-with the existing optional TX/RX diagnostic wrappers. Final-ELF and hardware
-verification are required before this slice is marked complete.
+with the existing optional TX/RX diagnostic wrappers.
+
+Both public ESP32-S31 names are absolute ROM exports, so the late linker
+fragment binds them directly to uniquely named Rust functions and retains the
+pinned ROM addresses only as `__real_*` aliases. The final ELF proves those
+addresses. The corrected relocation audit stops before the replaced vendor
+bodies and now reports one remaining strict mutable blob object:
+`phy_param` (508 bytes); `wDevCtrl` is present only outside the strict graph.
+
+Hardware verification exercised the Rust rate-completion path under WPA2 STA
+load: scan, association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
+UDP datagrams and four HTTP transfers completed. All 4786 TX credits and 691
+RX credits were returned, no PP publication was rejected, and allocation
+counters did not change after handoff.
+
+The separate `wifi-rust-static-cold-init-hil` memory gate currently reports
+only 14,400 bytes of CPU0 stack against the 16,384-byte minimum. Its strict
+call-graph audit is otherwise clean. This is recorded as static-SRAM budget
+debt; the stack threshold must not be weakened to hide it.
 
 ## In-progress slice: `g_ic`
 
