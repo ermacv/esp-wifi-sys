@@ -687,9 +687,8 @@ pinned `libpp.a` runtime graph:
   `cca << 30` operation and returns zero.
 - `hal_mac_is_txq_valid`, `hal_mac_set_txq_invalid` and
   `hal_mac_txq_disable` access queue control word
-  `0x0100_4d70 - 0x10 * queue`. This unusual low address is not an inferred
-  peripheral base: it is the exact modulo-32-bit result of the vendor
-  `(0x2010_04d7 - queue) << 4` sequence. The first reads bit 30, the second
+  `0x2010_4d70 - 0x10 * queue`. This is the exact result of the vendor
+  `(0x0201_04d7 - queue) << 4` sequence. The first reads bit 30, the second
   clears bit 30, and the third clears bits 31:30.
 - `hal_mac_set_csi_cbw` is an evidenced two-byte `ret`; the pinned S31
   archive ignores its argument and performs no state mutation.
@@ -712,6 +711,17 @@ four-way handshake, obtained `192.168.178.138` by DHCP, and passed gateway
 ping, DNS, TCP and HTTP 200. Static TX ownership balanced at 18/18 and RX at
 15/15; all allocation counters, failures and other-core stalls remained zero.
 `ppTask` was never entered.
+
+A later hardware run exposed and corrected an error in the original address
+translation for the three queue-control leaves. The archive forms
+`0x0201_04d7 - queue` and then shifts the complete value left by four; the
+register is therefore `0x2010_4d70 - 0x10 * queue`. The earlier Rust
+translation accidentally dropped the upper nibble and tried to read
+`0x0100_4d70`. The strict exception handler stopped at
+`wifi_strict_hal_mac_is_txq_valid` with `mtval=0x01004d70`, before silently
+continuing with invalid state. After correction, final-ELF disassembly
+materializes `0x2010_4d70`, and the same post-link path completed without a
+trap.
 
 Two complete `libphy.a[phy_reg.o]` leaves are now Rust-owned as well.
 `phy_set_rx_comp_new` replaces the low byte of `0x2010_702c` and the high byte
@@ -811,11 +821,29 @@ The normal TX-gain path is now Rust-owned as well. The three pinned
 `phy_tx_gain.o` tables are represented as typed aligned halfword arrays.
 Rust calls the absolute-ROM `phy_wifi_get_tx_gain` oracle with the adopted
 calibration profile and stack-owned fixed output arrays, then calls the finite
-`phy_set_tx_gain_mem_new` register leaf directly. This removes
+TX-gain register encoder directly. This removes
 `phy_wifi_set_tx_gain_new` and the cold-published `g_phyFuns+0x24` callback
 from the strict runtime graph. It adds 42 bytes to the explicit PHY state
 (the aligned section grows from 6 to 48 bytes) instead of retaining an opaque
 508-byte owner.
+
+The encoder itself is now Rust-owned too. Its reference is the complete
+`0x130`-byte `libphy.a[phy_tx_gain.o]::phy_set_tx_gain_mem_new` body together
+with the complete ROM bodies `phy_txbbgain_to_index` and
+`phy_write_gain_mem`. The former is a five-value pure mapping; the latter
+writes the three gain words at `0x2010_0848..=0x2010_0850` and then updates
+the index field at `0x2010_0844`. The replacement accepts only the evidenced
+16- or 32-entry bounds, traps null inputs before any dereference, has no
+allocation, wait, indirect call, hidden state, or hardware-dependent exit,
+and is emitted as a `0x170`-byte SRAM leaf with no calls.
+
+The vendor ABI requires one contiguous 192-byte scratch layout rather than
+four unrelated arrays. `TxGainScratch` now makes that contract explicit:
+six seed words at offset 0, eight 32-bit output words at 24, sixteen 64-path
+words at 56, and eighteen 72-path words at 120. Compile-time offset and size
+assertions prevent a Rust layout change from silently changing the oracle
+inputs. This also documents the recovered overlap by which baseband-gain
+indices three and four select halfwords in the 32-bit output region.
 
 JTAG inspection after the qualified DE cold initialization measured
 `phy_param[0x26] == 0`: the optional channel-14 MIC/power mode was disabled.
@@ -851,7 +879,13 @@ The subsequent Rust-owned TX-gain qualification returned all 4786 TX and 691
 RX credits, rejected no PP publication, and measured 26.309 Mbit/s. The final
 channel-14-invariant build repeated the complete workload, returned all 4786
 TX and 691 RX credits, rejected no PP publication, and measured
-28.278 Mbit/s.
+28.278 Mbit/s. After replacing the final TX-gain MMIO leaf and correcting the
+queue-register address, a focused regression again completed passive scan,
+WPA2, DHCP, gateway ping, DNS, TCP and HTTP 200. It returned 19/19 TX and
+17/17 RX owners, reported zero allocation operations and other-core stalls,
+and remained running for a further 30 seconds without a trap or `ppTask`
+entry. The final strict debt is `1 fallback + 9 stateful/unproven + 0
+temporary MMIO`; 10 vendor roots and 23 reachable vendor functions remain.
 
 ## In-progress slice: `g_ic`
 
