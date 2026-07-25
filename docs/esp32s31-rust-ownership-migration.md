@@ -849,8 +849,15 @@ group-CCMP mapper tuple: frame control `0x4208`, rate `12`, layout `0x2000`,
 descriptor flags `0x0000_200b`, priority `7`, security/control word
 `0x0004_0342`, AP peer state `0x83`, and peer flag `0`. The adjacent Rust
 security leaf had already qualified this descriptor and expanded its CCMP
-headroom. The mapper now admits only this complete observed state; the
-rate-control-bit variant and pairwise/QoS data remain separately fail-closed.
+headroom. The mapper initially admitted only this complete observed state;
+pairwise/QoS data remained separately fail-closed.
+
+The Android WPA2 join later emitted the same group-CCMP class from static-slot
+layout `0x2003` with descriptor flags `0x0200_200b`. The additional
+`0x0200_0000` rate-control bit is already a bounded input in the adjacent
+security and completion leaves, so the mapper now admits the two observed
+group descriptor words explicitly. An unrelated `0x0100_0000` bit remains
+rejected.
 
 The first completion of that frame retained the same validated `0x0020:0x0068`
 lengths, `0x2000` layout, `0xc022_0082` buffer equation, and callback bit 12,

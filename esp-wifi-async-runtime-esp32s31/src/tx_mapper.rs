@@ -135,7 +135,11 @@ pub(crate) fn strict_sta_ap_treatment(
     // expanded this exact group-CCMP descriptor before the mapper runs.
     let ap_group_ccmp_data = rate == 12
         && frame_control == 0x4208
-        && state == [0x0000_200b, 7, 0x0004_0342, 0x83, 0];
+        && matches!(state[0], 0x0000_200b | 0x0200_200b)
+        && state[1] == 7
+        && state[2] == 0x0004_0342
+        && state[3] == 0x83
+        && state[4] == 0;
     // Once the associated peer requests RX aggregation, the bounded Rust AP
     // response enters the mapper as a post-association Action frame.
     let ap_addba_response = rate == 11
@@ -408,6 +412,12 @@ mod tests {
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 2],
             ),
             (12, 0x2000, 0x4208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
+            (
+                12,
+                0x2003,
+                0x4208,
+                [0x0200_200b, 7, 0x0004_0342, 0x83, 0],
+            ),
             (11, 0x2732, 0x00d0, [0, 7, 0x0004_0000, 0x2100_0000, 1]),
             (11, 0x2f32, 0x00d0, [0, 7, 0x0004_0000, 0x2100_0000, 2]),
             (
@@ -504,9 +514,9 @@ mod tests {
         assert_eq!(
             strict_sta_ap_treatment(
                 12,
-                0x2000,
+                0x2003,
                 0x4208,
-                [0x0200_200b, 7, 0x0004_0342, 0x83, 0],
+                [0x0100_200b, 7, 0x0004_0342, 0x83, 0],
             ),
             None
         );
