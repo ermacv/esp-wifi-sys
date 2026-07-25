@@ -145,7 +145,7 @@ indirection cell reachable from a strict runtime leaf. The remaining direct
 cold PHY graph reaches two objects (`phy_param` and `g_phyFuns`) totalling 512
 bytes. Other linked mutable blob state totals 22,203 bytes.
 
-Rust-owned strict sections total 311,745 bytes. The largest storage is in the
+Rust-owned strict sections total 311,501 bytes. The largest storage is in the
 RX path: the 59,008-byte runtime ESF pool, 56,320-byte cold ESF pool, and
 54,784-byte WDEV payload pool. These are not assumed redundant merely because
 their capacities are similar; their simultaneous lifetimes and transfer of
@@ -182,7 +182,8 @@ minimal ISR view while moving the cross-context lifetime into safe Rust. The
 new second ownership bitmap costs one native word in the default profile. A
 redundant cumulative data-RX claim counter was removed and is now derived from
 the mutually exclusive admission outcomes, keeping the primary static SRAM
-budget neutral.
+budget from growing. The qualified final ELF is 244 bytes below the preceding
+311,745-byte baseline.
 
 This slice does not claim that the WDEV payload, cold ESF, and runtime ESF pools
 have disjoint lifetimes. It makes that lifetime measurable and enforceable
