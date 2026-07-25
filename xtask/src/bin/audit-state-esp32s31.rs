@@ -688,8 +688,11 @@ const PRIMARY_STATE_BASELINE: StateMetrics = StateMetrics {
     // routes are measured. The Rust-owned TX-PER transition and its validated
     // ABI projection add 320 bytes of internal executable/read-only storage.
     // The 32-KiB aggregate payload arena is in PSRAM and is intentionally
-    // excluded from the internal-SRAM metric.
-    strict_static_bytes: 312_310,
+    // excluded from the internal-SRAM metric. Rust-owned TXOP publication
+    // adds the exact three-byte queue-class pool plus 128 bytes for its two
+    // finite ABI boundaries; the former vendor three-byte global is removed
+    // from the linked mutable-blob inventory.
+    strict_static_bytes: 312_441,
 };
 
 fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {

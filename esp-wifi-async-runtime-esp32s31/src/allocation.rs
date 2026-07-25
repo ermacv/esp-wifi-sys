@@ -323,9 +323,25 @@ const WDEV_FUNCTION_TABLE_SIZE: usize = 1560;
 #[cfg(feature = "rust-static-function-table-storage")]
 const NET80211_FUNCTION_TABLE_SIZE: usize = 332;
 #[cfg(feature = "rust-static-function-table-storage")]
-const WDEV_FUNCTION_TABLE_RETURN_OFFSET: usize = 0x34;
+const WDEV_FUNCTION_TABLE_RETURN_OFFSET: usize =
+    if cfg!(feature = "rust-static-bindings-interpose") {
+        // Replacing the preceding `wdev_data_init` call changes relaxation in
+        // the pinned `wdev_funcs_init` body. The OSI calloc returns at +0x36
+        // in the Rust-published profile and at +0x34 in the vendor-reference
+        // profile.
+        0x36
+    } else {
+        0x34
+    };
 #[cfg(feature = "rust-static-function-table-storage")]
-const NET80211_FUNCTION_TABLE_RETURN_OFFSET: usize = 0x30;
+const NET80211_FUNCTION_TABLE_RETURN_OFFSET: usize =
+    if cfg!(feature = "rust-static-bindings-interpose") {
+        // The adjacent `net80211_data_ptr_init` replacement similarly moves
+        // the return from the fixed OSI calloc by two bytes.
+        0x32
+    } else {
+        0x30
+    };
 
 #[cfg(feature = "rust-static-function-table-storage")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
