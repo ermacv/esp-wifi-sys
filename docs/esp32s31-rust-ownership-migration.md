@@ -881,6 +881,14 @@ status in addition to the previously qualified retry/rate-control outcomes;
 the complete geometry is still checked before the callback becomes a no-op,
 and an adjacent `0x0105_0348` selector remains rejected.
 
+Sustained AP-to-station TCP then exercised a maximum-MTU retry completion:
+frame control `0x4a88`, lengths `0x0022:0x05ea`, changing static-slot layout
+`0x2c71`, exact buffer equation `0xc183_0604`, descriptor flags
+`0x0000_2109`, callback bit 12, and pairwise hardware status `0x0204_0348`.
+That status is admitted beside the previously measured `0x0214/0x02a4`
+outcomes only after the same bounded geometry checks; `0x0205_0348` remains
+rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

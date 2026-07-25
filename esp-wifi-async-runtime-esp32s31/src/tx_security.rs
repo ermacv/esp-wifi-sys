@@ -122,6 +122,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
             0x0104_0348
                 | 0x0114_0348
                 | 0x01a4_0348
+                | 0x0204_0348
                 | 0x0214_0348
                 | 0x02a4_0348
                 | 0x0414_0348
@@ -1405,6 +1406,8 @@ mod tests {
             (0x4288, 0x0000_3009, 0x01a4_0348),
             (0x4a88, 0x0000_2109, 0x0214_0348),
             (0x4288, 0x0000_3009, 0x0114_0348),
+            // Maximum-MTU retry completion under sustained AP-to-STA TCP.
+            (0x4a88, 0x0000_2109, 0x0204_0348),
             (0x4a88, 0x0000_3109, 0x0214_0348),
             (0x4a88, 0x0000_2109, 0x0414_0348),
             // Observed after a Q10 hardware-timeout recovery under concurrent
@@ -1444,6 +1447,24 @@ mod tests {
             expected.buffer_flags,
             0x0000_3009,
             0x0105_0348,
+        ));
+        assert!(strict_ap_pairwise_power_save_completion(
+            0x4a88,
+            0x0022,
+            0x05ea,
+            0x2c71,
+            0xc183_0604,
+            0x0000_2109,
+            0x0204_0348,
+        ));
+        assert!(!strict_ap_pairwise_power_save_completion(
+            0x4a88,
+            0x0022,
+            0x05ea,
+            0x2c71,
+            0xc183_0604,
+            0x0000_2109,
+            0x0205_0348,
         ));
         for rejected in [
             TxSecurityLayoutInput {
