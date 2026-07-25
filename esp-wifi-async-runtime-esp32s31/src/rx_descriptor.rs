@@ -48,8 +48,7 @@ pub(crate) fn decode_rx_metadata_layout(
     let rounded_sublength = round_up_four(sublength)?;
     let mut payload_offset = RX_METADATA_BASE_PAYLOAD_OFFSET.checked_add(rounded_sublength)?;
 
-    let extra_length =
-        usize::from(metadata[0x26]) | (usize::from(metadata[0x27] & 0x03) << 8);
+    let extra_length = usize::from(metadata[0x26]) | (usize::from(metadata[0x27] & 0x03) << 8);
     let has_extra_field =
         extended_metadata_enabled && (metadata[0x27] & 0x04 != 0 || extra_length != 0);
     if has_extra_field {
@@ -62,6 +61,27 @@ pub(crate) fn decode_rx_metadata_layout(
         has_sublength,
         has_extra_field,
     })
+}
+
+/// Recover the second argument passed by the pinned
+/// `wDev_ProcessRxSucData` body to `wDev_IndicateFrame`.
+///
+/// The value is normally zero. A signed-negative metadata mode forces one;
+/// mode `0b01` in the high two bits selects bit 27 of the following word.
+/// Keeping this bit decode separate from the pointer-owning WDEV boundary
+/// makes all three branches host-testable.
+pub(crate) fn rx_indicate_aggregate_flag(metadata: &[u8]) -> Option<u32> {
+    if metadata.len() < 8 {
+        return None;
+    }
+    let mode = metadata[1];
+    if (mode as i8) < 0 {
+        return Some(1);
+    }
+    if mode & 0xc0 != 0x40 {
+        return Some(0);
+    }
+    Some((u32::from_le_bytes(metadata[4..8].try_into().ok()?) >> 27) & 1)
 }
 
 /// Reproduce the pinned S31 RX recycle descriptor transformation.
@@ -120,6 +140,7 @@ mod tests {
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout,
         descriptor_buffer_length, recycled_descriptor_word, restore_received_packet_buffer_view,
+        rx_indicate_aggregate_flag,
     };
 
     #[test]
@@ -230,5 +251,22 @@ mod tests {
     #[test]
     fn rx_metadata_layout_rejects_a_truncated_prefix() {
         assert_eq!(decode_rx_metadata_layout(&[0_u8; 0x2b], true), None);
+    }
+
+    #[test]
+    fn indicate_aggregate_flag_matches_all_pinned_branches() {
+        assert_eq!(rx_indicate_aggregate_flag(&[0; 7]), None);
+
+        let mut metadata = [0_u8; 8];
+        assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(0));
+
+        metadata[1] = 0x80;
+        assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(1));
+
+        metadata[1] = 0x40;
+        metadata[7] = 0x08;
+        assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(1));
+        metadata[7] = 0;
+        assert_eq!(rx_indicate_aggregate_flag(&metadata), Some(0));
     }
 }

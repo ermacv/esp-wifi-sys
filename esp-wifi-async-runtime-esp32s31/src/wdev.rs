@@ -11,7 +11,7 @@ static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 use crate::{
     rx_descriptor::{
         RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout, descriptor_buffer_length,
-        recycled_descriptor_word,
+        recycled_descriptor_word, rx_indicate_aggregate_flag,
     },
     timer::RawOsiTimer,
 };
@@ -182,6 +182,8 @@ struct RxMetadataProbe {
     route_other: AtomicUsize,
     frame_class_bitmap: AtomicUsize,
     aggregate_flag_bitmap: AtomicUsize,
+    rust_data_routes: AtomicUsize,
+    vendor_fallbacks: AtomicUsize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -206,6 +208,8 @@ impl RxMetadataProbe {
             route_other: AtomicUsize::new(0),
             frame_class_bitmap: AtomicUsize::new(0),
             aggregate_flag_bitmap: AtomicUsize::new(0),
+            rust_data_routes: AtomicUsize::new(0),
+            vendor_fallbacks: AtomicUsize::new(0),
         }
     }
 }
@@ -231,6 +235,8 @@ pub struct WdevRxMetadataSnapshot {
     pub route_other: usize,
     pub frame_class_bitmap: usize,
     pub aggregate_flag_bitmap: usize,
+    pub rust_data_routes: usize,
+    pub vendor_fallbacks: usize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -343,6 +349,13 @@ unsafe extern "C" {
     #[link_name = "wDev_ProcessRxSucData"]
     fn vendor_process_rx_success_data(descriptor: *mut u8, subframe_count: u32);
     fn __real_wDev_ProcessRxSucData(descriptor: *mut u8, subframe_count: u32);
+    fn wDev_IndicateFrame(
+        copy_mode: u32,
+        aggregate_flag: u32,
+        tail: *mut u8,
+        count: u32,
+        timestamp: u32,
+    );
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -488,9 +501,7 @@ unsafe fn publish_rx_recycle_chain(
     // yet and eventually corrupts the descriptor list under sustained load.
     state.reload_active = true;
     state.reload_tail = tail;
-    RX_RECYCLE_PROBE
-        .reload_active
-        .store(1, Ordering::Release);
+    RX_RECYCLE_PROBE.reload_active.store(1, Ordering::Release);
     hal_mac_rx_set_dscr_reload();
     crate::critical::strict_wifi_int_restore(interrupt_state);
     Ok(true)
@@ -577,17 +588,13 @@ unsafe fn complete_rx_reload(state: &mut RxRecycleState) {
         .write_unaligned(reload_tail);
     crate::critical::strict_wifi_int_restore(interrupt_state);
     state.reload_active = false;
-    RX_RECYCLE_PROBE
-        .reload_active
-        .store(0, Ordering::Release);
+    RX_RECYCLE_PROBE.reload_active.store(0, Ordering::Release);
     state.reload_tail = ptr::null_mut();
     let pending_head = state.pending_head;
     let pending_tail = state.pending_tail;
     state.pending_head = ptr::null_mut();
     state.pending_tail = ptr::null_mut();
-    RX_RECYCLE_PROBE
-        .pending_chains
-        .store(0, Ordering::Release);
+    RX_RECYCLE_PROBE.pending_chains.store(0, Ordering::Release);
     // A reload which completed while the walker exhausted its old chain may
     // have left a proven terminal frontier. Start its separate async enable
     // edge only after the accepted software tail is visible and the ordinary
@@ -682,9 +689,7 @@ unsafe fn begin_terminal_rx_restart(state: &mut RxRecycleState, head: *mut u8) {
     hal_mac_rx_set_base(head);
     state.reload_active = true;
     state.terminal_restart_active = true;
-    RX_RECYCLE_PROBE
-        .reload_active
-        .store(1, Ordering::Release);
+    RX_RECYCLE_PROBE.reload_active.store(1, Ordering::Release);
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -694,17 +699,13 @@ unsafe fn finish_terminal_rx_restart(state: &mut RxRecycleState) {
     RX_RECYCLE_PROBE.completions.fetch_add(1, Ordering::Relaxed);
     state.terminal_restart_active = false;
     state.reload_active = false;
-    RX_RECYCLE_PROBE
-        .reload_active
-        .store(0, Ordering::Release);
+    RX_RECYCLE_PROBE.reload_active.store(0, Ordering::Release);
 
     let pending_head = state.pending_head;
     let pending_tail = state.pending_tail;
     state.pending_head = ptr::null_mut();
     state.pending_tail = ptr::null_mut();
-    RX_RECYCLE_PROBE
-        .pending_chains
-        .store(0, Ordering::Release);
+    RX_RECYCLE_PROBE.pending_chains.store(0, Ordering::Release);
     if !pending_head.is_null() {
         if let Err(error) = publish_or_defer_rx_recycle_chain(state, pending_head, pending_tail) {
             fail_rx_recycle(state, error);
@@ -803,29 +804,26 @@ impl CompletedRxUnit {
     }
 }
 
-/// Observe the exact metadata layout at the remaining vendor aggregate
-/// boundary, then delegate without changing protocol behavior.
+/// Decode the exact metadata layout at the remaining vendor aggregate
+/// boundary and own the qualified common STA data route in Rust.
 ///
-/// This is the first vertical slice of `wDev_ProcessRxSucData`: its
-/// `get_sublen_offset` pointer arithmetic is now expressed as safe Rust and
-/// measured in fixed SRAM. Normal/error routing still enters the pinned ROM
-/// body until the corresponding state transitions are ported.
+/// The qualified route is deliberately narrow: successful base-layout STA
+/// data under the strict ordinary AP/STA mode. It reproduces the pinned
+/// `wDevCtrl` publications and calls the existing finite
+/// `wDev_IndicateFrame` leaf. Management, control, optional metadata, error,
+/// promiscuous and currently unclassified routes retain an explicit ROM
+/// fallback until their individual state transitions are ported.
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
 #[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
-pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
-    tail: *mut u8,
-    count: u32,
-) {
+pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8, count: u32) {
     if !crate::critical::strict_wifi_hart_armed() {
         __real_wDev_ProcessRxSucData(tail, count);
         return;
     }
 
     RX_METADATA_PROBE.calls.fetch_add(1, Ordering::Relaxed);
-    let head = ptr::addr_of!(wDevCtrl)
-        .cast::<*mut u8>()
-        .read_unaligned();
+    let head = ptr::addr_of!(wDevCtrl).cast::<*mut u8>().read_unaligned();
     if head.is_null() {
         RX_METADATA_PROBE
             .rejected_layout
@@ -849,10 +847,9 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
 
     let mut prefix = [0_u8; RX_METADATA_PREFIX_BYTES];
     ptr::copy_nonoverlapping(metadata, prefix.as_mut_ptr(), prefix.len());
-    let extended_metadata_enabled =
-        WIFI_MAC_RX_METADATA_CONTROL_REGISTER.read_volatile()
-            & WIFI_MAC_RX_EXTENDED_METADATA_BIT
-            != 0;
+    let extended_metadata_enabled = WIFI_MAC_RX_METADATA_CONTROL_REGISTER.read_volatile()
+        & WIFI_MAC_RX_EXTENDED_METADATA_BIT
+        != 0;
     let Some(layout) = decode_rx_metadata_layout(&prefix, extended_metadata_enabled) else {
         RX_METADATA_PROBE
             .rejected_layout
@@ -910,15 +907,60 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
             Ordering::Relaxed,
         );
     }
-    let aggregate_flag = if prefix[1] as i8 >= 0 && prefix[1] & 0xc0 == 0x40 {
-        (u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]) >> 27 & 1) as usize
-    } else {
-        1
-    };
+    let aggregate_flag = rx_indicate_aggregate_flag(&prefix).unwrap_or(0) as usize;
     RX_METADATA_PROBE
         .aggregate_flag_bitmap
         .fetch_or(1 << aggregate_flag, Ordering::Relaxed);
 
+    let status = metadata.add(status_offset).read();
+    let frame_offset = layout.payload_offset + 8;
+    let control = ptr::addr_of_mut!(wDevCtrl);
+    let strict_sta_data_route = status == 0
+        && !layout.has_sublength
+        && !layout.has_extra_field
+        && layout.payload_offset == 0x38
+        && prefix[3] & 0x70 == 0x10
+        && frame_offset + 2 <= descriptor_length
+        && metadata.add(frame_offset).cast::<u16>().read_unaligned() & 0x0f == 0x08
+        && control.add(0x30).read() == 0
+        && control.add(0x46).read() == 0
+        && ptr::addr_of!(g_wdev_csi_rx).read() == 0
+        && crate::net80211_state::station_interface().is_some();
+    if strict_sta_data_route {
+        // Pinned prelude stores the current RX rate/channel fields into the
+        // metadata envelope before publishing the frame pointer.
+        metadata.add(0x1c).write(control.add(0x2c).read());
+        let metadata_flags = metadata.add(0x1d).read();
+        metadata
+            .add(0x1d)
+            .write((metadata_flags & 0xf0) | (control.add(0x2d).read() & 0x0f));
+        control.add(0x44).write(status);
+        control
+            .add(0x45)
+            .write(metadata.add(layout.payload_offset + 5).read());
+        let frame = metadata.add(frame_offset);
+        control.add(0x40).cast::<*mut u8>().write_unaligned(frame);
+
+        let frame_control = frame.cast::<u16>().read_unaligned();
+        // With the strict real-chip OSI leaf, ordinary data uses copy_mode 0;
+        // QoS-null data retains the vendor's special value 1. Fragmented
+        // frames always clear it at the common post-classification join.
+        let mut copy_mode = u32::from(frame_control & 0x70 == 0x40);
+        if frame.add(1).read() & 0x04 != 0 {
+            copy_mode = 0;
+        }
+        let timestamp =
+            u32::from_le_bytes([prefix[0x0c], prefix[0x0d], prefix[0x0e], prefix[0x0f]]);
+        RX_METADATA_PROBE
+            .rust_data_routes
+            .fetch_add(1, Ordering::Relaxed);
+        wDev_IndicateFrame(copy_mode, aggregate_flag as u32, tail, count, timestamp);
+        return;
+    }
+
+    RX_METADATA_PROBE
+        .vendor_fallbacks
+        .fetch_add(1, Ordering::Relaxed);
     __real_wDev_ProcessRxSucData(tail, count);
 }
 
@@ -1001,9 +1043,7 @@ pub fn rx_recycle_snapshot() -> WdevRxRecycleSnapshot {
         deferred: RX_RECYCLE_PROBE.deferred.load(Ordering::Acquire),
         timers_armed: RX_RECYCLE_PROBE.timers_armed.load(Ordering::Acquire),
         completions: RX_RECYCLE_PROBE.completions.load(Ordering::Acquire),
-        terminal_restarts: RX_RECYCLE_PROBE
-            .terminal_restarts
-            .load(Ordering::Acquire),
+        terminal_restarts: RX_RECYCLE_PROBE.terminal_restarts.load(Ordering::Acquire),
         reload_active: RX_RECYCLE_PROBE.reload_active.load(Ordering::Acquire) != 0,
         pending_chains: RX_RECYCLE_PROBE.pending_chains.load(Ordering::Acquire),
         software_head: software_head as usize,
@@ -1362,9 +1402,7 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         sublength_and_extra: RX_METADATA_PROBE
             .sublength_and_extra
             .load(Ordering::Acquire),
-        max_payload_offset: RX_METADATA_PROBE
-            .max_payload_offset
-            .load(Ordering::Acquire),
+        max_payload_offset: RX_METADATA_PROBE.max_payload_offset.load(Ordering::Acquire),
         route_sta: RX_METADATA_PROBE.route_sta.load(Ordering::Acquire),
         route_ap: RX_METADATA_PROBE.route_ap.load(Ordering::Acquire),
         route_nan: RX_METADATA_PROBE.route_nan.load(Ordering::Acquire),
@@ -1373,6 +1411,8 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         aggregate_flag_bitmap: RX_METADATA_PROBE
             .aggregate_flag_bitmap
             .load(Ordering::Acquire),
+        rust_data_routes: RX_METADATA_PROBE.rust_data_routes.load(Ordering::Acquire),
+        vendor_fallbacks: RX_METADATA_PROBE.vendor_fallbacks.load(Ordering::Acquire),
     }
 }
 
