@@ -10,8 +10,9 @@ use anyhow::{bail, Context, Result};
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
 use strict_policy::{
-    REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
-    STRICT_REFERENCE_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
+    REQUIRED_RUNTIME_ALIASES, ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK,
+    STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
+    STRICT_REFERENCE_ROOTS, TEMPORARY_EVIDENCED_MMIO_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
 };
 
 // Exact store pairs in the pinned net80211_data_ptr_init (first 12) and
@@ -286,6 +287,27 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
     pushln(
         &mut report,
         &format!("- strict vendor roots: {}", ROOTS.len()),
+    );
+    pushln(
+        &mut report,
+        &format!(
+            "- Rust boundaries retaining vendor fallback: {}",
+            RUST_BOUNDARIES_WITH_VENDOR_FALLBACK.len()
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
+            "- stateful or not-yet-proven runtime roots: {}",
+            STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS.len()
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
+            "- temporary evidenced MMIO-only roots: {}",
+            TEMPORARY_EVIDENCED_MMIO_ROOTS.len()
+        ),
     );
     pushln(
         &mut report,
@@ -1196,7 +1218,8 @@ mod tests {
         definition_name, enforce_primary_state_baseline, linked_code_referrers, local_data_aliases,
         parse_archive_relocations, parse_archive_symbol, parse_posix_symbols, parse_sections,
         placement, reachable_vendor_functions, ArchiveInventory, StateMetrics, Symbol,
-        PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS,
+        PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS, ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK,
+        STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS, TEMPORARY_EVIDENCED_MMIO_ROOTS,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1213,6 +1236,23 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(cells.len(), ROM_ABI_BACKINGS.len());
         assert_eq!(backings.len(), ROM_ABI_BACKINGS.len());
+    }
+
+    #[test]
+    fn ownership_debt_classes_partition_every_runtime_root() {
+        let roots = ROOTS.iter().copied().collect::<BTreeSet<_>>();
+        let classified = RUST_BOUNDARIES_WITH_VENDOR_FALLBACK
+            .iter()
+            .chain(STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS)
+            .chain(TEMPORARY_EVIDENCED_MMIO_ROOTS)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let classified_count = RUST_BOUNDARIES_WITH_VENDOR_FALLBACK.len()
+            + STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS.len()
+            + TEMPORARY_EVIDENCED_MMIO_ROOTS.len();
+
+        assert_eq!(classified_count, classified.len(), "debt classes overlap");
+        assert_eq!(classified, roots, "every runtime root needs a contract");
     }
 
     #[test]

@@ -228,7 +228,6 @@ unsafe extern "C" {
     fn esf_buf_recycle(frame: *mut c_void);
     #[link_name = "rcUpdateTxDone"]
     fn vendor_rc_update_tx_done(rate_control: *mut c_void, descriptor: *mut c_void);
-    fn rcUpdateAckSnr(rate_control: *mut c_void, ack_snr: i32);
     fn rcTxUpdatePer(rate_control: *mut c_void, retries: u32);
     fn lmacReleaseTxopQueue(queue: u8);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
@@ -679,14 +678,63 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
     )
 }
 
+/// Pure two-byte ACK-SNR filter recovered from `libpp.a[trc.o]`.
+///
+/// Byte zero is the previous signed sample and byte one is the smoothed
+/// sample. `0x7f` is the vendor "not measured" sentinel. Keeping this
+/// transform safe and value-based is intentional: the radio owner decides
+/// which record is current, while the target adapter below only copies the
+/// two bytes across the temporary C ABI boundary.
+fn update_ack_snr_filter(mut state: [i8; 2], sample: i32) -> [i8; 2] {
+    const NOT_MEASURED: i8 = 0x7f;
+
+    if sample == i32::from(NOT_MEASURED) {
+        return state;
+    }
+
+    let midpoint = if state[0] == NOT_MEASURED {
+        0
+    } else {
+        (i32::from(state[0]) + sample) >> 1
+    };
+    let previous_smoothed = state[1];
+    state[0] = sample as u8 as i8;
+    state[1] = if previous_smoothed == NOT_MEASURED {
+        midpoint as u8 as i8
+    } else {
+        ((i32::from(previous_smoothed) * 3 + midpoint) / 4) as u8 as i8
+    };
+    state
+}
+
+/// Temporary C/ROM ABI adapter for the now Rust-owned ACK-SNR transform.
+///
+/// The caller must provide unique writable access to the first two bytes of a
+/// live rate-control record. No pointer escapes this function and the safe
+/// filter has no access to MMIO, blob globals, or ROM state.
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_rc_update_ack_snr(
+    rate_control: *mut c_void,
+    ack_snr: i32,
+) {
+    let rate_control = rate_control.cast::<i8>();
+    if rate_control.is_null() {
+        return;
+    }
+
+    let state = [rate_control.read(), rate_control.add(1).read()];
+    let updated = update_ack_snr_filter(state, ack_snr);
+    rate_control.write(updated[0]);
+    rate_control.add(1).write(updated[1]);
+}
+
 /// Exact finite non-mesh port of the pinned `rcUpdateTxDone` boundary.
 ///
-/// Only two stateless vendor leaves remain below this adapter:
-/// `rcUpdateAckSnr` updates fields within the caller-owned rate-control record
-/// and `rcTxUpdatePer` updates its finite retry counters/schedule. The hidden
-/// `wDevCtrl[0x2e]` read is replaced by its immutable archive initializer.
-/// Mesh-specific retry clamping is intentionally absent from the strict
-/// basic AP/STA profile.
+/// The ACK-SNR update is now a safe Rust value transform. `rcTxUpdatePer`
+/// remains the sole vendor leaf below this adapter: it mutates finite retry
+/// counters and can lower the current schedule. The hidden `wDevCtrl[0x2e]`
+/// read is replaced by its immutable archive initializer. Mesh-specific retry
+/// clamping is intentionally absent from the strict basic AP/STA profile.
 #[no_mangle]
 pub unsafe extern "C" fn wifi_strict_rc_update_tx_done(
     rate_control: *mut c_void,
@@ -716,7 +764,7 @@ pub unsafe extern "C" fn wifi_strict_rc_update_tx_done(
             if rate_control.add(0x1b).read() & 0x04 == 0 {
                 let encoded = descriptor.add(0x0d).read();
                 let ack_snr = encoded.wrapping_add(ACK_SNR_ENCODING_OFFSET) as i8;
-                rcUpdateAckSnr(rate_control.cast(), i32::from(ack_snr));
+                wifi_strict_rc_update_ack_snr(rate_control.cast(), i32::from(ack_snr));
             }
             u32::from(descriptor.add(0x05).read())
         }
@@ -2026,9 +2074,18 @@ mod tests {
     use super::ieee80211_data_header_len;
     use super::{
         beacon_dtim, is_ap_addba_response_completion_layout, is_ap_deauthentication_completion,
-        supported_callback_index, StrictTxDoneRegistry, CALLBACK_ADDBA_RESPONSE,
-        CALLBACK_AP_POWER_SAVE, CALLBACK_MGMT, FRAME_NEXT_OFFSET,
+        supported_callback_index, update_ack_snr_filter, StrictTxDoneRegistry,
+        CALLBACK_ADDBA_RESPONSE, CALLBACK_AP_POWER_SAVE, CALLBACK_MGMT, FRAME_NEXT_OFFSET,
     };
+
+    #[test]
+    fn ack_snr_filter_is_safe_and_matches_the_pinned_two_byte_transform() {
+        assert_eq!(update_ack_snr_filter([12, -4], 0x7f), [12, -4]);
+        assert_eq!(update_ack_snr_filter([0x7f, 0x7f], -20), [-20, 0]);
+        assert_eq!(update_ack_snr_filter([-20, 0], -10), [-10, -3]);
+        assert_eq!(update_ack_snr_filter([-10, -3], -11), [-11, -5]);
+        assert_eq!(update_ack_snr_filter([20, 4], 10), [10, 6]);
+    }
 
     #[test]
     fn bounded_beacon_parser_owns_dtim_count_and_period() {

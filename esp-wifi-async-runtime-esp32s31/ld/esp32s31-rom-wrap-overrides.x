@@ -124,6 +124,16 @@ rcUpdateTxDone = wifi_strict_rc_update_tx_done;
 ASSERT(rcUpdateTxDone == wifi_strict_rc_update_tx_done,
        "ESP32-S31 rcUpdateTxDone Rust boundary is inactive");
 
+/* The ROM rcUpdateAckSnr leaf mutates two bytes in a caller-owned rate
+ * record. It is therefore not an admissible pure/MMIO-only ROM dependency.
+ * Route all callers through the safe Rust value transform and retain the ROM
+ * address only as a differential oracle. */
+__real_rcUpdateAckSnr = 0x2f801064;
+EXTERN(wifi_strict_rc_update_ack_snr);
+rcUpdateAckSnr = wifi_strict_rc_update_ack_snr;
+ASSERT(rcUpdateAckSnr == wifi_strict_rc_update_ack_snr,
+       "ESP32-S31 rcUpdateAckSnr Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 

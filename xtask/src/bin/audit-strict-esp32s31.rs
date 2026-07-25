@@ -10,8 +10,9 @@ use anyhow::{bail, Context, Result};
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
 use strict_policy::{
-    REQUIRED_RUNTIME_ALIASES, ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
-    STRICT_REFERENCE_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
+    REQUIRED_RUNTIME_ALIASES, ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK,
+    STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS, STATIC_BINDING_ROOTS, STATIC_PM_INIT_ROOTS,
+    STRICT_REFERENCE_ROOTS, TEMPORARY_EVIDENCED_MMIO_ROOTS, WRAPPED_VENDOR_BOUNDARIES,
 };
 
 const REPLACED_VENDOR_ROOTS: &[&str] = &[
@@ -39,6 +40,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "ppRxProtoProc",
     "rc_get_trc",
     "rcUpdateRxDone",
+    "rcUpdateAckSnr",
     "ieee80211_output_process",
     "ppTxPkt",
     "ppMapTxQueue",
@@ -1198,6 +1200,12 @@ fn print_report(
     println!(
         "- replaced vendor roots: `{}`",
         REPLACED_VENDOR_ROOTS.join("`, `")
+    );
+    println!(
+        "- ownership debt: {} fallback / {} stateful-or-unproven / {} temporary MMIO",
+        RUST_BOUNDARIES_WITH_VENDOR_FALLBACK.len(),
+        STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS.len(),
+        TEMPORARY_EVIDENCED_MMIO_ROOTS.len()
     );
     println!("- discovered functions: {}", graph.len());
     println!("- violations: {}", violations.len());

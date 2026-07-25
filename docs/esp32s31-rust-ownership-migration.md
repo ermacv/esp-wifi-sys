@@ -27,6 +27,43 @@ their meaning is demonstrated. An SVD/PAC description is useful after stable
 register groups have been recovered; it is not a prerequisite for moving
 state out of the blob.
 
+## Completion contract
+
+The primary goal is ownership, not merely link-size reduction. The migration
+is complete only when all radio state controlled by this driver is reachable
+through an explicit Rust composition root and no C or ROM function can retain
+or mutate that state implicitly.
+
+The final profile therefore requires all of the following:
+
+1. No mutable radio backing, node, queue, timer, rate-control, key, channel,
+   PHY, MAC, or power-management object is owned by a vendor archive, a ROM ABI
+   pointer cell, or an untyped C global.
+2. Protocol and runtime code do not obtain Rust-owned state through an
+   `unsafe` C call. Safe Rust owns the state machine and its storage; the
+   target adapter may use a narrowly scoped `unsafe` block only to validate an
+   interrupt payload, cross a temporary ABI, or access MMIO.
+3. No vendor archive contributes executable radio functionality to the final
+   ELF. Removing the last archive reference is a consequence of transferring
+   ownership, not a substitute for it.
+4. A temporary ROM call is admitted only after evidence classifies its whole
+   reachable behavior as either a pure input-to-output transform or a finite
+   register operation. A ROM function which dereferences caller state,
+   consults a callback table, follows a pointer from a ROM ABI cell, or has
+   unknown side effects is ownership debt and must be rewritten.
+5. Pure and register-only ROM leaves are temporary differential oracles. They
+   remain on the removal ledger and ultimately move to safe Rust or the
+   ESP32-S31 radio HAL/PAC.
+6. Interrupts do not own protocol state. They acknowledge hardware and
+   transfer bounded data or readiness into Rust-owned channels; the single
+   radio owner performs all state transitions.
+
+Consequently, `0 mutable blob globals reachable from strict roots` is a useful
+regression gate but not a completion claim. The separate completion counters
+are: remaining vendor runtime roots, cold vendor initializers, ROM ABI
+bindings, unproven/stateful ROM calls, and temporary pure/MMIO ROM calls. All
+five must eventually reach zero.
+
 ## Migration rules
 
 Each migrated object follows one vertical slice:
@@ -435,6 +472,9 @@ on mutable blob bytes:
    than this list transition.
    Move the 22 `g_per_conn_trc` publications and the three route bitmaps out of
    the ROM ABI table before claiming complete rate-control ownership.
+   `rcUpdateAckSnr` is no longer part of this debt: its complete two-byte
+   transform is Rust-owned. `rcTxUpdatePer`, its schedule-lowering branch, and
+   the published rate-control records still cross the vendor/ROM boundary.
 2. Use the separate Radio/Network ownership counts and existing high-water
    marks to overlay or remove only storage whose
    lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
@@ -463,6 +503,31 @@ Public `ieee80211` and supplicant crates should remain behind adapters for now.
 Adopting them before the hardware/state boundaries are stable would combine a
 protocol migration with an ownership migration and make regressions harder to
 localize.
+
+## Completed runtime slice: ACK-SNR ownership
+
+The pinned `libpp.a[trc.o]::rcUpdateAckSnr` body has no MMIO or global reads,
+but it mutates the first two bytes of a caller-owned rate-control record
+through an untyped pointer. Under the completion contract this is not an
+admissible ROM leaf: Rust owns the record, so a ROM function must not mutate
+it.
+
+The recovered transform is now a safe value function over `[i8; 2]`:
+
+- `0x7f` input leaves the filter unchanged;
+- byte zero stores the latest signed sample;
+- the first midpoint is zero when the previous sample is `0x7f`, otherwise it
+  is the arithmetic half of previous plus current;
+- byte one stores that midpoint when uninitialized, then applies the exact
+  `(3 * old + midpoint) / 4` signed filter.
+
+Host tests cover sentinel, initialization, negative rounding, steady-state and
+positive samples. The exported `rcUpdateAckSnr` name is linked to a narrow Rust
+ABI adapter which copies exactly two bytes into and out of the safe transform.
+The original ROM address remains only as `__real_rcUpdateAckSnr` for
+differential inspection. `rcUpdateTxDone` calls the Rust adapter directly, so
+the strict runtime root has been removed without moving record ownership into
+the adapter.
 
 ## Completed strict-runtime slice: `wDevCtrl`
 

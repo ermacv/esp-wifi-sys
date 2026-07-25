@@ -10,7 +10,6 @@ pub const ROOTS: &[&str] = &[
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
     "lmacReleaseTxopQueue",
-    "rcUpdateAckSnr",
     "rcTxUpdatePer",
     "hal_get_tsf_time",
     "ic_set_current_channel",
@@ -26,6 +25,42 @@ pub const ROOTS: &[&str] = &[
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
+];
+
+// Ownership-completion classification for every current runtime root.
+//
+// This is deliberately more conservative than the no-wait call graph.
+// "Evidenced MMIO" means the pinned complete body only accesses registers and
+// scalar arguments; it is still temporary and must eventually move to the
+// radio HAL. Everything not proved to that standard remains stateful/unproven.
+// Keep these three sets a disjoint, exhaustive partition of ROOTS.
+pub const RUST_BOUNDARIES_WITH_VENDOR_FALLBACK: &[&str] = &["wDev_ProcessRxSucData"];
+
+pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
+    "lmacReleaseTxopQueue",
+    "rcTxUpdatePer",
+    "ic_set_current_channel",
+    "ic_mac_init",
+    "ic_set_mac",
+    "ic_set_rx_policy",
+    "ic_set_rx_policy_ubssid_check",
+    "ieee80211_getmgtframe",
+    "ic_del_key",
+    "ic_set_key",
+    "wDev_Insert_KeyEntry",
+];
+
+pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[
+    "hal_mac_rx_get_last_dscr",
+    "hal_mac_tx_set_cca",
+    "hal_mac_is_txq_valid",
+    "hal_mac_set_txq_invalid",
+    "hal_mac_txq_disable",
+    "hal_get_tsf_time",
+    "phy_set_tx_gain_mem_new",
+    "phy_set_rx_comp_new",
+    "phy_dc_mem_clr",
+    "hal_mac_set_csi_cbw",
 ];
 
 // The strict Rust PHY sequence calls several absolute ROM leaves whose bytes
@@ -131,6 +166,10 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wifi_strict_esp_test_set_rx_error_occurs",
     ),
     ("rcUpdateTxDone", "wifi_strict_rc_update_tx_done"),
+    (
+        "rcUpdateAckSnr",
+        "wifi_strict_rc_update_ack_snr",
+    ),
     (
         "ieee80211_post_hmac_tx",
         "wifi_strict_ieee80211_post_hmac_tx",
