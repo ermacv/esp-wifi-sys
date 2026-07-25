@@ -249,11 +249,18 @@ fallible event entry; `RadioFuture` serves it round-robin with vendor and
 internal events. Consequently no strict-runtime path uses `pTxRx`,
 `lmacRxDone`, or `ppDequeueRxq_Locked`. `pTxRx` remains only a cold-init and
 one-shot adoption source until the corresponding initialization is ported.
-The registered Embassy task waker is still a documented interrupt-boundary
-gap: live JTAG inspection found its vtable/wake leaf in flash, and the leaf
-uses the shared run-queue CAS retry. A dedicated fixed radio interrupt
-executor is required before claiming a fully SRAM-resident, retry-free wake
-closure.
+The reference strict STA HIL no longer registers an Embassy task waker for
+this owner. It pins the one `RadioOwnerFuture` in SRAM and supplies a custom
+SRAM `RawWaker` whose only action is one `FROM_CPU_INTR2` MMIO write. The
+vtable, clone/wake/drop leaves, software-interrupt entry, task pointer, and
+future storage are all in internal SRAM; the final-image auditor reads the
+vtable bytes and requires those exact targets. This removes the shared
+Embassy transfer-stack CAS retry from the hard RX interrupt closure. The first
+hardware qualification completed WPA2, 4,096 UDP datagrams and four HTTP
+transfers with balanced ownership, no queue rejects and no allocation delta at
+27.477 Mbit/s. An explicit cache-disabled policy for the low-priority async
+software-interrupt bottom half remains open before the complete executor
+boundary is declared final.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.

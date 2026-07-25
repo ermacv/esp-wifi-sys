@@ -808,13 +808,19 @@ with 4,786/4,786 TX, 691/691 RX, 20,591/20,591 PP events, no allocation delta,
 and 19.634 Mbit/s. `pTxRx` is now read only during one-shot adoption; the
 remaining runtime RX vendor leaves are protocol processing and recycle.
 
-The RX ISR closure is not yet fully SRAM-only. A USB-JTAG read of the live
-registered waker found SRAM task data but a flash vtable and
-`embassy_executor::raw::waker::wake` target. That target also contains the
-shared Embassy run-queue CAS retry. It is therefore an explicit next boundary,
-not an accepted exception: the radio runtime needs a dedicated fixed
-single-task interrupt executor/waker in SRAM, so an RX edge can pend that
-executor without dynamic dispatch or shared run-queue contention.
+The strict STA HIL now supplies the dedicated fixed single-task interrupt
+executor/waker. `RadioOwnerFuture` has one static SRAM address and its custom
+`RawWaker` only raises `FROM_CPU_INTR2` with one write plus readback. The
+vtable and all four waker leaves are in SRAM, so the hardware RX callback no
+longer reaches `embassy_executor::raw::waker::wake`, its flash vtable, or its
+shared transfer-stack CAS retry. The final-image audit resolves the four
+vtable words back to the required SRAM symbols instead of accepting an
+unproven indirect call. `FROM_CPU_INTR2` is a low-priority async bottom half.
+Its first hardware stress run completed WPA2, 4,096/4,096 UDP datagrams and
+4/4 HTTP transfers with 4,786/4,786 TX, 694/694 RX, 20,601/20,601 PP events,
+no reject or allocation delta, and 27.477 Mbit/s. An explicit cache-disabled
+deferral rule is still required before treating that bottom half as the final
+executor boundary.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,

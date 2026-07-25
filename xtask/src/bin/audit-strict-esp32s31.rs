@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
@@ -230,6 +230,15 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "wifi_strict_lmac_rx_done",
     "wifi_strict_wake_internal_consumer",
 ];
+const REQUIRED_RADIO_WAKER_SRAM_CODE: &[&str] = &[
+    "wifi_strict_radio_executor_interrupt",
+    "wifi_strict_radio_waker_clone",
+    "wifi_strict_radio_waker_wake",
+    "wifi_strict_radio_waker_wake_by_ref",
+    "wifi_strict_radio_waker_drop",
+];
+const RADIO_WAKER_VTABLE: &str = "WIFI_STRICT_RADIO_WAKER_VTABLE";
+const RADIO_WAKER_SECTION: &str = ".critical.data.wifi_strict.radio_executor";
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",
     "pp_timer_do_process",
@@ -863,6 +872,57 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             Some(_) => {}
         }
     }
+    let has_radio_waker = all_linked_symbols.contains_key(RADIO_WAKER_VTABLE);
+    if has_radio_waker {
+        for required in REQUIRED_RADIO_WAKER_SRAM_CODE {
+            match all_linked_symbols.get(*required) {
+                None => {
+                    violations.insert(Violation::ElfSymbol {
+                        category: "missing strict radio waker code",
+                        symbol: (*required).to_owned(),
+                    });
+                }
+                Some((kind, address)) if !is_internal_sram_code(kind, *address) => {
+                    violations.insert(Violation::ElfSymbol {
+                        category: "strict radio waker outside internal SRAM",
+                        symbol: format!("{required}@0x{address:08x}"),
+                    });
+                }
+                Some(_) => {}
+            }
+        }
+
+        match read_radio_waker_vtable(elf) {
+            Ok(words) => {
+                let expected = [
+                    "wifi_strict_radio_waker_clone",
+                    "wifi_strict_radio_waker_wake",
+                    "wifi_strict_radio_waker_wake_by_ref",
+                    "wifi_strict_radio_waker_drop",
+                ]
+                .map(|symbol| linked_symbol_addresses.get(symbol).copied());
+                if expected.iter().any(Option::is_none)
+                    || words
+                        != expected.map(|address| {
+                            u32::try_from(address.unwrap_or_default()).unwrap_or_default()
+                        })
+                {
+                    violations.insert(Violation::ElfSymbol {
+                        category: "invalid strict radio waker vtable",
+                        symbol: format!(
+                            "{RADIO_WAKER_VTABLE}={words:08x?}, expected={expected:08x?}"
+                        ),
+                    });
+                }
+            }
+            Err(error) => {
+                violations.insert(Violation::ElfSymbol {
+                    category: "unreadable strict radio waker vtable",
+                    symbol: error.to_string(),
+                });
+            }
+        }
+    }
 
     let disassembly = text(checked(
         Command::new("llvm-objdump").arg("-d").arg("-C").arg(elf),
@@ -976,6 +1036,43 @@ fn is_code_symbol_kind(kind: &str) -> bool {
 
 fn is_internal_sram_code(kind: &str, address: u64) -> bool {
     is_code_symbol_kind(kind) && (INTERNAL_SRAM_START..INTERNAL_SRAM_END).contains(&address)
+}
+
+fn read_radio_waker_vtable(elf: &Path) -> Result<[u32; 4]> {
+    let dump = text(checked(
+        Command::new("llvm-readelf")
+            .arg("-x")
+            .arg(RADIO_WAKER_SECTION)
+            .arg(elf),
+    )?)?;
+    let line = dump
+        .lines()
+        .find(|line| {
+            line.split_whitespace()
+                .next()
+                .is_some_and(|field| field.starts_with("0x"))
+        })
+        .context("radio waker section has no data")?;
+    let mut words = [0_u32; 4];
+    let fields = line.split_whitespace().skip(1).take(4).collect::<Vec<_>>();
+    if fields.len() != words.len() {
+        bail!("radio waker vtable is shorter than four words");
+    }
+    for (word, field) in words.iter_mut().zip(fields) {
+        *word = parse_readelf_le_word(field)?;
+    }
+    Ok(words)
+}
+
+fn parse_readelf_le_word(field: &str) -> Result<u32> {
+    if field.len() != 8 || !field.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid llvm-readelf word `{field}`");
+    }
+    let mut bytes = [0_u8; 4];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&field[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(u32::from_le_bytes(bytes))
 }
 
 fn parse_linked_code_locations(symbols: &str) -> Vec<(u64, String)> {
@@ -1150,7 +1247,7 @@ mod tests {
     use super::{
         calls_symbol, definition_name, direct_relocation_target, final_call_owners, indirect_site,
         is_code_symbol_kind, is_internal_sram_code, is_invariant_excluded_indirect_site,
-        is_pinned_bounded_cycle, parse_linked_code_locations, parse_object,
+        is_pinned_bounded_cycle, parse_linked_code_locations, parse_object, parse_readelf_le_word,
         pinned_indirect_site_target,
     };
 
@@ -1171,6 +1268,12 @@ mod tests {
     fn only_unresolved_register_calls_are_indirect() {
         assert!(indirect_site("  18:       jalr a5").is_some());
         assert!(indirect_site("  18:       jalr ra <function+0x4>").is_none());
+    }
+
+    #[test]
+    fn parses_little_endian_readelf_words() {
+        assert_eq!(parse_readelf_le_word("b80d002f").unwrap(), 0x2f00_0db8);
+        assert!(parse_readelf_le_word("not-hex!").is_err());
     }
 
     #[test]

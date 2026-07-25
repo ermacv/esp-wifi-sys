@@ -396,18 +396,26 @@ message. The empty-to-non-empty edge wakes the Rust executor, while
 `RadioFuture` checks RX directly as a third round-robin source beside vendor
 and internal events. Thus a full finite event queue cannot strand an RX
 packet, and a continuously ready RX source cannot starve the other two.
-The SRAM audit pins both the callback and its direct wake leaf. The remaining
-indirect `RawWaker::wake` target is tracked separately and must be replaced
-before the complete interrupt call graph can be claimed as cache-independent.
-USB-JTAG observation of the qualified ELF found the registered waker vtable at
+The earlier USB-JTAG observation found the registered Embassy waker vtable at
 `0x4000bc5c` and its wake target at `0x400b556e`, both in flash; the task data
-is in SRAM at `0x2f06ab00`. Disassembly identifies the target as
-`embassy_executor::raw::waker::wake`: it atomically marks the task runnable,
-pushes it into the shared executor transfer stack with a CAS retry, then calls
-the SRAM `__pender`. Merely relocating this leaf would fix cache residency but
-would not satisfy the strict no-potential-wait rule. The intended replacement
-is a fixed single-radio-task interrupt executor whose SRAM waker only marks
-readiness and pends its dedicated software interrupt, with no shared run queue.
+was in SRAM at `0x2f06ab00`. Disassembly identified the target as
+`embassy_executor::raw::waker::wake`: it atomically marked the task runnable,
+pushed it into the shared executor transfer stack with a CAS retry, then
+called the SRAM `__pender`.
+
+The strict STA HIL now replaces that boundary with a fixed one-owner executor.
+`RadioOwnerFuture` is initialized once in SRAM. Its custom `RawWaker` vtable
+and clone/wake/wake-by-ref/drop leaves are also in SRAM, and wake performs only
+the bounded S31 `FROM_CPU_INTR2` register write and readback. The final-image
+auditor reads the vtable from
+`.critical.data.wifi_strict.radio_executor`, resolves all four entries to
+their exact SRAM symbols, and requires the software-interrupt entry itself in
+SRAM. Consequently the hard RX ISR no longer enters the shared Embassy run
+queue or any CAS retry. The first hardware stress run passed WPA2, 4,096 UDP
+datagrams and four HTTP transfers with balanced TX/RX/PP ownership, no rejects
+or allocation delta, and 27.477 Mbit/s. The remaining executor proof is a
+cache-disabled deferral rule for the low-priority software-interrupt bottom
+half.
 
 The final hardware run with the durable Rust producer/consumer queue completed
 scan, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096/4,096 UDP datagrams and
