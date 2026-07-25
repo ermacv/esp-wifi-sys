@@ -8,7 +8,9 @@
 
 use core::ptr;
 
-const TRC_CONTEXT_SIZE: usize = 0x98;
+use crate::rate_control::{RateControlRecord, RATE_CONTROL_RECORD_SIZE};
+
+const TRC_CONTEXT_SIZE: usize = RATE_CONTROL_RECORD_SIZE;
 const TRC_CONTEXT_COUNT: usize = 3;
 const TRC_TABLE_COUNT: usize = 22;
 const TRC_DEFAULT_INDEX: usize = 19;
@@ -26,14 +28,11 @@ const FINAL_STATE_OFFSET: usize = 0x87;
 const ESP_OK: i32 = 0;
 const ESP_ERR_WIFI_STATE: i32 = 0x3006;
 
-#[repr(C, align(4))]
-struct StaticTrcContext([u8; TRC_CONTEXT_SIZE]);
-
 #[link_section = ".critical.bss.wifi_strict.trc_default_contexts"]
-static mut STATIC_TRC_CONTEXTS: [StaticTrcContext; TRC_CONTEXT_COUNT] = [
-    StaticTrcContext([0; TRC_CONTEXT_SIZE]),
-    StaticTrcContext([0; TRC_CONTEXT_SIZE]),
-    StaticTrcContext([0; TRC_CONTEXT_SIZE]),
+static mut STATIC_TRC_CONTEXTS: [RateControlRecord; TRC_CONTEXT_COUNT] = [
+    RateControlRecord::zeroed(),
+    RateControlRecord::zeroed(),
+    RateControlRecord::zeroed(),
 ];
 
 unsafe extern "C" {
@@ -160,6 +159,21 @@ unsafe fn context(index: usize) -> *mut u8 {
         .add(index * TRC_CONTEXT_SIZE)
 }
 
+/// Return whether a temporary ABI pointer names one of the three
+/// Rust-owned default contexts.
+///
+/// The check only establishes backing-storage provenance. The single radio
+/// owner separately guarantees that a published context is not concurrently
+/// mutated.
+pub(crate) unsafe fn owns_rate_control_record(candidate: *mut u8) -> bool {
+    for index in 0..TRC_CONTEXT_COUNT {
+        if context(index) == candidate {
+            return true;
+        }
+    }
+    false
+}
+
 unsafe fn initialize_context(context: *mut u8, identity: u8) {
     let legacy = ptr::addr_of!(rc11BSchedTbl) as u32;
     let primary = ptr::addr_of!(rc11BSchedTbl).add(0x24) as u32;
@@ -255,10 +269,10 @@ mod tests {
 
     #[test]
     fn default_context_arena_has_exact_vendor_shape() {
-        assert_eq!(size_of::<StaticTrcContext>(), TRC_CONTEXT_SIZE);
-        assert_eq!(align_of::<StaticTrcContext>(), 4);
+        assert_eq!(size_of::<RateControlRecord>(), TRC_CONTEXT_SIZE);
+        assert_eq!(align_of::<RateControlRecord>(), 4);
         assert_eq!(
-            size_of::<[StaticTrcContext; TRC_CONTEXT_COUNT]>(),
+            size_of::<[RateControlRecord; TRC_CONTEXT_COUNT]>(),
             TRC_CONTEXT_SIZE * TRC_CONTEXT_COUNT
         );
     }

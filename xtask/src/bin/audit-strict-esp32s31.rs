@@ -41,6 +41,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "rc_get_trc",
     "rcUpdateRxDone",
     "rcUpdateAckSnr",
+    "rcTxUpdatePer",
     "ieee80211_output_process",
     "ppTxPkt",
     "ppMapTxQueue",

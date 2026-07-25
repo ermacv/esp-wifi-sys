@@ -472,9 +472,13 @@ on mutable blob bytes:
    than this list transition.
    Move the 22 `g_per_conn_trc` publications and the three route bitmaps out of
    the ROM ABI table before claiming complete rate-control ownership.
-   `rcUpdateAckSnr` is no longer part of this debt: its complete two-byte
-   transform is Rust-owned. `rcTxUpdatePer`, its schedule-lowering branch, and
-   the published rate-control records still cross the vendor/ROM boundary.
+   `rcUpdateAckSnr` and `rcTxUpdatePer` are no longer part of this debt: their
+   complete scalar transforms, counter rescaling, schedule-lowering decision,
+   noise-floor conversion and HE beamforming-rate MMIO are Rust-owned.
+   The published rate-control records are now validated Rust storage. The
+   remaining rate-control ownership debt is the initialization of peer
+   records and the immutable contents/pointers of the vendor schedule arenas;
+   migrate those together rather than copying another opaque pointer graph.
 2. Use the separate Radio/Network ownership counts and existing high-water
    marks to overlay or remove only storage whose
    lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
@@ -537,6 +541,48 @@ while mutable blob state reachable from strict leaves remained zero. The
 no-wait/no-heap audit covered 6,407 functions with zero violations. On
 ESP32-S31 hardware an Android client completed WPA2 M1/M3, became authorized,
 and reached the ready AP after the Rust replacement was flashed.
+
+## Completed runtime slice: TX-PER and schedule lowering
+
+The public `rcTxUpdatePer` symbol is now bound to
+`wifi_strict_rc_update_tx_per`. Its ABI adapter accepts only one of the three
+fixed default records or a currently claimed record from the 16-entry
+Rust-owned peer pool. A schedule pointer is read only after its base,
+12-byte alignment and arena bounds have been checked.
+
+The state transition itself is safe Rust over `RateControlState`. It reproduces
+the recovered retry penalty, joint counter rescaling at `0x0200_0000`, the four
+retry-pressure bands, the threshold at seven, and the complete scalar clear
+performed before lowering a schedule. Six host tests cover the boundaries,
+wrapping byte behavior, counter rescaling, legacy fallback and all three HE
+beamforming policy branches.
+
+The exact ESP32-S31 ROM image used for the ROM-only leaf proof is
+`esp32s31_rev0_rom.elf`, SHA-256
+`a52ad7513deb656a910a5740125f1cce2c7941f11ce57213b7b43aea93d5ab87`.
+It places the 0x7e-byte `rcTxUpdatePer` body at `0x2f8375aa` and the
+0x1a-byte `phy_read_hw_noisefloor` body at `0x2f827d72`. The latter is only a
+volatile read of `0x2010708c`, conversion of its low 12-bit signed encoding and
+an arithmetic divide by four, so the runtime now performs that MMIO leaf
+directly. The three writes formerly performed by
+`hal_he_set_bf_report_rate` and four byte-field writes from
+`hal_he_set_ersu_ack_rate` are likewise direct, finite Rust MMIO sequences.
+
+The strict final-ELF audit now reports 21 vendor roots, 34 reachable vendor
+functions, zero mutable blob globals reachable from strict leaves and zero
+violations. Ownership debt is `1 fallback + 10 stateful/unproven + 10 temporary
+MMIO`. Linking all currently admissible schedule arenas retains one additional
+12-byte compatibility object (`BAROFDMSched`), while the Rust transition adds
+320 bytes of internal executable/read-only storage. Both costs are explicit in
+the primary state baseline and are temporary until schedule contents move into
+typed Rust storage.
+
+Hardware qualification used the heap-free primary STA image: passive scan,
+association, WPA2 four-way handshake, DHCP, gateway ping, DNS and HTTP all
+completed. An 8 MiB device-to-host TCP transfer completed at approximately
+20 Mbit/s in the ordinary non-throughput profile. TX ownership balanced at
+5,946/5,946, the 32-credit pool reached its full qualified high-water mark, and
+all invalid/full/contended/credit/peer rejection counters remained zero.
 
 ## Completed strict-runtime slice: `wDevCtrl`
 

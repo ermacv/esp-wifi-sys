@@ -134,6 +134,14 @@ rcUpdateAckSnr = wifi_strict_rc_update_ack_snr;
 ASSERT(rcUpdateAckSnr == wifi_strict_rc_update_ack_snr,
        "ESP32-S31 rcUpdateAckSnr Rust boundary is inactive");
 
+/* TX PER accounting, schedule lowering, and its terminal HE/noise-floor MMIO
+ * are Rust-owned. Keep the original ROM entry only as a differential oracle. */
+__real_rcTxUpdatePer = 0x2f801060;
+EXTERN(wifi_strict_rc_update_tx_per);
+rcTxUpdatePer = wifi_strict_rc_update_tx_per;
+ASSERT(rcTxUpdatePer == wifi_strict_rc_update_tx_per,
+       "ESP32-S31 rcTxUpdatePer Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 

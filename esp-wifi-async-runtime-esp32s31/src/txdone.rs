@@ -10,7 +10,13 @@ use core::sync::atomic::AtomicU8;
 
 use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
-use crate::event::PpEvent;
+use crate::{
+    event::PpEvent,
+    rate_control::{
+        beamforming_report_rate, RateControlState, RateScheduleState, ScheduleSelection,
+        RATE_SCHEDULE_RECORD_SIZE,
+    },
+};
 
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 unsafe extern "C" {
@@ -38,6 +44,26 @@ const DESCRIPTOR_RATE_CONTROL_SKIP_VALUE: u32 = 0x0040_0000;
 // relocation inspection finds readers but no writer. It converts the encoded
 // descriptor ACK-SNR byte into the signed value consumed by rate control.
 const ACK_SNR_ENCODING_OFFSET: u8 = 0x60;
+const RATE_RETRY_PRESSURE_OFFSET: usize = 0x07;
+const RATE_MAXIMUM_SCHEDULE_INDEX_OFFSET: usize = 0x05;
+const RATE_WEIGHTED_RETRIES_OFFSET: usize = 0x2c;
+const RATE_TRANSMISSIONS_OFFSET: usize = 0x30;
+const RATE_LAST_MAC_TIME_OFFSET: usize = 0x34;
+const RATE_COMPLETED_OFFSET: usize = 0x40;
+const RATE_REEVALUATE_AFTER_OFFSET: usize = 0x60;
+const RATE_CURRENT_SCHEDULE_OFFSET: usize = 0x64;
+const RATE_LEGACY_SCHEDULE_OFFSET: usize = 0x74;
+const RATE_RETRY_STATE_1D_OFFSET: usize = 0x1d;
+const RATE_RETRY_STATE_1E_OFFSET: usize = 0x1e;
+const RATE_HE_FEATURE_8F_OFFSET: usize = 0x8f;
+const RATE_HE_FEATURE_90_OFFSET: usize = 0x90;
+const SCHEDULE_RETRY_LIMIT_OFFSET: usize = 0x01;
+const SCHEDULE_INDEX_OFFSET: usize = 0x0a;
+const SCHEDULE_ADAPTIVE_OFFSET: usize = 0x0b;
+const MAC_TIME_LOW_REGISTER: *const u32 = 0x2010_d800 as *const u32;
+const PHY_NOISE_FLOOR_REGISTER: *const u32 = 0x2010_708c as *const u32;
+const HE_BF_REPORT_RATE_REGISTER: *mut u32 = 0x2010_4464 as *mut u32;
+const HE_ERSU_ACK_RATE_REGISTER: *mut u32 = 0x2010_4404 as *mut u32;
 
 const CALLBACK_MGMT: u8 = 2;
 const CALLBACK_STA_EAPOL: u8 = 3;
@@ -199,6 +225,15 @@ unsafe extern "C" {
     static mut g_ic: u8;
     static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
     static TmpSTAAPCloseAP: u8;
+    static BAROFDMSched: u8;
+    static BasicOFDMSched: u8;
+    static rc11AXSchedTbl: u8;
+    static rc11BSchedTbl: u8;
+    static rc11GSchedTbl: u8;
+    static rc11NSchedTbl: u8;
+    static rcLoRaSchedTbl: u8;
+    static rcP2P11GSchedTbl: u8;
+    static rcP2P11NSchedTbl: u8;
     #[link_name = "__esp_s31_beacon_send_start_flag"]
     static mut BEACON_SEND_START_FLAG: u8;
     #[link_name = "__esp_s31_beacon_timer"]
@@ -228,7 +263,6 @@ unsafe extern "C" {
     fn esf_buf_recycle(frame: *mut c_void);
     #[link_name = "rcUpdateTxDone"]
     fn vendor_rc_update_tx_done(rate_control: *mut c_void, descriptor: *mut c_void);
-    fn rcTxUpdatePer(rate_control: *mut c_void, retries: u32);
     fn lmacReleaseTxopQueue(queue: u8);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
@@ -728,13 +762,292 @@ pub unsafe extern "C" fn wifi_strict_rc_update_ack_snr(
     rate_control.add(1).write(updated[1]);
 }
 
+#[derive(Clone, Copy)]
+struct ScheduleArena {
+    base: *const u8,
+    records: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedSchedule {
+    pointer: *mut u8,
+    arena: ScheduleArena,
+    index: usize,
+}
+
+unsafe fn schedule_arenas() -> [ScheduleArena; 9] {
+    [
+        ScheduleArena {
+            base: ptr::addr_of!(BAROFDMSched),
+            records: 1,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(BasicOFDMSched),
+            records: 1,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rc11AXSchedTbl),
+            records: 16,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rc11BSchedTbl),
+            records: 6,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rc11GSchedTbl),
+            records: 13,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rc11NSchedTbl),
+            records: 14,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rcLoRaSchedTbl),
+            records: 2,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rcP2P11GSchedTbl),
+            records: 8,
+        },
+        ScheduleArena {
+            base: ptr::addr_of!(rcP2P11NSchedTbl),
+            records: 10,
+        },
+    ]
+}
+
+/// Validate a compatibility schedule pointer against every pinned immutable
+/// 12-byte schedule arena before reading it.
+unsafe fn validate_schedule(pointer: *mut u8) -> Option<ValidatedSchedule> {
+    let address = pointer as usize;
+    for arena in schedule_arenas() {
+        let base = arena.base as usize;
+        let bytes = arena.records.checked_mul(RATE_SCHEDULE_RECORD_SIZE)?;
+        let Some(offset) = address.checked_sub(base) else {
+            continue;
+        };
+        if offset < bytes && offset % RATE_SCHEDULE_RECORD_SIZE == 0 {
+            return Some(ValidatedSchedule {
+                pointer,
+                arena,
+                index: offset / RATE_SCHEDULE_RECORD_SIZE,
+            });
+        }
+    }
+    None
+}
+
+unsafe fn owns_rate_control_record(rate_control: *mut u8) -> bool {
+    crate::static_trc::owns_rate_control_record(rate_control)
+        || crate::allocation::owns_rate_control_record(rate_control)
+}
+
+/// Exact S31 ROM `phy_read_hw_noisefloor` value transform.
+///
+/// The complete 0x1a-byte ROM body at `0x2f827d72` reads only
+/// `0x2010_708c`, converts its low 12 bits to the signed hardware encoding,
+/// and divides by four. Keeping the MMIO load here removes both the archive
+/// trampoline and the absolute ROM dependency from TX completion.
+unsafe fn read_noise_floor() -> i32 {
+    let raw = PHY_NOISE_FLOOR_REGISTER.read_volatile() & 0x0fff;
+    (raw as i32 - 4096) >> 2
+}
+
+/// Direct port of the complete `hal_he_set_bf_report_rate` register body.
+unsafe fn set_bf_report_rate(mode: u8, rate: u16, dcm: bool, ersu: bool) {
+    let mut encoded = rate;
+    if mode != 0 {
+        let mode_bits = (u16::from(mode) << 5) & 0x60;
+        encoded = if rate.wrapping_sub(16) <= 9 {
+            rate.wrapping_sub(16)
+        } else {
+            rate.wrapping_sub(26)
+        };
+        encoded |= mode_bits;
+    }
+    if dcm {
+        encoded |= 0x80;
+    }
+    if ersu {
+        encoded |= 0x100;
+    }
+
+    let register = HE_BF_REPORT_RATE_REGISTER;
+    let old = register.read_volatile();
+    register.write_volatile(
+        (old & 0xf803_ffff) | ((u32::from(encoded) << 18) & 0x07fc_0000),
+    );
+    let old = register.read_volatile();
+    register.write_volatile(
+        (old & 0xfffc_01ff) | ((u32::from(encoded) << 9) & 0x0003_fe00),
+    );
+    let old = register.read_volatile();
+    register.write_volatile((old & !0x1ff) | (u32::from(encoded) & 0x1ff));
+}
+
+/// Direct port of the complete `hal_he_set_ersu_ack_rate` register body.
+unsafe fn set_ersu_ack_rate(enabled: bool) {
+    let value = if enabled { 0xa0_u32 } else { 0x80_u32 };
+    let register = HE_ERSU_ACK_RATE_REGISTER;
+
+    let old = register.read_volatile();
+    register.write_volatile((old & !0x0000_00ff) | value);
+    let old = register.read_volatile();
+    register.write_volatile((old & !0x0000_ff00) | (value << 8));
+    let old = register.read_volatile();
+    register.write_volatile((old & !0x00ff_0000) | (value << 16));
+    let old = register.read_volatile();
+    register.write_volatile((old & !0xff00_0000) | (value << 24));
+}
+
+/// Rust-owned TX PER transition with a narrow validated ABI projection.
+///
+/// All scalar mutation is performed by [`RateControlState`]. The adapter
+/// accepts only the fixed Rust default records or a currently claimed
+/// Rust-owned peer record, and it reads schedule bytes only after proving that
+/// the pointer names a record in one of the nine pinned schedule arenas.
+/// Unlike `rcClearCurSched`, it does not write the shared vendor
+/// `schedule[11]`: the only remaining reader was the excluded stateful
+/// `rcUpdateRate`, so that mutable bit is now eliminated from strict runtime.
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(
+    rate_control: *mut c_void,
+    retries: u32,
+) {
+    let rate_control = rate_control.cast::<u8>();
+    if rate_control.is_null() || !owns_rate_control_record(rate_control) {
+        STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+        return;
+    }
+
+    let current_pointer = rate_control
+        .add(RATE_CURRENT_SCHEDULE_OFFSET)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    let Some(current) = validate_schedule(current_pointer) else {
+        STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+        return;
+    };
+
+    let mut state = RateControlState {
+        retry_pressure: rate_control.add(RATE_RETRY_PRESSURE_OFFSET).read(),
+        weighted_retries: rate_control
+            .add(RATE_WEIGHTED_RETRIES_OFFSET)
+            .cast::<u32>()
+            .read_unaligned(),
+        transmissions: rate_control
+            .add(RATE_TRANSMISSIONS_OFFSET)
+            .cast::<u32>()
+            .read_unaligned(),
+        completed: rate_control
+            .add(RATE_COMPLETED_OFFSET)
+            .cast::<u32>()
+            .read_unaligned(),
+        reevaluate_after_us: rate_control
+            .add(RATE_REEVALUATE_AFTER_OFFSET)
+            .cast::<u32>()
+            .read_unaligned(),
+        retry_state_1d: rate_control.add(RATE_RETRY_STATE_1D_OFFSET).read(),
+        retry_state_1e: rate_control.add(RATE_RETRY_STATE_1E_OFFSET).read(),
+        maximum_schedule_index: rate_control
+            .add(RATE_MAXIMUM_SCHEDULE_INDEX_OFFSET)
+            .read(),
+        current_schedule: RateScheduleState {
+            retry_limit: current.pointer.add(SCHEDULE_RETRY_LIMIT_OFFSET).read(),
+            index: current.pointer.add(SCHEDULE_INDEX_OFFSET).read(),
+            adaptive: current.pointer.add(SCHEDULE_ADAPTIVE_OFFSET).read(),
+        },
+    };
+    let update = state.update_tx_per(retries);
+
+    rate_control
+        .add(RATE_RETRY_PRESSURE_OFFSET)
+        .write(state.retry_pressure);
+    rate_control
+        .add(RATE_WEIGHTED_RETRIES_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(state.weighted_retries);
+    rate_control
+        .add(RATE_TRANSMISSIONS_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(state.transmissions);
+    rate_control
+        .add(RATE_COMPLETED_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(state.completed);
+
+    if update.schedule == ScheduleSelection::Unchanged {
+        return;
+    }
+
+    rate_control
+        .add(RATE_REEVALUATE_AFTER_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(state.reevaluate_after_us);
+    rate_control
+        .add(RATE_RETRY_STATE_1D_OFFSET)
+        .write(state.retry_state_1d);
+    rate_control
+        .add(RATE_RETRY_STATE_1E_OFFSET)
+        .write(state.retry_state_1e);
+
+    let next_pointer = match update.schedule {
+        ScheduleSelection::Unchanged => return,
+        ScheduleSelection::AdvanceCurrentByOne => {
+            let next_index = current.index + 1;
+            if next_index >= current.arena.records {
+                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+                return;
+            }
+            current.arena.base.add(next_index * RATE_SCHEDULE_RECORD_SIZE) as *mut u8
+        }
+        ScheduleSelection::LegacyIndex(index) => {
+            let legacy_pointer = rate_control
+                .add(RATE_LEGACY_SCHEDULE_OFFSET)
+                .cast::<*mut u8>()
+                .read_unaligned();
+            let Some(legacy) = validate_schedule(legacy_pointer) else {
+                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+                return;
+            };
+            let Some(index) = legacy.index.checked_add(usize::from(index)) else {
+                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+                return;
+            };
+            if index >= legacy.arena.records {
+                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+                return;
+            }
+            legacy.arena.base.add(index * RATE_SCHEDULE_RECORD_SIZE) as *mut u8
+        }
+    };
+    rate_control
+        .add(RATE_CURRENT_SCHEDULE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(next_pointer);
+
+    rate_control
+        .add(RATE_LAST_MAC_TIME_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(MAC_TIME_LOW_REGISTER.read_volatile());
+
+    let quarter_noise_floor = read_noise_floor().wrapping_add(2) >> 2;
+    let report = beamforming_report_rate(
+        rate_control.add(1).read(),
+        quarter_noise_floor,
+        rate_control.add(RATE_HE_FEATURE_8F_OFFSET).read() != 0,
+        rate_control.add(RATE_HE_FEATURE_90_OFFSET).read() != 0,
+    );
+    set_bf_report_rate(report.mode, report.rate, report.dcm, report.ersu);
+    set_ersu_ack_rate(report.ersu_ack);
+}
+
 /// Exact finite non-mesh port of the pinned `rcUpdateTxDone` boundary.
 ///
-/// The ACK-SNR update is now a safe Rust value transform. `rcTxUpdatePer`
-/// remains the sole vendor leaf below this adapter: it mutates finite retry
-/// counters and can lower the current schedule. The hidden `wDevCtrl[0x2e]`
-/// read is replaced by its immutable archive initializer. Mesh-specific retry
-/// clamping is intentionally absent from the strict basic AP/STA profile.
+/// ACK-SNR filtering and TX PER/schedule lowering are safe Rust state
+/// transitions. The hidden `wDevCtrl[0x2e]` read is replaced by its immutable
+/// archive initializer. Mesh-specific retry clamping is intentionally absent
+/// from the strict basic AP/STA profile.
 #[no_mangle]
 pub unsafe extern "C" fn wifi_strict_rc_update_tx_done(
     rate_control: *mut c_void,
@@ -776,7 +1089,7 @@ pub unsafe extern "C" fn wifi_strict_rc_update_tx_done(
         }
         _ => return,
     };
-    rcTxUpdatePer(rate_control.cast(), retries);
+    wifi_strict_rc_update_tx_per(rate_control.cast(), retries);
 }
 
 /// Constant-time replacement for the vendor TBTT catch-up loop.

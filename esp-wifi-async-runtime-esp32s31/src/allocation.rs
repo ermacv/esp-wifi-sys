@@ -503,6 +503,8 @@ mod target {
 
     use esp_wifi_sys_esp32s31::include::wifi_osi_funcs_t;
 
+    use crate::rate_control::{RateControlRecord, RATE_CONTROL_RECORD_SIZE};
+
     #[cfg(feature = "rust-static-function-table-storage")]
     use super::{
         classify_static_function_table, StaticFunctionTable, NET80211_FUNCTION_TABLE_SIZE,
@@ -566,7 +568,7 @@ mod target {
     const WPA_IE_SLOT_CAPACITY: usize = 8;
     const WPA_IE_SLOT_MASK: usize = (1 << WPA_IE_SLOT_CAPACITY) - 1;
     const OS_MEMDUP_MALLOC_RETURN_OFFSET: usize = 0x10;
-    const RATE_CONTEXT_SIZE: usize = 152;
+    const RATE_CONTEXT_SIZE: usize = RATE_CONTROL_RECORD_SIZE;
     const RATE_CONTEXT_CAPACITY: usize = 16;
     const RATE_CONTEXT_MASK: usize = (1 << RATE_CONTEXT_CAPACITY) - 1;
     // Return address after the pinned S31 `_wifi_zalloc(152)` call in
@@ -644,11 +646,11 @@ mod target {
     unsafe impl Sync for WpaIeSlot {}
 
     #[repr(C, align(4))]
-    struct RateContext(UnsafeCell<[u8; RATE_CONTEXT_SIZE]>);
+    struct RateContext(UnsafeCell<RateControlRecord>);
 
     impl RateContext {
         const fn new() -> Self {
-            Self(UnsafeCell::new([0; RATE_CONTEXT_SIZE]))
+            Self(UnsafeCell::new(RateControlRecord::zeroed()))
         }
     }
 
@@ -1174,7 +1176,7 @@ mod target {
             .compare_exchange(claimed, claimed | bit, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
         let context = RATE_CONTEXTS[index].0.get();
-        unsafe { context.write([0; RATE_CONTEXT_SIZE]) };
+        unsafe { context.write(RateControlRecord::zeroed()) };
         Some(context.cast())
     }
 
@@ -1198,8 +1200,22 @@ mod target {
         if CLAIMED_RATE_CONTEXTS.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
             return false;
         }
-        unsafe { RATE_CONTEXTS[index].0.get().write([0; RATE_CONTEXT_SIZE]) };
+        unsafe {
+            RATE_CONTEXTS[index]
+                .0
+                .get()
+                .write(RateControlRecord::zeroed())
+        };
         true
+    }
+
+    /// Verify that a temporary C ABI pointer names a currently claimed
+    /// Rust-owned peer rate-control record.
+    pub(crate) fn owns_rate_control_record(context: *mut u8) -> bool {
+        let Some(index) = rate_context_index(context.cast()) else {
+            return false;
+        };
+        CLAIMED_RATE_CONTEXTS.load(Ordering::Acquire) & (1_usize << index) != 0
     }
 
     fn claim_rate_table_scratch(size: usize, caller: usize) -> Option<*mut c_void> {
@@ -2256,6 +2272,7 @@ pub use target::static_supplicant_callback_table_bound;
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
     allocator_callbacks_patched, direct_heap_link_wrappers_active, forbid_runtime_heap,
+    owns_rate_control_record,
 };
 #[cfg(target_arch = "riscv32")]
 pub use target::{allow_heap_for_wifi_teardown, patch_allocator_probes};

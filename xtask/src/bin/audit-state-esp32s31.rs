@@ -674,13 +674,19 @@ const PRIMARY_STATE_BASELINE: StateMetrics = StateMetrics {
     runtime_mutable_blob_bytes: 0,
     runtime_rom_indirections: 0,
     cold_phy_mutable_blob_bytes: 512,
-    linked_other_mutable_blob_bytes: 22_203,
+    // `BAROFDMSched` adds one 12-byte immutable-contents compatibility
+    // schedule to the linked mutable-data inventory. The Rust TX-PER adapter
+    // validates every schedule pointer before reading it; eliminating these
+    // C schedule arenas is the next rate-control ownership slice.
+    linked_other_mutable_blob_bytes: 22_215,
     // Two multi-descriptor RX owners add 288 bytes of ISR-visible ESF headers
     // and eight bytes of ownership state. Seventeen temporary outer-RX
     // fallback counters add another 68 bytes while the remaining vendor
-    // routes are measured. The 32-KiB aggregate payload arena is in PSRAM and is
-    // intentionally excluded from the internal-SRAM metric.
-    strict_static_bytes: 311_990,
+    // routes are measured. The Rust-owned TX-PER transition and its validated
+    // ABI projection add 320 bytes of internal executable/read-only storage.
+    // The 32-KiB aggregate payload arena is in PSRAM and is intentionally
+    // excluded from the internal-SRAM metric.
+    strict_static_bytes: 312_310,
 };
 
 fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {

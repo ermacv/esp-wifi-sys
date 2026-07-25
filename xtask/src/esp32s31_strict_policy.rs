@@ -10,7 +10,6 @@ pub const ROOTS: &[&str] = &[
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
     "lmacReleaseTxopQueue",
-    "rcTxUpdatePer",
     "hal_get_tsf_time",
     "ic_set_current_channel",
     "phy_set_tx_gain_mem_new",
@@ -38,7 +37,6 @@ pub const RUST_BOUNDARIES_WITH_VENDOR_FALLBACK: &[&str] = &["wDev_ProcessRxSucDa
 
 pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
     "lmacReleaseTxopQueue",
-    "rcTxUpdatePer",
     "ic_set_current_channel",
     "ic_mac_init",
     "ic_set_mac",
@@ -169,6 +167,10 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     (
         "rcUpdateAckSnr",
         "wifi_strict_rc_update_ack_snr",
+    ),
+    (
+        "rcTxUpdatePer",
+        "wifi_strict_rc_update_tx_per",
     ),
     (
         "ieee80211_post_hmac_tx",
