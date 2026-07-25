@@ -534,6 +534,18 @@ pub(crate) unsafe fn dispatch_one() -> Result<(), Net80211TxError> {
         esf_buf_recycle(buffer.as_ptr().cast());
         Ok(())
     };
+    if result == Err(Net80211TxError::UnsupportedPowerSave) {
+        // A station may enter power save between network-stack publication
+        // and this serialized event. That is a per-frame delivery outcome,
+        // not corruption of the radio owner. The vendor solution would move
+        // the ESF into its dynamic PS queue; until the equivalent Rust-owned
+        // async queue is connected, release this one fixed-pool object and
+        // keep servicing unrelated peers. No retry, wait, callback, or
+        // polling loop is entered here.
+        esf_buf_recycle(buffer.as_ptr().cast());
+        crate::ap_power_save::record_cancelled_transmit();
+        return arm_next_event();
+    }
     if let Err(error) = result {
         esf_buf_recycle(buffer.as_ptr().cast());
         return Err(error);

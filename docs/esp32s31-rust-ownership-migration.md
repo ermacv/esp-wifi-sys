@@ -895,7 +895,16 @@ descriptor flags `0x0200_2009`, priority `7`, pairwise selector
 `0x0004_0348`, associated-peer word `0x2100_0000`, and peer flag `1`. It is
 admitted as a separate complete mapper class for the two already-qualified AP
 peer identities. The unrelated `0x0100_0000` flag and mixing priority `0x20`
-into this rate-control class remain rejected.
+into this fixed-per-packet-rate class remain rejected.
+
+When a second WPA2 station joined while Android was in power-save state, an
+ordinary net80211 event encountered the associated node's measured sleep bit.
+That per-frame condition no longer propagates `UnsupportedPowerSave` out of
+the dispatcher and terminates the radio owner. Until ordinary data is wired
+to the existing peer-bound async wake edge, the fixed-pool ESF is released,
+the cancellation is counted, and the next queued frame is armed. This
+temporary bounded drop has no retry, wait, callback, vendor PS queue, or
+effect on traffic owned by another peer.
 
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
