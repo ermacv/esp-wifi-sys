@@ -181,6 +181,7 @@ struct RxMetadataProbe {
     route_nan: AtomicUsize,
     route_other: AtomicUsize,
     frame_class_bitmap: AtomicUsize,
+    management_subtype_bitmap: AtomicUsize,
     aggregate_flag_bitmap: AtomicUsize,
     rust_data_routes: AtomicUsize,
     vendor_fallbacks: AtomicUsize,
@@ -207,6 +208,7 @@ impl RxMetadataProbe {
             route_nan: AtomicUsize::new(0),
             route_other: AtomicUsize::new(0),
             frame_class_bitmap: AtomicUsize::new(0),
+            management_subtype_bitmap: AtomicUsize::new(0),
             aggregate_flag_bitmap: AtomicUsize::new(0),
             rust_data_routes: AtomicUsize::new(0),
             vendor_fallbacks: AtomicUsize::new(0),
@@ -234,6 +236,7 @@ pub struct WdevRxMetadataSnapshot {
     pub route_nan: usize,
     pub route_other: usize,
     pub frame_class_bitmap: usize,
+    pub management_subtype_bitmap: usize,
     pub aggregate_flag_bitmap: usize,
     pub rust_data_routes: usize,
     pub vendor_fallbacks: usize,
@@ -906,6 +909,12 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
             1_usize << usize::from(frame_control & 0x0f),
             Ordering::Relaxed,
         );
+        if frame_control & 0x0f == 0 {
+            RX_METADATA_PROBE.management_subtype_bitmap.fetch_or(
+                1_usize << usize::from((frame_control >> 4) & 0x0f),
+                Ordering::Relaxed,
+            );
+        }
     }
     let aggregate_flag = rx_indicate_aggregate_flag(&prefix).unwrap_or(0) as usize;
     RX_METADATA_PROBE
@@ -1411,6 +1420,9 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         route_nan: RX_METADATA_PROBE.route_nan.load(Ordering::Acquire),
         route_other: RX_METADATA_PROBE.route_other.load(Ordering::Acquire),
         frame_class_bitmap: RX_METADATA_PROBE.frame_class_bitmap.load(Ordering::Acquire),
+        management_subtype_bitmap: RX_METADATA_PROBE
+            .management_subtype_bitmap
+            .load(Ordering::Acquire),
         aggregate_flag_bitmap: RX_METADATA_PROBE
             .aggregate_flag_bitmap
             .load(Ordering::Acquire),
