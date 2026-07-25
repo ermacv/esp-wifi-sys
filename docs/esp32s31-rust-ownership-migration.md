@@ -815,6 +815,12 @@ peer flag `1`. The nonzero flag is admitted only as part of this complete
 post-association tuple; all earlier mapper classes retain their zero-flag
 requirement.
 
+The next join edge reached WPA2 message one with frame control `0x0288`, rate
+`11`, layout `0x2000`, descriptor flags `0x0200_200c`, priority `7`, selector
+`0x0004_0000`, peer word `0x2100_0000`, and peer flag `1`. This is the exact
+post-association AP EAPOL mapper tuple; it reuses the already-qualified
+plaintext AP EAPOL security layout without admitting other data frames.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX

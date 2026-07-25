@@ -47,6 +47,12 @@ pub(crate) fn strict_sta_ap_treatment(
     let ap_association_response = rate == 11
         && frame_control == 0x0010
         && state == [0, 7, 0x0004_0000, 0x2100_0000, 1];
+    // WPA2 message one is emitted immediately after successful association.
+    // It remains plaintext at this boundary and is bound to the same
+    // post-association node identity as the response above.
+    let ap_eapol_message_one = rate == 11
+        && frame_control == 0x0288
+        && state == [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1];
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -69,6 +75,7 @@ pub(crate) fn strict_sta_ap_treatment(
         || ap_probe_response
         || ap_authentication_response
         || ap_association_response
+        || ap_eapol_message_one
         || ht_qos
         || legacy_qos
     {
@@ -251,6 +258,12 @@ mod tests {
                 0x0010,
                 [0, 7, 0x0004_0000, 0x2100_0000, 1],
             ),
+            (
+                11,
+                0x2000,
+                0x0288,
+                [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1],
+            ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -309,6 +322,15 @@ mod tests {
                 0x2731,
                 0x0010,
                 [0, 7, 0x0004_0000, 0x2100_0000, 0],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                11,
+                0x2000,
+                0x0288,
+                [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 0],
             ),
             None
         );
