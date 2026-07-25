@@ -954,22 +954,25 @@ the exact copy/aggregate arguments, and calls `wDev_IndicateFrame`. Probe
 Requests in the STA-only profile instead take the recovered direct discard
 path: strict preparation proves the optional observation callback null, the
 interface registry proves AP absent, and the unit is consumed into the Rust
-asynchronous recycler. Action frames retain the reference path because they
-contain separate FTM and NAN branches. Other classes still delegate
+asynchronous recycler. Action frames are admitted only after the quiescent
+handoff proves `wDevCtrl+0x31` interface bit two (NAN) and
+`g_wifi_menuconfig+0x40` bit `0x04` (FTM) both clear. That proof is copied into
+one byte of Rust-owned SRAM, so the RX hot path does not consult either hidden
+C global. Other classes still delegate
 explicitly, so the aggregate remains in the strict root graph and the ROM
 indication leaf is not claimed as replaced.
 
 The management HIL measurement produced subtype bitmap `0x2912`: association
 response (1), probe request (4), beacon (8), authentication (11), and action
-(13). After the Probe Request port, the full WPA2/network stress run decoded
-710/710 base-layout, status-zero STA units. Rust indicated 694 data and 9
-management routes, discarded 5 Probe Requests, and left only 2 Action routes
-in the ROM fallback. It completed scan, authentication, association, the
-four-way handshake, DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
-23.813 Mbit/s with balanced 4,786/4,786 TX and 691/691 network RX ownership,
+(13). After the Action port, the full WPA2/network stress run decoded 708/708
+base-layout, status-zero STA units. Rust indicated 694 data and 13 management
+routes, including 2 Action frames, discarded one Probe Request, and observed
+zero ROM aggregate fallbacks. It completed scan, authentication, association,
+the four-way handshake, DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers
+at 24.798 Mbit/s with balanced 4,786/4,786 TX and 690/690 network RX ownership,
 zero allocations, and zero rejections. The host-tested aggregate decoder
 reported only flag value zero. Control, AP/NAN, optional metadata and error
-classes remain unqualified.
+classes remain unqualified and keep an explicit fallback.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

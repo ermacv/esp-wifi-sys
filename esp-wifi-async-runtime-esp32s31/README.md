@@ -582,9 +582,14 @@ vendor aggregate classifier, publish the recovered `wDevCtrl` fields in Rust,
 and call `wDev_IndicateFrame` directly. In the STA-only profile, Probe Requests
 take the recovered STA-to-AP rewrite outcome directly into the Rust recycler:
 the optional observation callback is null and no AP interface is enabled.
-Action frames keep the FTM/NAN classifier; all other unqualified classes use
-the explicit ROM aggregate fallback. The segment remains owned by the current
-radio continuation until it is recycled.
+Action frames take the same common indication join only after quiescent
+handoff proves NAN interface bit two and FTM menu bit `0x04` clear, then
+publishes that policy in one Rust-owned SRAM byte. All other unqualified
+classes use the explicit ROM aggregate fallback. The segment remains owned by
+the current radio continuation until it is recycled. The latest WPA2/network
+HIL routed 694 data and 13 management units in Rust, including two Action
+frames, discarded one Probe Request, and observed zero vendor aggregate
+fallbacks across 708 validated units.
 Consequently the two linked-copy backedges are finite data traversal, not
 polling or waiting. The exported frame-copy snapshot counts this real call
 boundary on hardware.
