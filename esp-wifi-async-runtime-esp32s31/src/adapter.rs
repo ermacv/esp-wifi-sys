@@ -200,6 +200,24 @@ impl RadioResources {
     fn queue_bridge(&self) -> OsiPpQueue<'_, PP_QUEUE_CAPACITY> {
         OsiPpQueue::new(&self.queue, &self.probe)
     }
+
+    /// Atomically transfer all executor-side radio authority to one owner.
+    ///
+    /// The capability is deliberately constructed only after the one-way
+    /// claim succeeds. It is then moved into `VendorPpDispatcher`; ISR code
+    /// has no access to it and can only publish work into the fixed queues.
+    fn try_take_executor(&self) -> Option<RxExecutorCapability> {
+        self.owner.try_take_executor()
+    }
+}
+
+/// Non-cloneable proof that the caller is the sole executor-side RX consumer.
+///
+/// This is a zero-sized ownership token, not storage. Its private field and
+/// the private `RadioResources::try_take_executor` constructor tie creation to
+/// the same one-way claim that protects the complete radio future.
+pub(crate) struct RxExecutorCapability {
+    _private: (),
 }
 
 /// One-way ownership handoff from cold initialization to a Rust radio future.
@@ -215,10 +233,11 @@ impl RadioOwnerClaim {
         Self(AtomicBool::new(false))
     }
 
-    fn try_take(&self) -> bool {
+    fn try_take_executor(&self) -> Option<RxExecutorCapability> {
         self.0
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+            .then_some(RxExecutorCapability { _private: () })
     }
 
     fn is_taken(&self) -> bool {
@@ -921,13 +940,11 @@ pub fn take_radio_future(
 ) -> Option<
     RadioFuture<'static, VendorPpDispatcher, PP_QUEUE_CAPACITY, INTERNAL_EVENT_QUEUE_CAPACITY>,
 > {
-    if !STATE.owner.try_take() {
-        return None;
-    }
+    let rx_executor = STATE.try_take_executor()?;
     Some(RadioFuture::new(
         &STATE.queue,
         &STATE.internal_queue,
-        VendorPpDispatcher::new(),
+        VendorPpDispatcher::new(rx_executor),
         event_budget,
     ))
 }
@@ -950,14 +967,12 @@ pub fn take_wifi_runtime(
         TIMER_CAPACITY,
     >,
 > {
-    if !STATE.owner.try_take() {
-        return None;
-    }
+    let rx_executor = STATE.try_take_executor()?;
     TIME_SOURCE.store(now as usize, Ordering::Release);
     Some(WifiRuntimeFuture::new(
         &STATE.queue,
         &STATE.internal_queue,
-        VendorPpDispatcher::new(),
+        VendorPpDispatcher::new(rx_executor),
         &STATE.timers,
         now,
         rearm_alarm,
@@ -1715,9 +1730,11 @@ mod tests {
         let owner = RadioOwnerClaim::new();
 
         assert!(!owner.is_taken());
-        assert!(owner.try_take());
+        let executor = owner.try_take_executor();
+        assert!(executor.is_some());
+        assert_eq!(core::mem::size_of_val(executor.as_ref().unwrap()), 0);
         assert!(owner.is_taken());
-        assert!(!owner.try_take());
+        assert!(owner.try_take_executor().is_none());
     }
 
     #[test]

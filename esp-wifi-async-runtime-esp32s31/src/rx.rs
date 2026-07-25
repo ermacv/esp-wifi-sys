@@ -674,7 +674,13 @@ pub(crate) fn pending_continuation() -> Option<PpEvent> {
 }
 
 /// Drain a bounded number of PP RX buffers on the single radio-owner stack.
-pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
+///
+/// The mutable capability is not used as data. Requiring it removes the old
+/// free consumer entry point: only the dispatcher created by the one-way
+/// `RadioResources` handoff can dequeue or recycle RX descriptors.
+pub(crate) unsafe fn dispatch(
+    _executor: &mut crate::adapter::RxExecutorCapability,
+) -> Result<(), RxPumpError> {
     if rx_registry().is_none() || !STRICT_RX_QUEUE_ADOPTED.load(Ordering::Acquire) {
         return Err(RxPumpError::StateUnavailable);
     }

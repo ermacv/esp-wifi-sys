@@ -73,6 +73,7 @@ pub enum VendorDispatchError {
     CallbackNotRegistered(PpAction),
     FatalEvent(usize),
     InternalQueueFull,
+    RxExecutorUnavailable,
     #[cfg(feature = "strict-no-wait")]
     LmacContinuation(crate::lmac::LmacAsyncError),
     #[cfg(feature = "strict-no-wait")]
@@ -107,6 +108,7 @@ pub enum VendorDispatchError {
 /// jump table. The infinite `ppTask` function itself is never entered.
 pub struct VendorPpDispatcher {
     allow_initialization_config: bool,
+    rx_executor: Option<crate::adapter::RxExecutorCapability>,
 }
 
 /// Laboratory-only observation of the strict event-17 boundary.
@@ -184,9 +186,10 @@ unsafe fn observe_pp_timer(argument: *mut c_void) {
 }
 
 impl VendorPpDispatcher {
-    pub const fn new() -> Self {
+    pub(crate) const fn new(rx_executor: crate::adapter::RxExecutorCapability) -> Self {
         Self {
             allow_initialization_config: false,
+            rx_executor: Some(rx_executor),
         }
     }
 
@@ -199,7 +202,17 @@ impl VendorPpDispatcher {
     pub(crate) const fn for_initialization() -> Self {
         Self {
             allow_initialization_config: true,
+            rx_executor: None,
         }
+    }
+
+    #[cfg(feature = "strict-no-wait")]
+    fn dispatch_owned_rx(&mut self) -> Result<(), VendorDispatchError> {
+        let executor = self
+            .rx_executor
+            .as_mut()
+            .ok_or(VendorDispatchError::RxExecutorUnavailable)?;
+        unsafe { crate::rx::dispatch(executor) }.map_err(VendorDispatchError::RxPump)
     }
 
     unsafe fn account_received_event(event: PpEvent) -> Result<(), VendorDispatchError> {
@@ -271,12 +284,6 @@ impl VendorPpDispatcher {
     }
 }
 
-impl Default for VendorPpDispatcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl PpDispatcher for VendorPpDispatcher {
     type Error = VendorDispatchError;
 
@@ -331,7 +338,7 @@ impl PpDispatcher for VendorPpDispatcher {
 
             #[cfg(feature = "strict-no-wait")]
             if crate::rx::is_continuation(event.kind) {
-                crate::rx::dispatch().map_err(VendorDispatchError::RxPump)?;
+                self.dispatch_owned_rx()?;
                 return Ok(DispatchControl::Continue);
             }
 
@@ -474,9 +481,15 @@ impl PpDispatcher for VendorPpDispatcher {
                     #[cfg(feature = "hil-vendor-tx")]
                     RX_DISPATCH_ENTERED.fetch_add(1, Ordering::Relaxed);
                     #[cfg(feature = "strict-no-wait")]
-                    crate::rx::dispatch().map_err(VendorDispatchError::RxPump)?;
+                    self.dispatch_owned_rx()?;
                     #[cfg(not(feature = "strict-no-wait"))]
-                    ppRxPkt();
+                    {
+                        let _executor = self
+                            .rx_executor
+                            .as_mut()
+                            .ok_or(VendorDispatchError::RxExecutorUnavailable)?;
+                        ppRxPkt();
+                    }
                     #[cfg(feature = "hil-vendor-tx")]
                     RX_DISPATCH_COMPLETED.fetch_add(1, Ordering::Release);
                 }
