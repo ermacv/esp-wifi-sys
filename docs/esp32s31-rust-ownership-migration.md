@@ -249,6 +249,16 @@ from the image: Rust still reads its evidenced fields once during cold
 handoff, and the remaining cold vendor PHY initialization still owns and
 populates the object.
 
+The audit now resolves member-local RISC-V data relocations such as
+`.LANCHOR0` back to their unique global symbol and filters referrers against
+the final ELF. In the direct cold call graph rooted at
+`register_chipv7_phy`, only two mutable blob objects remain: `phy_param`
+(508 bytes) and `g_phyFuns` (4 bytes). The direct cold referrers are narrowed
+to `register_chipv7_phy` and `phy_get_romfunc_addr`; indirect callbacks
+published to ROM remain a separately stated limitation. This makes those two
+functions the next concrete cold-PHY ownership frontier instead of treating
+all 35 linked PHY helpers as equally live during initialization.
+
 The migrated sequence passed the strict hardware workload: passive
 scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
 UDP datagrams and four HTTP transfers. All 4786 TX credits and 690 RX credits

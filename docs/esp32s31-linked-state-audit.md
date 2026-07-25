@@ -9,6 +9,7 @@
 - separately auditable Rust caller-task cold init: `wifi_init_in_caller_task`, `wifi_deinit_in_caller_task`
 - vendor functions reachable from those roots: 39
 - live mutable blob globals reached by strict leaves: 0 symbols / 0 bytes
+- live mutable blob globals reached from `register_chipv7_phy`: 2 symbols / 512 bytes
 - ROM-ABI mutable indirection cells reached by strict leaves: 0 cells / 0 inferred bytes
 - fixed cold-init bindings live in this ELF: 43 / 43
 - live mutable blob globals outside the strict-root graph: 185 symbols / 22203 bytes
@@ -24,6 +25,15 @@ The application `wifi-rust-static-cold-init-hil` final-ELF audit additionally pr
 | symbol | size | placement | archive owner | strict referrers |
 |---|---:|---|---|---|
 | _none_ | 0 | - | - | - |
+
+## Mutable blob state reached by PHY cold initialization
+
+This is the direct archive call graph rooted at `register_chipv7_phy`. It does not prove indirect ROM callbacks unreachable.
+
+| symbol | size | placement | archive owner | cold PHY referrers |
+|---|---:|---|---|---|
+| `phy_param` | 508 | `internal SRAM` / `.data` | `libphy.a[phy_init.o]` | `phy_get_romfunc_addr`, `register_chipv7_phy` |
+| `g_phyFuns` | 4 | `internal SRAM` / `.bss` | `libphy.a[phy_init.o]` | `phy_get_romfunc_addr` |
 
 ## Mutable ROM-ABI indirection cells reached by strict leaves
 
@@ -213,7 +223,7 @@ These are the exact direct stores recovered from the two separately audited cold
 
 ## Linked mutable blob state outside the strict-root graph
 
-| symbol | size | placement | archive owner | known archive referrers |
+| symbol | size | placement | archive owner | linked referrers |
 |---|---:|---|---|---|
 | `est_PHY_RESP_FTM_COMP_40_40D_MHZ_DIS` | 2 | `internal SRAM` / `.data` | `libwifi_support.a[ftm_calibration_data.o]` | - |
 | `est_PHY_RESP_FTM_COMP_40_40D_MHZ` | 2 | `internal SRAM` / `.data` | `libwifi_support.a[ftm_calibration_data.o]` | - |
@@ -239,34 +249,34 @@ These are the exact direct stores recovered from the two separately audited cold
 | `est_PHY_INIT_FTM_COMP_20_20D_MHZ` | 2 | `internal SRAM` / `.data` | `libwifi_support.a[ftm_calibration_data.o]` | - |
 | `est_PHY_INIT_FTM_COMP_20_20U_MHZ_DIS` | 2 | `internal SRAM` / `.data` | `libwifi_support.a[ftm_calibration_data.o]` | - |
 | `est_PHY_INIT_FTM_COMP_20_20U_MHZ` | 2 | `internal SRAM` / `.data` | `libwifi_support.a[ftm_calibration_data.o]` | - |
-| `ccmp` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_ccmp.o]` | `mt_set_lmk` |
-| `TmpSTAAPCloseAP` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_hostap.o]` | - |
-| `g_mesh_self_organized` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_mesh_quick.o]` | `candidate_monitor_timer_start`, `cnx_connect_to_bss`, `cnx_sta_connect_cmd`, `esp_mesh_get_self_organized`, `esp_mesh_is_root`, +4 |
+| `ccmp` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_ccmp.o]` | `ccmp_encap` |
+| `TmpSTAAPCloseAP` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_hostap.o]` | `ieee80211_hostapd_beacon_txcb` |
+| `g_mesh_self_organized` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_mesh_quick.o]` | `cnx_connect_to_bss` |
 | `s_itwt_id` | 16 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_twt.o]` | - |
 | `s_tmp_itwt_id` | 16 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_twt.o]` | - |
 | `setup_timer_param` | 372 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_twt.o]` | - |
 | `g_def_2g_channels` | 11 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_nan_datapath.o]` | - |
 | `s_wfa_oui` | 3 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_nan_sd.o]` | - |
-| `g_espnow_user_oui` | 3 | `internal SRAM` / `.data` | `libespnow.a[manatick.o]` | `ieee80211_add_ie_vendor_esp_freq_annon`, `ieee80211_add_ie_vendor_esp_head`, `ieee80211_add_ie_vendor_esp_manufacturer`, `ieee80211_add_ie_vendor_esp_mesh_group`, `ieee80211_add_ie_vendor_esp_now`, +3 |
-| `g_phy_cap_rx_stbc` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_ht.o]` | `esp_wifi_enable_rx_stbc` |
-| `g_wifi_nvs` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_nvs.o]` | `_do_wifi_disconnect`, `chm_check_channel_is_valid`, `chm_init`, `cnx_auth_done`, `cnx_bss_alloc`, +135 |
-| `tkip` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_tkip.o]` | - |
-| `wep` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_wep.o]` | - |
-| `sms4` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_sms4.o]` | - |
-| `g_timer_info` | 376 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_timer.o]` | - |
-| `gcmp` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_gcmp.o]` | - |
-| `WIFI_MESH_EVENT` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_api.o]` | `mesh_wifi_event_deinit` |
-| `g_wifi_event_mask` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_api.o]` | `wifi_set_event_mask` |
+| `g_espnow_user_oui` | 3 | `internal SRAM` / `.data` | `libespnow.a[manatick.o]` | `ieee80211_add_ie_vendor_esp_head`, `ieee80211_add_ie_vendor_esp_manufacturer` |
+| `g_phy_cap_rx_stbc` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_ht.o]` | - |
+| `g_wifi_nvs` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_nvs.o]` | `_do_wifi_disconnect`, `chm_check_channel_is_valid`, `chm_init`, `cnx_auth_done`, `cnx_bss_alloc`, +91 |
+| `tkip` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_tkip.o]` | `tkip_encap` |
+| `wep` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_wep.o]` | `wep_encap` |
+| `sms4` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_sms4.o]` | `sms4_encap` |
+| `g_timer_info` | 376 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_timer.o]` | `ieee80211_register_ftm_timer`, `ieee80211_register_hostap_timer` |
+| `gcmp` | 24 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_crypto_gcmp.o]` | `gcmp_encap` |
+| `WIFI_MESH_EVENT` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_api.o]` | - |
+| `g_wifi_event_mask` | 4 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_api.o]` | - |
 | `esp_test_tx_addba_request` | 1 | `internal SRAM` / `.data` | `libnet80211.a[wl_cnx.o]` | - |
 | `g_dynamic_cs` | 12 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_sta.o]` | - |
 | `send_deauth` | 1 | `internal SRAM` / `.data` | `libnet80211.a[ieee80211_sta.o]` | - |
-| `phy_param` | 508 | `internal SRAM` / `.data` | `libphy.a[phy_init.o]` | `bt_agc_gain_set`, `phy_11p_set`, `phy_ble_set_chan_base`, `phy_bt_get_tx_tab_new`, `phy_bt_power_track`, +48 |
+| `phy_param` | 508 | `internal SRAM` / `.data` | `libphy.a[phy_init.o]` | `phy_11p_set`, `phy_bb_init`, `phy_bt_get_tx_tab_new`, `phy_bt_set_tx_gain_new`, `phy_bt_tx_gain_init`, +38 |
 | `g_pp_timer_info` | 136 | `internal SRAM` / `.data` | `libpp.a[pp_timer.o]` | `wdev_data_init` |
-| `g_pm_cfg` | 88 | `internal SRAM` / `.data` | `libpp.a[pm.o]` | `ic_update_light_sleep_wake_ahead_time`, `pm_beacon_offset_reset`, `pm_coex_pwr_configure`, `pm_twt_set_config`, `wdev_data_init` |
-| `TxRxCxt` | 1044 | `internal SRAM` / `.data` | `libpp.a[pp.o]` | `SigSpaceFree`, `SigSpaceMalloc`, `lmacStopTransmit`, `ppCalTxopDur`, `ppCheckTxHEAMPDUlength`, +37 |
+| `g_pm_cfg` | 88 | `internal SRAM` / `.data` | `libpp.a[pm.o]` | `pm_attach`, `pm_beacon_miss_exceeded_wakeup_disabled`, `pm_beacon_monitor_timeout_process`, `pm_beacon_offset_reset`, `pm_enable_keep_alive_timer`, +7 |
+| `TxRxCxt` | 1044 | `internal SRAM` / `.data` | `libpp.a[pp.o]` | `lmacStopTransmit`, `ppCalTxopDur`, `ppClearTxq`, `ppInitTxq`, `ppRegisterPromisRxCallback`, +8 |
 | `g_eb_list_desc` | 220 | `internal SRAM` / `.data` | `libpp.a[esf_buf.o]` | `wdev_data_init` |
 | `g_txop_queue_status` | 3 | `internal SRAM` / `.data` | `libpp.a[lmac.o]` | `wdev_data_init` |
-| `lmacConfMib` | 48 | `internal SRAM` / `.data` | `libpp.a[lmac.o]` | `ppProcessLifeTime`, `ppRxFragmentProc`, `ppTxFragmentProc`, `wdev_data_init` |
+| `lmacConfMib` | 48 | `internal SRAM` / `.data` | `libpp.a[lmac.o]` | `ppRxFragmentProc`, `ppTxFragmentProc`, `wdev_data_init` |
 | `g_pm_twt` | 24 | `internal SRAM` / `.data` | `libpp.a[pm_twt.o]` | `wdev_data_init` |
 | `BasicOFDMSched` | 12 | `internal SRAM` / `.data` | `libpp.a[trc.o]` | `wdev_data_init` |
 | `rc11AXSchedTbl` | 192 | `internal SRAM` / `.data` | `libpp.a[trc.o]` | - |
@@ -279,30 +289,30 @@ These are the exact direct stores recovered from the two separately audited cold
 | `trc_ctl` | 28 | `internal SRAM` / `.data` | `libpp.a[trc.o]` | `wdev_data_init` |
 | `txop_max_list` | 8 | `internal SRAM` / `.data` | `libpp.a[trc.o]` | - |
 | `BcnInterval` | 4 | `internal SRAM` / `.data` | `libpp.a[wdev.o]` | - |
-| `wDevCtrl` | 72 | `internal SRAM` / `.data` | `libpp.a[wdev.o]` | `RxNodeNum`, `dbg_dump_rx_errors`, `dbg_dump_rx_links`, `dbg_dump_rx_ppdu`, `esp_test_rx_process_complete`, +9 |
+| `wDevCtrl` | 72 | `internal SRAM` / `.data` | `libpp.a[wdev.o]` | `esp_test_rx_process_complete`, `esp_test_set_rx_error_occurs`, `mac_rxbuf_init`, `rcUpdateTxDone`, `wdev_data_init` |
 | `he_data_bits_per_sym` | 160 | `internal SRAM` / `.data` | `libpp.a[hal_mac_ctl.o]` | - |
 | `he_preamble_ersu` | 16 | `internal SRAM` / `.data` | `libpp.a[hal_mac_ctl.o]` | - |
 | `he_preamble_su` | 16 | `internal SRAM` / `.data` | `libpp.a[hal_mac_ctl.o]` | - |
 | `he_time_per_sym` | 12 | `internal SRAM` / `.data` | `libpp.a[hal_mac_ctl.o]` | - |
-| `coex_pti_tab` | 48 | `internal SRAM` / `.data.wifi` | `libcoexist.a[coexist_core.o]` | `coex_rom_data_init` |
-| `g_mesh_is_started` | 1 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `ic_set_trc`, `lmacAdjustTimestamp`, `net80211_data_ptr_init`, `pm_allow_tx`, `pm_disconnected_wake`, +10 |
-| `g_mesh_init_ps_type` | 4 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `esp_mesh_is_ps_enabled`, `esp_mesh_parse_ps_ie`, `esp_mesh_process_ps_type`, `esp_mesh_set_beacon_interval`, `ieee80211_add_ie_vendor_esp_ssid`, +19 |
-| `g_mesh_is_root` | 1 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `candidate_monitor_timer_start`, `cnx_connect_next_ap`, `cnx_connect_to_bss`, `cnx_sta_connect_cmd`, `esp_mesh_get_layer`, +34 |
+| `coex_pti_tab` | 48 | `internal SRAM` / `.data.wifi` | `libcoexist.a[coexist_core.o]` | - |
+| `g_mesh_is_started` | 1 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `ic_set_trc`, `net80211_data_ptr_init`, `pm_enable_active_timer`, `pm_enable_disconnected_sleep_delay_timer`, `pm_go_to_sleep`, +4 |
+| `g_mesh_init_ps_type` | 4 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `mesh_sta_auth_expire_time`, `net80211_data_ptr_init`, `pm_enable_active_timer`, `pm_go_to_sleep`, `pm_mesh_set_next_tbtt`, +2 |
+| `g_mesh_is_root` | 1 | `internal SRAM` / `.data.wifi` | `libnet80211.a[ieee80211_mesh_quick.o]` | `cnx_connect_next_ap`, `cnx_connect_to_bss`, `mesh_sta_auth_expire_time`, `net80211_data_ptr_init`, `pm_enable_active_timer`, +3 |
 | `pp_sig_cnt` | 36 | `internal SRAM` / `.data.wifi` | `libpp.a[pp.o]` | `wdev_data_init` |
 | `eb_txdesc_space` | 288 | `internal SRAM` / `.data.wifi` | `libpp.a[esf_buf.o]` | - |
-| `ptr_beacon_offset_funcs` | 4 | `internal SRAM` / `.data.wifi` | `libpp.a[pm_beacon_offset.o]` | `ic_beacon_offset_configure`, `ic_beacon_offset_set_rx_beacon_standard`, `pm_beacon_add_loss_counter`, `pm_beacon_add_total_counter`, `pm_beacon_monitor_tbtt_start`, +4 |
+| `ptr_beacon_offset_funcs` | 4 | `internal SRAM` / `.data.wifi` | `libpp.a[pm_beacon_offset.o]` | `pm_beacon_add_loss_counter`, `pm_beacon_monitor_tbtt_start`, `pm_beacon_offset_funcs_init`, `pm_funcs_deinit`, `pm_funcs_init`, +3 |
 | `ap_rxcb` | 4 | `internal SRAM` / `.bss.esp_wifi_async_net80211` | `libnet80211.a[ieee80211_hostap.o]` | `ieee80211_decap_amsdu` |
 | `eloop_lifecycle_busy` | 1 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[eloop.c.obj]` | `eloop_lifecycle_unlock` |
 | `eloop_data_lock` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[eloop.c.obj]` | - |
-| `g_wpa_config_changed` | 1 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | `config_changed_handler` |
+| `g_wpa_config_changed` | 1 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | - |
 | `wpa_cb` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | - |
 | `wifi_funcs` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | `os_timer_disarm.constprop.0` |
-| `g_wpa_pmk_caching_disabled` | 1 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | `esp_supplicant_disable_pmk_caching` |
+| `g_wpa_pmk_caching_disabled` | 1 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wpa_main.c.obj]` | - |
 | `s_sm_valid_bitmap` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa_auth.c.obj]` | - |
 | `s_wps_sm_cb` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_wps.c.obj]` | `wps_get_wps_sm_cb` |
 | `global_hapd` | 4 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_hostap.c.obj]` | `hostapd_get_hapd_data` |
-| `g_ic` | 788 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211.o]` | `_cnx_start_connect_without_scan`, `_do_wifi_disconnect`, `_do_wifi_start`, `_do_wifi_stop`, `ap_rx_cb`, +451 |
-| `wpa_crypto_funcs` | 52 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_crypto.o]` | `key_derivation_hmac_sha256`, `mt_copy_peer`, `nan_compute_service_hash`, `wapi_mk_mic.constprop.0.isra.0`, `wpa_crypto_funcs_init` |
+| `g_ic` | 788 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211.o]` | `_do_wifi_disconnect`, `_do_wifi_start`, `_do_wifi_stop`, `ap_rx_cb`, `btwt_setup_dwell_timeout_fn_process`, +259 |
+| `wpa_crypto_funcs` | 52 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_crypto.o]` | `wpa_crypto_funcs_init` |
 | `color_change_timer` | 20 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_he.o]` | - |
 | `esp_test_rx_trs_count` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_he.o]` | - |
 | `esp_wifi_opr_bss_color` | 3 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_he.o]` | - |
@@ -312,10 +322,10 @@ These are the exact direct stores recovered from the two separately audited cold
 | `g_beacon_idx` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_hostap.o]` | `ieee80211_getbcnframe` |
 | `g_deauth_mac_list` | 12 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_hostap.o]` | - |
 | `g_sa_query_mac_list` | 12 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_hostap.o]` | - |
-| `esp_mesh_quick_funcs` | 176 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_mesh_quick.o]` | `esp_mesh_quick_funcs_deinit`, `esp_mesh_quick_funcs_init`, `net80211_data_ptr_init`, `pm_go_to_sleep`, `pm_mesh_set_next_tbtt`, +5 |
-| `g_mesh_topology` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_mesh_quick.o]` | `esp_mesh_get_layer`, `esp_mesh_get_topology`, `esp_mesh_ie_init`, `esp_mesh_print_route_table`, `esp_mesh_scan_done_vote`, +23 |
-| `g_log_level` | 4 | `internal SRAM` / `.bss` | `libcore.a[misc_nvs.o]` | `_mesh_find_root_competitor`, `esp_mesh_ap_enqueue`, `esp_mesh_ap_list_clear`, `esp_mesh_ap_list_clear_expire`, `esp_mesh_ap_list_clear_invalid`, +150 |
-| `g_log_mod` | 24 | `internal SRAM` / `.bss` | `libcore.a[misc_nvs.o]` | `esp_wifi_internal_get_log`, `wifi_set_log_mod_process` |
+| `esp_mesh_quick_funcs` | 176 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_mesh_quick.o]` | `net80211_data_ptr_init`, `pm_go_to_sleep`, `pm_mesh_set_next_tbtt`, `pm_tx_null_data_done_process`, `wifi_mesh_ps_duty_cycle_get_process` |
+| `g_mesh_topology` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_mesh_quick.o]` | `net80211_data_ptr_init` |
+| `g_log_level` | 4 | `internal SRAM` / `.bss` | `libcore.a[misc_nvs.o]` | `esp_wifi_internal_get_log`, `esp_wifi_internal_set_log_level` |
+| `g_log_mod` | 24 | `internal SRAM` / `.bss` | `libcore.a[misc_nvs.o]` | `esp_wifi_internal_get_log` |
 | `itwt_information_timer` | 160 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_twt.o]` | - |
 | `s_itwt_flow_id_bitmap` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_twt.o]` | - |
 | `s_itwt_resume_flow_id_bitmap` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_twt.o]` | - |
@@ -325,7 +335,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `s_btwt_id_bitmap` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_btwt.o]` | `he_twt_teardown_txcb`, `ieee80211_close_all_twt_sessions` |
 | `s_avail_seq` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nan_datapath.o]` | - |
 | `s_dp` | 1324 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nan_datapath.o]` | - |
-| `gChmCxt` | 592 | `internal SRAM` / `.bss` | `libnet80211.a[wl_chm.o]` | `chm_acquire_lock`, `chm_cancel_op`, `chm_change_channel`, `chm_deinit`, `chm_end_op`, +10 |
+| `gChmCxt` | 592 | `internal SRAM` / `.bss` | `libnet80211.a[wl_chm.o]` | `chm_acquire_lock`, `chm_cancel_op`, `chm_change_channel`, `chm_deinit`, `chm_end_op`, +9 |
 | `action_q` | 8 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nan_common.o]` | - |
 | `g_nan_secure_dp_funcs` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nan_common.o]` | `nan_send_ndp_confirm`, `nan_update_static_sdfs` |
 | `g_nan_started` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nan_common.o]` | `nan_action_timeout`, `nan_disc_bcn_timeout`, `nan_dwend_timeout`, `nan_dwstart_timeout`, `nan_faw_end_timeout`, +5 |
@@ -335,15 +345,15 @@ These are the exact direct stores recovered from the two separately audited cold
 | `g_offchan_ctx` | 28 | `internal SRAM` / `.bss` | `libnet80211.a[wl_offchan.o]` | - |
 | `g_offchan_packet_lifetime` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[wl_offchan.o]` | `wdev_data_init` |
 | `offchan_tx_progress_in` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_offchan.o]` | `offchan_in_progress`, `wdev_data_init` |
-| `g_hmac_cnt` | 64 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_debug.o]` | `hostap_input`, `ieee80211_psq_send_one_pkt`, `net80211_data_ptr_init`, `sta_input` |
-| `app_scan_params` | 16 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | `wifi_get_scan_params_process` |
+| `g_hmac_cnt` | 64 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_debug.o]` | `hostap_input`, `ieee80211_psq_send_one_pkt`, `net80211_data_ptr_init` |
+| `app_scan_params` | 16 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | - |
 | `connect_scan_flag` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | - |
-| `gScanStruct` | 284 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | `_cnx_start_connect_without_scan`, `cnx_sta_connect_cmd`, `ieee80211_scan_attach`, `ieee80211_scan_deattach`, `net80211_data_ptr_init`, +26 |
-| `scannum` | 2 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | `ieee80211_sta_scan` |
+| `gScanStruct` | 284 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | `ieee80211_scan_attach`, `ieee80211_scan_deattach`, `net80211_data_ptr_init`, `scan_add_probe_ssid`, `scan_build_chan_list`, +15 |
+| `scannum` | 2 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_scan.o]` | - |
 | `esp_test_baparas_support_amsdu` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ht.o]` | - |
-| `s_wifi_nvs` | 1440 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nvs.o]` | `net80211_data_ptr_init` |
-| `g_mac_sleep_en` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `esp_wifi_internal_set_mac_sleep`, `net80211_data_ptr_init` |
-| `g_wifi_menuconfig` | 104 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `ampdu_rx_start.constprop.0`, `dbg_dump_rx_links`, `esf_buf_setup`, `ftm_is_initiator_supported`, `ftm_is_responder_supported`, +22 |
+| `s_wifi_nvs` | 1440 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_nvs.o]` | `net80211_data_ptr_init`, `wifi_nvs_cfg_init`, `wifi_nvs_compare_cfg_diff`, `wifi_nvs_deinit` |
+| `g_mac_sleep_en` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `net80211_data_ptr_init` |
+| `g_wifi_menuconfig` | 104 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `ampdu_rx_start.constprop.0`, `esf_buf_setup`, `ftm_is_initiator_supported`, `ftm_is_responder_supported`, `ht_recv_action_ba_addba_request`, +18 |
 | `itwt_probe_timer` | 20 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `itwt_probe_rc_tx_cb`, `itwt_stop_process` |
 | `mac_list_lock` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | `clear_mac_queue` |
 | `s_wifi_task_hdl` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_ioctl.o]` | - |
@@ -353,7 +363,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `ap_no_lr` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | `wdev_data_init` |
 | `g_authmode_incompatible` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | - |
 | `g_authmode_threshold_failure` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | - |
-| `g_cnxMgr` | 5256 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | `_cnx_start_connect_without_scan`, `cnx_add_rc`, `cnx_add_to_blacklist`, `cnx_auth_done`, `cnx_bss_alloc`, +14 |
+| `g_cnxMgr` | 5256 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | `cnx_add_rc`, `cnx_auth_done`, `cnx_bss_alloc`, `cnx_cal_rc_util`, `cnx_connect_to_bss`, +9 |
 | `g_cnx_probe_rc_list_cb` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | - |
 | `g_in_blacklist_flag` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | - |
 | `g_in_blacklist_scanned_again` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[wl_cnx.o]` | - |
@@ -364,24 +374,24 @@ These are the exact direct stores recovered from the two separately audited cold
 | `s_eapol_txdone_cb` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_sta.o]` | - |
 | `send_wake_null_timer` | 20 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_sta.o]` | `wdev_data_init` |
 | `sta_csa_timer` | 20 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_sta.o]` | - |
-| `g_wifi_improve_contention_ability` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_proto.o]` | `esp_wifi_improve_contention_ability` |
+| `g_wifi_improve_contention_ability` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[ieee80211_proto.o]` | - |
 | `esp_test_rx_ctrl` | 72 | `internal SRAM` / `.bss` | `libnet80211.a[test.o]` | `esp_test_rx_parse_trig` |
 | `g_rx_trig_idx` | 4 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
 | `g_store_rx_trig` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
 | `g_store_rx_trig_print` | 1 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
 | `test_rx_trig_bfrp` | 1200 | `internal SRAM` / `.bss` | `libnet80211.a[test_rx_trig.o]` | - |
-| `g_phyFuns` | 4 | `internal SRAM` / `.bss` | `libphy.a[phy_init.o]` | `phy_bt_set_tx_gain_new`, `phy_bt_tx_pwctrl_init`, `phy_start_tx_tone_step_new`, `phy_tx_cap_init`, `phy_tx_gain_print`, +3 |
-| `g_pm` | 1176 | `internal SRAM` / `.bss` | `libpp.a[pm.o]` | `hal_get_time_to_sta_next_tbtt`, `ic_update_light_sleep_wake_ahead_time`, `pm_beacon_offset_check`, `pm_beacon_offset_get_average`, `pm_beacon_offset_get_expect`, +35 |
+| `g_phyFuns` | 4 | `internal SRAM` / `.bss` | `libphy.a[phy_init.o]` | `phy_bt_set_tx_gain_new`, `phy_bt_tx_pwctrl_init`, `phy_get_romfunc_addr`, `phy_start_tx_tone_step_new`, `phy_tx_cap_init`, +3 |
+| `g_pm` | 1176 | `internal SRAM` / `.bss` | `libpp.a[pm.o]` | `hal_get_time_to_sta_next_tbtt`, `is_off_channel`, `pm_active_timeout_process`, `pm_attach`, `pm_beacon_add_loss_counter`, +94 |
 | `g_rts_threshold_bytes` | 120 | `internal SRAM` / `.bss` | `libpp.a[if_hwctrl.o]` | `wdev_data_init` |
 | `if_ctrl` | 40 | `internal SRAM` / `.bss` | `libpp.a[if_hwctrl.o]` | `wdev_data_init` |
 | `s_is_6m` | 1 | `internal SRAM` / `.bss` | `libpp.a[if_hwctrl.o]` | - |
 | `s_fragment` | 16 | `internal SRAM` / `.bss` | `libpp.a[pp.o]` | `wdev_data_init` |
-| `g_bss_color_collision_detection_enabled` | 2 | `internal SRAM` / `.bss` | `libpp.a[pp_he_ctrl.o]` | `wifi_enable_bss_color_collision_detection_process` |
-| `eb_space` | 240 | `internal SRAM` / `.bss` | `libpp.a[esf_buf.o]` | - |
+| `g_bss_color_collision_detection_enabled` | 2 | `internal SRAM` / `.bss` | `libpp.a[pp_he_ctrl.o]` | - |
+| `eb_space` | 240 | `internal SRAM` / `.bss` | `libpp.a[esf_buf.o]` | `esf_buf_setup` |
 | `g_he_max_apep_length_tab` | 480 | `internal SRAM` / `.bss` | `libpp.a[trc.o]` | `wdev_data_init` |
 | `s_fix_rate` | 12 | `internal SRAM` / `.bss` | `libpp.a[trc.o]` | - |
 | `s_fix_rate_mask` | 4 | `internal SRAM` / `.bss` | `libpp.a[trc.o]` | - |
-| `g_lmac_cnt` | 192 | `internal SRAM` / `.bss` | `libpp.a[pp_debug.o]` | `esf_buf_alloc_dynamic`, `esf_buf_statis_dump`, `lmacDebugTxDrop`, `wdev_data_init` |
+| `g_lmac_cnt` | 192 | `internal SRAM` / `.bss` | `libpp.a[pp_debug.o]` | `lmacDebugTxDrop`, `wdev_data_init` |
 | `g_pm_cnt` | 72 | `internal SRAM` / `.bss` | `libpp.a[pp_debug.o]` | `pm_active_timeout_process`, `pm_beacon_timestamp_statistic`, `wdev_data_init` |
 | `BcnSendTick` | 4 | `internal SRAM` / `.bss` | `libpp.a[wdev.o]` | - |
 | `g_wdev_csi_rx` | 4 | `internal SRAM` / `.bss` | `libpp.a[wdev.o]` | - |
@@ -393,10 +403,10 @@ These are the exact direct stores recovered from the two separately audited cold
 | `wDevMacSleep` | 120 | `internal SRAM` / `.bss` | `libpp.a[wdev.o]` | `wdev_data_init` |
 | `s_pm_beacon_offset` | 76 | `internal SRAM` / `.bss` | `libpp.a[pm_beacon_offset.o]` | `wdev_data_init` |
 | `s_pm_beacon_offset_config` | 6 | `internal SRAM` / `.bss` | `libpp.a[pm_beacon_offset.o]` | `wdev_data_init` |
-| `s_tbttstart` | 8 | `internal SRAM` / `.bss` | `libpp.a[hal_tsf.o]` | `wdev_data_init` |
-| `strid.1` | 20 | `internal SRAM` / `.bss` | `libpp.a[hal_utilities.o]` | - |
+| `s_tbttstart` | 8 | `internal SRAM` / `.bss` | `libpp.a[hal_tsf.o]` | `hal_set_sta_tbtt`, `hal_tsf_get_tbttstart`, `wdev_data_init` |
+| `strid.1` | 20 | `internal SRAM` / `.bss` | `libpp.a[hal_utilities.o]` | `rate2str` |
 | `assoc_ie_buf` | 48 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa.c.obj]` | - |
-| `gWpaSm` | 1160 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa.c.obj]` | `esp_wifi_set_okc_support`, `get_wpa_sm`, `set_assoc_ie`, `wpa_config_reload`, `wpa_set_pmk`, +6 |
+| `gWpaSm` | 1160 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa.c.obj]` | `set_assoc_ie`, `wpa_config_reload`, `wpa_set_pmk`, `wpa_sta_in_4way_handshake`, `wpa_supplicant_stop_countermeasures` |
 | `eloop` | 36 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[eloop.c.obj]` | `eloop_insert_timeout_locked.isra.0`, `eloop_is_running` |
 | `s_sm_table` | 64 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa_auth.c.obj]` | - |
 | `g_wpa_supp` | 144 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_common.c.obj]` | `esp_supplicant_common_deinit` |

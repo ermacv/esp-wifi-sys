@@ -140,6 +140,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
         Command::new("llvm-readelf").arg("-S").arg("-W").arg(elf),
     )?)?);
     let reachable = reachable_vendor_functions(&inventory.calls);
+    let cold_phy_reachable = reachable_from_roots(&inventory.calls, &["register_chipv7_phy"], &[]);
     let mut reverse_references = reverse_references(&inventory.references);
     let pointer_backings = augment_pointer_backing_references(
         &mut reverse_references,
@@ -150,6 +151,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
 
     let mut runtime_globals = Vec::new();
     let mut linked_other_globals = Vec::new();
+    let mut cold_phy_globals = Vec::new();
     for (name, owners) in &inventory.data_owners {
         let Some(symbol) = final_symbols.get(name) else {
             continue;
@@ -158,16 +160,29 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
             continue;
         }
         let all_referrers = reverse_references.get(name).cloned().unwrap_or_default();
-        let runtime_referrers = all_referrers
+        let linked_referrers = linked_code_referrers(&all_referrers, &final_symbols);
+        let runtime_referrers = linked_referrers
             .intersection(&reachable)
             .cloned()
             .collect::<BTreeSet<_>>();
+        let cold_phy_referrers = linked_referrers
+            .intersection(&cold_phy_reachable)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !cold_phy_referrers.is_empty() {
+            cold_phy_globals.push((
+                name.clone(),
+                symbol.clone(),
+                owners.clone(),
+                cold_phy_referrers,
+            ));
+        }
         let row = (
             name.clone(),
             symbol.clone(),
             owners.clone(),
             runtime_referrers,
-            all_referrers,
+            linked_referrers,
         );
         if row.3.is_empty() {
             linked_other_globals.push(row);
@@ -178,6 +193,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
 
     runtime_globals.sort_by_key(|(_, symbol, ..)| symbol.address);
     linked_other_globals.sort_by_key(|(_, symbol, ..)| symbol.address);
+    cold_phy_globals.sort_by_key(|(_, symbol, ..)| symbol.address);
 
     let mut runtime_indirections = reverse_references
         .iter()
@@ -216,6 +232,10 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
         .collect::<Vec<_>>();
 
     let runtime_bytes = runtime_globals
+        .iter()
+        .map(|(_, symbol, ..)| symbol.size)
+        .sum::<u64>();
+    let cold_phy_bytes = cold_phy_globals
         .iter()
         .map(|(_, symbol, ..)| symbol.size)
         .sum::<u64>();
@@ -295,6 +315,14 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(
         &mut report,
         &format!(
+            "- live mutable blob globals reached from `register_chipv7_phy`: {} symbols / {} bytes",
+            cold_phy_globals.len(),
+            cold_phy_bytes
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
             "- ROM-ABI mutable indirection cells reached by strict leaves: {} cells / {} inferred bytes",
             runtime_indirections.len(),
             runtime_indirections.len() * 4
@@ -366,6 +394,39 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
         );
     }
     if runtime_globals.is_empty() {
+        pushln(&mut report, "| _none_ | 0 | - | - | - |");
+    }
+
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "## Mutable blob state reached by PHY cold initialization",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "This is the direct archive call graph rooted at `register_chipv7_phy`. It does not prove indirect ROM callbacks unreachable.",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "| symbol | size | placement | archive owner | cold PHY referrers |",
+    );
+    pushln(&mut report, "|---|---:|---|---|---|");
+    for (name, symbol, owners, cold_referrers) in &cold_phy_globals {
+        pushln(
+            &mut report,
+            &format!(
+                "| `{name}` | {} | `{}` / `{}` | {} | {} |",
+                symbol.size,
+                placement(symbol.address),
+                section_name(symbol.address, &sections),
+                code_set(owners, 3),
+                code_set(cold_referrers, 5),
+            ),
+        );
+    }
+    if cold_phy_globals.is_empty() {
         pushln(&mut report, "| _none_ | 0 | - | - | - |");
     }
 
@@ -528,10 +589,10 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
     pushln(&mut report, "");
     pushln(
         &mut report,
-        "| symbol | size | placement | archive owner | known archive referrers |",
+        "| symbol | size | placement | archive owner | linked referrers |",
     );
     pushln(&mut report, "|---|---:|---|---|---|");
-    for (name, symbol, owners, _, all_referrers) in &linked_other_globals {
+    for (name, symbol, owners, _, linked_referrers) in &linked_other_globals {
         pushln(
             &mut report,
             &format!(
@@ -540,7 +601,7 @@ fn build_report(library_dir: &Path, elf: &Path) -> Result<String> {
                 placement(symbol.address),
                 section_name(symbol.address, &sections),
                 code_set(owners, 3),
-                code_set(all_referrers, 5),
+                code_set(linked_referrers, 5),
             ),
         );
     }
@@ -563,17 +624,23 @@ fn inventory_archives(library_dir: &Path) -> Result<ArchiveInventory> {
             .context("archive name is not UTF-8")?;
         let nm = text(checked(
             Command::new("llvm-nm")
+                .arg("-a")
                 .arg("-A")
                 .arg("-S")
                 .arg("-P")
                 .arg("--defined-only")
                 .arg(&archive),
         )?)?;
+        let mut member_symbols = BTreeMap::<String, Vec<(String, Symbol)>>::new();
         for line in nm.lines() {
             let Some((source, (name, symbol))) = parse_archive_symbol(line) else {
                 continue;
             };
             let owner = short_owner(source, archive_name);
+            member_symbols
+                .entry(owner.clone())
+                .or_default()
+                .push((name.to_owned(), symbol.clone()));
             if is_mutable_data(symbol.kind) && !name.starts_with('.') {
                 inventory
                     .data_owners
@@ -588,6 +655,7 @@ fn inventory_archives(library_dir: &Path) -> Result<ArchiveInventory> {
                     .insert(owner);
             }
         }
+        let local_data_aliases = local_data_aliases(&member_symbols);
 
         let disassembly = text(checked(
             Command::new("llvm-objdump")
@@ -595,7 +663,12 @@ fn inventory_archives(library_dir: &Path) -> Result<ArchiveInventory> {
                 .arg("--no-show-raw-insn")
                 .arg(&archive),
         )?)?;
-        parse_archive_relocations(&disassembly, &mut inventory);
+        parse_archive_relocations(
+            &disassembly,
+            archive_name,
+            &local_data_aliases,
+            &mut inventory,
+        );
     }
     Ok(inventory)
 }
@@ -634,9 +707,62 @@ fn short_owner(source: &str, fallback_archive: &str) -> String {
     }
 }
 
-fn parse_archive_relocations(disassembly: &str, inventory: &mut ArchiveInventory) {
+fn local_data_aliases(
+    member_symbols: &BTreeMap<String, Vec<(String, Symbol)>>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut aliases = BTreeMap::new();
+    for (owner, symbols) in member_symbols {
+        for (local_name, local_symbol) in symbols
+            .iter()
+            .filter(|(name, symbol)| name.starts_with(".LANCHOR") && is_mutable_data(symbol.kind))
+        {
+            let matches = symbols
+                .iter()
+                .filter(|(name, symbol)| {
+                    !name.starts_with('.')
+                        && is_mutable_data(symbol.kind)
+                        && symbol.address == local_symbol.address
+                        && data_kind(symbol.kind) == data_kind(local_symbol.kind)
+                })
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            if let [canonical] = matches.as_slice() {
+                aliases
+                    .entry(owner.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .insert(local_name.clone(), (*canonical).clone());
+            }
+        }
+    }
+    aliases
+}
+
+fn data_kind(kind: char) -> char {
+    match kind {
+        'B' | 'b' | 'C' | 'c' => 'b',
+        'D' | 'd' | 'G' | 'g' | 'S' | 's' => 'd',
+        _ => '?',
+    }
+}
+
+fn parse_archive_relocations(
+    disassembly: &str,
+    archive_name: &str,
+    local_data_aliases: &BTreeMap<String, BTreeMap<String, String>>,
+    inventory: &mut ArchiveInventory,
+) {
     let mut function = None::<String>;
+    let mut owner = archive_name.to_owned();
     for line in disassembly.lines() {
+        if let Some((source, _)) = line.split_once(":\tfile format ") {
+            if let Some((_, member)) = source.rsplit_once('(') {
+                if let Some(member) = member.strip_suffix(')') {
+                    owner = format!("{archive_name}[{member}]");
+                    function = None;
+                    continue;
+                }
+            }
+        }
         if let Some(name) = definition_name(line) {
             function = (!name.starts_with('.')).then(|| normalize_symbol(name));
             continue;
@@ -654,7 +780,16 @@ fn parse_archive_relocations(disassembly: &str, inventory: &mut ArchiveInventory
         let Some(target) = fields.get(index + 1) else {
             continue;
         };
-        let target = normalize_symbol(target);
+        let mut target = normalize_symbol(target);
+        if target.starts_with(".LANCHOR") {
+            let Some(canonical) = local_data_aliases
+                .get(&owner)
+                .and_then(|aliases| aliases.get(&target))
+            else {
+                continue;
+            };
+            target = canonical.clone();
+        }
         if target.starts_with('.') || target == "*ABS*" {
             continue;
         }
@@ -677,12 +812,18 @@ fn parse_archive_relocations(disassembly: &str, inventory: &mut ArchiveInventory
 }
 
 fn reachable_vendor_functions(calls: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
+    reachable_from_roots(calls, ROOTS, WRAPPED_VENDOR_BOUNDARIES)
+}
+
+fn reachable_from_roots(
+    calls: &BTreeMap<String, BTreeSet<String>>,
+    roots: &[&str],
+    boundaries: &[&str],
+) -> BTreeSet<String> {
     let mut reachable = BTreeSet::new();
-    let mut pending = VecDeque::from_iter(ROOTS.iter().map(|root| (*root).to_owned()));
+    let mut pending = VecDeque::from_iter(roots.iter().map(|root| (*root).to_owned()));
     while let Some(function) = pending.pop_front() {
-        if !ROOTS.contains(&function.as_str())
-            && WRAPPED_VENDOR_BOUNDARIES.contains(&function.as_str())
-        {
+        if !roots.contains(&function.as_str()) && boundaries.contains(&function.as_str()) {
             continue;
         }
         if !reachable.insert(function.clone()) {
@@ -847,6 +988,21 @@ fn is_code(kind: char) -> bool {
     matches!(kind, 'T' | 't' | 'W' | 'w')
 }
 
+fn linked_code_referrers(
+    referrers: &BTreeSet<String>,
+    final_symbols: &BTreeMap<String, Symbol>,
+) -> BTreeSet<String> {
+    referrers
+        .iter()
+        .filter(|referrer| {
+            final_symbols
+                .get(*referrer)
+                .is_some_and(|symbol| is_code(symbol.kind))
+        })
+        .cloned()
+        .collect()
+}
+
 fn definition_name(line: &str) -> Option<&str> {
     let start = line.find('<')? + 1;
     let end = line[start..].find(">:")? + start;
@@ -918,8 +1074,9 @@ fn text(output: Output) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        definition_name, parse_archive_symbol, parse_posix_symbols, parse_sections, placement,
-        reachable_vendor_functions, ROM_ABI_BACKINGS,
+        definition_name, linked_code_referrers, local_data_aliases, parse_archive_relocations,
+        parse_archive_symbol, parse_posix_symbols, parse_sections, placement,
+        reachable_vendor_functions, ArchiveInventory, Symbol, ROM_ABI_BACKINGS,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -991,5 +1148,78 @@ mod tests {
         assert!(reachable.contains("wDev_ProcessRxSucData"));
         assert!(!reachable.contains("esp_test_set_rx_error_occurs"));
         assert!(!reachable.contains("vendor_body_child"));
+    }
+
+    #[test]
+    fn outside_state_lists_only_final_link_code_referrers() {
+        let referrers = BTreeSet::from([
+            "cold_live".to_owned(),
+            "discarded_archive_function".to_owned(),
+            "linked_data".to_owned(),
+        ]);
+        let final_symbols = BTreeMap::from([
+            (
+                "cold_live".to_owned(),
+                Symbol {
+                    address: 0x4000_0000,
+                    size: 4,
+                    kind: 'T',
+                },
+            ),
+            (
+                "linked_data".to_owned(),
+                Symbol {
+                    address: 0x2f00_0000,
+                    size: 4,
+                    kind: 'D',
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            linked_code_referrers(&referrers, &final_symbols),
+            BTreeSet::from(["cold_live".to_owned()])
+        );
+    }
+
+    #[test]
+    fn resolves_member_local_data_anchor_to_global_state() {
+        let owner = "libphy.a[phy_init.o]".to_owned();
+        let symbols = BTreeMap::from([(
+            owner,
+            vec![
+                (
+                    ".LANCHOR0".to_owned(),
+                    Symbol {
+                        address: 0,
+                        size: 0,
+                        kind: 'd',
+                    },
+                ),
+                (
+                    "phy_param".to_owned(),
+                    Symbol {
+                        address: 0,
+                        size: 508,
+                        kind: 'D',
+                    },
+                ),
+            ],
+        )]);
+        let aliases = local_data_aliases(&symbols);
+        let mut inventory = ArchiveInventory::default();
+        parse_archive_relocations(
+            "libs/libphy.a(phy_init.o):\tfile format elf32-littleriscv\n\
+             00000000 <register_chipv7_phy>:\n\
+             \t72: R_RISCV_HI20 .LANCHOR0\n",
+            "libphy.a",
+            &aliases,
+            &mut inventory,
+        );
+
+        assert_eq!(
+            inventory.references["register_chipv7_phy"],
+            BTreeSet::from(["phy_param".to_owned()])
+        );
     }
 }
