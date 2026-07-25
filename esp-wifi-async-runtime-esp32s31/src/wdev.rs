@@ -6,13 +6,22 @@ use core::{
 };
 
 static FTM_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".critical.bss.wifi_strict.rx_action_policy"]
+static STRICT_ACTION_SIDE_PATHS_DISABLED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WdevActionRxAdoptionError {
+    NanInterfaceEnabled,
+    FtmRxEnabled,
+}
 
 #[cfg(target_arch = "riscv32")]
 use crate::{
     rx_descriptor::{
         decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
-        rx_indicate_aggregate_flag, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
-        rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
+        rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
+        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
     },
     timer::RawOsiTimer,
 };
@@ -186,6 +195,7 @@ struct RxMetadataProbe {
     aggregate_flag_bitmap: AtomicUsize,
     rust_data_routes: AtomicUsize,
     rust_management_routes: AtomicUsize,
+    rust_action_routes: AtomicUsize,
     rust_probe_request_discards: AtomicUsize,
     vendor_fallbacks: AtomicUsize,
 }
@@ -215,6 +225,7 @@ impl RxMetadataProbe {
             aggregate_flag_bitmap: AtomicUsize::new(0),
             rust_data_routes: AtomicUsize::new(0),
             rust_management_routes: AtomicUsize::new(0),
+            rust_action_routes: AtomicUsize::new(0),
             rust_probe_request_discards: AtomicUsize::new(0),
             vendor_fallbacks: AtomicUsize::new(0),
         }
@@ -245,6 +256,7 @@ pub struct WdevRxMetadataSnapshot {
     pub aggregate_flag_bitmap: usize,
     pub rust_data_routes: usize,
     pub rust_management_routes: usize,
+    pub rust_action_routes: usize,
     pub rust_probe_request_discards: usize,
     pub vendor_fallbacks: usize,
 }
@@ -338,6 +350,7 @@ const MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT: usize = 64;
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static mut wDevCtrl: u8;
+    static g_wifi_menuconfig: u8;
     static mut g_wdev_last_desc_reset_ptr: *mut u8;
     static mut g_wdev_csi_rx: usize;
     #[link_name = "wDev_AppendRxBlocks"]
@@ -818,15 +831,17 @@ impl CompletedRxUnit {
 /// boundary and own qualified common STA data/management routes in Rust.
 ///
 /// The qualified route is deliberately narrow: successful base-layout STA
-/// data plus association-response, beacon and authentication management
-/// frames under the strict ordinary AP/STA mode. It reproduces the pinned
+/// data plus association-response, beacon, authentication and qualified
+/// Action management frames under the strict ordinary AP/STA mode. It
+/// reproduces the pinned
 /// `wDevCtrl` publications and calls the existing finite `wDev_IndicateFrame`
 /// leaf. In the STA-only profile it also reproduces the Probe Request
 /// STA-to-AP rewrite outcome as a direct Rust-owned discard, after strict
-/// preparation disabled the optional observation callback. Action/control
-/// frames, optional metadata, error, promiscuous and currently unclassified
-/// routes retain an explicit ROM fallback until their state transitions are
-/// ported.
+/// preparation disabled the optional observation callback. Action is admitted
+/// only after one-shot adoption proved both NAN and FTM side paths disabled.
+/// Control frames, optional metadata, error, promiscuous and currently
+/// unclassified routes retain an explicit ROM fallback until their state
+/// transitions are ported.
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
 #[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
@@ -941,8 +956,12 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     };
     let data_copy_mode = frame_control.and_then(rx_sta_data_copy_mode);
     let management_copy_mode = frame_control.and_then(rx_sta_management_copy_mode);
+    let action_copy_mode = STRICT_ACTION_SIDE_PATHS_DISABLED
+        .load(Ordering::Acquire)
+        .then(|| frame_control.and_then(rx_sta_action_copy_mode))
+        .flatten();
     let probe_request_discard = frame_control.is_some_and(rx_sta_probe_request_is_discarded);
-    let copy_mode = data_copy_mode.or(management_copy_mode);
+    let copy_mode = data_copy_mode.or(management_copy_mode).or(action_copy_mode);
     let control = ptr::addr_of_mut!(wDevCtrl);
     let strict_sta_base_route = status == 0
         && !tail.is_null()
@@ -989,7 +1008,14 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         let copy_mode = copy_mode.unwrap_or(0);
         let timestamp =
             u32::from_le_bytes([prefix[0x0c], prefix[0x0d], prefix[0x0e], prefix[0x0f]]);
-        if management_copy_mode.is_some() {
+        if action_copy_mode.is_some() {
+            RX_METADATA_PROBE
+                .rust_action_routes
+                .fetch_add(1, Ordering::Relaxed);
+            RX_METADATA_PROBE
+                .rust_management_routes
+                .fetch_add(1, Ordering::Relaxed);
+        } else if management_copy_mode.is_some() {
             RX_METADATA_PROBE
                 .rust_management_routes
                 .fetch_add(1, Ordering::Relaxed);
@@ -1292,6 +1318,40 @@ pub(crate) unsafe fn strict_optional_rx_mode_state() -> (u8, u8, usize) {
     )
 }
 
+/// Adopt the immutable optional-policy guards surrounding management Action
+/// RX before the strict executor takes ownership.
+///
+/// The pinned `ic_interface_enabled(2)` is exactly bit two of
+/// `wDevCtrl+0x31`. The adjacent FTM branch tests bit `0x04` in the aligned
+/// word at `g_wifi_menuconfig+0x40`. Post-handoff APIs cannot enable NAN or
+/// FTM, so publishing this one-shot Rust proof removes both hidden global
+/// reads from the RX hot path.
+///
+/// # Safety
+///
+/// Vendor initialization must be quiescent and the caller must prevent NAN
+/// and FTM configuration changes after a successful adoption.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn adopt_action_rx_policy() -> Result<(), WdevActionRxAdoptionError> {
+    if STRICT_ACTION_SIDE_PATHS_DISABLED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if ptr::addr_of!(wDevCtrl).add(0x31).read_volatile() & (1 << 2) != 0 {
+        return Err(WdevActionRxAdoptionError::NanInterfaceEnabled);
+    }
+    if ptr::addr_of!(g_wifi_menuconfig)
+        .add(0x40)
+        .cast::<u32>()
+        .read_volatile()
+        & 0x04
+        != 0
+    {
+        return Err(WdevActionRxAdoptionError::FtmRxEnabled);
+    }
+    STRICT_ACTION_SIDE_PATHS_DISABLED.store(true, Ordering::Release);
+    Ok(())
+}
+
 pub(crate) fn runtime_wdev_link_wrapper_active() -> bool {
     core::ptr::eq(
         vendor_record_ftm_data as *const (),
@@ -1462,6 +1522,7 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         rust_management_routes: RX_METADATA_PROBE
             .rust_management_routes
             .load(Ordering::Acquire),
+        rust_action_routes: RX_METADATA_PROBE.rust_action_routes.load(Ordering::Acquire),
         rust_probe_request_discards: RX_METADATA_PROBE
             .rust_probe_request_discards
             .load(Ordering::Acquire),

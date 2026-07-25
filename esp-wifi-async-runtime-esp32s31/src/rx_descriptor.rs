@@ -98,12 +98,13 @@ pub(crate) const fn rx_sta_data_copy_mode(frame_control: u16) -> Option<u32> {
     Some((frame_control & 0x70 == 0x40) as u32)
 }
 
-/// Admit only management subtypes whose pinned STA path has no optional
-/// callback, NAN or FTM side branch.
+/// Admit management subtypes whose pinned STA path has no optional side
+/// branch.
 ///
 /// Association responses, beacons and authentication frames all join the
 /// vendor classifier with copy mode one. The common fragmentation join clears
-/// that flag. Probe requests and action frames deliberately return `None`.
+/// that flag. Probe requests and action frames deliberately return `None`;
+/// action admission additionally requires an adopted NAN/FTM policy proof.
 pub(crate) const fn rx_sta_management_copy_mode(frame_control: u16) -> Option<u32> {
     if frame_control & 0x0f != 0 {
         return None;
@@ -112,6 +113,20 @@ pub(crate) const fn rx_sta_management_copy_mode(frame_control: u16) -> Option<u3
         1 | 8 | 11 => Some((frame_control & 0x0400 == 0) as u32),
         _ => None,
     }
+}
+
+/// Recover the common copy mode for a management Action frame.
+///
+/// `wDev_ProcessRxSucData+0x2d8..=0x312` first dispatches optional NAN and FTM
+/// observers, then joins the same copy-mode-one management path. This pure
+/// classifier owns only the frame-control decision. Its caller must hold the
+/// one-shot proof that NAN interface bit two and FTM menu bit `0x04` were both
+/// disabled before the strict runtime handoff.
+pub(crate) const fn rx_sta_action_copy_mode(frame_control: u16) -> Option<u32> {
+    if frame_control & 0x0f != 0 || (frame_control >> 4) & 0x0f != 13 {
+        return None;
+    }
+    Some((frame_control & 0x0400 == 0) as u32)
 }
 
 /// Identify the Probe Request that the pinned STA-only path reroutes to AP.
@@ -178,8 +193,8 @@ mod tests {
 
     use super::{
         decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
-        restore_received_packet_buffer_view, rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
-        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
+        restore_received_packet_buffer_view, rx_indicate_aggregate_flag, rx_sta_action_copy_mode,
+        rx_sta_data_copy_mode, rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
@@ -328,6 +343,16 @@ mod tests {
         assert_eq!(rx_sta_management_copy_mode(0x0040), None);
         assert_eq!(rx_sta_management_copy_mode(0x00d0), None);
         assert_eq!(rx_sta_management_copy_mode(0x0008), None);
+    }
+
+    #[test]
+    fn sta_action_classifier_is_exact_and_clears_copy_on_fragment() {
+        assert_eq!(rx_sta_action_copy_mode(0x00d0), Some(1));
+        assert_eq!(rx_sta_action_copy_mode(0x04d0), Some(0));
+        assert_eq!(rx_sta_action_copy_mode(0x40d0), Some(1));
+        assert_eq!(rx_sta_action_copy_mode(0x00d1), None);
+        assert_eq!(rx_sta_action_copy_mode(0x00c0), None);
+        assert_eq!(rx_sta_action_copy_mode(0x00d8), None);
     }
 
     #[test]

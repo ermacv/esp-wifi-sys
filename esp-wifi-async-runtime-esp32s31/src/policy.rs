@@ -68,6 +68,7 @@ pub enum StrictRuntimeError {
     TxQueueStateAdoption(crate::tx_queue::TxQueueStateAdoptionError),
     TxDoneStateAdoption(crate::txdone::TxDoneStateAdoptionError),
     RxStateAdoption(crate::rx::RxStateAdoptionError),
+    ActionRxPolicyAdoption(crate::wdev::WdevActionRxAdoptionError),
     RxInterruptStateAdoption(crate::rx::RxInterruptAdoptionError),
     RuntimeCallbacksNotPatched,
     PpTaskHandoffIncomplete,
@@ -375,6 +376,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
             csi_callback,
         });
     }
+    #[cfg(feature = "strict-no-wait")]
+    crate::wdev::adopt_action_rx_policy().map_err(StrictRuntimeError::ActionRxPolicyAdoption)?;
     let configured_hart = config.wifi_task_core_id as u32;
     let current_hart = crate::critical::current_hart().min(u32::MAX as usize) as u32;
     STRICT_PREPARATION_STAGE.store(7, Ordering::Release);
@@ -424,8 +427,7 @@ pub unsafe fn prepare_strict_runtime(
         return Err(StrictRuntimeError::PpPostLinkWrapperMissing);
     }
     #[cfg(feature = "strict-no-wait")]
-    crate::rx::adopt_rx_interrupt_queue()
-        .map_err(StrictRuntimeError::RxInterruptStateAdoption)?;
+    crate::rx::adopt_rx_interrupt_queue().map_err(StrictRuntimeError::RxInterruptStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
     if !crate::net80211_tx::link_wrapper_active() {
         return Err(StrictRuntimeError::Net80211TxLinkWrapperMissing);
