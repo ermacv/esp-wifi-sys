@@ -1,7 +1,7 @@
 # ESP32-S31 linked state and interposition audit
 
 - final ELF: `wifi-sta`
-- ELF SHA-256: `876f2a39ae70ccd1515f2dda4517f31a37ee6d4f4c9649fe5386e5874ce0f70d`
+- ELF SHA-256: `93f0143d1469adcebb5bc39299300277f454817b01f5b5f15a731ae7140cdacb`
 - strict vendor roots: 26
 - reference-only control-flow roots: `phy_change_channel`
 - separately auditable static-binding roots: `net80211_data_ptr_init`, `wdev_data_init`
@@ -259,7 +259,7 @@ These are the exact direct stores recovered from the two separately audited cold
 | `wifi_log` | `0x400c3ad2` | retained replacement only | - |
 | `wpa_ap_rx_eapol` | `0x400c31ec` | retained replacement only | - |
 | `wpa_sm_rx_eapol` | `0x400c31ae` | retained replacement only | - |
-| `esp_test_set_rx_error_occurs` | `0x400b8cda` | direct public alias | `0x2f801164` (ROM export) |
+| `esp_test_set_rx_error_occurs` | `0x400b8cc0` | direct public alias | `0x2f801164` (ROM export) |
 | `rcUpdateTxDone` | `0x400c2e58` | direct public alias | `0x2f80106c` (ROM export) |
 | `ieee80211_post_hmac_tx` | `0x400d04bc` | direct public alias | `0x2f800cc0` (ROM export) |
 | `ieee80211_crypto_encap` | `0x400c1ec8` | direct public alias | `0x2f800cac` (ROM export) |
