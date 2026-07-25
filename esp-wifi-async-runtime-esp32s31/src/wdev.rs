@@ -20,7 +20,7 @@ pub enum WdevActionRxAdoptionError {
 use crate::{
     rx_descriptor::{
         decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
-        recycled_descriptor_word, rx_csi_length, rx_indicate_aggregate_flag,
+        multi_rx_copy_plan, recycled_descriptor_word, rx_csi_length, rx_indicate_aggregate_flag,
         rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
         rx_sta_probe_request_is_discarded, single_rx_copy_plan, SingleRxCopyPlan,
         RX_METADATA_PREFIX_BYTES,
@@ -200,6 +200,8 @@ struct RxMetadataProbe {
     rust_action_routes: AtomicUsize,
     rust_probe_request_discards: AtomicUsize,
     rust_indicate_routes: AtomicUsize,
+    rust_multi_indicate_routes: AtomicUsize,
+    rust_multi_copy_mode_discards: AtomicUsize,
     rust_indicate_allocation_rejects: AtomicUsize,
     rust_indicate_population_rejects: AtomicUsize,
     vendor_indicate_fallbacks: AtomicUsize,
@@ -234,6 +236,8 @@ impl RxMetadataProbe {
             rust_action_routes: AtomicUsize::new(0),
             rust_probe_request_discards: AtomicUsize::new(0),
             rust_indicate_routes: AtomicUsize::new(0),
+            rust_multi_indicate_routes: AtomicUsize::new(0),
+            rust_multi_copy_mode_discards: AtomicUsize::new(0),
             rust_indicate_allocation_rejects: AtomicUsize::new(0),
             rust_indicate_population_rejects: AtomicUsize::new(0),
             vendor_indicate_fallbacks: AtomicUsize::new(0),
@@ -269,6 +273,8 @@ pub struct WdevRxMetadataSnapshot {
     pub rust_action_routes: usize,
     pub rust_probe_request_discards: usize,
     pub rust_indicate_routes: usize,
+    pub rust_multi_indicate_routes: usize,
+    pub rust_multi_copy_mode_discards: usize,
     pub rust_indicate_allocation_rejects: usize,
     pub rust_indicate_population_rejects: usize,
     pub vendor_indicate_fallbacks: usize,
@@ -917,6 +923,86 @@ unsafe fn indicate_single_received_frame(
     true
 }
 
+/// Own the base-layout multi-descriptor body of the pinned indication leaf.
+///
+/// Copy mode one is the vendor's explicit immediate-discard branch for a
+/// split MPDU. Copy mode zero joins at most 64 hardware segments into one
+/// fixed split SRAM-header/PSRAM-payload ESF object. Every rejection either
+/// leaves ownership untouched for the explicit fallback or consumes both
+/// owners through the bounded discard path.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+unsafe fn indicate_multi_received_frame(
+    head: *mut u8,
+    tail: *mut u8,
+    count: u32,
+    copy_mode: u32,
+    aggregate: bool,
+    timestamp: u32,
+) -> bool {
+    if head.is_null()
+        || tail.is_null()
+        || head == tail
+        || !(2..=MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32).contains(&count)
+        || copy_mode > 1
+    {
+        return false;
+    }
+    if copy_mode != 0 {
+        RX_METADATA_PROBE
+            .rust_multi_copy_mode_discards
+            .fetch_add(1, Ordering::Relaxed);
+        vendor_discard_frame(tail, count);
+        return true;
+    }
+    let head_word = head.cast::<u32>().read_unaligned();
+    let tail_word = tail.cast::<u32>().read_unaligned();
+    let Some(copy_plan) = multi_rx_copy_plan(
+        count as usize,
+        descriptor_buffer_length(head_word),
+        descriptor_received_length(tail_word),
+    ) else {
+        return false;
+    };
+    let Some(frame) =
+        crate::esf::allocate_strict_aggregate_received_frame(copy_plan.indicated_length)
+    else {
+        RX_METADATA_PROBE
+            .rust_indicate_allocation_rejects
+            .fetch_add(1, Ordering::Relaxed);
+        vendor_discard_frame(tail, count);
+        return true;
+    };
+    let control = ptr::addr_of!(wDevCtrl);
+    if !crate::esf::populate_multi_received_frame(
+        frame,
+        head,
+        tail,
+        copy_plan,
+        timestamp,
+        control.add(0x2c).read(),
+        control.add(0x2d).read(),
+        aggregate,
+    ) {
+        RX_METADATA_PROBE
+            .rust_indicate_population_rejects
+            .fetch_add(1, Ordering::Relaxed);
+        crate::esf::recycle_received_packet(frame);
+        vendor_discard_frame(tail, count);
+        return true;
+    }
+
+    vendor_discard_frame(tail, count);
+    RX_METADATA_PROBE
+        .rust_indicate_routes
+        .fetch_add(1, Ordering::Relaxed);
+    RX_METADATA_PROBE
+        .rust_multi_indicate_routes
+        .fetch_add(1, Ordering::Relaxed);
+    crate::rx::wifi_strict_lmac_rx_done(frame);
+    true
+}
+
 /// Decode the exact metadata layout at the remaining vendor aggregate
 /// boundary and own qualified common STA data/management routes in Rust.
 ///
@@ -1126,6 +1212,20 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
             RX_METADATA_PROBE
                 .rust_data_routes
                 .fetch_add(1, Ordering::Relaxed);
+        }
+        if count > 1
+            && !layout.has_sublength
+            && rx_csi_length(&prefix) == Some(0)
+            && indicate_multi_received_frame(
+                head,
+                tail,
+                count,
+                copy_mode,
+                aggregate_flag != 0,
+                timestamp,
+            )
+        {
+            return;
         }
         if indicate_single_received_frame(
             head,
@@ -1647,6 +1747,12 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
             .load(Ordering::Acquire),
         rust_indicate_routes: RX_METADATA_PROBE
             .rust_indicate_routes
+            .load(Ordering::Acquire),
+        rust_multi_indicate_routes: RX_METADATA_PROBE
+            .rust_multi_indicate_routes
+            .load(Ordering::Acquire),
+        rust_multi_copy_mode_discards: RX_METADATA_PROBE
+            .rust_multi_copy_mode_discards
             .load(Ordering::Acquire),
         rust_indicate_allocation_rejects: RX_METADATA_PROBE
             .rust_indicate_allocation_rejects

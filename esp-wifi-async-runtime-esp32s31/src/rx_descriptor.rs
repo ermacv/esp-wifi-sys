@@ -34,6 +34,23 @@ pub(crate) struct SingleRxCopyPlan {
     pub(crate) indicated_length: usize,
 }
 
+/// Bounded copy plan for one MPDU split across hardware RX descriptors.
+///
+/// The pinned S31 indication leaf keeps the first descriptor's 0x38-byte
+/// control prefix, appends the remainder of that full segment, then appends
+/// every complete middle segment and the tail's received byte count. Hardware
+/// and ESF publish lengths in fourteen bits, so malformed or oversized chains
+/// are rejected before the raw-pointer boundary sees them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MultiRxCopyPlan {
+    pub(crate) descriptor_count: usize,
+    pub(crate) segment_capacity: usize,
+    pub(crate) first_payload_length: usize,
+    pub(crate) middle_descriptor_count: usize,
+    pub(crate) tail_payload_length: usize,
+    pub(crate) indicated_length: usize,
+}
+
 fn round_up_four(value: usize) -> Option<usize> {
     value.checked_add(3).map(|rounded| rounded & !3)
 }
@@ -104,6 +121,40 @@ pub(crate) fn single_rx_copy_plan(
     Some(SingleRxCopyPlan {
         source_payload_offset: layout.payload_offset,
         payload_length,
+        indicated_length,
+    })
+}
+
+/// Produce the exact base-layout multi-descriptor copy/length transform.
+///
+/// Optional sublength, extended metadata and CSI are intentionally excluded
+/// by the caller. This function owns only finite integer arithmetic and
+/// enforces both the recovered 64-descriptor event bound and the 14-bit ESF
+/// length ABI.
+pub(crate) fn multi_rx_copy_plan(
+    descriptor_count: usize,
+    segment_capacity: usize,
+    tail_payload_length: usize,
+) -> Option<MultiRxCopyPlan> {
+    if !(2..=64).contains(&descriptor_count)
+        || segment_capacity < RX_METADATA_BASE_PAYLOAD_OFFSET
+        || segment_capacity > LENGTH_MASK as usize
+        || tail_payload_length == 0
+        || tail_payload_length > segment_capacity
+    {
+        return None;
+    }
+    let preceding_length = segment_capacity.checked_mul(descriptor_count.checked_sub(1)?)?;
+    let indicated_length = preceding_length.checked_add(tail_payload_length)?;
+    if indicated_length > LENGTH_MASK as usize {
+        return None;
+    }
+    Some(MultiRxCopyPlan {
+        descriptor_count,
+        segment_capacity,
+        first_payload_length: segment_capacity - RX_METADATA_BASE_PAYLOAD_OFFSET,
+        middle_descriptor_count: descriptor_count - 2,
+        tail_payload_length,
         indicated_length,
     })
 }
@@ -279,12 +330,12 @@ mod tests {
 
     use super::{
         decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
-        indicated_rx_descriptor_word, indicated_rx_flags_word, recycled_descriptor_word,
-        restore_received_packet_buffer_view, rx_csi_length, rx_indicate_aggregate_flag,
-        rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
-        rx_sta_probe_request_is_discarded, single_rx_copy_plan, ESF_BUFFER_DESCRIPTOR_DATA_OFFSET,
-        ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET, ESF_RX_CONTROL_POINTER_OFFSET,
-        RX_METADATA_PREFIX_BYTES,
+        indicated_rx_descriptor_word, indicated_rx_flags_word, multi_rx_copy_plan,
+        recycled_descriptor_word, restore_received_packet_buffer_view, rx_csi_length,
+        rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
+        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, single_rx_copy_plan,
+        ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
+        ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
 
     #[test]
@@ -446,6 +497,28 @@ mod tests {
         metadata[0x26] = 1;
         let extra = decode_rx_metadata_layout(&metadata, true).unwrap();
         assert_eq!(single_rx_copy_plan(100, extra, 0), None);
+    }
+
+    #[test]
+    fn multi_copy_plan_matches_the_pinned_segment_join() {
+        let plan = multi_rx_copy_plan(3, 1700, 123).unwrap();
+        assert_eq!(plan.descriptor_count, 3);
+        assert_eq!(plan.segment_capacity, 1700);
+        assert_eq!(plan.first_payload_length, 1700 - 0x38);
+        assert_eq!(plan.middle_descriptor_count, 1);
+        assert_eq!(plan.tail_payload_length, 123);
+        assert_eq!(plan.indicated_length, 3523);
+
+        assert_eq!(multi_rx_copy_plan(1, 1700, 100), None);
+        assert_eq!(multi_rx_copy_plan(65, 1700, 100), None);
+        assert_eq!(multi_rx_copy_plan(2, 0x37, 1), None);
+        assert_eq!(multi_rx_copy_plan(2, 1700, 0), None);
+        assert_eq!(multi_rx_copy_plan(2, 1700, 1701), None);
+        assert_eq!(multi_rx_copy_plan(11, 1700, 100), None);
+
+        let maximum = multi_rx_copy_plan(2, 0x2000, 0x1fff).unwrap();
+        assert_eq!(maximum.indicated_length, 0x3fff);
+        assert_eq!(multi_rx_copy_plan(2, 0x2000, 0x2000), None);
     }
 
     #[test]

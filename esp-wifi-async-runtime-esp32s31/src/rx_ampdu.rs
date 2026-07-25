@@ -16,6 +16,10 @@ pub const RX_AMPDU_SLOT_CAPACITY: usize = RX_BLOCK_ACK_MAX_WINDOW as usize;
 pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 48;
 #[cfg(not(feature = "large-rx-pool-48"))]
 pub(crate) const RX_ESF_SLOT_ID_CAPACITY: usize = 32;
+// Rare multi-descriptor MPDUs use a separate split SRAM/PSRAM pool. Its
+// IDs participate in reorder ownership, but must not inflate the ordinary
+// zero-copy channel budget computed from `RX_ESF_SLOT_ID_CAPACITY`.
+pub(crate) const RX_REORDER_SLOT_ID_CAPACITY: usize = RX_ESF_SLOT_ID_CAPACITY + 2;
 const SEQUENCE_MASK: u16 = 0x0fff;
 const SEQUENCE_HALF_RANGE: u16 = 0x0800;
 
@@ -147,7 +151,7 @@ impl RxBlockAckReorder {
         if frame.sequence > SEQUENCE_MASK {
             return Err(RxAmpduError::InvalidSequence(frame.sequence));
         }
-        if usize::from(frame.slot) >= RX_ESF_SLOT_ID_CAPACITY {
+        if usize::from(frame.slot) >= RX_REORDER_SLOT_ID_CAPACITY {
             return Err(RxAmpduError::InvalidSlot(frame.slot));
         }
         if self
@@ -358,8 +362,8 @@ mod tests {
     #[test]
     fn esf_slot_id_is_independent_of_reorder_window_index() {
         let mut reorder = RxBlockAckReorder::new(1, RX_BLOCK_ACK_MAX_WINDOW).unwrap();
-        let highest_valid = (RX_ESF_SLOT_ID_CAPACITY - 1) as u8;
-        let first_invalid = RX_ESF_SLOT_ID_CAPACITY as u8;
+        let highest_valid = (RX_REORDER_SLOT_ID_CAPACITY - 1) as u8;
+        let first_invalid = RX_REORDER_SLOT_ID_CAPACITY as u8;
         assert_eq!(
             reorder
                 .ingest(frame(1, highest_valid))

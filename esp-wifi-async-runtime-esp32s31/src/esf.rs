@@ -41,6 +41,14 @@ const LARGE_RX_CLAIM_WORD_BITS: usize = usize::BITS as usize;
 const LARGE_RX_CLAIM_WORDS: usize =
     (LARGE_RX_SLOT_CAPACITY + LARGE_RX_CLAIM_WORD_BITS - 1) / LARGE_RX_CLAIM_WORD_BITS;
 
+// A hardware MPDU may span several 1700-byte RX descriptors even though the
+// common path fits one. Preserve the 14-bit indication ABI with two rare-path
+// objects: only the intrusive ESF header and ownership state stay in
+// interrupt-visible SRAM; their payloads live in PSRAM and are accessed after
+// the descriptor prefix has been detached onto the radio executor.
+pub(crate) const AGGREGATE_RX_SLOT_CAPACITY: usize = 2;
+const AGGREGATE_RX_PAYLOAD_CAPACITY: usize = 0x4000;
+
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
 const ESF_TX_DESCRIPTOR_OFFSET: usize = 0x48;
 const ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET: usize = 0x04;
@@ -73,6 +81,28 @@ impl LargeRxSlot {
 
 unsafe impl Sync for LargeRxSlot {}
 
+#[repr(C, align(4))]
+struct AggregateRxHeader(UnsafeCell<[u8; ESF_HEADER_SIZE]>);
+
+impl AggregateRxHeader {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; ESF_HEADER_SIZE]))
+    }
+}
+
+unsafe impl Sync for AggregateRxHeader {}
+
+#[repr(C, align(4))]
+struct AggregateRxPayload(UnsafeCell<[u8; AGGREGATE_RX_PAYLOAD_CAPACITY]>);
+
+impl AggregateRxPayload {
+    const fn new() -> Self {
+        Self(UnsafeCell::new([0; AGGREGATE_RX_PAYLOAD_CAPACITY]))
+    }
+}
+
+unsafe impl Sync for AggregateRxPayload {}
+
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_management_slots"
@@ -96,6 +126,26 @@ static LARGE_RX_SLOTS: [LargeRxSlot; LARGE_RX_SLOT_CAPACITY] =
 )]
 static LARGE_RX_OWNERS: [RxBufferOwnershipWord; LARGE_RX_CLAIM_WORDS] =
     [const { RxBufferOwnershipWord::new() }; LARGE_RX_CLAIM_WORDS];
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_aggregate_rx_headers"
+)]
+static AGGREGATE_RX_HEADERS: [AggregateRxHeader; AGGREGATE_RX_SLOT_CAPACITY] =
+    [const { AggregateRxHeader::new() }; AGGREGATE_RX_SLOT_CAPACITY];
+// The ISR-facing queue only reads and writes the ESF header above. These
+// payloads are filled by the radio executor after PSRAM initialization and
+// remain behind that owned header until the async network consumer drops it.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".psram.bss.wifi_strict.esf_aggregate_rx_payloads"
+)]
+static AGGREGATE_RX_PAYLOADS: [AggregateRxPayload; AGGREGATE_RX_SLOT_CAPACITY] =
+    [const { AggregateRxPayload::new() }; AGGREGATE_RX_SLOT_CAPACITY];
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.esf_aggregate_rx_owners"
+)]
+static AGGREGATE_RX_OWNERS: RxBufferOwnershipWord = RxBufferOwnershipWord::new();
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_rejections"
@@ -185,10 +235,7 @@ fn on_prearm_management_hart() -> bool {
     crate::critical::current_hart() == PREARM_MANAGEMENT_HART.load(Ordering::Acquire)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 #[inline(always)]
 fn reject(kind: u32, argument: usize) {
     LAST_REJECTED_ESF_KIND.store(kind as usize, Ordering::Relaxed);
@@ -207,19 +254,13 @@ const fn is_management_kind(kind: u32) -> bool {
     matches!(kind, 2..=4)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 #[inline(always)]
 unsafe fn descriptor(kind: u32) -> *mut u8 {
     ptr::addr_of_mut!(g_eb_list_desc).add(kind as usize * DESCRIPTOR_SIZE)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 unsafe fn initialize_frame(
     frame: *mut u8,
     kind: u32,
@@ -227,7 +268,36 @@ unsafe fn initialize_frame(
     length: usize,
     payload_capacity: usize,
 ) -> Option<*mut u8> {
-    if kind as usize >= DESCRIPTOR_COUNT || length > u16::MAX as usize {
+    initialize_frame_with_payload(
+        frame,
+        frame.add(ESF_HEADER_SIZE),
+        kind,
+        source,
+        length,
+        payload_capacity,
+    )
+}
+
+/// Initialize the pinned ESF header while keeping its payload in separately
+/// owned storage.
+///
+/// This is used only by the rare multi-descriptor RX pool. The radio ISR sees
+/// the SRAM header and its intrusive links; the executor and network owner
+/// follow the explicit payload pointer into PSRAM.
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+unsafe fn initialize_frame_with_payload(
+    frame: *mut u8,
+    payload: *mut u8,
+    kind: u32,
+    source: *const u8,
+    length: usize,
+    payload_capacity: usize,
+) -> Option<*mut u8> {
+    if frame.is_null()
+        || payload.is_null()
+        || kind as usize >= DESCRIPTOR_COUNT
+        || length > u16::MAX as usize
+    {
         return None;
     }
     let list = descriptor(kind);
@@ -239,7 +309,6 @@ unsafe fn initialize_frame(
     frame.write_bytes(0, ESF_HEADER_SIZE);
     let buffer_descriptor = frame.add(ESF_BUFFER_DESCRIPTOR_OFFSET);
     let tx_descriptor = frame.add(ESF_TX_DESCRIPTOR_OFFSET);
-    let payload = frame.add(ESF_HEADER_SIZE);
     let data = payload.add(prefix);
 
     frame.add(0x04).cast::<*mut u8>().write(buffer_descriptor);
@@ -286,10 +355,7 @@ unsafe fn initialize_frame(
     Some(frame)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 fn claim_management_slot() -> Option<usize> {
     let claimed = CLAIMED_MANAGEMENT_SLOTS.load(Ordering::Acquire);
     let free = !claimed & MANAGEMENT_SLOT_MASK;
@@ -301,10 +367,7 @@ fn claim_management_slot() -> Option<usize> {
     (CLAIMED_MANAGEMENT_SLOTS.fetch_or(bit, Ordering::AcqRel) & bit == 0).then_some(index)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 fn claim_large_rx_slot() -> Option<usize> {
     // This is a bounded scan of one or two independent native words, never a
     // retry loop. A racing owner may cause one immediate failed claim, but
@@ -352,10 +415,36 @@ fn large_rx_owner(index: usize) -> Option<RxBufferOwner> {
     LARGE_RX_OWNERS[word_index].owner(index % LARGE_RX_CLAIM_WORD_BITS)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+fn claim_aggregate_rx_slot() -> Option<usize> {
+    // Exactly one finite pass over two bits. A racing transition may reject
+    // one admission, but this path never retries or waits.
+    let mut index = 0;
+    while index < AGGREGATE_RX_SLOT_CAPACITY {
+        if AGGREGATE_RX_OWNERS.try_claim_radio(index) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+#[inline(always)]
+fn aggregate_rx_slot_claimed(index: usize) -> bool {
+    AGGREGATE_RX_OWNERS.claimed_bits() & (1_usize << index) != 0
+}
+
+#[inline(always)]
+fn aggregate_rx_owner(index: usize) -> Option<RxBufferOwner> {
+    AGGREGATE_RX_OWNERS.owner(index)
+}
+
+#[inline(always)]
+fn release_aggregate_rx_slot(index: usize, owner: RxBufferOwner) -> bool {
+    AGGREGATE_RX_OWNERS.try_release(index, owner)
+}
+
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 fn management_slot_index(frame: *mut u8) -> Option<usize> {
     let base = ptr::addr_of!(MANAGEMENT_SLOTS) as usize;
     let address = frame as usize;
@@ -368,10 +457,7 @@ fn management_slot_index(frame: *mut u8) -> Option<usize> {
     (index < MANAGEMENT_SLOT_CAPACITY).then_some(index)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
     let base = ptr::addr_of!(LARGE_RX_SLOTS) as usize;
     let address = frame as usize;
@@ -384,35 +470,54 @@ fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
     (index < LARGE_RX_SLOT_CAPACITY).then_some(index)
 }
 
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+fn aggregate_rx_slot_index(frame: *mut u8) -> Option<usize> {
+    let base = ptr::addr_of!(AGGREGATE_RX_HEADERS) as usize;
+    let address = frame as usize;
+    let stride = mem::size_of::<AggregateRxHeader>();
+    let offset = address.checked_sub(base)?;
+    if offset % stride != 0 {
+        return None;
+    }
+    let index = offset / stride;
+    (index < AGGREGATE_RX_SLOT_CAPACITY).then_some(index)
+}
+
 /// Map a live kind-7 ESF object to the fixed slot ID used by the safe reorder
 /// state. The pointer is validated against the exact internal-SRAM pool.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) fn large_rx_slot_id(frame: *mut u8) -> Option<u8> {
-    let index = large_rx_slot_index(frame)?;
-    (large_rx_slot_claimed(index) && large_rx_owner(index) == Some(RxBufferOwner::Radio))
-        .then_some(index as u8)
+    if let Some(index) = large_rx_slot_index(frame) {
+        return (large_rx_slot_claimed(index)
+            && large_rx_owner(index) == Some(RxBufferOwner::Radio))
+        .then_some(index as u8);
+    }
+    let index = aggregate_rx_slot_index(frame)?;
+    (aggregate_rx_slot_claimed(index) && aggregate_rx_owner(index) == Some(RxBufferOwner::Radio))
+        .then_some((LARGE_RX_SLOT_CAPACITY + index) as u8)
 }
 
 /// Resolve a reorder slot ID back to its still-owned ESF object.
 ///
 /// The returned raw pointer remains owned by the fixed pool. The caller may
 /// pass it through the RX protocol path exactly once or recycle it.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) fn large_rx_frame(slot: u8) -> Option<*mut u8> {
     let index = usize::from(slot);
-    if index >= LARGE_RX_SLOT_CAPACITY {
+    if index < LARGE_RX_SLOT_CAPACITY {
+        if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
+            return None;
+        }
+        return Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>());
+    }
+    let aggregate_index = index.checked_sub(LARGE_RX_SLOT_CAPACITY)?;
+    if aggregate_index >= AGGREGATE_RX_SLOT_CAPACITY
+        || !aggregate_rx_slot_claimed(aggregate_index)
+        || aggregate_rx_owner(aggregate_index) != Some(RxBufferOwner::Radio)
+    {
         return None;
     }
-    if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
-        return None;
-    }
-    Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>())
+    Some(AGGREGATE_RX_HEADERS[aggregate_index].0.get().cast::<u8>())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -428,37 +533,55 @@ pub(crate) enum LargeRxNetworkAdoptionError {
 /// network consumer. Dropping this value is the only Network -> Free
 /// transition and returns the backing storage directly to the Rust pool.
 pub(crate) struct OwnedLargeRxNetworkFrame {
-    slot: u8,
+    backing: LargeRxNetworkBacking,
     buffer_offset: u16,
     length: u16,
 }
 
+#[derive(Clone, Copy)]
+enum LargeRxNetworkBacking {
+    Internal { slot: u8 },
+    Aggregate { slot: u8 },
+}
+
 impl OwnedLargeRxNetworkFrame {
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        let frame = LARGE_RX_SLOTS[usize::from(self.slot)].0.get().cast::<u8>();
-        unsafe {
-            core::slice::from_raw_parts(
-                frame.add(usize::from(self.buffer_offset)),
-                usize::from(self.length),
-            )
+    fn payload(&self) -> *mut u8 {
+        match self.backing {
+            LargeRxNetworkBacking::Internal { slot } => unsafe {
+                LARGE_RX_SLOTS[usize::from(slot)]
+                    .0
+                    .get()
+                    .cast::<u8>()
+                    .add(ESF_HEADER_SIZE)
+            },
+            LargeRxNetworkBacking::Aggregate { slot } => AGGREGATE_RX_PAYLOADS[usize::from(slot)]
+                .0
+                .get()
+                .cast::<u8>(),
         }
     }
 
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        let buffer = unsafe { self.payload().add(usize::from(self.buffer_offset)) };
+        unsafe { core::slice::from_raw_parts(buffer, usize::from(self.length)) }
+    }
+
     pub(crate) fn as_bytes_mut(&mut self) -> &mut [u8] {
-        let frame = LARGE_RX_SLOTS[usize::from(self.slot)].0.get().cast::<u8>();
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                frame.add(usize::from(self.buffer_offset)),
-                usize::from(self.length),
-            )
-        }
+        let buffer = unsafe { self.payload().add(usize::from(self.buffer_offset)) };
+        unsafe { core::slice::from_raw_parts_mut(buffer, usize::from(self.length)) }
     }
 }
 
 impl Drop for OwnedLargeRxNetworkFrame {
     fn drop(&mut self) {
-        let index = usize::from(self.slot);
-        let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
+        let frame = match self.backing {
+            LargeRxNetworkBacking::Internal { slot } => {
+                LARGE_RX_SLOTS[usize::from(slot)].0.get().cast::<u8>()
+            }
+            LargeRxNetworkBacking::Aggregate { slot } => {
+                AGGREGATE_RX_HEADERS[usize::from(slot)].0.get().cast::<u8>()
+            }
+        };
         unsafe {
             let buffer_descriptor = frame.add(0x04).cast::<*mut u8>().read();
             let payload = frame
@@ -469,7 +592,15 @@ impl Drop for OwnedLargeRxNetworkFrame {
                 buffer_descriptor.add(4).cast::<*mut u8>().write(payload);
             }
         }
-        if !release_large_rx_slot(index, RxBufferOwner::Network) {
+        let released = match self.backing {
+            LargeRxNetworkBacking::Internal { slot } => {
+                release_large_rx_slot(usize::from(slot), RxBufferOwner::Network)
+            }
+            LargeRxNetworkBacking::Aggregate { slot } => {
+                release_aggregate_rx_slot(usize::from(slot), RxBufferOwner::Network)
+            }
+        };
+        if !released {
             reject(u32::MAX, frame as usize);
         }
     }
@@ -485,10 +616,7 @@ impl Drop for OwnedLargeRxNetworkFrame {
 ///
 /// `frame` and `buffer` come from the pinned RX callback ABI. `buffer` must be
 /// readable for `length` bytes while the radio still owns `frame`.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) unsafe fn adopt_large_rx_for_network(
     frame: *mut u8,
     buffer: *mut u8,
@@ -497,32 +625,57 @@ pub(crate) unsafe fn adopt_large_rx_for_network(
     if buffer.is_null() || length == 0 {
         return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
-    let Some(index) = large_rx_slot_index(frame) else {
+    let (backing, start, capacity) = if let Some(index) = large_rx_slot_index(frame) {
+        if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
+            return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
+        }
+        (
+            LargeRxNetworkBacking::Internal { slot: index as u8 },
+            frame.add(ESF_HEADER_SIZE) as usize,
+            LARGE_RX_PAYLOAD_CAPACITY,
+        )
+    } else if let Some(index) = aggregate_rx_slot_index(frame) {
+        if !aggregate_rx_slot_claimed(index)
+            || aggregate_rx_owner(index) != Some(RxBufferOwner::Radio)
+        {
+            return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
+        }
+        (
+            LargeRxNetworkBacking::Aggregate { slot: index as u8 },
+            AGGREGATE_RX_PAYLOADS[index].0.get().cast::<u8>() as usize,
+            AGGREGATE_RX_PAYLOAD_CAPACITY,
+        )
+    } else {
         return Err(LargeRxNetworkAdoptionError::NotRustPool);
     };
-    if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
-        return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
-    }
-    let start = frame.add(ESF_HEADER_SIZE) as usize;
     let Some(end) = (buffer as usize).checked_add(length) else {
         return Err(LargeRxNetworkAdoptionError::InvalidView);
     };
-    if (buffer as usize) < start || end > start + LARGE_RX_PAYLOAD_CAPACITY {
+    if (buffer as usize) < start || end > start + capacity {
         return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
     if length > u16::MAX as usize {
         return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
-    let offset = buffer as usize - frame as usize;
+    let offset = buffer as usize - start;
     if offset > u16::MAX as usize {
         return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
-    let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
-    if !LARGE_RX_OWNERS[word_index].try_transfer_to_network(index % LARGE_RX_CLAIM_WORD_BITS) {
+    let transferred = match backing {
+        LargeRxNetworkBacking::Internal { slot } => {
+            let index = usize::from(slot);
+            let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
+            LARGE_RX_OWNERS[word_index].try_transfer_to_network(index % LARGE_RX_CLAIM_WORD_BITS)
+        }
+        LargeRxNetworkBacking::Aggregate { slot } => {
+            AGGREGATE_RX_OWNERS.try_transfer_to_network(usize::from(slot))
+        }
+    };
+    if !transferred {
         return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
     };
     Ok(OwnedLargeRxNetworkFrame {
-        slot: index as u8,
+        backing,
         buffer_offset: offset as u16,
         length: length as u16,
     })
@@ -530,20 +683,15 @@ pub(crate) unsafe fn adopt_large_rx_for_network(
 
 /// Return whether `frame` belongs to one of the fixed pools handled by the
 /// strict recycler. The caller must hold a live ESF object.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) unsafe fn is_strict_recyclable_frame(frame: *mut u8) -> bool {
     management_slot_index(frame).is_some()
         || large_rx_slot_index(frame).is_some()
+        || aggregate_rx_slot_index(frame).is_some()
         || is_vendor_static_kind(frame.add(ESF_TYPE_OFFSET).read() as u32)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     let index = claim_management_slot()?;
     let frame = MANAGEMENT_SLOTS[index].0.get().cast::<u8>();
@@ -554,10 +702,7 @@ unsafe fn allocate_management(source: *const u8, kind: u32, length: usize) -> Op
     Some(frame)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8> {
     let index = claim_large_rx_slot()?;
     let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
@@ -568,10 +713,28 @@ unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8>
     Some(frame)
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+unsafe fn allocate_aggregate_rx(length: usize) -> Option<*mut u8> {
+    let index = claim_aggregate_rx_slot()?;
+    let frame = AGGREGATE_RX_HEADERS[index].0.get().cast::<u8>();
+    let payload = AGGREGATE_RX_PAYLOADS[index].0.get().cast::<u8>();
+    if initialize_frame_with_payload(
+        frame,
+        payload,
+        7,
+        ptr::null(),
+        length,
+        AGGREGATE_RX_PAYLOAD_CAPACITY,
+    )
+    .is_none()
+    {
+        release_aggregate_rx_slot(index, RxBufferOwner::Radio);
+        return None;
+    }
+    Some(frame)
+}
+
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) -> Option<*mut u8> {
     if length > u16::MAX as usize {
         return None;
@@ -646,10 +809,7 @@ unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) ->
 /// finite kind-8 pool for inputs up to 500 bytes and immediately falls back to
 /// kind 7 when that pool is empty. No failed preferred-pool claim is reported
 /// as an allocation failure when the fallback succeeds.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) unsafe fn allocate_strict_received_frame(
     copy_mode: u32,
     descriptor_length: usize,
@@ -675,6 +835,27 @@ pub(crate) unsafe fn allocate_strict_received_frame(
     frame.map(|frame| (frame, large_length))
 }
 
+/// Claim one split SRAM-header/PSRAM-payload ESF object for a bounded
+/// multi-descriptor MPDU.
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+pub(crate) unsafe fn allocate_strict_aggregate_received_frame(
+    indicated_length: usize,
+) -> Option<*mut u8> {
+    if !crate::critical::strict_wifi_hart_armed()
+        || !crate::critical::on_strict_wifi_hart()
+        || indicated_length == 0
+        || indicated_length > 0x3fff
+    {
+        reject(7, indicated_length);
+        return None;
+    }
+    let frame = allocate_aggregate_rx(indicated_length);
+    if frame.is_none() {
+        reject(7, indicated_length);
+    }
+    frame
+}
+
 /// Populate the pinned S31 ESF layout for one singleton RX descriptor.
 ///
 /// `wDev_IndicateFrame` copies the fixed 0x38-byte RX-control prefix, skips
@@ -688,10 +869,7 @@ pub(crate) unsafe fn allocate_strict_received_frame(
 /// `frame` must be an outstanding kind-7 or kind-8 object returned by
 /// [`allocate_strict_received_frame`]. `source` must be readable for
 /// `descriptor_length` bytes, and the source and ESF payload must not overlap.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) unsafe fn populate_single_received_frame(
     frame: *mut u8,
     source: *const u8,
@@ -758,10 +936,134 @@ pub(crate) unsafe fn populate_single_received_frame(
     true
 }
 
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+/// Join one hardware descriptor chain into a contiguous kind-7 ESF payload.
+///
+/// All sizes and iteration counts come from a prevalidated safe copy plan.
+/// Each descriptor contributes exactly one finite copy; the raw chain is
+/// required to terminate at `tail` after `descriptor_count` nodes.
+///
+/// # Safety
+///
+/// `frame` must be a radio-owned object returned by
+/// [`allocate_strict_aggregate_received_frame`]. `head..=tail` must be the
+/// detached hardware-owned chain described by `copy_plan`, and every buffer
+/// pointer must remain readable for its selected segment length.
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
+pub(crate) unsafe fn populate_multi_received_frame(
+    frame: *mut u8,
+    head: *mut u8,
+    tail: *mut u8,
+    copy_plan: crate::rx_descriptor::MultiRxCopyPlan,
+    timestamp: u32,
+    rx_rate: u8,
+    rx_channel: u8,
+    aggregate: bool,
+) -> bool {
+    if frame.is_null()
+        || head.is_null()
+        || tail.is_null()
+        || head == tail
+        || copy_plan.descriptor_count < 2
+        || copy_plan.descriptor_count > 64
+        || copy_plan.segment_capacity < 0x38
+        || copy_plan.first_payload_length != copy_plan.segment_capacity - 0x38
+        || copy_plan.middle_descriptor_count != copy_plan.descriptor_count - 2
+        || copy_plan.indicated_length > 0x3fff
+    {
+        return false;
+    }
+    let Some(index) = aggregate_rx_slot_index(frame) else {
+        return false;
+    };
+    if !aggregate_rx_slot_claimed(index) || aggregate_rx_owner(index) != Some(RxBufferOwner::Radio)
+    {
+        return false;
+    }
+    let buffer_descriptor = frame
+        .add(ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let rx_descriptor = frame
+        .add(ESF_TX_DESCRIPTOR_POINTER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if buffer_descriptor.is_null() || rx_descriptor.is_null() {
+        return false;
+    }
+    let destination = buffer_descriptor.add(4).cast::<*mut u8>().read();
+    if destination.is_null() {
+        return false;
+    }
+    let Some(descriptor_word) = crate::rx_descriptor::indicated_rx_descriptor_word(
+        buffer_descriptor.cast::<u32>().read(),
+        copy_plan.indicated_length,
+    ) else {
+        return false;
+    };
+
+    let mut descriptor_node = head;
+    let first_source = descriptor_node.add(4).cast::<*mut u8>().read_unaligned();
+    if first_source.is_null()
+        || crate::rx_descriptor::descriptor_buffer_length(
+            descriptor_node.cast::<u32>().read_unaligned(),
+        ) != copy_plan.segment_capacity
+    {
+        return false;
+    }
+    ptr::copy_nonoverlapping(first_source, destination, 0x38);
+    ptr::copy_nonoverlapping(
+        first_source.add(0x38),
+        destination.add(0x38),
+        copy_plan.first_payload_length,
+    );
+    let mut destination_offset = copy_plan.segment_capacity;
+    let mut descriptor_index = 1;
+    while descriptor_index < copy_plan.descriptor_count {
+        descriptor_node = descriptor_node.add(8).cast::<*mut u8>().read_unaligned();
+        if descriptor_node.is_null() {
+            return false;
+        }
+        let word = descriptor_node.cast::<u32>().read_unaligned();
+        if crate::rx_descriptor::descriptor_buffer_length(word) != copy_plan.segment_capacity {
+            return false;
+        }
+        let source = descriptor_node.add(4).cast::<*mut u8>().read_unaligned();
+        if source.is_null() {
+            return false;
+        }
+        let chunk_length = if descriptor_index + 1 == copy_plan.descriptor_count {
+            if descriptor_node != tail
+                || crate::rx_descriptor::descriptor_received_length(word)
+                    != copy_plan.tail_payload_length
+            {
+                return false;
+            }
+            copy_plan.tail_payload_length
+        } else {
+            copy_plan.segment_capacity
+        };
+        ptr::copy_nonoverlapping(source, destination.add(destination_offset), chunk_length);
+        destination_offset += chunk_length;
+        descriptor_index += 1;
+    }
+    if descriptor_node != tail || destination_offset != copy_plan.indicated_length {
+        return false;
+    }
+
+    buffer_descriptor.cast::<u32>().write(descriptor_word);
+    rx_descriptor.add(4).cast::<u32>().write(timestamp);
+    rx_descriptor.add(8).write(rx_rate);
+    rx_descriptor.add(9).write(rx_channel);
+    let flags = crate::rx_descriptor::indicated_rx_flags_word(
+        rx_descriptor.cast::<u32>().read(),
+        copy_plan.descriptor_count as u32,
+        aggregate,
+    );
+    rx_descriptor.cast::<u32>().write(flags);
+    true
+}
+
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 unsafe fn recycle_vendor_static(frame: *mut u8, kind: u32) {
     let tx_descriptor = frame
         .add(ESF_TX_DESCRIPTOR_POINTER_OFFSET)
@@ -798,10 +1100,7 @@ unsafe fn recycle_vendor_static(frame: *mut u8, kind: u32) {
 /// `source`, when non-null, must be valid for `length` readable bytes and must
 /// not overlap the selected ESF payload. `kind` must follow the vendor ABI.
 #[no_mangle]
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub unsafe extern "C" fn __wrap_esf_buf_alloc(
     source: *const u8,
     kind: u32,
@@ -847,10 +1146,7 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
 /// `frame` must be null or an outstanding ESF object returned by the matching
 /// allocator. Recycling transfers the object back to its fixed pool.
 #[no_mangle]
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
     if !crate::critical::strict_wifi_hart_armed() {
         if !frame.is_null() {
@@ -891,6 +1187,12 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
         }
         return;
     }
+    if let Some(index) = aggregate_rx_slot_index(frame) {
+        if !release_aggregate_rx_slot(index, RxBufferOwner::Radio) {
+            reject(u32::MAX, frame as usize);
+        }
+        return;
+    }
     let kind = frame.add(ESF_TYPE_OFFSET).read() as u32;
     if !is_vendor_static_kind(kind) {
         reject(kind, frame as usize);
@@ -910,10 +1212,7 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
 ///
 /// `frame` must be an outstanding radio-owned RX ESF object. Calling this
 /// function transfers that ownership back to the fixed pool exactly once.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub(crate) unsafe fn recycle_received_packet(frame: *mut u8) {
     if frame.is_null()
         || !crate::critical::strict_wifi_hart_armed()
@@ -945,10 +1244,7 @@ pub(crate) unsafe fn recycle_received_packet(frame: *mut u8) {
 /// `frame` follows the same ownership contract as
 /// [`recycle_received_packet`].
 #[no_mangle]
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub unsafe extern "C" fn wifi_strict_pp_recycle_rx_pkt(frame: *mut u8) {
     if !crate::critical::strict_wifi_hart_armed() {
         __real_ppRecycleRxPkt(frame);
@@ -974,10 +1270,7 @@ pub unsafe extern "C" fn wifi_strict_pp_recycle_rx_pkt(frame: *mut u8) {
 /// `frame` must be the outstanding ESF owner supplied as the third argument of
 /// a registered Wi-Fi RX callback. The call consumes that owner exactly once.
 #[no_mangle]
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
+#[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 pub unsafe extern "C" fn wifi_strict_esp_wifi_internal_free_rx_buffer(frame: *mut c_void) {
     wifi_strict_pp_recycle_rx_pkt(frame.cast());
 }
@@ -994,6 +1287,10 @@ pub struct FixedEsfPoolSnapshot {
     pub large_rx_radio_owned: usize,
     pub large_rx_network_owned: usize,
     pub large_rx_capacity: usize,
+    pub aggregate_rx_claimed: usize,
+    pub aggregate_rx_radio_owned: usize,
+    pub aggregate_rx_network_owned: usize,
+    pub aggregate_rx_capacity: usize,
     pub rejected_operations: usize,
     pub last_rejected_kind: u32,
     pub last_rejected_argument: usize,
@@ -1016,6 +1313,14 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
             .filter(|index| large_rx_owner(*index) == Some(RxBufferOwner::Network))
             .count(),
         large_rx_capacity: LARGE_RX_SLOT_CAPACITY,
+        aggregate_rx_claimed: AGGREGATE_RX_OWNERS.claimed_bits().count_ones() as usize,
+        aggregate_rx_radio_owned: (0..AGGREGATE_RX_SLOT_CAPACITY)
+            .filter(|index| aggregate_rx_owner(*index) == Some(RxBufferOwner::Radio))
+            .count(),
+        aggregate_rx_network_owned: (0..AGGREGATE_RX_SLOT_CAPACITY)
+            .filter(|index| aggregate_rx_owner(*index) == Some(RxBufferOwner::Network))
+            .count(),
+        aggregate_rx_capacity: AGGREGATE_RX_SLOT_CAPACITY,
         rejected_operations: rejected_esf_operations(),
         last_rejected_kind: LAST_REJECTED_ESF_KIND.load(Ordering::Acquire) as u32,
         last_rejected_argument: LAST_REJECTED_ESF_ARGUMENT.load(Ordering::Acquire),
@@ -1028,3 +1333,10 @@ const _: () = assert!(mem::size_of::<LargeRxSlot>() == LARGE_RX_SLOT_SIZE);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY <= u8::MAX as usize);
 const _: () = assert!(LARGE_RX_CLAIM_WORDS <= 2);
 const _: () = assert!(LARGE_RX_SLOT_CAPACITY == crate::rx_ampdu::RX_ESF_SLOT_ID_CAPACITY);
+const _: () = assert!(mem::size_of::<AggregateRxHeader>() == ESF_HEADER_SIZE);
+const _: () = assert!(mem::size_of::<AggregateRxPayload>() == AGGREGATE_RX_PAYLOAD_CAPACITY);
+const _: () = assert!(AGGREGATE_RX_SLOT_CAPACITY < usize::BITS as usize);
+const _: () = assert!(
+    LARGE_RX_SLOT_CAPACITY + AGGREGATE_RX_SLOT_CAPACITY
+        == crate::rx_ampdu::RX_REORDER_SLOT_ID_CAPACITY
+);
