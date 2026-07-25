@@ -195,6 +195,34 @@ phy_set_tx_gain_mem_new = wifi_strict_phy_set_tx_gain_mem_new;
 ASSERT(phy_set_tx_gain_mem_new == wifi_strict_phy_set_tx_gain_mem_new,
        "ESP32-S31 phy_set_tx_gain_mem_new Rust boundary is inactive");
 
+/* Complete finite phy_init.o parameter-transfer bodies. These still address
+ * the cold vendor phy_param symbol, but all bulk mutations and calibration
+ * serialization are now explicit Rust transforms. */
+EXTERN(wifi_strict_register_chipv7_phy_init_param);
+register_chipv7_phy_init_param =
+    wifi_strict_register_chipv7_phy_init_param;
+ASSERT(register_chipv7_phy_init_param ==
+           wifi_strict_register_chipv7_phy_init_param,
+       "ESP32-S31 PHY init parameter Rust boundary is inactive");
+
+EXTERN(wifi_strict_phy_rfcal_data_sub_new);
+phy_rfcal_data_sub_new = wifi_strict_phy_rfcal_data_sub_new;
+ASSERT(phy_rfcal_data_sub_new == wifi_strict_phy_rfcal_data_sub_new,
+       "ESP32-S31 PHY calibration transfer Rust boundary is inactive");
+
+EXTERN(wifi_strict_phy_rf_cal_data_backup_new);
+phy_rf_cal_data_backup_new = wifi_strict_phy_rf_cal_data_backup_new;
+ASSERT(phy_rf_cal_data_backup_new ==
+           wifi_strict_phy_rf_cal_data_backup_new,
+       "ESP32-S31 PHY calibration backup Rust boundary is inactive");
+
+EXTERN(wifi_strict_phy_rf_cal_data_recovery_new);
+phy_rf_cal_data_recovery_new =
+    wifi_strict_phy_rf_cal_data_recovery_new;
+ASSERT(phy_rf_cal_data_recovery_new ==
+           wifi_strict_phy_rf_cal_data_recovery_new,
+       "ESP32-S31 PHY calibration recovery Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */

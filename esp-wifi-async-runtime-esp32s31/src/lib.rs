@@ -69,6 +69,7 @@ mod net80211_tx;
 pub mod osi;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod phy_channel;
+mod phy_param;
 pub mod policy;
 pub mod queue;
 pub mod radio;
