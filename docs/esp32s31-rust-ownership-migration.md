@@ -244,6 +244,36 @@ publication at 20,691/20,691; ESF rejection and all allocation counters
 remained zero. The full final-ELF audit, including static binding and PM init,
 reports 6,407 functions and zero violations.
 
+## Completed slice: exact completed-RX-unit identity
+
+The first Rust outer RX walk incorrectly named and forwarded the first
+descriptor seen after `wDevCtrl.head` as the argument to
+`wDev_ProcessRxSucData`. That interpretation is valid only for a
+single-descriptor unit. The pinned 0x150-byte
+`libpp.a[wdev.o]::wdevProcessRxSucDataAll` body proves the actual ABI:
+`+0xc2` tests bit 30 on the current descriptor, `+0xfe` moves the accumulated
+count into `a1`, `+0x100` moves that same current descriptor into `a0`, and
+`+0x102` calls `wDev_ProcessRxSucData`. The argument is therefore the
+descriptor carrying the completion marker: the unit tail.
+
+The inner routine obtains the unit head independently from `wDevCtrl.head` and
+retains the argument as the exact tail later supplied to indication or
+discard/recycle. Rust now represents that pair as a non-`Copy`
+`CompletedRxUnit { tail, count }`; consuming it is the only way the outer walk
+can dispatch the unit. There is no duplicable head-shaped pointer at that
+boundary. The pinned symbol-size audit now fixes all three relevant reference
+bodies: outer walk 0x150, inner aggregate 0x6a0, and discard leaf 0x20.
+
+The corrected image completed scan, WPA2, DHCP, 4,096/4,096 UDP datagrams and
+4/4 HTTP transfers at 26.829 Mbit/s. It balanced 4,786/4,786 TX,
+690/690 network RX, and all fixed-pool/recycler ownership with zero allocation
+or rejection. The WDEV probe validated 702/702 completed units and the
+asynchronous recycler completed 702/702 chains. This traffic contained only
+single-descriptor units (`max_descriptors=1`), so the hardware run qualifies
+the ordinary path; the multi-descriptor tail identity is currently established
+by the pinned instruction sequence, not by a separate multi-descriptor HIL
+case.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only

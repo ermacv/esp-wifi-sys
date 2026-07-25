@@ -917,6 +917,24 @@ transfers at 23.778 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
 delta. The complete static-binding, static-PM and runtime audit reports 6,407
 functions and zero violations.
 
+The Rust outer successful-RX walk now also preserves the exact aggregate ABI.
+The pinned 0x150-byte `wdevProcessRxSucDataAll` body tests the completion
+marker on its current descriptor and passes that same descriptor in `a0` to
+`wDev_ProcessRxSucData` at `+0x102`; it does not pass the first descriptor of
+the unit. The inner 0x6a0-byte routine reloads the first descriptor from
+`wDevCtrl.head` and retains the argument as the unit tail for indication or
+discard. The earlier Rust `unit_head` interpretation was therefore unsafe for
+multi-descriptor units and has been removed. A non-`Copy`
+`CompletedRxUnit { tail, count }` now crosses the boundary exactly once.
+
+The corrected HIL image completed the full WPA2/network stress workload at
+26.829 Mbit/s with 4,786/4,786 TX and 690/690 network RX ownership, zero
+allocation delta, and no queue or ESF rejection. Its WDEV probe validated
+702/702 units and recycler completions, but observed
+`max_descriptors=1`. Consequently the singleton runtime path is
+hardware-qualified; the multi-descriptor contract remains a pinned
+disassembly proof until traffic that produces such a unit is captured.
+
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable
 `RxExecutorCapability` and moves it into the sole runtime dispatcher. Every
