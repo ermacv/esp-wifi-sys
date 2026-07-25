@@ -815,7 +815,7 @@ event without adding a poll loop, delay, retry, or RTOS context switch. The
 hardware qualification run completed the full WPA2/network stress workload
 with 4,786/4,786 TX, 691/691 RX, 20,591/20,591 PP events, no allocation delta,
 and 19.634 Mbit/s. `pTxRx` is now read only during one-shot adoption; the
-remaining runtime RX vendor leaf is protocol processing.
+remaining PP protocol and recycle leaves are replaced below.
 
 RX packet recycling is now a direct Rust ownership transfer. The pinned
 `libpp.a[pp.o]::ppRecycleRxPkt` reference body is exactly fourteen bytes: it
@@ -834,6 +834,30 @@ and 4/4 HTTP transfers with 4,786/4,786 TX, 692/692 RX, and
 26.532 Mbit/s. `strict_ok=true` additionally proves that the fixed ESF
 rejection counter was unchanged across the run; all allocation, blocking,
 task-delay, and direct-delay counters remained zero.
+
+The adjacent `ppRxProtoProc` leaf is now Rust-owned as well. The pinned
+reference is exactly 0x154 bytes. Under the mandatory `WIFI_PS_NONE` policy,
+its data and beacon branches have no remaining effect because
+`pm_on_data_rx`, `pm_set_beacon_duration`, and `pm_on_beacon_rx` are verified
+no-ops. Rust reproduces the observable tail: RX-control bits 4 through 6 select
+rate-control route 0, 1, 2, or no route; the selected context is stored at
+`packet+0x2c`; and the finite `rcUpdateRxDone` leaf applies the RSSI average.
+
+The original lookup through `rc_get_trc` is also removed. Rust reads the three
+route bitmaps from the explicitly named 28-byte `trc_ctl` backing and scans at
+most the 22 pointer publications in the fixed `g_per_conn_trc` ROM-ABI table.
+Each candidate must be non-null and match the six-byte receiver address at
+context offset `0x21`; a bitmap outside the 22-slot range fails closed. This
+is a bounded data search, not polling for external progress. The table remains
+an explicit compatibility boundary until its per-peer publishers move to
+Rust-owned state.
+
+The resulting ESP32-S31 run completed WPA2, 4,096/4,096 UDP datagrams and 4/4
+HTTP transfers at 25.033 Mbit/s. TX ownership balanced at 4,786/4,786, RX at
+692/692, and PP at 20,589/20,589. ESF rejection remained 0 to 0, with zero
+allocation, blocking, task-delay, direct-delay, or queue-rejection probes.
+The final ELF contains no call to `ppRxProtoProc` or `rc_get_trc`; its strict
+vendor graph retains only `rcUpdateRxDone` for this rate-control tail.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable
