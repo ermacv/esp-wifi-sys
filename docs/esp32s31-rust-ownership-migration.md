@@ -851,6 +851,13 @@ callback policy now accepts that exact status alongside the two previously
 measured group-CCMP outcomes. It remains a no-op only after the complete
 bounded geometry is checked; nearby selector/status values are rejected.
 
+After DHCP made the AP network ready, the client requested RX aggregation.
+The existing bounded Rust ADDBA response reached the mapper as frame control
+`0x00d0`, rate `11`, layout `0x2732`, zero descriptor flags, priority `7`,
+selector `0x0004_0000`, peer word `0x2100_0000`, and peer flag `1`. This exact
+post-association Action tuple is now distinct from the older STA Action class;
+pre-association and zero-peer-flag variants still fail closed.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
