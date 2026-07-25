@@ -780,6 +780,16 @@ datagrams and 4/4 HTTP transfers, with 4,786/4,786 TX and 692/692 RX releases,
 21,320/21,320 PP events, no allocation delta, and 18.466 Mbit/s. RX is now the
 only live strict-runtime `pTxRx` slice.
 
+RX callback routing no longer belongs to that slice. Strict handoff adopts the
+STA callback and the presence of the pinned AP callback into immutable SRAM,
+while rejecting any unknown AP callback or enabled NAN callback. Ordinary RX
+and A-MPDU expiry therefore do not inspect the callback words at
+`pTxRx+0x3f8..+0x400`. Hardware qualification passed WPA2 and the complete
+strict stress workload with 4,786/4,786 TX, 692/692 RX and 21,295/21,295 PP
+ownership transitions, no allocation delta, and 20.931 Mbit/s. The remaining
+RX dependency is the intrusive ISR-to-executor queue plus the protocol and
+recycle leaves.
+
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,
 queued, or safely recycled, so exactly one pointer may be quarantined and

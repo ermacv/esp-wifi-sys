@@ -363,10 +363,31 @@ scheduler state. Their bits are not assigned speculative names: they remain
 opaque adopted PLCP length/data inputs until a register-level meaning is
 proven. The LMAC TX path consequently has no post-handoff `pTxRx` access.
 
-Only the RX producer/consumer slice remains live. Once that queue and the
-required RX processing context have explicit Rust ownership,
-`pTxRx`/`TxRxCxt` can be removed from the static binding and linked-state
-inventory. Final ELF
-verification must continue to use a non-empty STA configuration; otherwise
-the HIL binary deliberately enters `pending()` before Wi-Fi initialization
-and LTO removes the unreachable strict runtime.
+The RX callback registry is now Rust-owned too. Handoff copies only the three
+words used by the pinned `ppRxPkt` router: STA, AP, and NAN callbacks at
+`pTxRx+0x3f8/+0x3fc/+0x400`. It rejects an AP callback other than
+`ap_rx_cb` and rejects any NAN callback. Runtime RX routing and A-MPDU gap
+expiry read the immutable SRAM registry and never dereference `pTxRx`.
+
+The queue layout comes directly from pinned `libpp.a[pp.o]` disassembly:
+`ppEnqueueRxq` clears `packet+0x30`, appends through the tail-link stored at
+`pTxRx+0x398`, then points that slot at the new link; dequeue reads the head
+at `+0x394`, advances through `packet+0x30`, and restores the empty tail-link
+invariant. Neither leaf locks, waits, or retries; `Locked` documents an
+external serialization requirement. `lmacRxDone` is the interrupt-side
+producer and immediately publishes PP event 17.
+
+Hardware verification after callback adoption completed passive scan, WPA2,
+DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096 UDP datagrams and 4 HTTP transfers.
+It released 4,786/4,786 TX and 692/692 RX owners, drained 21,295/21,295 PP
+events, changed no allocation counter, and measured 20.931 Mbit/s.
+
+Only the RX intrusive queue and the `ppRxProtoProc`/recycler compatibility
+leaves remain live. Moving the queue requires intercepting the actual
+interrupt publication path, not merely replacing dequeue: otherwise the ROM
+producer and Rust consumer would have different owners. Once those leaves
+have explicit Rust ownership, `pTxRx`/`TxRxCxt` can be removed from the static
+binding and linked-state inventory. Final ELF verification must continue to
+use a non-empty STA configuration; otherwise the HIL binary deliberately
+enters `pending()` before Wi-Fi initialization and LTO removes the unreachable
+strict runtime.

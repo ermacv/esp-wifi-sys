@@ -1,8 +1,9 @@
 //! Bounded strict receive pump for the pinned ESP32-S31 PP ABI.
 
 use core::{
+    cell::UnsafeCell,
     ptr,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::event::PpEvent;
@@ -39,6 +40,105 @@ unsafe extern "C" {
 pub enum RxPumpError {
     StateUnavailable,
     InternalQueueFull,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RxStateAdoptionError {
+    TxRxUnavailable,
+    UnsupportedApCallback,
+    NanCallbackInstalled,
+}
+
+struct StrictRxRegistry {
+    station_callback: Option<RxCallback>,
+    ap_callback_registered: bool,
+}
+
+impl StrictRxRegistry {
+    const fn empty() -> Self {
+        Self {
+            station_callback: None,
+            ap_callback_registered: false,
+        }
+    }
+}
+
+struct StrictRxRegistryCell(UnsafeCell<StrictRxRegistry>);
+
+// Initialization publishes this immutable callback registry once. Runtime RX
+// only reads it from the single strict radio owner.
+unsafe impl Sync for StrictRxRegistryCell {}
+
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.rx_registry"
+)]
+static STRICT_RX_REGISTRY: StrictRxRegistryCell =
+    StrictRxRegistryCell(UnsafeCell::new(StrictRxRegistry::empty()));
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.rx_registry"
+)]
+static STRICT_RX_REGISTRY_ADOPTED: AtomicBool = AtomicBool::new(false);
+
+/// Copy the initialized RX callback policy out of the mixed vendor `pTxRx`
+/// object before the strict runtime takes ownership.
+///
+/// The three words at pinned offsets `+0x3f8..+0x400` are the STA, AP and NAN
+/// receive callbacks used by `ppRxPkt`. The exact surrounding C structure is
+/// intentionally not reproduced: strict basic AP/STA needs only these
+/// immutable routing capabilities. NAN is rejected, and the AP slot may only
+/// contain the pinned `ap_rx_cb` leaf.
+///
+/// # Safety
+///
+/// Wi-Fi initialization must be quiescent, and no callback registration may
+/// race this one-shot ownership transfer.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn adopt_vendor_rx_state() -> Result<(), RxStateAdoptionError> {
+    if STRICT_RX_REGISTRY_ADOPTED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let txrx = ptr::addr_of!(pTxRx).read();
+    if txrx.is_null() {
+        return Err(RxStateAdoptionError::TxRxUnavailable);
+    }
+    let station_callback = txrx
+        .add(RX_CALLBACK_OFFSET)
+        .cast::<Option<RxCallback>>()
+        .read();
+    let ap_callback = txrx
+        .add(RX_AUX_CALLBACK_1_OFFSET)
+        .cast::<Option<RxCallback>>()
+        .read();
+    if let Some(callback) = ap_callback {
+        if callback as usize != ap_rx_cb as *const () as usize {
+            return Err(RxStateAdoptionError::UnsupportedApCallback);
+        }
+    }
+    if txrx
+        .add(RX_AUX_CALLBACK_2_OFFSET)
+        .cast::<Option<RxCallback>>()
+        .read()
+        .is_some()
+    {
+        return Err(RxStateAdoptionError::NanCallbackInstalled);
+    }
+
+    STRICT_RX_REGISTRY.0.get().write(StrictRxRegistry {
+        station_callback,
+        ap_callback_registered: ap_callback.is_some(),
+    });
+    STRICT_RX_REGISTRY_ADOPTED.store(true, Ordering::Release);
+    Ok(())
+}
+
+#[inline(always)]
+fn rx_registry() -> Option<&'static StrictRxRegistry> {
+    if !STRICT_RX_REGISTRY_ADOPTED.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(unsafe { &*STRICT_RX_REGISTRY.0.get() })
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -254,8 +354,7 @@ pub fn block_ack_rx_snapshot() -> BlockAckRxSnapshot {
 
 #[cfg(feature = "hil-rx-ampdu")]
 pub fn expire_rx_ampdu_gap(generation: usize) -> usize {
-    let txrx = unsafe { ptr::addr_of!(pTxRx).read() };
-    if txrx.is_null() {
+    if rx_registry().is_none() {
         return 0;
     }
     let Some(release) = crate::rx_ampdu_ap::expire_gap(generation) else {
@@ -267,7 +366,7 @@ pub fn expire_rx_ampdu_gap(generation: usize) -> usize {
             COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
             continue;
         };
-        unsafe { process_deaggregated(txrx, packet) };
+        unsafe { process_deaggregated(packet) };
         processed += 1;
     }
     processed
@@ -279,8 +378,7 @@ pub(crate) const fn is_continuation(kind: u32) -> bool {
 
 /// Drain a bounded number of PP RX buffers on the single radio-owner stack.
 pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
-    let txrx = unsafe { ptr::addr_of!(pTxRx).read() };
-    if txrx.is_null() {
+    if rx_registry().is_none() {
         return Err(RxPumpError::StateUnavailable);
     }
 
@@ -292,7 +390,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
         }
         processed += 1;
         COUNTERS.processed.fetch_add(1, Ordering::Relaxed);
-        unsafe { process_one(txrx, packet) };
+        unsafe { process_one(packet) };
     }
 
     if !crate::adapter::enqueue_internal_event(PpEvent {
@@ -304,7 +402,7 @@ pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
     Ok(())
 }
 
-unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
+unsafe fn process_one(packet: *mut u8) {
     let descriptor = unsafe { packet.add(0x34).cast::<*mut u8>().read() };
     if descriptor.is_null() {
         COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
@@ -395,7 +493,7 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
                             COUNTERS.malformed.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
-                        unsafe { process_deaggregated(txrx, owned_packet) };
+                        unsafe { process_deaggregated(owned_packet) };
                     }
                     return;
                 }
@@ -409,11 +507,11 @@ unsafe fn process_one(txrx: *mut u8, packet: *mut u8) {
         return;
     }
 
-    unsafe { process_protocol(txrx, packet, rx_control, payload_owner) };
+    unsafe { process_protocol(packet, rx_control, payload_owner) };
 }
 
 #[cfg(feature = "hil-rx-ampdu")]
-unsafe fn process_deaggregated(txrx: *mut u8, packet: *mut u8) {
+unsafe fn process_deaggregated(packet: *mut u8) {
     let descriptor = unsafe { packet.add(0x34).cast::<*mut u8>().read() };
     let rx_control = unsafe { packet.add(0x10).cast::<*mut u8>().read() };
     let payload_owner = unsafe { packet.add(4).cast::<*mut u8>().read() };
@@ -427,11 +525,10 @@ unsafe fn process_deaggregated(txrx: *mut u8, packet: *mut u8) {
     // protocol leaf; all hardware RX status remains intact.
     let descriptor_word = unsafe { descriptor.cast::<u32>().read() };
     unsafe { descriptor.cast::<u32>().write(descriptor_word & !0x10) };
-    unsafe { process_protocol(txrx, packet, rx_control, payload_owner) };
+    unsafe { process_protocol(packet, rx_control, payload_owner) };
 }
 
 unsafe fn process_protocol(
-    txrx: *mut u8,
     packet: *mut u8,
     rx_control: *mut u8,
     payload_owner: *mut u8,
@@ -488,11 +585,7 @@ unsafe fn process_protocol(
             unsafe { ppRecycleRxPkt(packet) };
             return;
         }
-        let callback = unsafe {
-            txrx.add(RX_CALLBACK_OFFSET)
-                .cast::<Option<RxCallback>>()
-                .read()
-        };
+        let callback = rx_registry().and_then(|registry| registry.station_callback);
         let Some(callback) = callback else {
             COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
             unsafe { ppRecycleRxPkt(packet) };
@@ -506,12 +599,10 @@ unsafe fn process_protocol(
     }
 
     if flags & 0x20 != 0 {
-        let registered = unsafe {
-            txrx.add(RX_AUX_CALLBACK_1_OFFSET)
-                .cast::<Option<RxCallback>>()
-                .read()
-        };
-        if registered.map(|callback| callback as usize) != Some(ap_rx_cb as usize) {
+        if !rx_registry()
+            .map(|registry| registry.ap_callback_registered)
+            .unwrap_or(false)
+        {
             COUNTERS.callback_missing.fetch_add(1, Ordering::Relaxed);
             unsafe { ppRecycleRxPkt(packet) };
             return;
@@ -523,16 +614,9 @@ unsafe fn process_protocol(
         return;
     }
     if flags & 0x40 != 0 {
-        let registered = unsafe {
-            txrx.add(RX_AUX_CALLBACK_2_OFFSET)
-                .cast::<Option<RxCallback>>()
-                .read()
-        };
-        if registered.is_some() {
-            COUNTERS.auxiliary_callback.fetch_add(1, Ordering::Relaxed);
-        }
         // Interface two is NAN in the pinned registration table. The strict
-        // STA/AP profile keeps it disabled and never enters its callback.
+        // handoff rejected any installed callback, so it cannot be routed by
+        // the basic STA/AP runtime.
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
         return;
     }

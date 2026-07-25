@@ -290,6 +290,8 @@ pub use rx::expire_rx_ampdu_gap;
 pub use rx::{
     block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
 };
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use rx::RxStateAdoptionError;
 pub use rx_ampdu::{
     write_successful_addba_response, RxAddbaResponseError, RxAmpduError, RxAmpduMpdu,
     RxAmpduRelease, RxBlockAckReorder, RX_AMPDU_SLOT_CAPACITY, RX_BLOCK_ACK_MAX_WINDOW,

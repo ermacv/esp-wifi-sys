@@ -66,6 +66,7 @@ pub enum StrictRuntimeError {
     Net80211StateAdoption(crate::net80211_state::Net80211StateAdoptionError),
     TxQueueStateAdoption(crate::tx_queue::TxQueueStateAdoptionError),
     TxDoneStateAdoption(crate::txdone::TxDoneStateAdoptionError),
+    RxStateAdoption(crate::rx::RxStateAdoptionError),
     RuntimeCallbacksNotPatched,
     PpTaskHandoffIncomplete,
     PpPostLinkWrapperMissing,
@@ -283,6 +284,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
         .map_err(StrictRuntimeError::TxQueueStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
     crate::txdone::adopt_vendor_tx_done_state().map_err(StrictRuntimeError::TxDoneStateAdoption)?;
+    #[cfg(feature = "strict-no-wait")]
+    crate::rx::adopt_vendor_rx_state().map_err(StrictRuntimeError::RxStateAdoption)?;
     STRICT_PREPARATION_STAGE.store(1, Ordering::Release);
     let result = esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE);
     STRICT_PREPARATION_STAGE.store(2, Ordering::Release);
