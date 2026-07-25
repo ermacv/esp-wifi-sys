@@ -223,6 +223,14 @@ ASSERT(phy_rf_cal_data_recovery_new ==
            wifi_strict_phy_rf_cal_data_recovery_new,
        "ESP32-S31 PHY calibration recovery Rust boundary is inactive");
 
+/* Publish the ROM PHY ABI table and parameter pointer directly from Rust.
+ * The replacement performs no call into phy_get_romfuncs/phy_param_addr and
+ * retains the two untouched rev0 ROM callbacks only after validation. */
+EXTERN(wifi_strict_phy_get_romfunc_addr);
+phy_get_romfunc_addr = wifi_strict_phy_get_romfunc_addr;
+ASSERT(phy_get_romfunc_addr == wifi_strict_phy_get_romfunc_addr,
+       "ESP32-S31 PHY ROM function table Rust boundary is inactive");
+
 /* TX rate completion is an absolute ROM export even though the pinned archive
  * also contains its reference body. Keep the ROM entry only as an oracle and
  * route runtime calls to the unique finite Rust adapter. */
