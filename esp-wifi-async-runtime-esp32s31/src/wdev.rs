@@ -12,6 +12,7 @@ use crate::{
     rx_descriptor::{
         RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout, descriptor_buffer_length,
         recycled_descriptor_word, rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
+        rx_sta_management_copy_mode,
     },
     timer::RawOsiTimer,
 };
@@ -184,6 +185,7 @@ struct RxMetadataProbe {
     management_subtype_bitmap: AtomicUsize,
     aggregate_flag_bitmap: AtomicUsize,
     rust_data_routes: AtomicUsize,
+    rust_management_routes: AtomicUsize,
     vendor_fallbacks: AtomicUsize,
 }
 
@@ -211,6 +213,7 @@ impl RxMetadataProbe {
             management_subtype_bitmap: AtomicUsize::new(0),
             aggregate_flag_bitmap: AtomicUsize::new(0),
             rust_data_routes: AtomicUsize::new(0),
+            rust_management_routes: AtomicUsize::new(0),
             vendor_fallbacks: AtomicUsize::new(0),
         }
     }
@@ -239,6 +242,7 @@ pub struct WdevRxMetadataSnapshot {
     pub management_subtype_bitmap: usize,
     pub aggregate_flag_bitmap: usize,
     pub rust_data_routes: usize,
+    pub rust_management_routes: usize,
     pub vendor_fallbacks: usize,
 }
 
@@ -808,12 +812,13 @@ impl CompletedRxUnit {
 }
 
 /// Decode the exact metadata layout at the remaining vendor aggregate
-/// boundary and own the qualified common STA data route in Rust.
+/// boundary and own qualified common STA data/management routes in Rust.
 ///
 /// The qualified route is deliberately narrow: successful base-layout STA
-/// data under the strict ordinary AP/STA mode. It reproduces the pinned
-/// `wDevCtrl` publications and calls the existing finite
-/// `wDev_IndicateFrame` leaf. Management, control, optional metadata, error,
+/// data plus association-response, beacon and authentication management
+/// frames under the strict ordinary AP/STA mode. It reproduces the pinned
+/// `wDevCtrl` publications and calls the existing finite `wDev_IndicateFrame`
+/// leaf. Probe requests, action/control frames, optional metadata, error,
 /// promiscuous and currently unclassified routes retain an explicit ROM
 /// fallback until their individual state transitions are ported.
 #[cfg(target_arch = "riscv32")]
@@ -928,9 +933,11 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
     } else {
         None
     };
-    let copy_mode = frame_control.and_then(rx_sta_data_copy_mode);
+    let data_copy_mode = frame_control.and_then(rx_sta_data_copy_mode);
+    let management_copy_mode = frame_control.and_then(rx_sta_management_copy_mode);
+    let copy_mode = data_copy_mode.or(management_copy_mode);
     let control = ptr::addr_of_mut!(wDevCtrl);
-    let strict_sta_data_route = status == 0
+    let strict_sta_common_route = status == 0
         && !tail.is_null()
         && count != 0
         && count <= MAX_RX_SUCCESS_DESCRIPTORS_PER_EVENT as u32
@@ -943,7 +950,7 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         && control.add(0x46).read() == 0
         && ptr::addr_of!(g_wdev_csi_rx).read() == 0
         && crate::net80211_state::station_interface().is_some();
-    if strict_sta_data_route {
+    if strict_sta_common_route {
         // Pinned prelude stores the current RX rate/channel fields into the
         // metadata envelope before publishing the frame pointer.
         metadata.add(0x1c).write(control.add(0x2c).read());
@@ -963,9 +970,15 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         let copy_mode = copy_mode.unwrap_or(0);
         let timestamp =
             u32::from_le_bytes([prefix[0x0c], prefix[0x0d], prefix[0x0e], prefix[0x0f]]);
-        RX_METADATA_PROBE
-            .rust_data_routes
-            .fetch_add(1, Ordering::Relaxed);
+        if management_copy_mode.is_some() {
+            RX_METADATA_PROBE
+                .rust_management_routes
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            RX_METADATA_PROBE
+                .rust_data_routes
+                .fetch_add(1, Ordering::Relaxed);
+        }
         wDev_IndicateFrame(copy_mode, aggregate_flag as u32, tail, count, timestamp);
         return;
     }
@@ -1427,6 +1440,9 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
             .aggregate_flag_bitmap
             .load(Ordering::Acquire),
         rust_data_routes: RX_METADATA_PROBE.rust_data_routes.load(Ordering::Acquire),
+        rust_management_routes: RX_METADATA_PROBE
+            .rust_management_routes
+            .load(Ordering::Acquire),
         vendor_fallbacks: RX_METADATA_PROBE.vendor_fallbacks.load(Ordering::Acquire),
     }
 }

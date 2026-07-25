@@ -98,6 +98,22 @@ pub(crate) const fn rx_sta_data_copy_mode(frame_control: u16) -> Option<u32> {
     Some((frame_control & 0x70 == 0x40) as u32)
 }
 
+/// Admit only management subtypes whose pinned STA path has no optional
+/// callback, NAN or FTM side branch.
+///
+/// Association responses, beacons and authentication frames all join the
+/// vendor classifier with copy mode one. The common fragmentation join clears
+/// that flag. Probe requests and action frames deliberately return `None`.
+pub(crate) const fn rx_sta_management_copy_mode(frame_control: u16) -> Option<u32> {
+    if frame_control & 0x0f != 0 {
+        return None;
+    }
+    match (frame_control >> 4) & 0x0f {
+        1 | 8 | 11 => Some((frame_control & 0x0400 == 0) as u32),
+        _ => None,
+    }
+}
+
 /// Reproduce the pinned S31 RX recycle descriptor transformation.
 ///
 /// This leaf is deliberately independent of global state, registers and raw
@@ -154,7 +170,7 @@ mod tests {
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES, decode_rx_metadata_layout,
         descriptor_buffer_length, recycled_descriptor_word, restore_received_packet_buffer_view,
-        rx_indicate_aggregate_flag, rx_sta_data_copy_mode,
+        rx_indicate_aggregate_flag, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
     };
 
     #[test]
@@ -290,5 +306,16 @@ mod tests {
         assert_eq!(rx_sta_data_copy_mode(0x0008), Some(0));
         assert_eq!(rx_sta_data_copy_mode(0x0048), Some(1));
         assert_eq!(rx_sta_data_copy_mode(0x0448), Some(0));
+    }
+
+    #[test]
+    fn sta_management_classifier_admits_only_side_effect_free_subtypes() {
+        assert_eq!(rx_sta_management_copy_mode(0x0010), Some(1));
+        assert_eq!(rx_sta_management_copy_mode(0x0080), Some(1));
+        assert_eq!(rx_sta_management_copy_mode(0x00b0), Some(1));
+        assert_eq!(rx_sta_management_copy_mode(0x0480), Some(0));
+        assert_eq!(rx_sta_management_copy_mode(0x0040), None);
+        assert_eq!(rx_sta_management_copy_mode(0x00d0), None);
+        assert_eq!(rx_sta_management_copy_mode(0x0008), None);
     }
 }
