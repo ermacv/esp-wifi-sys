@@ -873,6 +873,14 @@ finite mapper admits only this complete measured tuple and rewrites descriptor
 byte four to the recovered treatment `7`; the group-key selector, an already
 mapped priority, and a pre-association peer remain independently rejected.
 
+Its first successful completion retained frame control `0x4288`, lengths
+`0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
+descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned
+pairwise status `0x0104_0348`. The AP completion leaf now admits that measured
+status in addition to the previously qualified retry/rate-control outcomes;
+the complete geometry is still checked before the callback becomes a no-op,
+and an adjacent `0x0105_0348` selector remains rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
