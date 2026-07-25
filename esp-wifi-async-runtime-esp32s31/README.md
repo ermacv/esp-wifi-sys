@@ -172,8 +172,13 @@ wrong-hart `pp_post`, and never stalls the second core.
 `patch_allocator_probes` similarly wraps all OSI allocator slots and reports
 counts, sizes, failures, and calls made from radio context. Direct C allocator
 references in the vendor archives must additionally pass through the GNU
-linker's wrappers. TX/RX completion, WPA2 ingress, and key programming also
-require symbol interposition. Ordinary archive definitions use LLD wrapping:
+linker's wrappers. In the promoted application `wifi-primary` profile there
+is no captured heap implementation: every qualified cold request is resolved
+to an exact fixed owner, while any unmatched OSI, direct C, or Rust allocation
+reaches an `ebreak` ABI sentinel. The allocating path remains only as the
+explicit `wifi-vendor-strict-link` A/B oracle. TX/RX completion, WPA2 ingress,
+and key programming also require symbol interposition. Ordinary archive
+definitions use LLD wrapping:
 
 ```text
 -Wl,--wrap=malloc
@@ -458,9 +463,11 @@ addresses with all twenty-four required `__wrap_*` functions. Issuing the proof
 arms the allocator and core-stall wrappers: runtime
 allocation calls return null, runtime frees never enter the heap, and a
 requested other-core stall is recorded but never entered.
-`allow_heap_for_wifi_teardown` and `allow_core_stalls_for_wifi_teardown` can be
-called only after the strict executor has fully stopped. The proof token is
-required by the S31 backend. In strict mode,
+`allow_heap_for_wifi_teardown` remains solely for the allocating vendor oracle;
+the primary profile has no heap to reopen. It and
+`allow_core_stalls_for_wifi_teardown` can be called only after the strict
+executor has fully stopped. The proof token is required by the S31 backend. In
+strict mode,
 unexpected AMPDU, power-save, BSS-color, modem-beacon, or coexistence events
 fail closed instead of entering vendor handlers with reachable delay paths.
 

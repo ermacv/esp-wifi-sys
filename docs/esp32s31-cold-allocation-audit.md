@@ -1,5 +1,44 @@
 # ESP32-S31 cold Wi-Fi allocation audit
 
+## Current primary profile
+
+The project's default `wifi-sta` workload now selects `wifi-primary`, the
+qualified static cold-init path. It links neither the `esp-alloc` crate nor a
+heap arena. The application-level `wifi` feature is retained only for
+allocating vendor examples such as the standalone scan and AP oracle.
+
+The dependency and final-ELF audits reject `esp-alloc`, `EspHeap`, TLSF heap
+state and heap sections in the primary image. Allocator-shaped ABI symbols
+must remain because `esp-radio` and the closed archives expose those function
+slots. They are not allocators: they own no storage or metadata, allocation
+and non-null deallocation enter `ebreak`, and the free-space query returns
+zero. The forked `esp-radio/no-heap` mode leaves its otherwise
+allocation-backed fallback RX queues at const zero capacity because the
+strict Rust runtime installs its own fixed-capacity RX/TX owners before radio
+start.
+
+The promoted commands need no feature argument:
+
+```text
+cargo xtask app build wifi-sta
+cargo xtask app run wifi-sta --port /dev/ttyACM0
+```
+
+Use `wifi-vendor-strict-link` only as an explicit allocating A/B oracle. It
+must not be combined with `wifi-primary` or
+`wifi-rust-static-cold-init-hil`.
+
+On 2026-07-25 the no-allocator primary image passed the complete final-link
+audit (6,407 functions, zero no-wait/no-heap violations) and retained 22,648
+bytes of CPU0 stack against the 16,384-byte gate. Hardware completed cold
+initialization without entering the heap trap, then passive scan, open
+authentication, association, WPA2 M1-M4, DHCP, ping, DNS, TCP, HTTP and the
+strict stress run. The run transferred 5,734,400 UDP payload bytes and four
+HTTP responses; TX/RX/PP ownership balanced and the allocation snapshot
+remained exactly zero in every field.
+
+## Historical allocation inventory
+
 This inventory covers the taskless strict STA cold-start path through
 `prepare_strict_runtime`. It was captured on hardware with
 `hil-cold-allocation-trace`, after the direct Rust
@@ -8,16 +47,16 @@ uses a fixed laboratory-only PSRAM journal and performs no allocation. The
 journal is never accessed by an interrupt handler or after cold handoff, so it
 does not consume the IRQ-critical SRAM arena.
 
-The qualified run observed 115 allocations, no reallocations, 24 frees and
+The original allocating oracle run observed 115 allocations, no reallocations, 24 frees and
 128,984 requested bytes. The allocation count and byte count remained
 unchanged through scan, open authentication, association, WPA2 M1-M4,
 network traffic, teardown and a second complete connection. The blocking
 probe remained zero and no allocation ran in radio context.
 
 After the qualified static owners and direct API boundaries documented below,
-the current image performs zero allocations, reallocations or frees and
-requests zero heap bytes. The traced strict STA cold-start and runtime path
-therefore has no accepted dynamic-memory dependency.
+the primary image performs zero allocations, reallocations or frees and
+requests zero heap bytes. It now also contains no allocator implementation or
+heap arena, so this is no longer merely an unused-bootstrap-heap observation.
 
 Addresses below are expressed as a function-relative return offset so that
 the audit does not depend on application link layout. `esf_buf_alloc_dynamic`

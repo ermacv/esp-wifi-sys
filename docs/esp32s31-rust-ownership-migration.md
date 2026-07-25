@@ -118,8 +118,9 @@ removing `gChmCxt` yields a net 336-byte SRAM reduction.
 
 ### Verification
 
-The strict `wifi-rust-static-cold-init-hil` STA final link passes with zero
-no-wait/no-heap audit violations. In the generated linked-state report,
+The primary `wifi-primary` STA final link (implemented by
+`wifi-rust-static-cold-init-hil`) passes with zero no-wait/no-heap audit
+violations. In the generated linked-state report,
 `gChmCxt` and `g_chm` are absent from mutable state reachable by strict vendor
 leaves. They remain listed only as cold-init linked state.
 
@@ -190,10 +191,14 @@ UDP datagrams and four HTTP transfers completed. All 4786 TX credits and 691
 RX credits were returned, no PP publication was rejected, and allocation
 counters did not change after handoff.
 
-The separate `wifi-rust-static-cold-init-hil` memory gate currently reports
-only 14,400 bytes of CPU0 stack against the 16,384-byte minimum. Its strict
-call-graph audit is otherwise clean. This is recorded as static-SRAM budget
-debt; the stack threshold must not be weakened to hide it.
+The static cold-init path is now the default `wifi-primary` STA profile. Its
+former 8 KiB bootstrap allocator arena has been removed together with the
+`esp-alloc` dependency. The 2026-07-25 final image leaves 22,648 bytes of CPU0
+stack against the unchanged 16,384-byte minimum, so the earlier stack-budget
+debt is resolved rather than hidden by weakening the gate. Allocator-shaped C
+and Rust ABI entries are fail-closed `ebreak` sentinels with no backing
+storage; the final-ELF audit rejects an allocator implementation or heap
+section.
 
 ## In-progress slice: `phy_param`
 

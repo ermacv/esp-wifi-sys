@@ -18,7 +18,11 @@
 
 The archive relocation graph supplies `vendor function -> data symbol`; the final ELF supplies liveness, address, size and section. A wrapper boundary stops traversal into the replaced vendor body. “Outside strict roots” means linked but not proven runtime-reachable by this vendor-leaf graph; it is not automatically safe to delete because cold initialization and non-Wi-Fi owners can still use it.
 Run `audit-strict-esp32s31 --include-static-binding-init --include-static-pm-init --enforce` to prove the fixed-storage cold-init leaves together with the runtime roots.
-The application `wifi-rust-static-cold-init-hil` final-ELF audit additionally proves the three fixed SRAM locks, the exact direct init/deinit call targets, the taskless PP tail calls, and the absence of control-flow cycles.
+The primary application `wifi-primary` profile (implemented by the
+`wifi-rust-static-cold-init-hil` boundary set) additionally proves the three
+fixed SRAM locks, the exact direct init/deinit call targets, the taskless PP
+tail calls, the absence of control-flow cycles, and the absence of
+`esp-alloc`, allocator state, or a heap section.
 
 ## Mutable blob state reached by strict vendor leaves
 
