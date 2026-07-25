@@ -950,7 +950,8 @@ status-zero, base-offset STA data frame, or an ordinary association-response,
 beacon, or authentication management frame, with
 promiscuous/error-dump/CSI modes disabled, Rust publishes the recovered
 `wDevCtrl+0x40/+0x44/+0x45` fields, copies the two metadata nibbles, derives
-the exact copy/aggregate arguments, and calls `wDev_IndicateFrame`. Probe
+the exact copy/aggregate arguments, and enters the Rust single-descriptor
+indication leaf. Probe
 Requests in the STA-only profile instead take the recovered direct discard
 path: strict preparation proves the optional observation callback null, the
 interface registry proves AP absent, and the unit is consumed into the Rust
@@ -958,9 +959,9 @@ asynchronous recycler. Action frames are admitted only after the quiescent
 handoff proves `wDevCtrl+0x31` interface bit two (NAN) and
 `g_wifi_menuconfig+0x40` bit `0x04` (FTM) both clear. That proof is copied into
 one byte of Rust-owned SRAM, so the RX hot path does not consult either hidden
-C global. Other classes still delegate
-explicitly, so the aggregate remains in the strict root graph and the ROM
-indication leaf is not claimed as replaced.
+C global. Other classes still delegate explicitly, so the aggregate remains
+in the strict root graph and the ROM indication leaf remains only for
+multi-descriptor, CSI, or otherwise unqualified indication variants.
 
 The management HIL measurement produced subtype bitmap `0x2912`: association
 response (1), probe request (4), beacon (8), authentication (11), and action
@@ -973,6 +974,27 @@ at 24.798 Mbit/s with balanced 4,786/4,786 TX and 690/690 network RX ownership,
 zero allocations, and zero rejections. The host-tested aggregate decoder
 reported only flag value zero. Control, AP/NAN, optional metadata and error
 classes remain unqualified and keep an explicit fallback.
+
+The qualified singleton indication body is now Rust-owned as well. The
+base-layout/zero-CSI precondition makes the ROM copy split at `0x38` one
+contiguous bounded copy. Kind 7 claims the fixed Rust large-RX pool; kind 8
+claims only the finite initialized small-RX free list. Neither path can enter
+the public allocator or wait for capacity. The stateless population leaf
+writes the recovered ESF buffer length, timestamp, rate, channel, and
+single/aggregate flags, then preserves the ROM ownership order by recycling
+the hardware descriptor before publishing the ESF object to the Rust RX
+queue. Descriptor bits 0..13 are validated as capacity and bits 14..27 are
+decoded independently as received length.
+
+The final HIL run validated 715/715 units. Rust indicated 699 data plus 13
+management frames, including three Action frames, and directly discarded
+three STA Probe Requests. Both indication rejection counters, the ROM
+indication fallback, and the vendor aggregate fallback remained zero. The
+complete WPA2/DHCP/UDP/HTTP workload balanced 4,795 TX and 695 network RX
+owners. The primary profile also compiles out unsupported vendor benchmark
+statistics; the runtime allocation probe consequently remained exactly zero
+from cold takeover through stress, rather than merely unchanged during the
+measurement window.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable

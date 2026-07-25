@@ -572,27 +572,32 @@ zero/wrap case, it executes at most 256 times and never polls hardware or
 external state. Its logging call is still consumed by the mandatory
 `wifi_log` wrapper.
 The ROM-resident `wDev_IndicateFrame` cannot be truthfully interposed with GNU
-`--wrap`. Its precondition instead lives in SRAM Rust: the event-25
-continuation follows the completed segment under a short local interrupt mask,
-checks every payload, and admits only a final marker reached in at most 64
-links. It passes that exact checked tail and count into the Rust
-`wDev_ProcessRxSucData` boundary. Qualified status-zero/base-offset STA data,
-association responses, beacons, and authentication frames now bypass the
-vendor aggregate classifier, publish the recovered `wDevCtrl` fields in Rust,
-and call `wDev_IndicateFrame` directly. In the STA-only profile, Probe Requests
-take the recovered STA-to-AP rewrite outcome directly into the Rust recycler:
-the optional observation callback is null and no AP interface is enabled.
-Action frames take the same common indication join only after quiescent
-handoff proves NAN interface bit two and FTM menu bit `0x04` clear, then
-publishes that policy in one Rust-owned SRAM byte. All other unqualified
-classes use the explicit ROM aggregate fallback. The segment remains owned by
-the current radio continuation until it is recycled. The latest WPA2/network
-HIL routed 694 data and 13 management units in Rust, including two Action
-frames, discarded one Probe Request, and observed zero vendor aggregate
-fallbacks across 708 validated units.
-Consequently the two linked-copy backedges are finite data traversal, not
-polling or waiting. The exported frame-copy snapshot counts this real call
-boundary on hardware.
+`--wrap`, so its qualified singleton body is reproduced directly in SRAM
+Rust. The event-25 continuation first follows the completed segment under a
+short local interrupt mask, checks every payload, and admits only a final
+marker reached in at most 64 links. Qualified status-zero/base-offset,
+zero-CSI, single-descriptor STA data, association responses, beacons,
+authentication frames, and guarded Action frames then bypass both the vendor
+aggregate classifier and the ROM indication leaf.
+
+The Rust leaf decodes descriptor bits 0..13 as capacity and bits 14..27 as
+actual received length. It claims kind 7 from the fixed Rust large-RX pool or
+kind 8 from the initialized finite small-RX free list, performs the recovered
+bounded copy and descriptor stores, recycles the hardware descriptor, and
+publishes the new ESF owner directly through `wifi_strict_lmac_rx_done`.
+Exhaustion returns immediately and discards the input unit; it never enters a
+dynamic allocator or waits. Probe Requests in the STA-only profile take their
+recovered direct-discard route. Multi-descriptor, CSI, optional-metadata, and
+other unqualified variants retain an explicit ROM fallback.
+
+The qualifying WPA2/network HIL validated 715/715 RX units. Rust indicated
+699 data and 13 management frames, including three Action frames, discarded
+three Probe Requests, and observed zero indication rejects, ROM indication
+fallbacks, or vendor aggregate fallbacks. The full 4,096 UDP plus four HTTP
+workload balanced all 4,795 TX and 695 network RX owners. The primary
+firmware also compiles out unsupported vendor benchmark-statistics calls, so
+the allocation probe remained exactly zero for allocations, failed attempts,
+reallocations, and frees.
 `hal_mac_get_txq_state` must resolve through its wrapper as well: completion
 and collision handlers receive one bitmap bit per event, while the wrapper
 posts another event for a captured remainder. `hal_mac_get_txq_complete` is

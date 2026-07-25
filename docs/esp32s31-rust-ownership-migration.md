@@ -296,7 +296,7 @@ validates the computed status offset against the descriptor length. Its first
 qualified protocol route is now Rust-owned: status-zero, base-offset STA data
 with promiscuous/error-dump/CSI modes disabled publishes the pinned `wDevCtrl`
 metadata and frame-pointer fields, derives the exact copy and aggregate flags,
-and calls the existing finite `wDev_IndicateFrame` leaf. The same route now
+and enters the Rust-owned single-descriptor indication leaf. The same route now
 owns ordinary STA association-response, beacon, and authentication management
 frames. In the STA-only profile, Probe Request frames are also Rust-owned: the
 pinned body rewrites their route from STA to AP, its optional observation
@@ -312,14 +312,15 @@ enters the common Action indication join without reading either hidden C
 global. Control, AP/NAN, optional-metadata, error-status and unclassified
 inputs still enter an explicit
 `__real_wDev_ProcessRxSucData` fallback. This is not yet a claim that the
-complete aggregate or frame-indication leaf has been replaced.
+complete multi-descriptor aggregate or optional-metadata frame-indication
+paths have been replaced.
 
 Host tests cover the base layout, both rounded optional fields, a truncated
 prefix, all three branches of the recovered aggregate-flag decoder, and the
 data, management, exact Probe Request, and exact Action classifiers; the
-runtime suite now passes 270 tests. The complete metadata/route probe owns 96
+runtime suite now passes 272 tests. The complete metadata/route probe owns 112
 bytes of explicit internal-SRAM state and the immutable Action policy owns one
-byte. Strict Rust static storage is 311,598 bytes and remains below the
+byte. Strict Rust static storage is 311,618 bytes and remains below the
 qualified baseline. The counters are diagnostic migration state and can be
 removed when the aggregate routes are fully Rust-owned.
 
@@ -336,6 +337,40 @@ allocation and rejection counts. The exact decoder reported only aggregate
 flag value zero in that run. Optional sniffer, CSI, NAN, error-status and
 extended-metadata classes remain unqualified.
 
+## Completed slice: single-descriptor RX indication
+
+The common basic STA route no longer calls the ROM `wDev_IndicateFrame`.
+Pinned ROM disassembly establishes its five-argument ABI, kind-7/kind-8 ESF
+selection, two adjacent copies, descriptor stores, discard-before-publish
+ownership order, and final `lmacRxDone` handoff. For one base-layout
+descriptor with zero CSI length, the split copy at byte `0x38` is exactly one
+bounded contiguous copy. Rust now claims either the fixed 32-object kind-7
+SRAM pool or the initialized finite kind-8 small-RX free list, fills the
+recovered ESF/RX descriptor layout, returns the hardware descriptor through
+the existing Rust recycler, and publishes the new frame directly to the
+Rust-owned RX queue. Pool exhaustion or malformed output fails immediately
+and consumes the input unit; it never waits or enters a dynamic fallback.
+
+The descriptor word contains two independent fourteen-bit values. Bits 0..13
+are the backing segment capacity while bits 14..27 are the actual received
+byte count. The first HIL attempt exposed this distinction: treating the
+1700-byte capacity as the received length exhausted the kind-8 guard during
+scan. `descriptor_received_length` now decodes the high field, checks it
+against the low-field capacity, and every subsequent bound and copy uses only
+the received length.
+
+The qualifying HIL run completed passive scan, open authentication,
+association, the Rust WPA2 four-way handshake, DHCP, 4,096/4,096 UDP
+datagrams, and 4/4 HTTP transfers. It validated 715/715 successful RX units:
+699 data and 13 management frames were published through the Rust indication
+leaf, including three Action frames; three STA Probe Requests took the
+qualified discard route. `rust_indicate_routes=712`, both indication reject
+counters were zero, and both vendor indication and aggregate fallbacks were
+zero. TX ownership balanced at 4,795/4,795 and network RX at 695/695.
+Removing unsupported vendor benchmark-statistics calls from `wifi-primary`
+also made the whole runtime allocation snapshot exactly zero, including
+attempted/failed allocations, frees, and reallocations.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
@@ -347,10 +382,12 @@ on mutable blob bytes:
    association-response, beacon, and authentication management routes are now
    Rust-owned. The STA-only Probe Request route rewrite/discard decision and
    the guarded Action route with NAN/FTM disabled are Rust-owned as well. The
-   complete observed basic STA RX workload now reaches no vendor aggregate
-   fallback. Retain fail-closed fallback for control, AP/NAN, optional metadata
-   and error-status classes while reducing the remaining
-   `wDev_IndicateFrame` leaf as its own ownership boundary.
+   complete observed basic STA RX workload now reaches neither the vendor
+   aggregate nor the ROM indication leaf. Retain fail-closed fallback for
+   control, AP/NAN, optional metadata, error-status, CSI, and multi-descriptor
+   classes while porting those indication variants. Remove the ROM leaf from
+   the strict root graph only after every admitted mode has an explicit Rust
+   owner or an intentional fail-closed policy.
    `ppRxProtoProc`, `rc_get_trc`, `rcUpdateRxDone`, `ppRecycleRxPkt`, and the
    public `esp_wifi_internal_free_rx_buffer` release boundary are now
    Rust-owned. The adjacent `wDev_DiscardFrame` head publication and transfer
