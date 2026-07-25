@@ -796,6 +796,13 @@ in addition to the previously measured vendor completion variants, validates
 the encoded length and fixed 1600-byte management bound before mutation, and
 returns the beacon to its `0x0004_0000` base selector for reuse.
 
+Longer AP operation also observed the same persistent 204-byte beacon through
+the direct-LMAC ACK-timeout completion with descriptor-security word
+`0x0404_0000`. The pinned vendor completion restores persistent geometry
+before branching on later callback/recycle policy, so Rust accepts this exact
+status variant with the same length and ownership checks. A missed beacon ACK
+therefore no longer terminates the radio owner.
+
 With the beacon visible, an external active scan also supplied the adjacent AP
 probe-response mapper class: frame control `0x0050`, rate `12`, layout
 `0x2003`, descriptor flags `0x0800_0010`, priority `7`, AP selector

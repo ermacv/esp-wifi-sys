@@ -165,7 +165,7 @@ pub const fn strict_persistent_frame_completion_layout(
             // with hardware-success bit 24 plus the fixed AP selector.  The
             // older 0x0114/0x0414 states remain measured vendor completion
             // variants, but must not be required for this direct LMAC path.
-            0x0104_0000 | 0x0114_0000 | 0x0414_0000
+            0x0104_0000 | 0x0114_0000 | 0x0404_0000 | 0x0414_0000
         )
         && input.header_len == 0x20;
     if input.frame_control & 0x000c != 0
@@ -1089,6 +1089,17 @@ mod tests {
                 descriptor_flags: 0x0000_0412,
                 descriptor_security: 0x0004_0000,
             }),
+        );
+        // The direct LMAC ACK-timeout branch changes only hardware status
+        // bits 24/26. Persistent ownership and reversible frame geometry are
+        // identical, so completion must return the same retained base object
+        // instead of terminating the radio owner.
+        assert_eq!(
+            strict_persistent_frame_completion_layout(TxSecurityLayoutInput {
+                descriptor_security: 0x0404_0000,
+                ..direct_lmac_beacon
+            }),
+            strict_persistent_frame_completion_layout(direct_lmac_beacon),
         );
 
         // WPA2 + HT/HE capability IEs make the strict bgnax beacon longer
