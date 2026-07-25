@@ -10,7 +10,8 @@ pub const ROOTS: &[&str] = &[
     "hal_mac_set_txq_invalid",
     "hal_mac_txq_disable",
     "lmacReleaseTxopQueue",
-    "rcUpdateTxDone",
+    "rcUpdateAckSnr",
+    "rcTxUpdatePer",
     "hal_get_tsf_time",
     "ic_set_current_channel",
     "phy_change_channel",
@@ -26,7 +27,6 @@ pub const ROOTS: &[&str] = &[
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
-    "ieee80211_set_tx_desc",
 ];
 
 // Channel-manager getters are intentionally absent. Strict handoff adopts the
@@ -58,6 +58,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "dbg_dump_rx_sigb",
     "wifi_gpio_debug",
     "esp_test_tx_enab_statistics",
+    "esp_test_set_rx_error_occurs",
     "esp_test_rx_parse_mu",
     "esp_test_rx_process_complete",
     "wDev_SnifferRxData",
@@ -90,6 +91,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
     "ppTxProtoProc",
     "ppProcTxSecFrame",
     "ppTxPkt",
+    "rcUpdateTxDone",
 ];
 
 /// Public runtime entry points which must resolve to an exact Rust symbol.
@@ -110,6 +112,7 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wifi_strict_ieee80211_crypto_encap",
     ),
     ("ieee80211_align_eb", "wifi_strict_ieee80211_align_eb"),
+    ("ieee80211_set_tx_desc", "wifi_strict_ieee80211_set_tx_desc"),
     ("ppTxProtoProc", "wifi_strict_pp_tx_proto_proc"),
     ("ppProcTxSecFrame", "wifi_strict_pp_proc_tx_sec_frame"),
 ];

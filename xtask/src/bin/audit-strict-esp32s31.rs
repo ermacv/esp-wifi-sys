@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 #[path = "../esp32s31_strict_policy.rs"]
 mod strict_policy;
@@ -52,6 +52,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "dbg_dump_rx_sigb",
     "wifi_gpio_debug",
     "esp_test_tx_enab_statistics",
+    "esp_test_set_rx_error_occurs",
     "esp_test_rx_parse_mu",
     "esp_test_rx_process_complete",
     "wDev_SnifferRxData",
@@ -159,6 +160,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_dbg_dump_rx_sigb",
     "__wrap_wifi_gpio_debug",
     "__wrap_esp_test_tx_enab_statistics",
+    "__wrap_esp_test_set_rx_error_occurs",
     "__wrap_esp_test_rx_parse_mu",
     "__wrap_esp_test_rx_process_complete",
     "__wrap_wDev_SnifferRxData",
@@ -173,6 +175,7 @@ const REQUIRED_RUNTIME_WRAPPERS: &[&str] = &[
     "__wrap_wifi_log",
     "__wrap_wifi_assert",
     "__wrap_pp_post",
+    "__wrap_rcUpdateTxDone",
     "__wrap_ieee80211_timer_process",
     "__wrap_chm_start_op",
     "__wrap_chm_return_home_channel",

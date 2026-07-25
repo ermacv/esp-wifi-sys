@@ -50,6 +50,22 @@ publish edges or data into bounded static channels. Cross-context scalar
 snapshots use atomics; they do not disable interrupts or enter a vendor
 critical section.
 
+## Deferred atomic retry debt
+
+A diagnostic scan of the qualified stress ELF found compiler-generated
+`lr.w`/`sc.w` retry backedges in generic Rust atomics outside the externally
+reachable command-claim boundary. ESP32-S31 has the RISC-V `A` extension but
+not Zacas, so LLVM implements compare-exchange with an LR/SC retry loop even
+for weak operations.
+
+This is recorded as architectural debt, not expanded into hand-written
+assembly now. The command and radio-queue admission leaves that must return
+after one failed claim already use isolated single-attempt LR/SC adapters.
+The remaining sites will be re-audited after each ownership slice: removing
+shared global state and assigning one radio owner should make most atomics
+unnecessary. Any site still reachable from an interrupt or run-to-completion
+boundary will then be replaced locally, with its ownership contract known.
+
 ## Completed slice: channel manager
 
 ### Evidence
@@ -123,7 +139,9 @@ each slice can remove:
 2. `TxRxCxt` and `pTxRx`: isolate descriptor queues, completion state, and
    hardware ring ownership.
 3. `wDevCtrl`: separate RX/TX interrupt-visible fields from diagnostics and
-   optional modes.
+   optional modes. The strict runtime currently reaches only the immutable
+   ACK-SNR encoding offset and an optional RX test counter; this is the active
+   slice.
 4. `phy_param`: recover the channel/rate/calibration subset used by the
    qualified profile, keeping calibration and coexistence fields explicit.
 5. Replace channel-manager cold init so `gChmCxt` can be removed from the
@@ -138,6 +156,27 @@ Public `ieee80211` and supplicant crates should remain behind adapters for now.
 Adopting them before the hardware/state boundaries are stable would combine a
 protocol migration with an ownership migration and make regressions harder to
 localize.
+
+## In-progress slice: `wDevCtrl`
+
+The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
+`0x2e` is `0x60`; archive-wide relocation inspection finds four readers and no
+writer. In the currently qualified strict graph only `rcUpdateTxDone` reads
+that byte. It converts the descriptor's encoded ACK-SNR byte to the signed
+sample consumed by the otherwise stateless `rcUpdateAckSnr` leaf.
+
+The Rust `rcUpdateTxDone` boundary now performs the finite validation and
+field selection itself, uses the evidenced `0x60` encoding constant, and
+delegates only to `rcUpdateAckSnr` and `rcTxUpdatePer`. The mesh-only retry
+clamp is deliberately outside the basic AP/STA profile and is documented at
+the adapter. This removes `wDevCtrl` from ordinary TX completion without
+copying the opaque C object into Rust.
+
+The other strict referrer, `esp_test_set_rx_error_occurs`, only increments
+external diagnostic counters when test byte `wDevCtrl[0x44]` is nonzero. The
+strict profile replaces it with its successful no-op result, consistently
+with the existing optional TX/RX diagnostic wrappers. Final-ELF and hardware
+verification are required before this slice is marked complete.
 
 ## In-progress slice: `g_ic`
 

@@ -182,6 +182,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=free
 -Wl,--wrap=pp_post
 -Wl,--wrap=ppTxPkt
+-Wl,--wrap=rcUpdateTxDone
 -Wl,--wrap=ieee80211_timer_process
 -Wl,--wrap=ieee80211_mgmt_output
 -Wl,--wrap=ieee80211_hostapd_beacon_txcb
@@ -200,6 +201,7 @@ require symbol interposition. Ordinary archive definitions use LLD wrapping:
 -Wl,--wrap=dbg_dump_rx_ppdu
 -Wl,--wrap=dbg_dump_rx_sigb
 -Wl,--wrap=wifi_gpio_debug
+-Wl,--wrap=esp_test_set_rx_error_occurs
 -Wl,--wrap=wDev_SnifferRxData
 -Wl,--wrap=wdev_csi_rx_process
 -Wl,--wrap=wpa_sm_rx_eapol

@@ -13,6 +13,8 @@ unsafe extern "C" {
     fn vendor_wifi_gpio_debug(selector: u32, value: u32);
     #[link_name = "esp_test_tx_enab_statistics"]
     fn vendor_test_tx_enable_statistics(queue: u32) -> i32;
+    #[link_name = "esp_test_set_rx_error_occurs"]
+    fn vendor_test_set_rx_error_occurs() -> i32;
     #[link_name = "esp_test_rx_parse_mu"]
     fn vendor_test_rx_parse_mu(descriptor: *mut c_void, rx_control: *mut c_void);
     #[link_name = "esp_test_rx_process_complete"]
@@ -45,6 +47,10 @@ pub(crate) fn runtime_debug_link_wrappers_active() -> bool {
         && core::ptr::eq(
             vendor_test_tx_enable_statistics as *const (),
             __wrap_esp_test_tx_enab_statistics as *const (),
+        )
+        && core::ptr::eq(
+            vendor_test_set_rx_error_occurs as *const (),
+            __wrap_esp_test_set_rx_error_occurs as *const (),
         )
         && core::ptr::eq(
             vendor_test_rx_parse_mu as *const (),
@@ -91,6 +97,18 @@ pub unsafe extern "C" fn __wrap_wifi_gpio_debug(_selector: u32, _value: u32) {}
 /// Disable the optional TX test-statistics collector.
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_esp_test_tx_enab_statistics(_queue: u32) -> i32 {
+    0
+}
+
+/// Disable the optional RX error-occurrence test collector.
+///
+/// The pinned `libpp.a[test_hal_rx_statis.o]` body only increments one of
+/// three external diagnostic counters when `wDevCtrl[0x44]` is nonzero. The
+/// strict AP/STA profile does not expose this test mode, so returning the
+/// vendor success value removes both the diagnostic pointer and the unrelated
+/// 72-byte `wDevCtrl` object from this path.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_esp_test_set_rx_error_occurs() -> i32 {
     0
 }
 

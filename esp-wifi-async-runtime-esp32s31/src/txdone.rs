@@ -34,6 +34,10 @@ const DESCRIPTOR_DIRECT_RECYCLE_BIT: u32 = 0x0400_0000;
 const DESCRIPTOR_RATE_CONTROL_BIT: u32 = 0x0000_0008;
 const DESCRIPTOR_RATE_CONTROL_SKIP_MASK: u32 = 0x4040_4000;
 const DESCRIPTOR_RATE_CONTROL_SKIP_VALUE: u32 = 0x0040_0000;
+// `libpp.a[wdev.o]::.data.wDevCtrl` byte 0x2e is 0x60. Archive-wide
+// relocation inspection finds readers but no writer. It converts the encoded
+// descriptor ACK-SNR byte into the signed value consumed by rate control.
+const ACK_SNR_ENCODING_OFFSET: u8 = 0x60;
 
 const CALLBACK_MGMT: u8 = 2;
 const CALLBACK_STA_EAPOL: u8 = 3;
@@ -222,7 +226,10 @@ unsafe extern "C" {
     #[cfg(not(feature = "strict-no-wait"))]
     fn pp_coex_tx_release(frame: *mut c_void);
     fn esf_buf_recycle(frame: *mut c_void);
-    fn rcUpdateTxDone(rate_control: *mut c_void, descriptor: *mut c_void);
+    #[link_name = "rcUpdateTxDone"]
+    fn vendor_rc_update_tx_done(rate_control: *mut c_void, descriptor: *mut c_void);
+    fn rcUpdateAckSnr(rate_control: *mut c_void, ack_snr: i32);
+    fn rcTxUpdatePer(rate_control: *mut c_void, retries: u32);
     fn lmacReleaseTxopQueue(queue: u8);
     fn pp_post(kind: u32, argument: *mut c_void) -> i32;
 }
@@ -645,7 +652,59 @@ pub(crate) fn runtime_callback_link_wrappers_active() -> bool {
     ) && core::ptr::eq(
         vendor_ic_get_next_tbtt as *const (),
         __wrap_ic_get_next_tbtt as *const (),
+    ) && core::ptr::eq(
+        vendor_rc_update_tx_done as *const (),
+        __wrap_rcUpdateTxDone as *const (),
     )
+}
+
+/// Exact finite non-mesh port of the pinned `rcUpdateTxDone` boundary.
+///
+/// Only two stateless vendor leaves remain below this adapter:
+/// `rcUpdateAckSnr` updates fields within the caller-owned rate-control record
+/// and `rcTxUpdatePer` updates its finite retry counters/schedule. The hidden
+/// `wDevCtrl[0x2e]` read is replaced by its immutable archive initializer.
+/// Mesh-specific retry clamping is intentionally absent from the strict
+/// basic AP/STA profile.
+#[no_mangle]
+pub unsafe extern "C" fn __wrap_rcUpdateTxDone(rate_control: *mut c_void, descriptor: *mut c_void) {
+    let rate_control = rate_control.cast::<u8>();
+    let descriptor = descriptor.cast::<u8>();
+    if rate_control.is_null() || descriptor.is_null() {
+        return;
+    }
+
+    let flags = rate_control.add(0x0c).cast::<u16>().read();
+    if flags & 0x80 != 0 {
+        return;
+    }
+    let schedule = rate_control.add(0x64).cast::<*const u8>().read();
+    let descriptor_schedule = descriptor.add(0x1c).cast::<*const u8>().read();
+    if descriptor_schedule != schedule || flags & 0x04 != 0 {
+        return;
+    }
+
+    let completed = rate_control.add(0x40).cast::<u32>();
+    completed.write(completed.read().wrapping_add(1));
+
+    let retries = match descriptor.add(0x13).read() {
+        1 => {
+            if rate_control.add(0x1b).read() & 0x04 == 0 {
+                let encoded = descriptor.add(0x0d).read();
+                let ack_snr = encoded.wrapping_add(ACK_SNR_ENCODING_OFFSET) as i8;
+                rcUpdateAckSnr(rate_control.cast(), i32::from(ack_snr));
+            }
+            u32::from(descriptor.add(0x05).read())
+        }
+        2 | 3 => {
+            if schedule.is_null() {
+                return;
+            }
+            u32::from(schedule.add(0x08).read())
+        }
+        _ => return,
+    };
+    rcTxUpdatePer(rate_control.cast(), retries);
 }
 
 /// Constant-time replacement for the vendor TBTT catch-up loop.
@@ -1005,7 +1064,7 @@ pub(crate) unsafe fn commit_callback_free_ampdu_success(frame: *mut u8) -> Resul
     if flags & DESCRIPTOR_RATE_CONTROL_BIT != 0
         && flags & DESCRIPTOR_RATE_CONTROL_SKIP_MASK != DESCRIPTOR_RATE_CONTROL_SKIP_VALUE
     {
-        rcUpdateTxDone(frame.add(0x2c).cast(), descriptor.cast());
+        vendor_rc_update_tx_done(frame.add(0x2c).cast(), descriptor.cast());
     }
     #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
@@ -1210,7 +1269,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
     if flags & DESCRIPTOR_RATE_CONTROL_BIT != 0
         && flags & DESCRIPTOR_RATE_CONTROL_SKIP_MASK != DESCRIPTOR_RATE_CONTROL_SKIP_VALUE
     {
-        rcUpdateTxDone(frame.add(0x2c).cast(), descriptor.cast());
+        vendor_rc_update_tx_done(frame.add(0x2c).cast(), descriptor.cast());
     }
     #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
