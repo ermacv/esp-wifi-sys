@@ -195,6 +195,46 @@ only 14,400 bytes of CPU0 stack against the 16,384-byte minimum. Its strict
 call-graph audit is otherwise clean. This is recorded as static-SRAM budget
 debt; the stack threshold must not be weakened to hide it.
 
+## In-progress slice: `phy_param`
+
+The first strict PHY step no longer calls `phy_change_channel`,
+`phy_set_chanfreq`, or `phy_chip_set_chan`. The Rust radio owner directly
+executes the recovered finite channel-programming sequence. Before handoff it
+adopts only the instruction-evidenced fields:
+
+- frequency offset at `0x20`;
+- channel-14 MIC gate at `0x26`;
+- 802.11p policy bytes at `0x28..=0x29`;
+- crystal selector at `0x4f`;
+- current channel/init/CBW at `0x11c..=0x11f`.
+
+The qualified `phy_i2c_enter_critical` and `phy_i2c_exit_critical` bindings
+are each a single `ret`; the Rust path omits them because the sequence belongs
+to one radio owner. The `g_phyFuns+0x14` indirect call is the cold-published
+`phy_set_rx_comp_new` leaf and is now direct. `phy_11p_set` was also removed
+from runtime: its complete body only writes the same two policy bytes back to
+`phy_param`.
+
+Absolute ROM leaves have no bytes in the final ELF, so the no-wait auditor
+keeps the old `phy_change_channel` graph as a reference-only control-flow
+oracle. The linked-state auditor uses only the real Rust runtime roots. This
+distinction prevents the removed `phy_chip_set_chan` body from being reported
+as live while retaining conservative checking of its lower calls.
+
+The next actual dependency is narrower than the 508-byte symbol suggests.
+`phy_chip_set_chan_misc_new` reaches `phy_wifi_set_tx_gain_new`, which reads
+the calibrated TX-gain tables in `phy_param` and dispatches the cold-published
+`g_phyFuns+0x24` callback. The optional channel-14 path also reads its two
+power bytes. These calibrated values must become a typed Rust-owned gain
+profile; copying the complete opaque `phy_param` object would hide rather
+than solve the ownership problem.
+
+The partially migrated sequence passed the strict hardware workload: passive
+scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
+UDP datagrams and four HTTP transfers. All 4786 TX credits and 690 RX credits
+were returned, no PP post was rejected, and post-handoff allocation counters
+were unchanged. Measured UDP payload throughput was 25.024 Mbit/s.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
