@@ -20,7 +20,7 @@ pub enum WdevActionRxAdoptionError {
 use crate::{
     rx_descriptor::{
         decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
-        rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
+        rx_csi_length, rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
         rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
     },
     timer::RawOsiTimer,
@@ -197,6 +197,10 @@ struct RxMetadataProbe {
     rust_management_routes: AtomicUsize,
     rust_action_routes: AtomicUsize,
     rust_probe_request_discards: AtomicUsize,
+    rust_indicate_routes: AtomicUsize,
+    rust_indicate_allocation_rejects: AtomicUsize,
+    rust_indicate_population_rejects: AtomicUsize,
+    vendor_indicate_fallbacks: AtomicUsize,
     vendor_fallbacks: AtomicUsize,
 }
 
@@ -227,6 +231,10 @@ impl RxMetadataProbe {
             rust_management_routes: AtomicUsize::new(0),
             rust_action_routes: AtomicUsize::new(0),
             rust_probe_request_discards: AtomicUsize::new(0),
+            rust_indicate_routes: AtomicUsize::new(0),
+            rust_indicate_allocation_rejects: AtomicUsize::new(0),
+            rust_indicate_population_rejects: AtomicUsize::new(0),
+            vendor_indicate_fallbacks: AtomicUsize::new(0),
             vendor_fallbacks: AtomicUsize::new(0),
         }
     }
@@ -258,6 +266,10 @@ pub struct WdevRxMetadataSnapshot {
     pub rust_management_routes: usize,
     pub rust_action_routes: usize,
     pub rust_probe_request_discards: usize,
+    pub rust_indicate_routes: usize,
+    pub rust_indicate_allocation_rejects: usize,
+    pub rust_indicate_population_rejects: usize,
+    pub vendor_indicate_fallbacks: usize,
     pub vendor_fallbacks: usize,
 }
 
@@ -827,6 +839,87 @@ impl CompletedRxUnit {
     }
 }
 
+/// Own the finite single-descriptor body of the pinned
+/// `wDev_IndicateFrame`.
+///
+/// The admitted base layout makes `get_sublen_offset` exactly `0x38`, the
+/// sublength exactly zero, and `wdev_csi_len_align` exactly zero. The ROM's
+/// two adjacent copies therefore reduce to one bounded copy. Allocation is a
+/// claim from kind 7's Rust SRAM pool or kind 8's initialized static free
+/// list; exhaustion discards this RX unit immediately.
+///
+/// Returning `false` leaves both input owners untouched and permits the
+/// explicit ROM fallback. Returning `true` consumes the completed descriptor
+/// prefix and either publishes or recycles the allocated ESF owner.
+#[cfg(target_arch = "riscv32")]
+#[link_section = ".rwtext.wifi_strict.rx_success_dispatch"]
+unsafe fn indicate_single_received_frame(
+    head: *mut u8,
+    tail: *mut u8,
+    count: u32,
+    metadata: *mut u8,
+    descriptor_length: usize,
+    copy_mode: u32,
+    aggregate: bool,
+    timestamp: u32,
+) -> bool {
+    if head.is_null()
+        || head != tail
+        || count != 1
+        || metadata.is_null()
+        || copy_mode > 1
+        || descriptor_length < 0x38
+    {
+        return false;
+    }
+    let (kind, allocated_length) = if copy_mode == 0 {
+        let Some(length) = crate::rx::strict_rx_descriptor_buffer_size() else {
+            return false;
+        };
+        if descriptor_length > length {
+            return false;
+        }
+        (7, length)
+    } else {
+        (8, descriptor_length)
+    };
+
+    let Some(frame) = crate::esf::allocate_strict_received_frame(kind, allocated_length) else {
+        RX_METADATA_PROBE
+            .rust_indicate_allocation_rejects
+            .fetch_add(1, Ordering::Relaxed);
+        vendor_discard_frame(tail, count);
+        return true;
+    };
+    let control = ptr::addr_of!(wDevCtrl);
+    if !crate::esf::populate_single_received_frame(
+        frame,
+        metadata,
+        descriptor_length,
+        allocated_length,
+        timestamp,
+        control.add(0x2c).read(),
+        control.add(0x2d).read(),
+        aggregate,
+    ) {
+        RX_METADATA_PROBE
+            .rust_indicate_population_rejects
+            .fetch_add(1, Ordering::Relaxed);
+        crate::esf::recycle_received_packet(frame);
+        vendor_discard_frame(tail, count);
+        return true;
+    }
+
+    // Preserve the ROM ownership order: recycle the hardware descriptor
+    // prefix before publishing the newly allocated ESF object.
+    vendor_discard_frame(tail, count);
+    RX_METADATA_PROBE
+        .rust_indicate_routes
+        .fetch_add(1, Ordering::Relaxed);
+    crate::rx::wifi_strict_lmac_rx_done(frame);
+    true
+}
+
 /// Decode the exact metadata layout at the remaining vendor aggregate
 /// boundary and own qualified common STA data/management routes in Rust.
 ///
@@ -834,8 +927,9 @@ impl CompletedRxUnit {
 /// data plus association-response, beacon, authentication and qualified
 /// Action management frames under the strict ordinary AP/STA mode. It
 /// reproduces the pinned
-/// `wDevCtrl` publications and calls the existing finite `wDev_IndicateFrame`
-/// leaf. In the STA-only profile it also reproduces the Probe Request
+/// `wDevCtrl` publications and, for the common single-descriptor layout, owns
+/// the finite `wDev_IndicateFrame` body too. In the STA-only profile it also
+/// reproduces the Probe Request
 /// STA-to-AP rewrite outcome as a direct Rust-owned discard, after strict
 /// preparation disabled the optional observation callback. Action is admitted
 /// only after one-shot adoption proved both NAN and FTM side paths disabled.
@@ -1024,6 +1118,23 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
                 .rust_data_routes
                 .fetch_add(1, Ordering::Relaxed);
         }
+        if rx_csi_length(&prefix) == Some(0)
+            && indicate_single_received_frame(
+                head,
+                tail,
+                count,
+                metadata,
+                descriptor_length,
+                copy_mode,
+                aggregate_flag != 0,
+                timestamp,
+            )
+        {
+            return;
+        }
+        RX_METADATA_PROBE
+            .vendor_indicate_fallbacks
+            .fetch_add(1, Ordering::Relaxed);
         wDev_IndicateFrame(copy_mode, aggregate_flag as u32, tail, count, timestamp);
         return;
     }
@@ -1525,6 +1636,18 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
         rust_action_routes: RX_METADATA_PROBE.rust_action_routes.load(Ordering::Acquire),
         rust_probe_request_discards: RX_METADATA_PROBE
             .rust_probe_request_discards
+            .load(Ordering::Acquire),
+        rust_indicate_routes: RX_METADATA_PROBE
+            .rust_indicate_routes
+            .load(Ordering::Acquire),
+        rust_indicate_allocation_rejects: RX_METADATA_PROBE
+            .rust_indicate_allocation_rejects
+            .load(Ordering::Acquire),
+        rust_indicate_population_rejects: RX_METADATA_PROBE
+            .rust_indicate_population_rejects
+            .load(Ordering::Acquire),
+        vendor_indicate_fallbacks: RX_METADATA_PROBE
+            .vendor_indicate_fallbacks
             .load(Ordering::Acquire),
         vendor_fallbacks: RX_METADATA_PROBE.vendor_fallbacks.load(Ordering::Acquire),
     }

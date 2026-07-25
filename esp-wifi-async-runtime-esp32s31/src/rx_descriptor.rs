@@ -153,6 +153,37 @@ pub(crate) const fn descriptor_buffer_length(word: u32) -> usize {
     (word & LENGTH_MASK) as usize
 }
 
+/// Recover the CSI byte count returned by the pinned `wdev_csi_len_align`
+/// leaf.
+///
+/// Despite its name, the S31 implementation is only two bounded byte loads
+/// and a ten-bit join. Strict ordinary AP/STA disables CSI, so the Rust-owned
+/// `wDev_IndicateFrame` route admits only a zero result.
+pub(crate) const fn rx_csi_length(metadata: &[u8]) -> Option<u16> {
+    if metadata.len() <= 0x27 {
+        return None;
+    }
+    Some(u16::from_le_bytes([metadata[0x26], metadata[0x27] & 0x03]))
+}
+
+/// Publish the received MPDU length into the allocated ESF buffer descriptor.
+///
+/// The pinned leaf preserves bits 0..13 and 28..31, replacing only the
+/// fourteen-bit length at 14..27.
+pub(crate) const fn indicated_rx_descriptor_word(word: u32, length: usize) -> Option<u32> {
+    if length > LENGTH_MASK as usize {
+        return None;
+    }
+    Some((word & PRESERVE_MASK) | ((length as u32) << 14))
+}
+
+/// Add the exact single/multi-descriptor and aggregate flags to the ESF RX
+/// descriptor without disturbing its existing low twelve or high twenty bits.
+pub(crate) const fn indicated_rx_flags_word(word: u32, count: u32, aggregate: bool) -> u32 {
+    let count_flag = if count == 1 { 0x100 } else { 0x80 };
+    word | count_flag | if aggregate { 0x10 } else { 0 }
+}
+
 /// Restore the sole mutable buffer view changed by the RX protocol path.
 ///
 /// Pinned `libpp.a[pp.o]::ppRecycleRxPkt` is fourteen bytes: it loads the ESF
@@ -192,9 +223,10 @@ mod tests {
     use core::ptr;
 
     use super::{
-        decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
-        restore_received_packet_buffer_view, rx_indicate_aggregate_flag, rx_sta_action_copy_mode,
-        rx_sta_data_copy_mode, rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
+        decode_rx_metadata_layout, descriptor_buffer_length, indicated_rx_descriptor_word,
+        indicated_rx_flags_word, recycled_descriptor_word, restore_received_packet_buffer_view,
+        rx_csi_length, rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
+        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
@@ -210,6 +242,29 @@ mod tests {
             assert_eq!(recycled_descriptor_word(word), expected);
             assert_eq!(descriptor_buffer_length(word), (word & 0x3fff) as usize);
         }
+    }
+
+    #[test]
+    fn indicated_rx_words_match_the_pinned_single_frame_stores() {
+        assert_eq!(
+            indicated_rx_descriptor_word(0xdead_beef, 0x1234),
+            Some((0xdead_beef & 0xf000_3fff) | (0x1234 << 14))
+        );
+        assert_eq!(indicated_rx_descriptor_word(0, 0x4000), None);
+
+        assert_eq!(indicated_rx_flags_word(0xabcd_e002, 1, false), 0xabcd_e102);
+        assert_eq!(indicated_rx_flags_word(0xabcd_e002, 2, false), 0xabcd_e082);
+        assert_eq!(indicated_rx_flags_word(0xabcd_e002, 1, true), 0xabcd_e112);
+    }
+
+    #[test]
+    fn csi_length_is_the_exact_ten_bit_metadata_join() {
+        assert_eq!(rx_csi_length(&[0; 0x27]), None);
+        let mut metadata = [0_u8; RX_METADATA_PREFIX_BYTES];
+        assert_eq!(rx_csi_length(&metadata), Some(0));
+        metadata[0x26] = 0xa5;
+        metadata[0x27] = 0xfe;
+        assert_eq!(rx_csi_length(&metadata), Some(0x2a5));
     }
 
     #[test]

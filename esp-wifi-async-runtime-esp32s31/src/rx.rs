@@ -16,6 +16,7 @@ const RX_BUDGET: usize = 8;
 const RX_CALLBACK_OFFSET: usize = 0x3f8;
 const RX_AUX_CALLBACK_1_OFFSET: usize = 0x3fc;
 const RX_AUX_CALLBACK_2_OFFSET: usize = 0x400;
+const RX_DESCRIPTOR_BUFFER_SIZE_OFFSET: usize = 0x40c;
 const RX_QUEUE_HEAD_OFFSET: usize = 0x394;
 const RX_QUEUE_TAIL_LINK_OFFSET: usize = 0x398;
 const RX_PACKET_NEXT_OFFSET: usize = 0x30;
@@ -52,6 +53,7 @@ pub enum RxPumpError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RxStateAdoptionError {
     TxRxUnavailable,
+    UnsupportedDescriptorBufferSize,
     UnsupportedApCallback,
     NanCallbackInstalled,
 }
@@ -150,6 +152,7 @@ static STRICT_RX_QUEUE_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
 struct StrictRxRegistry {
     station_callback: Option<RxCallback>,
     ap_callback_registered: bool,
+    descriptor_buffer_size: usize,
 }
 
 impl StrictRxRegistry {
@@ -157,6 +160,7 @@ impl StrictRxRegistry {
         Self {
             station_callback: None,
             ap_callback_registered: false,
+            descriptor_buffer_size: 0,
         }
     }
 }
@@ -222,10 +226,20 @@ pub(crate) unsafe fn adopt_vendor_rx_state() -> Result<(), RxStateAdoptionError>
     {
         return Err(RxStateAdoptionError::NanCallbackInstalled);
     }
+    let descriptor_buffer_size = txrx
+        .add(RX_DESCRIPTOR_BUFFER_SIZE_OFFSET)
+        .cast::<u32>()
+        .read() as usize;
+    if descriptor_buffer_size == 0
+        || descriptor_buffer_size > crate::esf::maximum_strict_large_rx_length()
+    {
+        return Err(RxStateAdoptionError::UnsupportedDescriptorBufferSize);
+    }
 
     STRICT_RX_REGISTRY.0.get().write(StrictRxRegistry {
         station_callback,
         ap_callback_registered: ap_callback.is_some(),
+        descriptor_buffer_size,
     });
     STRICT_RX_REGISTRY_ADOPTED.store(true, Ordering::Release);
     Ok(())
@@ -237,6 +251,14 @@ fn rx_registry() -> Option<&'static StrictRxRegistry> {
         return None;
     }
     Some(unsafe { &*STRICT_RX_REGISTRY.0.get() })
+}
+
+/// Return the immutable hardware RX segment size adopted from `pTxRx`.
+///
+/// The remaining strict receive path uses this value only to size a claim in
+/// the fixed kind-7 SRAM pool. Runtime code never dereferences `pTxRx`.
+pub(crate) fn strict_rx_descriptor_buffer_size() -> Option<usize> {
+    Some(rx_registry()?.descriptor_buffer_size)
 }
 
 /// Transfer the interrupt-to-executor RX FIFO and its ROM callback slot as one

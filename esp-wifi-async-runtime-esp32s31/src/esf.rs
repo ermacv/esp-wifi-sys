@@ -25,6 +25,9 @@ const MANAGEMENT_SLOT_MASK: usize = (1 << MANAGEMENT_SLOT_CAPACITY) - 1;
 // The original allocator serves kind 7 from the heap. Match the configured
 // static RX bound with fixed Rust-owned storage instead.
 const LARGE_RX_PAYLOAD_CAPACITY: usize = 1700;
+// Kind 8 is backed by the pinned 648-byte cold pool: a 0x90-byte ESF header
+// plus the vendor's 500-byte small-RX payload and alignment.
+const SMALL_RX_PAYLOAD_CAPACITY: usize = 500;
 const LARGE_RX_SLOT_SIZE: usize = ESF_HEADER_SIZE + LARGE_RX_PAYLOAD_CAPACITY;
 // The default profile uses one native atomic word. PSRAM-backed application
 // profiles can spend more internal SRAM here and use two independent native
@@ -40,6 +43,7 @@ const LARGE_RX_CLAIM_WORDS: usize =
 
 const ESF_BUFFER_DESCRIPTOR_OFFSET: usize = 0x3c;
 const ESF_TX_DESCRIPTOR_OFFSET: usize = 0x48;
+const ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET: usize = 0x04;
 const ESF_BUFFER_POINTER_OFFSET: usize = 0x10;
 const ESF_BUFFER_END_OFFSET: usize = 0x40;
 const ESF_TYPE_OFFSET: usize = 0x1a;
@@ -113,6 +117,10 @@ const NO_PREARM_HART: usize = usize::MAX;
     link_section = ".critical.data.wifi_strict.esf_prearm_hart"
 )]
 static PREARM_MANAGEMENT_HART: AtomicUsize = AtomicUsize::new(NO_PREARM_HART);
+
+pub(crate) const fn maximum_strict_large_rx_length() -> usize {
+    LARGE_RX_PAYLOAD_CAPACITY
+}
 
 unsafe extern "C" {
     static mut g_eb_list_desc: u8;
@@ -629,6 +637,112 @@ unsafe fn allocate_vendor_static(source: *const u8, kind: u32, length: usize) ->
         .cast::<u32>()
         .write(tx_descriptor.add(4).cast::<u32>().read() | 0x0f);
     Some(frame)
+}
+
+/// Claim one fixed ESF object for the Rust-owned single-descriptor RX path.
+///
+/// This is intentionally separate from the public allocator wrapper: the
+/// caller already holds the strict radio-owner capability, so there is no
+/// cold delegation branch and therefore no possible dynamic allocator edge.
+/// Kind 7 uses the Rust SRAM pool; kind 8 uses the initialized finite vendor
+/// small-RX free list. Exhaustion is an immediate `None`, never a wait.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) unsafe fn allocate_strict_received_frame(
+    kind: u32,
+    length: usize,
+) -> Option<*mut u8> {
+    if !crate::critical::strict_wifi_hart_armed() || !crate::critical::on_strict_wifi_hart() {
+        reject(kind, length);
+        return None;
+    }
+    let frame = match kind {
+        7 => allocate_large_rx(ptr::null(), length),
+        8 if length <= SMALL_RX_PAYLOAD_CAPACITY => {
+            allocate_vendor_static(ptr::null(), kind, length)
+        }
+        _ => None,
+    };
+    if frame.is_none() {
+        reject(kind, length);
+    }
+    frame
+}
+
+/// Populate the pinned S31 ESF layout for one base-metadata RX descriptor.
+///
+/// `wDev_IndicateFrame` splits the copy at byte `0x38`; with the admitted
+/// zero-sublength/zero-extra layout those two ranges are contiguous, so one
+/// finite copy is byte-for-byte equivalent. All pointer chasing and ABI
+/// stores live in this stateless leaf. The caller owns both objects and must
+/// recycle `frame` if this function rejects malformed input.
+///
+/// # Safety
+///
+/// `frame` must be an outstanding kind-7 or kind-8 object returned by
+/// [`allocate_strict_received_frame`]. `source` must be readable for
+/// `descriptor_length` bytes, and the source and ESF payload must not overlap.
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".rwtext.wifi_strict.esf"
+)]
+pub(crate) unsafe fn populate_single_received_frame(
+    frame: *mut u8,
+    source: *const u8,
+    descriptor_length: usize,
+    allocated_length: usize,
+    timestamp: u32,
+    rx_rate: u8,
+    rx_channel: u8,
+    aggregate: bool,
+) -> bool {
+    if frame.is_null()
+        || source.is_null()
+        || descriptor_length < 0x38
+        || descriptor_length > allocated_length
+    {
+        return false;
+    }
+    let kind = frame.add(ESF_TYPE_OFFSET).read();
+    if kind != 7 && kind != 8 {
+        return false;
+    }
+    let buffer_descriptor = frame
+        .add(ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    let rx_descriptor = frame
+        .add(ESF_TX_DESCRIPTOR_POINTER_OFFSET)
+        .cast::<*mut u8>()
+        .read();
+    if buffer_descriptor.is_null() || rx_descriptor.is_null() {
+        return false;
+    }
+    let destination = buffer_descriptor.add(4).cast::<*mut u8>().read();
+    if destination.is_null() {
+        return false;
+    }
+    let Some(descriptor_word) = crate::rx_descriptor::indicated_rx_descriptor_word(
+        buffer_descriptor.cast::<u32>().read(),
+        descriptor_length,
+    ) else {
+        return false;
+    };
+
+    ptr::copy_nonoverlapping(source, destination, descriptor_length);
+    buffer_descriptor.cast::<u32>().write(descriptor_word);
+    rx_descriptor.add(4).cast::<u32>().write(timestamp);
+    rx_descriptor.add(8).write(rx_rate);
+    rx_descriptor.add(9).write(rx_channel);
+    let flags = crate::rx_descriptor::indicated_rx_flags_word(
+        rx_descriptor.cast::<u32>().read(),
+        1,
+        aggregate,
+    );
+    rx_descriptor.cast::<u32>().write(flags);
+    true
 }
 
 #[cfg_attr(
