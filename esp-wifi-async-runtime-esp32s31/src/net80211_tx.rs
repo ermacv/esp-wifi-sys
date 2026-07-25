@@ -465,6 +465,7 @@ unsafe fn encapsulate_ordinary(
     buffer: NonNull<u8>,
     interface_selector: u32,
     allow_power_save_credit: bool,
+    more_data: bool,
 ) -> Result<(), Net80211TxError> {
     use crate::net80211_state::Net80211InterfaceRole;
 
@@ -560,6 +561,13 @@ unsafe fn encapsulate_ordinary(
         no_ack_policy,
     )
     .ok_or(Net80211TxError::InvalidOrdinaryFrame)?;
+    if more_data {
+        // Match `pwrsave_flushq`: every retained MPDU except the final FIFO
+        // element advertises that buffered traffic remains. This bit belongs
+        // to the 802.11 header and must be set before the header is copied
+        // into aligned ESF storage.
+        plan.header[1] |= 0x20;
+    }
     let new_remaining = remaining
         .checked_sub(crate::net80211_encap::ETHERNET_HEADER_LEN as u16)
         .and_then(|length| length.checked_add(crate::net80211_encap::LLC_SNAP_HEADER_LEN as u16))
@@ -720,7 +728,7 @@ pub(crate) unsafe fn dispatch_one() -> Result<(), Net80211TxError> {
         &mut search_error,
     ));
     let result = if let Some(node) = node {
-        encapsulate_ordinary(node, buffer, interface, false)
+        encapsulate_ordinary(node, buffer, interface, false, false)
     } else {
         esf_buf_recycle(buffer.as_ptr().cast());
         Ok(())
@@ -849,7 +857,7 @@ pub(crate) unsafe fn dispatch_power_save_continuation(
     if (group && last) || (!group && (active || last)) {
         crate::wpa2_ap::strict_update_ap_tim(node.as_ptr(), false);
     }
-    if let Err(error) = encapsulate_ordinary(node, buffer, interface, true) {
+    if let Err(error) = encapsulate_ordinary(node, buffer, interface, true, !last) {
         esf_buf_recycle(buffer.as_ptr().cast());
         return Err(error);
     }

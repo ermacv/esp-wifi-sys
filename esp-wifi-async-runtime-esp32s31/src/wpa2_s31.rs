@@ -379,6 +379,18 @@ pub enum S31Wpa2IoError {
     DataTxCreditMismatch,
 }
 
+/// Decide whether the radio-command owner must retain an AP data command
+/// until a peer-bound active/PS-Poll edge.
+///
+/// Group traffic is deliberately excluded. It must cross the ESF ownership
+/// boundary immediately so the bounded net80211 queue can retain several
+/// frames and release the complete group FIFO on one Rust DTIM edge. Retrying
+/// a group command here would wait on a nonexistent `ff:ff:ff:ff:ff:ff` peer
+/// edge and serialize the FIFO to at most one frame per DTIM.
+const fn ap_owner_power_save_retry(destination: &[u8; 6], sleeping: bool, flags: u32) -> bool {
+    destination[0] & 1 == 0 && (sleeping || flags & 0x10 != 0)
+}
+
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HilStaPairwiseKeySnapshot {
@@ -1518,7 +1530,9 @@ mod target {
                         crate::ap_power_save::ps_poll_credit_after(self.ap_ps_poll_epoch, &peer)
                     })
                     .flatten();
-                if (sleeping || flags & 0x10 != 0) && ps_poll_credit.is_none() {
+                if ap_owner_power_save_retry(&peer, sleeping, flags)
+                    && ps_poll_credit.is_none()
+                {
                     // Publish the exact recovered AID bit through the finite
                     // Rust leaf. The owned command remains with the Rust radio
                     // owner; no vendor PS queue or OSI primitive is entered.
@@ -2076,5 +2090,24 @@ mod tests {
         peers.remove(&first);
         assert_eq!(peers.get(&first), None);
         assert_eq!(peers.get(&third), Some(30));
+    }
+
+    #[test]
+    fn group_power_save_ownership_moves_to_bounded_dtim_queue() {
+        assert!(!ap_owner_power_save_retry(
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            true,
+            0x10,
+        ));
+        assert!(!ap_owner_power_save_retry(
+            &[0x33, 0x33, 0, 0, 0, 2],
+            true,
+            0x10,
+        ));
+        assert!(ap_owner_power_save_retry(
+            &[0x92, 0xd6, 0x0e, 0x4c, 0x09, 0x75],
+            true,
+            0,
+        ));
     }
 }
