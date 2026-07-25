@@ -40,7 +40,8 @@ unsafe extern "C" {
     static mut g_ic: u8;
 
     fn lmacRxDone(packet: *mut u8);
-    fn ppRxProtoProc(packet: *mut u8, rx_control: *mut u8) -> i32;
+    fn rc_get_trc(route: u32, receiver: *mut u8) -> *mut u8;
+    fn rcUpdateRxDone(rate_control: *mut u8, rx_control: *mut u8);
     fn ap_rx_cb(packet: *mut u8, rssi: i32, signal_length: u32);
 }
 
@@ -837,7 +838,7 @@ unsafe fn process_protocol(
     rx_control: *mut u8,
     payload_owner: *mut u8,
 ) {
-    if unsafe { ppRxProtoProc(packet, rx_control) } != 0 {
+    if unsafe { wifi_strict_pp_rx_proto_proc(packet, rx_control) } != 0 {
         COUNTERS.protocol_rejected.fetch_add(1, Ordering::Relaxed);
         unsafe { crate::esf::recycle_received_packet(packet) };
         return;
@@ -926,6 +927,57 @@ unsafe fn process_protocol(
     }
     COUNTERS.unrouted.fetch_add(1, Ordering::Relaxed);
     unsafe { crate::esf::recycle_received_packet(packet) };
+}
+
+/// Strict `WIFI_PS_NONE` replacement for the pinned 0x154-byte
+/// `libpp.a[pp.o]::ppRxProtoProc` body.
+///
+/// The vendor function first classifies RX-control bits 4 through 6. Its data
+/// branch calls `pm_on_data_rx`; its beacon branch calls `pm_sleep_for`,
+/// `pm_set_beacon_duration`, and `pm_on_beacon_rx`. The qualified strict
+/// profile keeps power save disabled, and all three resulting PM mutation
+/// hooks are already mandatory no-op interpositions. Omitting those branches
+/// therefore leaves the one observable operation: select a rate-control
+/// context, publish it at `packet+0x2c`, and apply the finite RX-done update.
+///
+/// # Safety
+///
+/// `packet` and `rx_control` must name the outstanding fixed-pool RX object
+/// and its hardware control block. This function validates the pointer chain
+/// it dereferences and returns nonzero without transferring ownership when the
+/// private ABI is malformed.
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_proto"]
+pub unsafe extern "C" fn wifi_strict_pp_rx_proto_proc(
+    packet: *mut u8,
+    rx_control: *mut u8,
+) -> i32 {
+    if packet.is_null() || rx_control.is_null() {
+        return -1;
+    }
+
+    let Some(route) = crate::rx_proto::rate_control_route(unsafe { rx_control.add(3).read() })
+    else {
+        return 0;
+    };
+    let payload_owner = unsafe { packet.add(4).cast::<*mut u8>().read() };
+    if payload_owner.is_null() {
+        return -1;
+    }
+    let mut frame = unsafe { payload_owner.add(4).cast::<*mut u8>().read() };
+    if frame.is_null() {
+        return -1;
+    }
+    if unsafe { packet.add(0x24).cast::<u16>().read() } & 0x2000 != 0 {
+        frame = unsafe { frame.add(8) };
+    }
+
+    let rate_control = unsafe { rc_get_trc(u32::from(route.index()), frame.add(10)) };
+    unsafe { packet.add(0x2c).cast::<*mut u8>().write(rate_control) };
+    if !rate_control.is_null() {
+        unsafe { rcUpdateRxDone(rate_control, rx_control) };
+    }
+    0
 }
 
 unsafe fn rx_signal_length(rx_control: *const u8) -> usize {

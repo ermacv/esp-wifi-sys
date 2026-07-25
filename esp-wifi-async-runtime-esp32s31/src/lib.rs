@@ -76,6 +76,7 @@ pub mod runtime;
 mod rx;
 pub mod rx_ampdu;
 mod rx_ownership;
+mod rx_proto;
 #[cfg(all(
     target_arch = "riscv32",
     feature = "strict-no-wait",

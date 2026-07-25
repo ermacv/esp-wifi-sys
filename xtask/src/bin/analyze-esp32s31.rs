@@ -51,7 +51,7 @@ const EXPECTED_LABELS: [&str; 34] = [
     ".L1024", ".L1017", ".L1023", ".L1022", ".L1021", ".L1020", ".L1018",
 ];
 
-const REQUIRED_GLOBALS: [(&str, &str); 46] = [
+const REQUIRED_GLOBALS: [(&str, &str); 49] = [
     ("ppTask", "0000023a"),
     ("pp_post", "00000160"),
     ("pp_sig_cnt", "00000024"),
@@ -59,6 +59,7 @@ const REQUIRED_GLOBALS: [(&str, &str); 46] = [
     ("ppProcessRxPktHdr", "00000042"),
     ("ppProcTxDone", "000001f4"),
     ("ppRxPkt", "00000178"),
+    ("ppRxProtoProc", "00000154"),
     ("ppRecycleRxPkt", "0000000e"),
     ("ppResortTxAMPDU", "000005bc"),
     ("pp_default_event_handler", "0000002c"),
@@ -82,6 +83,8 @@ const REQUIRED_GLOBALS: [(&str, &str); 46] = [
     ("ppProcTxCallback", "0000006e"),
     ("ppEnqueueTxDone", "00000062"),
     ("rcUpdateTxDone", "000000a0"),
+    ("rc_get_trc", "00000076"),
+    ("rcUpdateRxDone", "00000066"),
     // Allocation-free static-buffer/key branches used as strict backend
     // preconditions. Their exact control flow is part of the pinned ABI.
     ("esf_buf_alloc", "00000184"),
