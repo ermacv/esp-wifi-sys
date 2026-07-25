@@ -182,6 +182,7 @@ struct DeferredPeerQueue {
     head: *mut u8,
     tail: *mut u8,
     len: usize,
+    group_dtim_after: usize,
     active_after: usize,
     ps_poll_after: usize,
     removal_after: usize,
@@ -194,6 +195,7 @@ impl DeferredPeerQueue {
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
             len: 0,
+            group_dtim_after: 0,
             active_after: 0,
             ps_poll_after: 0,
             removal_after: 0,
@@ -223,6 +225,7 @@ impl DeferredPeerQueue {
         debug_assert!(self.is_empty());
         debug_assert_eq!(self.len, 0);
         self.peer = [0; 6];
+        self.group_dtim_after = 0;
         self.active_after = 0;
         self.ps_poll_after = 0;
         self.removal_after = 0;
@@ -252,9 +255,17 @@ impl DeferredPeerQueues {
         if total >= DEFERRED_POWER_SAVE_CAPACITY {
             return false;
         }
+        let group = peer[0] & 1 != 0;
         let slot_index = queues
             .iter()
-            .position(|slot| !slot.is_empty() && slot.peer == peer)
+            .position(|slot| {
+                !slot.is_empty()
+                    && if group {
+                        slot.peer[0] & 1 != 0
+                    } else {
+                        slot.peer == peer
+                    }
+            })
             .or_else(|| queues.iter().position(DeferredPeerQueue::is_empty));
         let Some(slot_index) = slot_index else {
             return false;
@@ -269,6 +280,7 @@ impl DeferredPeerQueues {
         if slot.is_empty() {
             slot.peer = peer;
             slot.head = buffer.as_ptr();
+            slot.group_dtim_after = crate::ap_power_save::group_dtim_epoch();
             slot.active_after = crate::ap_power_save::active_epoch(&peer);
             slot.ps_poll_after = crate::ap_power_save::ps_poll_epoch(&peer);
             slot.removal_after = crate::ap_power_save::removal_epoch(&peer);
@@ -294,6 +306,15 @@ impl DeferredPeerQueues {
             .find_map(|(index, slot)| {
                 if slot.is_empty() {
                     return None;
+                }
+                if slot.peer[0] & 1 != 0 {
+                    return match crate::ap_power_save::poll_group_dtim(
+                        slot.group_dtim_after,
+                        cx,
+                    ) {
+                        Poll::Ready(()) => Some(index),
+                        Poll::Pending => None,
+                    };
                 }
                 match crate::ap_power_save::poll_peer_edge(
                     slot.active_after,
@@ -742,13 +763,16 @@ pub(crate) unsafe fn dispatch_power_save_continuation(
     }
 
     let peer = slot.peer;
+    let group = peer[0] & 1 != 0;
+    let group_dtim_epoch = crate::ap_power_save::group_dtim_epoch();
     let active_epoch = crate::ap_power_save::active_epoch(&peer);
     let ps_poll_epoch = crate::ap_power_save::ps_poll_epoch(&peer);
     let removal_epoch = crate::ap_power_save::removal_epoch(&peer);
     let removed = removal_epoch != slot.removal_after;
     let active = active_epoch != slot.active_after;
     let ps_poll = ps_poll_epoch != 0 && ps_poll_epoch != slot.ps_poll_after;
-    if !removed && !active && !ps_poll {
+    let group_dtim = group && group_dtim_epoch != slot.group_dtim_after;
+    if !group_dtim && !removed && !active && !ps_poll {
         return Ok(());
     }
 
@@ -765,7 +789,7 @@ pub(crate) unsafe fn dispatch_power_save_continuation(
         slot.clear_identity();
     }
 
-    if removed {
+    if !group && removed {
         esf_buf_recycle(buffer.as_ptr().cast());
         crate::ap_power_save::record_cancelled_transmit();
         return Ok(());
@@ -808,7 +832,7 @@ pub(crate) unsafe fn dispatch_power_save_continuation(
         return arm_next_event();
     };
 
-    if active || last {
+    if (group && last) || (!group && (active || last)) {
         crate::wpa2_ap::strict_update_ap_tim(node.as_ptr(), false);
     }
     if let Err(error) = encapsulate_ordinary(node, buffer, interface, true) {

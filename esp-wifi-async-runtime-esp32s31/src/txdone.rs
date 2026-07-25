@@ -825,12 +825,103 @@ pub unsafe extern "C" fn __wrap_ieee80211_tx_mgt_cb(frame: *mut c_void) {
     }
 }
 
-unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
+fn beacon_dtim(bytes: &[u8]) -> Option<(u8, u8)> {
+    const FIXED_BEACON_LENGTH: usize = 24 + 8 + 2 + 2;
+
+    if bytes.len() < FIXED_BEACON_LENGTH
+        || u16::from_le_bytes([bytes[0], bytes[1]]) & 0x00fc != 0x0080
+    {
+        return None;
+    }
+    let mut offset = FIXED_BEACON_LENGTH;
+    macro_rules! inspect_element {
+        () => {{
+            if offset + 2 > bytes.len() {
+                return None;
+            }
+            let id = bytes[offset];
+            let length = usize::from(bytes[offset + 1]);
+            let end = offset + 2 + length;
+            if end > bytes.len() {
+                return None;
+            }
+            if id == 5 {
+                if length < 4 {
+                    return None;
+                }
+                let count = bytes[offset + 2];
+                let period = bytes[offset + 3];
+                return (period != 0 && count < period).then_some((count, period));
+            }
+            offset = end;
+        }};
+    }
+
+    // A beacon can carry at most 32 elements in the qualified 1600-byte
+    // management object. Expanding the bound leaves no control-flow cycle in
+    // this strict TX-done root.
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    inspect_element!();
+    None
+}
+
+unsafe fn strict_beacon_dtim(frame: *mut u8) -> Option<(u8, u8)> {
+    if frame.is_null() {
+        return None;
+    }
+    let storage = frame.add(4).cast::<*mut u8>().read();
+    if storage.is_null() {
+        return None;
+    }
+    let data = storage.add(4).cast::<*mut u8>().read();
+    if data.is_null() {
+        return None;
+    }
+    let length = usize::from(frame.add(0x14).cast::<u16>().read_unaligned())
+        + usize::from(frame.add(0x16).cast::<u16>().read_unaligned());
+    if length > 1600 {
+        return None;
+    }
+    beacon_dtim(core::slice::from_raw_parts(data, length))
+}
+
+unsafe fn strict_ap_beacon_txdone(frame: *mut u8) -> Result<(), ()> {
     const STRICT_AP_BEACON_INTERVAL_US: u32 = 100 * 1_024;
 
     if TmpSTAAPCloseAP != 0 || !crate::net80211_state::ordinary_sta_ap_profile() {
         return Err(());
     }
+    let (dtim_count, _) = strict_beacon_dtim(frame).ok_or(())?;
     let interface = crate::net80211_state::access_point_interface()
         .map(|interface| interface.as_ptr())
         .unwrap_or(ptr::null_mut());
@@ -863,6 +954,9 @@ unsafe fn strict_ap_beacon_txdone() -> Result<(), ()> {
     let timer = ptr::addr_of_mut!(BEACON_TIMER).cast::<c_void>();
     disarm(timer);
     arm_us(timer, interval, false);
+    if dtim_count == 0 {
+        crate::ap_power_save::observe_group_dtim();
+    }
     Ok(())
 }
 
@@ -880,7 +974,7 @@ pub unsafe extern "C" fn __wrap_ieee80211_hostapd_beacon_txcb(frame: *mut c_void
         initialization_hostapd_beacon_txcb(frame);
         return;
     }
-    if strict_ap_beacon_txdone().is_err() {
+    if strict_ap_beacon_txdone(frame.cast()).is_err() {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
     }
 }
@@ -2001,10 +2095,25 @@ mod tests {
     #[cfg(feature = "hil-vendor-tx")]
     use super::ieee80211_data_header_len;
     use super::{
-        is_ap_addba_response_completion_layout, is_ap_deauthentication_completion,
+        beacon_dtim, is_ap_addba_response_completion_layout, is_ap_deauthentication_completion,
         supported_callback_index, StrictTxDoneRegistry, CALLBACK_ADDBA_RESPONSE,
         CALLBACK_AP_POWER_SAVE, CALLBACK_MGMT, FRAME_NEXT_OFFSET,
     };
+
+    #[test]
+    fn bounded_beacon_parser_owns_dtim_count_and_period() {
+        let mut beacon = [0_u8; 46];
+        beacon[..2].copy_from_slice(&0x0080_u16.to_le_bytes());
+        beacon[36..40].copy_from_slice(&[0, 2, b'a', b'p']);
+        beacon[40..46].copy_from_slice(&[5, 4, 0, 2, 0, 0]);
+        assert_eq!(beacon_dtim(&beacon), Some((0, 2)));
+        beacon[42] = 1;
+        assert_eq!(beacon_dtim(&beacon), Some((1, 2)));
+        beacon[42] = 2;
+        assert_eq!(beacon_dtim(&beacon), None);
+        beacon[41] = 3;
+        assert_eq!(beacon_dtim(&beacon), None);
+    }
 
     #[test]
     fn rust_tx_done_registry_owns_fifo_and_supported_callbacks() {

@@ -17,6 +17,8 @@ use crate::queue::WakerCell;
 static ACTIVE_EDGE: WakerCell = WakerCell::new();
 static PS_POLL_EPOCH: AtomicUsize = AtomicUsize::new(0);
 static PEER_EVENT_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static GROUP_DTIM_EPOCH: AtomicUsize = AtomicUsize::new(0);
+static GROUP_DTIM_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static SLEEP_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static REMOVAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -143,6 +145,7 @@ pub struct ApPowerSaveSnapshot {
     pub sleep_observations: usize,
     pub active_observations: usize,
     pub ps_poll_observations: usize,
+    pub group_dtim_observations: usize,
     pub removal_observations: usize,
     pub deferred_transmits: usize,
     pub cancelled_transmits: usize,
@@ -156,6 +159,7 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
         sleep_observations: SLEEP_OBSERVATIONS.load(Ordering::Acquire),
         active_observations: ACTIVE_OBSERVATIONS.load(Ordering::Acquire),
         ps_poll_observations: PS_POLL_EPOCH.load(Ordering::Acquire),
+        group_dtim_observations: GROUP_DTIM_OBSERVATIONS.load(Ordering::Acquire),
         removal_observations: REMOVAL_OBSERVATIONS.load(Ordering::Acquire),
         deferred_transmits: DEFERRED_TRANSMITS.load(Ordering::Acquire),
         cancelled_transmits: CANCELLED_TRANSMITS.load(Ordering::Acquire),
@@ -235,6 +239,17 @@ pub(crate) fn observe_peer_removed(peer: &[u8; 6]) {
     ACTIVE_EDGE.wake();
 }
 
+/// Publish one transmitted DTIM beacon as a multicast delivery edge.
+///
+/// This is called from the strict beacon TX-done continuation, never from a
+/// timer poll. One retained edge remains visible until the radio owner has
+/// moved every group frame which preceded that beacon.
+pub(crate) fn observe_group_dtim() {
+    GROUP_DTIM_OBSERVATIONS.fetch_add(1, Ordering::Relaxed);
+    GROUP_DTIM_EPOCH.store(next_peer_event_epoch(), Ordering::Release);
+    ACTIVE_EDGE.wake();
+}
+
 pub(crate) fn record_cancelled_transmit() {
     CANCELLED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
@@ -264,6 +279,19 @@ pub(crate) fn ps_poll_epoch(peer: &[u8; 6]) -> usize {
 
 pub(crate) fn removal_epoch(peer: &[u8; 6]) -> usize {
     peer_epochs(peer).2
+}
+
+pub(crate) fn group_dtim_epoch() -> usize {
+    GROUP_DTIM_EPOCH.load(Ordering::Acquire)
+}
+
+pub(crate) fn poll_group_dtim(after: usize, cx: &mut Context<'_>) -> Poll<()> {
+    ACTIVE_EDGE.register(cx.waker());
+    if group_dtim_epoch() != after {
+        Poll::Ready(())
+    } else {
+        Poll::Pending
+    }
 }
 
 pub(crate) fn ps_poll_credit_after(after: usize, peer: &[u8; 6]) -> Option<usize> {
