@@ -956,6 +956,16 @@ each queued owner independently cancellable and recyclable without a drain
 loop. Same-MAC reassociation publishes the old-generation removal before the
 new nonzero generation becomes visible.
 
+The `/power-save-cancel-test` HIL path then retained one laptop response,
+published its synthetic peer-bound removal edge, and returned every application
+and hardware TX owner (`12/12/12/12`, hardware `4/4`). The intentionally
+cancelled HTTP request timed out without an unauthorized response. A real
+laptop disconnect/reconnect immediately afterwards exercised removal plus two
+same-MAC association generations; WPA2 authorization recovered, ICMP completed
+5/5, HTTP returned 200, and ownership remained balanced at `17/17/17/17`
+with hardware `8/8`. The immortal radio owner and beacon clock continued
+through both cancellation and reassociation.
+
 Keeping the first Android peer active while associating the laptop exposed the
 second pairwise key selector before security headroom was changed:
 frame control `0x4288`, HT rate code `33`, descriptor flags `0x0000_2009`,
