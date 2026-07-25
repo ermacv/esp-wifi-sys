@@ -137,7 +137,7 @@ pub(crate) fn link_wrappers_active() -> bool {
 pub(crate) fn rx_packet_recycle_link_wrapper_active() -> bool {
     ptr::eq(
         ppRecycleRxPkt as *const (),
-        __wrap_ppRecycleRxPkt as *const (),
+        wifi_strict_pp_recycle_rx_pkt as *const (),
     )
 }
 
@@ -800,11 +800,13 @@ pub(crate) unsafe fn recycle_received_packet(frame: *mut u8) {
     __wrap_esf_buf_recycle(frame.cast());
 }
 
-/// Linker interception for any remaining calls from the pinned archives.
+/// Linker interception for remaining calls through the pinned public symbol.
 ///
 /// Rust RX code calls [`recycle_received_packet`] directly. This ABI boundary
-/// remains only because another archive object may still reference the vendor
-/// leaf internally.
+/// remains because ROM and archive code may still reference the public leaf.
+/// A unique name is required: the S31 ROM linker fragment exports
+/// `ppRecycleRxPkt` as an absolute symbol and would otherwise capture GNU
+/// `--wrap`'s generated name before LTO can retain this function.
 ///
 /// # Safety
 ///
@@ -815,7 +817,7 @@ pub(crate) unsafe fn recycle_received_packet(frame: *mut u8) {
     target_arch = "riscv32",
     link_section = ".rwtext.wifi_strict.esf"
 )]
-pub unsafe extern "C" fn __wrap_ppRecycleRxPkt(frame: *mut u8) {
+pub unsafe extern "C" fn wifi_strict_pp_recycle_rx_pkt(frame: *mut u8) {
     if !crate::critical::strict_wifi_hart_armed() {
         __real_ppRecycleRxPkt(frame);
         return;

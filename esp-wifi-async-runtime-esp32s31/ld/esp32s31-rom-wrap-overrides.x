@@ -58,6 +58,16 @@ esf_buf_alloc = __wrap_esf_buf_alloc;
 __real_esf_buf_recycle = 0x2f800d24;
 esf_buf_recycle = __wrap_esf_buf_recycle;
 
+/* This public PP leaf is also an absolute ROM export. The pinned libpp.a
+ * reference body proves its complete fourteen-byte field transform, but GNU
+ * --wrap would rename the ROM assignment itself. Route every public call to
+ * a unique Rust owner and retain the ROM address only for cold delegation. */
+__real_ppRecycleRxPkt = 0x2f800f98;
+EXTERN(wifi_strict_pp_recycle_rx_pkt);
+ppRecycleRxPkt = wifi_strict_pp_recycle_rx_pkt;
+ASSERT(ppRecycleRxPkt == wifi_strict_pp_recycle_rx_pkt,
+       "ESP32-S31 ppRecycleRxPkt Rust boundary is inactive");
+
 __real_wDev_AppendRxBlocks = 0x2f8010c4;
 wDev_AppendRxBlocks = __wrap_wDev_AppendRxBlocks;
 
