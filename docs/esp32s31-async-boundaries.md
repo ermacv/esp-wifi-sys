@@ -945,24 +945,29 @@ absolute ROM name is late-aliased to that boundary; the original
 `0x2f8010f4` address remains reachable only through
 `__real_wDev_ProcessRxSucData`.
 
-The first common route no longer enters the pinned 0x6a0-byte body. For a
-status-zero, base-offset STA data frame with promiscuous/error-dump/CSI modes
-disabled, Rust publishes the recovered `wDevCtrl+0x40/+0x44/+0x45` fields,
-copies the two metadata nibbles, derives the exact copy/aggregate arguments,
-and calls `wDev_IndicateFrame`. Every other class still delegates explicitly,
-so the aggregate remains in the strict root graph and the ROM indication leaf
-is not claimed as replaced.
+The first common routes no longer enter the pinned 0x6a0-byte body. For a
+status-zero, base-offset STA data frame, or an ordinary association-response,
+beacon, or authentication management frame, with
+promiscuous/error-dump/CSI modes disabled, Rust publishes the recovered
+`wDevCtrl+0x40/+0x44/+0x45` fields, copies the two metadata nibbles, derives
+the exact copy/aggregate arguments, and calls `wDev_IndicateFrame`. Probe
+requests deliberately retain the reference path because it rewrites the STA
+route to AP before its interface-enabled decision. Action frames retain it
+because they contain separate FTM and NAN branches. Other classes still
+delegate explicitly, so the aggregate remains in the strict root graph and
+the ROM indication leaf is not claimed as replaced.
 
-The pre-port HIL measurement saw 711/711 base-layout, status-zero STA units and
-only management/data frame classes (`bitmap=0x101`). After the change, a full
-WPA2/network stress run decoded 730/730 units: Rust owned 712 data routes and
-the ROM fallback handled 18 management routes. It completed 4,096/4,096 UDP
-datagrams and 4/4 HTTP transfers at 25.071 Mbit/s with balanced 4,786/4,786 TX
-and 690/690 network RX ownership, zero allocations and zero rejections. The
-host-tested aggregate decoder also corrected the earlier diagnostic
-approximation: this run contained only flag value zero. Management is the next
-measured aggregate slice; control, AP/NAN, optional metadata and error classes
-remain unqualified.
+The management HIL measurement produced subtype bitmap `0x2912`: association
+response (1), probe request (4), beacon (8), authentication (11), and action
+(13). After the qualified port, the full WPA2/network stress run decoded
+713/713 base-layout, status-zero STA units. Rust owned 693 data and 8
+management routes; the ROM fallback handled the remaining 12 management
+routes. It completed scan, authentication, association, the four-way
+handshake, DHCP, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers at
+24.596 Mbit/s with balanced 4,786/4,786 TX and 690/690 network RX ownership,
+zero allocations, and zero rejections. The host-tested aggregate decoder
+reported only flag value zero. Control, AP/NAN, optional metadata and error
+classes remain unqualified.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable
