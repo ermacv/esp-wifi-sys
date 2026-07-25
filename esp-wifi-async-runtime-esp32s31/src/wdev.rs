@@ -19,9 +19,10 @@ pub enum WdevActionRxAdoptionError {
 #[cfg(target_arch = "riscv32")]
 use crate::{
     rx_descriptor::{
-        decode_rx_metadata_layout, descriptor_buffer_length, recycled_descriptor_word,
-        rx_csi_length, rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
-        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
+        decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
+        recycled_descriptor_word, rx_csi_length, rx_indicate_aggregate_flag,
+        rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
+        rx_sta_probe_request_is_discarded, RX_METADATA_PREFIX_BYTES,
     },
     timer::RawOsiTimer,
 };
@@ -955,12 +956,16 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(tail: *mut u8,
         return;
     }
     let descriptor_word = head.cast::<u32>().read_unaligned();
-    let descriptor_length = descriptor_buffer_length(descriptor_word);
+    let descriptor_capacity = descriptor_buffer_length(descriptor_word);
+    let descriptor_length = descriptor_received_length(descriptor_word);
     let metadata = head
         .add(RX_DESCRIPTOR_BUFFER_OFFSET)
         .cast::<*mut u8>()
         .read_unaligned();
-    if metadata.is_null() || descriptor_length < RX_METADATA_PREFIX_BYTES {
+    if metadata.is_null()
+        || descriptor_length < RX_METADATA_PREFIX_BYTES
+        || descriptor_length > descriptor_capacity
+    {
         RX_METADATA_PROBE
             .rejected_layout
             .fetch_add(1, Ordering::Relaxed);

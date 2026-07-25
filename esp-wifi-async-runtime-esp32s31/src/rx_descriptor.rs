@@ -153,6 +153,16 @@ pub(crate) const fn descriptor_buffer_length(word: u32) -> usize {
     (word & LENGTH_MASK) as usize
 }
 
+/// Return the hardware-published received byte count at descriptor bits
+/// 14..27.
+///
+/// The lower fourteen bits remain the backing segment capacity. Keeping the
+/// two fields separate prevents a short management frame from being mistaken
+/// for the configured 1700-byte RX buffer.
+pub(crate) const fn descriptor_received_length(word: u32) -> usize {
+    ((word >> 14) & LENGTH_MASK) as usize
+}
+
 /// Recover the CSI byte count returned by the pinned `wdev_csi_len_align`
 /// leaf.
 ///
@@ -223,10 +233,11 @@ mod tests {
     use core::ptr;
 
     use super::{
-        decode_rx_metadata_layout, descriptor_buffer_length, indicated_rx_descriptor_word,
-        indicated_rx_flags_word, recycled_descriptor_word, restore_received_packet_buffer_view,
-        rx_csi_length, rx_indicate_aggregate_flag, rx_sta_action_copy_mode, rx_sta_data_copy_mode,
-        rx_sta_management_copy_mode, rx_sta_probe_request_is_discarded,
+        decode_rx_metadata_layout, descriptor_buffer_length, descriptor_received_length,
+        indicated_rx_descriptor_word, indicated_rx_flags_word, recycled_descriptor_word,
+        restore_received_packet_buffer_view, rx_csi_length, rx_indicate_aggregate_flag,
+        rx_sta_action_copy_mode, rx_sta_data_copy_mode, rx_sta_management_copy_mode,
+        rx_sta_probe_request_is_discarded,
         ESF_BUFFER_DESCRIPTOR_DATA_OFFSET, ESF_BUFFER_DESCRIPTOR_POINTER_OFFSET,
         ESF_RX_CONTROL_POINTER_OFFSET, RX_METADATA_PREFIX_BYTES,
     };
@@ -241,6 +252,10 @@ mod tests {
             expected = (expected & 0xf000_3fff) | (length << 14);
             assert_eq!(recycled_descriptor_word(word), expected);
             assert_eq!(descriptor_buffer_length(word), (word & 0x3fff) as usize);
+            assert_eq!(
+                descriptor_received_length(word),
+                ((word >> 14) & 0x3fff) as usize
+            );
         }
     }
 
