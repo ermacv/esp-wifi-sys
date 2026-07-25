@@ -517,7 +517,7 @@ const fn is_ap_addba_response_completion_layout(
         && descriptor_callbacks == (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE)
         && matches!(
             (descriptor_security, hardware_status),
-            (0x0114_0000, 1) | (0x0214_0000, 2)
+            (0x0104_0000, 1) | (0x0114_0000, 1) | (0x0214_0000, 2)
         )
 }
 
@@ -2047,7 +2047,9 @@ mod tests {
     #[test]
     fn only_measured_terminal_ap_addba_completions_are_noops() {
         let callbacks = (1 << CALLBACK_MGMT) | (1 << CALLBACK_ADDBA_RESPONSE);
-        for (descriptor_security, hardware_status) in [(0x0114_0000, 1), (0x0214_0000, 2)] {
+        for (descriptor_security, hardware_status) in
+            [(0x0104_0000, 1), (0x0114_0000, 1), (0x0214_0000, 2)]
+        {
             for frame_control in [0x00d0, 0x08d0] {
                 for layout in [0x2000, 0x2732, 0x2733, 0x2734, 0x2fff] {
                     assert!(is_ap_addba_response_completion_layout(

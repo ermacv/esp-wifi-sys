@@ -858,6 +858,13 @@ selector `0x0004_0000`, peer word `0x2100_0000`, and peer flag `1`. This exact
 post-association Action tuple is now distinct from the older STA Action class;
 pre-association and zero-peer-flag variants still fail closed.
 
+Its first acknowledged completion preserved frame control `0x00d0`, lengths
+`0x0020:0x000d`, layout `0x2732`, buffer equation `0xc00b_402c`, zero
+descriptor flags, and callback mask `0x0000_2004`, while hardware returned
+descriptor-security `0x0104_0000` with status byte `1`. That exact successful
+pair is admitted in addition to the two older measured ADDBA outcomes; changing
+either the status or any structural field remains rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
