@@ -111,6 +111,22 @@ fn current_association_epoch(_peer: &[u8; 6]) -> usize {
     1
 }
 
+#[cfg(target_arch = "riscv32")]
+fn current_association_id(peer: &[u8; 6]) -> Option<u16> {
+    crate::wpa2_ap::wpa2_ap_peer_association_id(peer)
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+fn current_association_id(_peer: &[u8; 6]) -> Option<u16> {
+    Some(1)
+}
+
+fn ps_poll_association_id(frame: &[u8]) -> Option<u16> {
+    let raw = u16::from_le_bytes([*frame.get(2)?, *frame.get(3)?]);
+    let association_id = raw & 0x3fff;
+    (raw & 0xc000 == 0xc000 && association_id != 0).then_some(association_id)
+}
+
 fn publish_peer_event(peer: &[u8; 6], event: PeerEvent) {
     let association_epoch = current_association_epoch(peer);
     if association_epoch == 0 {
@@ -230,6 +246,12 @@ pub(crate) fn observe_frame(frame: &[u8]) {
         let peer = [
             frame[10], frame[11], frame[12], frame[13], frame[14], frame[15],
         ];
+        let Some(association_id) = ps_poll_association_id(frame) else {
+            return;
+        };
+        if current_association_id(&peer) != Some(association_id) {
+            return;
+        }
         PS_POLL_EPOCH.fetch_add(1, Ordering::Relaxed);
         let epoch = next_peer_event_epoch();
         publish_peer_event(&peer, PeerEvent::PsPoll(epoch));
@@ -414,6 +436,7 @@ mod tests {
         let before = ps_poll_epoch(&peer);
         let mut frame = [0_u8; 16];
         frame[..2].copy_from_slice(&0x00a4_u16.to_le_bytes());
+        frame[2..4].copy_from_slice(&0xc001_u16.to_le_bytes());
         frame[10..16].copy_from_slice(&peer);
         observe_frame(&frame);
         let published = ps_poll_credit_after(before, &peer).unwrap();
@@ -430,12 +453,33 @@ mod tests {
         let second_before = ps_poll_epoch(&second);
         let mut frame = [0_u8; 16];
         frame[..2].copy_from_slice(&0x00a4_u16.to_le_bytes());
+        frame[2..4].copy_from_slice(&0xc001_u16.to_le_bytes());
         frame[10..16].copy_from_slice(&first);
         observe_frame(&frame);
         frame[10..16].copy_from_slice(&second);
         observe_frame(&frame);
         assert!(ps_poll_credit_after(first_before, &first).is_some());
         assert!(ps_poll_credit_after(second_before, &second).is_some());
+    }
+
+    #[test]
+    fn ps_poll_requires_the_current_nonzero_association_id() {
+        let _guard = test_guard();
+        let peer = [22, 2, 3, 4, 5, 6];
+        let before = ps_poll_epoch(&peer);
+        let mut frame = [0_u8; 16];
+        frame[..2].copy_from_slice(&0x00a4_u16.to_le_bytes());
+        frame[10..16].copy_from_slice(&peer);
+
+        frame[2..4].copy_from_slice(&0x0001_u16.to_le_bytes());
+        observe_frame(&frame);
+        frame[2..4].copy_from_slice(&0xc002_u16.to_le_bytes());
+        observe_frame(&frame);
+        assert_eq!(ps_poll_epoch(&peer), before);
+
+        frame[2..4].copy_from_slice(&0xc001_u16.to_le_bytes());
+        observe_frame(&frame);
+        assert_ne!(ps_poll_epoch(&peer), before);
     }
 
     #[test]

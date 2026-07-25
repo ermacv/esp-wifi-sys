@@ -430,6 +430,7 @@ mod target {
     struct PeerSlot {
         claimed: AtomicBool,
         association_epoch: AtomicUsize,
+        association_id: AtomicUsize,
         station: UnsafeCell<PinnedStation>,
     }
 
@@ -438,6 +439,7 @@ mod target {
             Self {
                 claimed: AtomicBool::new(false),
                 association_epoch: AtomicUsize::new(0),
+                association_id: AtomicUsize::new(0),
                 station: UnsafeCell::new(PinnedStation {
                     bytes: [0; PINNED_STATION_SIZE],
                 }),
@@ -762,6 +764,7 @@ mod target {
     }
 
     unsafe fn claim_peer(peer: [u8; 6]) -> Option<*mut c_void> {
+        let association_id = peer_node_association_id(&peer)?;
         for slot in &PEERS {
             if slot.claimed.load(Ordering::Acquire) && station_mac(slot) == peer {
                 // A reassociation replaces the previous generation in place.
@@ -772,6 +775,8 @@ mod target {
                     next_association_epoch(),
                     Ordering::Release,
                 );
+                slot.association_id
+                    .store(usize::from(association_id), Ordering::Release);
                 return Some(slot.station.get().cast());
             }
         }
@@ -794,10 +799,21 @@ mod target {
                     next_association_epoch(),
                     Ordering::Release,
                 );
+                slot.association_id
+                    .store(usize::from(association_id), Ordering::Release);
                 return Some(slot.station.get().cast());
             }
         }
         None
+    }
+
+    unsafe fn peer_node_association_id(peer: &[u8; 6]) -> Option<u16> {
+        let node = cnx_node_search(peer.as_ptr());
+        if node.is_null() {
+            return None;
+        }
+        let association_id = node.add(0x26).cast::<u16>().read_unaligned() & 0x3fff;
+        (association_id != 0).then_some(association_id)
     }
 
     fn next_association_epoch() -> usize {
@@ -813,6 +829,7 @@ mod target {
         for slot in &PEERS {
             if slot.claimed.load(Ordering::Acquire) && station_mac(slot) == *peer {
                 ptr::write_bytes(slot.station.get().cast::<u8>(), 0, PINNED_STATION_SIZE);
+                slot.association_id.store(0, Ordering::Release);
                 slot.association_epoch.store(0, Ordering::Release);
                 slot.claimed.store(false, Ordering::Release);
                 return true;
@@ -2068,6 +2085,16 @@ mod target {
                 .then(|| slot.association_epoch.load(Ordering::Acquire))
         })
     }
+
+    pub(crate) fn wpa2_ap_peer_association_id(peer: &[u8; 6]) -> Option<u16> {
+        PEERS.iter().find_map(|slot| {
+            if !slot.claimed.load(Ordering::Acquire) || unsafe { station_mac(slot) != *peer } {
+                return None;
+            }
+            let association_id = slot.association_id.load(Ordering::Acquire) as u16;
+            (association_id != 0).then_some(association_id)
+        })
+    }
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -2079,7 +2106,7 @@ pub use target::{
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
     management_link_wrappers_active, poll_deferred_ap_management, strict_update_ap_tim,
-    wpa2_ap_peer_association_epoch,
+    wpa2_ap_peer_association_epoch, wpa2_ap_peer_association_id,
 };
 
 #[cfg(test)]

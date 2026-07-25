@@ -966,6 +966,13 @@ same-MAC association generations; WPA2 authorization recovered, ICMP completed
 with hardware `8/8`. The immortal radio owner and beacon clock continued
 through both cancellation and reassociation.
 
+The AP association slot now also owns the nonzero 14-bit AID read once from
+the already-qualified node during join. Legacy PS-Poll admission parses the
+mandatory `0xc000 | AID` Duration/ID field and publishes a one-frame credit
+only when MAC, association generation, and AID all match the same Rust slot.
+Malformed, zero, stale, and cross-peer AIDs are ignored without a lookup,
+retry, callback, or mutation of the deferred queue.
+
 Keeping the first Android peer active while associating the laptop exposed the
 second pairwise key selector before security headroom was changed:
 frame control `0x4288`, HT rate code `33`, descriptor flags `0x0000_2009`,
