@@ -111,6 +111,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
 pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
+    ("ppRecycleRxPkt", "wifi_strict_pp_recycle_rx_pkt"),
     (
         "esp_test_set_rx_error_occurs",
         "wifi_strict_esp_test_set_rx_error_occurs",

@@ -361,12 +361,12 @@ state wrapper reads pinned MMIO without test/log hooks and exposes one
 completion/collision bitmap bit per event. The original archive sections must
 not remain in the final ELF.
 
-Ten ROM-exported entries cannot use LLD wrapping because the ROM linker
+Eleven ROM-exported entries cannot use LLD wrapping because the ROM linker
 scripts assign their public symbols after `--wrap` rewriting. The late
 `esp32s31-rom-wrap-overrides.x` fragment instead aliases
 `ieee80211_set_tx_pti`, `esf_buf_alloc`, `esf_buf_recycle`,
 `hal_mac_get_txq_state`, `hal_mac_get_txq_complete`, `lmacTxDone`,
-`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, and
+`pm_on_beacon_rx`, `pm_on_data_rx`, `pm_on_data_tx`, `ppRecycleRxPkt`, and
 `esp_test_tx_enab_statistics` to Rust wrappers while pinning their
 `__real_*` names to the audited ROM addresses.
 
@@ -815,7 +815,25 @@ event without adding a poll loop, delay, retry, or RTOS context switch. The
 hardware qualification run completed the full WPA2/network stress workload
 with 4,786/4,786 TX, 691/691 RX, 20,591/20,591 PP events, no allocation delta,
 and 19.634 Mbit/s. `pTxRx` is now read only during one-shot adoption; the
-remaining runtime RX vendor leaves are protocol processing and recycle.
+remaining runtime RX vendor leaf is protocol processing.
+
+RX packet recycling is now a direct Rust ownership transfer. The pinned
+`libpp.a[pp.o]::ppRecycleRxPkt` reference body is exactly fourteen bytes: it
+loads the buffer descriptor from `frame+0x04`, restores its data view from the
+original RX-control pointer at `frame+0x10`, then tail-calls
+`esf_buf_recycle`. `rx.rs` calls the Rust recycler directly; the public ROM
+symbol is late-aliased to the same unique internal-SRAM function for any
+remaining ROM/archive caller. Strict mode admits only an outstanding frame
+from the fixed management, large-RX, or qualified static ESF pools, restores
+the view once, and releases that owner without PP state, allocation, an OSI
+primitive, a delay, or a retry loop. Pre-handoff delegation retains only the
+pinned ROM entry at `0x2f800f98`.
+The ESP32-S31 WPA2 stress qualification completed 4,096/4,096 UDP datagrams
+and 4/4 HTTP transfers with 4,786/4,786 TX, 692/692 RX, and
+20,693/20,693 PP ownership transitions. The measured UDP payload rate was
+26.532 Mbit/s. `strict_ok=true` additionally proves that the fixed ESF
+rejection counter was unchanged across the run; all allocation, blocking,
+task-delay, and direct-delay counters remained zero.
 
 Consumer authority is now distinct from that ISR publication view.
 The one-way `RadioResources` claim creates a zero-sized, non-cloneable
