@@ -236,6 +236,8 @@ const REQUIRED_RADIO_WAKER_SRAM_CODE: &[&str] = &[
     "wifi_strict_radio_waker_wake",
     "wifi_strict_radio_waker_wake_by_ref",
     "wifi_strict_radio_waker_drop",
+    "wifi_strict_radio_try_suspend_cached_executor",
+    "wifi_strict_radio_resume_cached_executor",
 ];
 const RADIO_WAKER_VTABLE: &str = "WIFI_STRICT_RADIO_WAKER_VTABLE";
 const RADIO_WAKER_SECTION: &str = ".critical.data.wifi_strict.radio_executor";

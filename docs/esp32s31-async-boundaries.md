@@ -818,9 +818,33 @@ vtable words back to the required SRAM symbols instead of accepting an
 unproven indirect call. `FROM_CPU_INTR2` is a low-priority async bottom half.
 Its first hardware stress run completed WPA2, 4,096/4,096 UDP datagrams and
 4/4 HTTP transfers with 4,786/4,786 TX, 694/694 RX, 20,601/20,601 PP events,
-no reject or allocation delta, and 27.477 Mbit/s. An explicit cache-disabled
-deferral rule is still required before treating that bottom half as the final
-executor boundary.
+no reject or allocation delta, and 27.477 Mbit/s.
+
+There is no S31 hardware register from which this bottom half can infer cache
+availability. Espressif's upstream `cache_ll.h` declares
+`CACHE_LL_ENABLE_DISABLE_STATE_SW` and requires software-maintained state.
+Accordingly the HIL now puts `CACHE_AVAILABLE`, `POLLING`, `DEFERRED`, and
+`TERMINATED` in one internal-SRAM atomic byte. The SRAM
+`wifi_strict_radio_try_suspend_cached_executor` leaf closes the gate with one
+AMO and succeeds only if no poll is active. Failure is immediate: the cache
+owner must arrange an async retry and must not spin. A wake arriving while
+closed leaves durable `DEFERRED` readiness; the SRAM
+`wifi_strict_radio_resume_cached_executor` leaf reopens the gate and raises
+one software interrupt when that bit was observed. The interrupt itself first
+claims `POLLING`, returns before dereferencing the cached future when the gate
+is closed, and traps on re-entry or future termination. There is no
+compare/exchange retry in this protocol.
+
+Executor launch deliberately starts with the gate closed and raises the first
+software interrupt before reopening it, so either scheduling order exercises
+the deferred protocol or the already-pending edge. Hardware qualification
+then passed scan, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096/4,096 UDP
+datagrams and 4/4 HTTP transfers with 4,786/4,786 TX, 691/691 RX,
+20,598/20,598 PP events, no rejects or allocation delta, and 25.801 Mbit/s.
+The run validates the state machine but did not physically disable cache.
+Every future flash/cache owner must acquire and release these leaves around
+its cache-off interval; until all such owners are audited, cache-disabled
+execution is a local executor guarantee rather than a global firmware proof.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,

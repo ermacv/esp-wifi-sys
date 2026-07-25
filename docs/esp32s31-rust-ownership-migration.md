@@ -413,9 +413,28 @@ their exact SRAM symbols, and requires the software-interrupt entry itself in
 SRAM. Consequently the hard RX ISR no longer enters the shared Embassy run
 queue or any CAS retry. The first hardware stress run passed WPA2, 4,096 UDP
 datagrams and four HTTP transfers with balanced TX/RX/PP ownership, no rejects
-or allocation delta, and 27.477 Mbit/s. The remaining executor proof is a
-cache-disabled deferral rule for the low-priority software-interrupt bottom
-half.
+or allocation delta, and 27.477 Mbit/s.
+
+The cache boundary now has explicit Rust ownership too. S31 exposes no
+hardware cache-enable status bit, so the upstream ESP-IDF cache HAL maintains
+that state in software. One internal-SRAM atomic byte records whether cached
+execution is available, whether the radio future currently owns the poll
+lease, whether readiness was deferred, and whether the immortal future
+terminated. The SRAM `try_suspend` leaf closes cached execution only when no
+poll is active and otherwise fails immediately; callers must retry
+asynchronously. The SRAM `resume` leaf reopens execution and re-pends one
+software interrupt for durable deferred readiness. The interrupt acquires the
+poll lease with one AMO, never waits, and does not dereference cached future
+state while the gate is closed.
+
+The final-image audit requires both cache leaves, every waker target, and the
+software-interrupt entry in SRAM. A hardware run that deliberately began with
+the gate closed passed the complete WPA2/network stress workload with
+4,786/4,786 TX, 691/691 RX, 20,598/20,598 PP events, no allocation delta, and
+25.801 Mbit/s. It verifies deferred startup and normal reopening, not a
+physical cache-disable cycle. This ownership protocol must be wired into every
+future flash/cache owner before the repository can assert a whole-firmware
+cache-off proof.
 
 The final hardware run with the durable Rust producer/consumer queue completed
 scan, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096/4,096 UDP datagrams and

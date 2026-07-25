@@ -258,9 +258,28 @@ vtable bytes and requires those exact targets. This removes the shared
 Embassy transfer-stack CAS retry from the hard RX interrupt closure. The first
 hardware qualification completed WPA2, 4,096 UDP datagrams and four HTTP
 transfers with balanced ownership, no queue rejects and no allocation delta at
-27.477 Mbit/s. An explicit cache-disabled policy for the low-priority async
-software-interrupt bottom half remains open before the complete executor
-boundary is declared final.
+27.477 Mbit/s.
+
+ESP32-S31 has no hardware cache-enable status register; the upstream
+`cache_ll.h` explicitly requires software-maintained enable/disable state.
+The HIL therefore keeps a four-bit executor gate in internal SRAM:
+`CACHE_AVAILABLE`, `POLLING`, `DEFERRED`, and `TERMINATED`. A cache owner calls
+the SRAM `wifi_strict_radio_try_suspend_cached_executor` leaf before disabling
+cache. It succeeds only after atomically closing the gate while no poll owns
+it; failure is immediate and must be retried by an async wake, never a loop.
+The SRAM `wifi_strict_radio_resume_cached_executor` leaf reopens the gate and
+raises one software interrupt when a wake was deferred. The interrupt entry
+acquires its poll lease with one AMO and returns without touching the cached
+future when the gate is closed. Both leaves and the interrupt entry are
+required in SRAM by the final-image audit.
+
+The gate's deferred path is exercised deterministically at executor startup,
+and a second hardware run completed the same WPA2/UDP/HTTP workload with
+4,786/4,786 TX, 691/691 RX, 20,598/20,598 PP events, no rejects or allocation
+delta, and 25.801 Mbit/s. This proves the gate state machine and preserves
+normal operation; it does not claim that cache was physically disabled during
+that run. Every future flash/cache owner must adopt this suspend/resume
+contract before cache-disabled execution is considered globally proven.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.
