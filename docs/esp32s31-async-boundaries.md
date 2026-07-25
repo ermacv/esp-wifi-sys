@@ -817,6 +817,14 @@ with 4,786/4,786 TX, 691/691 RX, 20,591/20,591 PP events, no allocation delta,
 and 19.634 Mbit/s. `pTxRx` is now read only during one-shot adoption; the
 remaining runtime RX vendor leaves are protocol processing and recycle.
 
+Consumer authority is now distinct from that ISR publication view.
+The one-way `RadioResources` claim creates a zero-sized, non-cloneable
+`RxExecutorCapability` and moves it into the sole runtime dispatcher. Every
+strict RX dequeue requires a mutable borrow of this capability. Cold
+initialization has no such token and fails closed on an unexpected RX event;
+the ISR can only append and wake. The readiness probe remains global but is
+read-only and cannot dequeue or recycle a packet.
+
 The strict STA HIL now supplies the dedicated fixed single-task interrupt
 executor/waker. `RadioOwnerFuture` has one static SRAM address and its custom
 `RawWaker` only raises `FROM_CPU_INTR2` with one write plus readback. The

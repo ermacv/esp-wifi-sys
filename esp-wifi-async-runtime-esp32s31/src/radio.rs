@@ -1,10 +1,42 @@
 use core::{
     future::Future,
     pin::Pin,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
 use crate::{event::PpEvent, queue::RadioQueue};
+
+static POLLS: AtomicUsize = AtomicUsize::new(0);
+static VENDOR_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static INTERNAL_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static RX_CONTINUATIONS: AtomicUsize = AtomicUsize::new(0);
+static SELF_WAKES_VENDOR: AtomicUsize = AtomicUsize::new(0);
+static SELF_WAKES_INTERNAL: AtomicUsize = AtomicUsize::new(0);
+static SELF_WAKES_RX: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RadioFutureSnapshot {
+    pub polls: usize,
+    pub vendor_events: usize,
+    pub internal_events: usize,
+    pub rx_continuations: usize,
+    pub self_wakes_vendor: usize,
+    pub self_wakes_internal: usize,
+    pub self_wakes_rx: usize,
+}
+
+pub fn radio_future_snapshot() -> RadioFutureSnapshot {
+    RadioFutureSnapshot {
+        polls: POLLS.load(Ordering::Acquire),
+        vendor_events: VENDOR_EVENTS.load(Ordering::Acquire),
+        internal_events: INTERNAL_EVENTS.load(Ordering::Acquire),
+        rx_continuations: RX_CONTINUATIONS.load(Ordering::Acquire),
+        self_wakes_vendor: SELF_WAKES_VENDOR.load(Ordering::Acquire),
+        self_wakes_internal: SELF_WAKES_INTERNAL.load(Ordering::Acquire),
+        self_wakes_rx: SELF_WAKES_RX.load(Ordering::Acquire),
+    }
+}
 
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 fn pending_rx_continuation() -> Option<PpEvent> {
@@ -78,6 +110,7 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
     type Output = Result<(), D::Error>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        POLLS.fetch_add(1, Ordering::Relaxed);
         // Register before inspecting the queue. A producer racing this poll
         // either observes the waker or leaves a pending wake for registration.
         self.queue.register_waker(cx.waker());
@@ -106,6 +139,12 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
                 };
             };
             self.next_source = (source + 1) % 3;
+            match source {
+                0 => VENDOR_EVENTS.fetch_add(1, Ordering::Relaxed),
+                1 => INTERNAL_EVENTS.fetch_add(1, Ordering::Relaxed),
+                2 => RX_CONTINUATIONS.fetch_add(1, Ordering::Relaxed),
+                _ => unreachable!(),
+            };
 
             match self.dispatcher.dispatch(event) {
                 Ok(DispatchControl::Continue) => {}
@@ -119,11 +158,19 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
         // Preserve fairness if producers keep the radio queue continuously
         // non-empty. This schedules one additional executor poll, not a busy
         // loop or a stack/context switch.
-        if self.stop_requested
-            || !self.queue.is_empty()
-            || !self.internal_queue.is_empty()
-            || pending_rx_continuation().is_some()
-        {
+        let vendor_pending = !self.queue.is_empty();
+        let internal_pending = !self.internal_queue.is_empty();
+        let rx_pending = pending_rx_continuation().is_some();
+        if vendor_pending {
+            SELF_WAKES_VENDOR.fetch_add(1, Ordering::Relaxed);
+        }
+        if internal_pending {
+            SELF_WAKES_INTERNAL.fetch_add(1, Ordering::Relaxed);
+        }
+        if rx_pending {
+            SELF_WAKES_RX.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.stop_requested || vendor_pending || internal_pending || rx_pending {
             cx.waker().wake_by_ref();
         }
         Poll::Pending

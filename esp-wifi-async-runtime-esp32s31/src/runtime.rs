@@ -1,6 +1,7 @@
 use core::{
     future::Future,
     pin::Pin,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll},
 };
 
@@ -9,6 +10,12 @@ use crate::{
     radio::{PpDispatcher, RadioFuture},
     timer::RuntimeTimerPool,
 };
+
+static TIMER_BUDGET_SELF_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+pub fn timer_budget_self_wakes() -> usize {
+    TIMER_BUDGET_SELF_WAKES.load(Ordering::Acquire)
+}
 
 /// Combined PP and OS-timer runtime. All vendor callbacks run to completion on
 /// one Rust executor stack; the hardware alarm only wakes this future.
@@ -57,6 +64,7 @@ impl<D: PpDispatcher + Unpin, const Q: usize, const I: usize, const T: usize> Fu
         let now = (self.now)();
         let dispatched = self.timers.dispatch_due_at(now as u32, self.timer_budget);
         if dispatched == self.timer_budget && self.timers.has_due_at(now as u32) {
+            TIMER_BUDGET_SELF_WAKES.fetch_add(1, Ordering::Relaxed);
             cx.waker().wake_by_ref();
         }
 

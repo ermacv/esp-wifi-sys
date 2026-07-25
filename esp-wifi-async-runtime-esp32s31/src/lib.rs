@@ -286,7 +286,10 @@ pub use policy::{
     StrictRuntimePreparation, StrictRuntimeProof,
 };
 pub use queue::{PushError, RadioQueue, RadioQueueSnapshot};
-pub use radio::{DispatchControl, PpDispatcher, RadioFuture};
+pub use radio::{
+    radio_future_snapshot, DispatchControl, PpDispatcher, RadioFuture, RadioFutureSnapshot,
+};
+pub use runtime::timer_budget_self_wakes;
 pub use runtime::WifiRuntimeFuture;
 #[cfg(all(
     target_arch = "riscv32",

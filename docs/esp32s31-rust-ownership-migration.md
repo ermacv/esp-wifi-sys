@@ -189,27 +189,47 @@ This slice does not claim that the WDEV payload, cold ESF, and runtime ESF pools
 have disjoint lifetimes. It makes that lifetime measurable and enforceable
 before any overlay is attempted.
 
+## Completed slice: unique executor-side RX authority
+
+The intrusive lower-MAC FIFO remains global because its address is part of the
+interrupt ABI, but global placement no longer grants consumer authority.
+`RadioOwnerClaim::try_take_executor` now creates one non-`Copy`, non-`Clone`
+`RxExecutorCapability` only after its one-way compare-exchange succeeds.
+The zero-sized capability is moved into the sole runtime
+`VendorPpDispatcher`; both the event-17 arm and the synthetic continuation
+must mutably borrow it before they can dequeue or recycle a descriptor.
+
+The cold initialization dispatcher deliberately has no RX capability. If an
+RX event appears before handoff, it fails immediately with
+`RxExecutorUnavailable` instead of silently creating a second consumer or
+entering the vendor RX pump. The ISR has no reference to the capability: it
+can append a descriptor and publish a wake edge, but cannot process protocol
+state or recycle storage.
+
+`pending_continuation` remains a read-only readiness view used by
+`RadioFuture`. It cannot remove a descriptor and therefore does not constitute
+a second consumer. This change adds no static storage, allocation, wait,
+delay, retry loop, or RTOS primitive; the capability has a host-tested size of
+zero.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
 on mutable blob bytes:
 
-1. Move the executor-side RX queue/recycle capability under the unique
-   `RadioResources` owner. Retain only the intrusive queue and wake edge in the
-   ISR publication view.
-2. Replace the remaining raw Radio-owned packet transitions in
+1. Replace the remaining raw Radio-owned packet transitions in
    `wDev_ProcessRxSucData`, `ppRxProtoProc`, `ppRecycleRxPkt`, and
    `esp_wifi_internal_free_rx_buffer` one vertical boundary at a time.
-3. Use the separate Radio/Network ownership counts and existing high-water
+2. Use the separate Radio/Network ownership counts and existing high-water
    marks to overlay or remove only storage whose
    lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
    new throughput qualification because it has reached full occupancy.
-4. Replace NVS-shaped cold configuration storage with typed Rust
+3. Replace NVS-shaped cold configuration storage with typed Rust
    configuration, then remove channel/function-table/interface cold ABI
    publishers one group at a time.
-5. Move finite register leaves (TSF, TXQ state, CCA, CSI bandwidth, key table,
+4. Move finite register leaves (TSF, TXQ state, CCA, CSI bandwidth, key table,
    and descriptor ownership) behind an experimental ESP32-S31 radio HAL.
-6. Port full PHY calibration and `register_chipv7_phy` last, keeping the
+5. Port full PHY calibration and `register_chipv7_phy` last, keeping the
    vendor image as a differential oracle until every adopted field and
    register sequence is qualified.
 
