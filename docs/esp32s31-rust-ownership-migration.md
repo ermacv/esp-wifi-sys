@@ -614,7 +614,23 @@ vendor debt decreases to 20 roots and
 `1 fallback + 9 stateful/unproven + 10 temporary MMIO`; reachable vendor
 functions decrease to 33. The linked-state audit reports all 43/43 fixed
 bindings, zero mutable blob globals reachable from strict leaves, and one
-fewer outside blob object (181 objects / 22,132 bytes).
+fewer outside blob object (185 objects / 22,212 bytes in the credentialed
+primary image).
+
+Enabling the Rust pointer publishers changes linker relaxation immediately
+before the two fixed function-table allocations. Their qualified OSI-calloc
+return offsets are therefore `wdev_funcs_init + 0x36` and
+`net80211_funcs_init + 0x32`, two bytes beyond the vendor-publication profile.
+The static allocator classifier selects the offset by profile; it still
+requires the exact caller, allocation source, and sizes 1,560/332 bytes.
+
+Hardware qualification of this exact image completed passive scan, open
+authentication, association, the WPA2 four-way handshake, DHCP, gateway ping,
+DNS, TCP and HTTP without entering `ppTask`. The post-link snapshot remained
+at zero allocations, reallocations, frees and failures. All 19 submitted data
+frames returned their static TX slots, all 16 received frames returned their
+static RX slots, the 32-credit TX pool was balanced, and no other-core stall
+was observed.
 
 ## Completed strict-runtime slice: `wDevCtrl`
 
