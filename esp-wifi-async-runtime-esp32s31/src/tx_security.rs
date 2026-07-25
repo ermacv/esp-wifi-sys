@@ -125,6 +125,7 @@ pub(crate) const fn strict_ap_pairwise_power_save_completion(
                 | 0x0204_0348
                 | 0x0214_0348
                 | 0x02a4_0348
+                | 0x0404_0348
                 | 0x0414_0348
                 | 0x04a4_0348
         )
@@ -1410,6 +1411,8 @@ mod tests {
             (0x4a88, 0x0000_2109, 0x0204_0348),
             (0x4a88, 0x0000_3109, 0x0214_0348),
             (0x4a88, 0x0000_2109, 0x0414_0348),
+            // Maximum-MTU success after the rate controller reaches outcome 4.
+            (0x4288, 0x0000_3009, 0x0404_0348),
             // Observed after a Q10 hardware-timeout recovery under concurrent
             // ICMP and HTTP load. The high status nibble changes while the
             // exact pairwise CCMP layout and terminal buffer equation remain
@@ -1465,6 +1468,15 @@ mod tests {
             0xc183_0604,
             0x0000_2109,
             0x0205_0348,
+        ));
+        assert!(!strict_ap_pairwise_power_save_completion(
+            0x4288,
+            0x0022,
+            0x05ea,
+            0x27ac,
+            0xc183_0604,
+            0x0000_3009,
+            0x0405_0348,
         ));
         for rejected in [
             TxSecurityLayoutInput {

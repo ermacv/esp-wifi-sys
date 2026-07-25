@@ -889,6 +889,12 @@ That status is admitted beside the previously measured `0x0214/0x02a4`
 outcomes only after the same bounded geometry checks; `0x0205_0348` remains
 rejected.
 
+A repeated maximum-MTU AP downlink later completed without the retry bit,
+using layout `0x27ac`, descriptor flags `0x0000_3009`, and hardware status
+`0x0404_0348`; its lengths and `0xc183_0604` buffer equation were unchanged.
+This outcome is also admitted as an exact pairwise status, while the adjacent
+`0x0405_0348` selector is rejected.
+
 The first hardware run with this shell completed the full STA workload:
 passive scan, HT20/WMM association, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA,
 and 4,096 UDP datagrams. It released 4,786 of 4,786 TX frames and 690 of 690 RX
