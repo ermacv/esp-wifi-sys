@@ -822,6 +822,14 @@ peer flag `1`. The nonzero flag is admitted only as part of this complete
 post-association tuple; all earlier mapper classes retain their zero-flag
 requirement.
 
+An independently connected Android station then reached the same association
+response with layout `0x2f31` and peer byte `0x84` equal to `2`; every other
+mapper input was unchanged. The mapper now models the two hardware-observed
+one-based AP connection identities explicitly for association response,
+message one, ADDBA response, and pairwise HT-QoS data. Values zero and three
+remain rejected, and broadcast/group pseudo-peers retain their separate exact
+states.
+
 The next join edge reached WPA2 message one with frame control `0x0288`, rate
 `11`, layout `0x2000`, descriptor flags `0x0200_200c`, priority `7`, selector
 `0x0004_0000`, peer word `0x2100_0000`, and peer flag `1`. This is the exact

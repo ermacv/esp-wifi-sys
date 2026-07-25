@@ -108,15 +108,28 @@ pub(crate) fn strict_sta_ap_treatment(
     // A successful AP association response observes the node after the vendor
     // state transition: peer[0x0c] and peer[0x84] are therefore intentionally
     // different from the pre-association authentication tuple.
+    // The first two statically provisioned AP connection nodes publish their
+    // one-based table identity in peer byte 0x84. Both values have now been
+    // observed with independently associated WPA2 stations. Keep the finite
+    // two-client HIL domain explicit; zero and unqualified later slots remain
+    // fail-closed.
+    let bounded_ap_peer =
+        state[3] == 0x2100_0000 && matches!(state[4], 1 | 2);
     let ap_association_response = rate == 11
         && frame_control == 0x0010
-        && state == [0, 7, 0x0004_0000, 0x2100_0000, 1];
+        && state[0] == 0
+        && state[1] == 7
+        && state[2] == 0x0004_0000
+        && bounded_ap_peer;
     // WPA2 message one is emitted immediately after successful association.
     // It remains plaintext at this boundary and is bound to the same
     // post-association node identity as the response above.
     let ap_eapol_message_one = rate == 11
         && frame_control == 0x0288
-        && state == [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1];
+        && state[0] == 0x0200_200c
+        && state[1] == 7
+        && state[2] == 0x0004_0000
+        && bounded_ap_peer;
     // The first network packet after AP authorization is the protected
     // broadcast response needed by the joining station. Security has already
     // expanded this exact group-CCMP descriptor before the mapper runs.
@@ -127,7 +140,10 @@ pub(crate) fn strict_sta_ap_treatment(
     // response enters the mapper as a post-association Action frame.
     let ap_addba_response = rate == 11
         && frame_control == 0x00d0
-        && state == [0, 7, 0x0004_0000, 0x2100_0000, 1];
+        && state[0] == 0
+        && state[1] == 7
+        && state[2] == 0x0004_0000
+        && bounded_ap_peer;
     // The first protected unicast network packet from the AP is a pairwise
     // CCMP QoS downlink. It uses the associated peer rather than the AP's
     // group/broadcast pseudo-peer and reaches the mapper after the security
@@ -135,7 +151,10 @@ pub(crate) fn strict_sta_ap_treatment(
     // four. Keep this separate from the STA uplink HT-QoS class below.
     let ap_pairwise_ht_qos = rate == 33
         && frame_control == 0x4288
-        && state == [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 1];
+        && state[0] == 0x0000_2009
+        && state[1] == 0x20
+        && state[2] == 0x0004_0348
+        && bounded_ap_peer;
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -372,17 +391,36 @@ mod tests {
             ),
             (
                 11,
+                0x2f31,
+                0x0010,
+                [0, 7, 0x0004_0000, 0x2100_0000, 2],
+            ),
+            (
+                11,
                 0x2000,
                 0x0288,
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 1],
             ),
+            (
+                11,
+                0x2001,
+                0x0288,
+                [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 2],
+            ),
             (12, 0x2000, 0x4208, [0x0000_200b, 7, 0x0004_0342, 0x83, 0]),
             (11, 0x2732, 0x00d0, [0, 7, 0x0004_0000, 0x2100_0000, 1]),
+            (11, 0x2f32, 0x00d0, [0, 7, 0x0004_0000, 0x2100_0000, 2]),
             (
                 33,
                 0x2000,
                 0x4288,
                 [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            (
+                33,
+                0x2001,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 2],
             ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -448,6 +486,15 @@ mod tests {
         assert_eq!(
             strict_sta_ap_treatment(
                 11,
+                0x2f31,
+                0x0010,
+                [0, 7, 0x0004_0000, 0x2100_0000, 3],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                11,
                 0x2000,
                 0x0288,
                 [0x0200_200c, 7, 0x0004_0000, 0x2100_0000, 0],
@@ -487,6 +534,15 @@ mod tests {
                 0x2000,
                 0x4288,
                 [0x0000_2009, 7, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                33,
+                0x2001,
+                0x4288,
+                [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 3],
             ),
             None
         );
