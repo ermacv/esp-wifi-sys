@@ -217,6 +217,7 @@ pub(crate) struct WakerCell {
 
 static WAKER_WAKE_DELIVERIES: AtomicUsize = AtomicUsize::new(0);
 static WAKER_LAST_DELIVERY_CELL: AtomicUsize = AtomicUsize::new(0);
+static WAKER_REGISTER_CONTENDED: AtomicUsize = AtomicUsize::new(0);
 static WAKER_REGISTER_PENDING_WAKES: AtomicUsize = AtomicUsize::new(0);
 static WAKER_LAST_REGISTER_PENDING_CELL: AtomicUsize = AtomicUsize::new(0);
 
@@ -224,6 +225,7 @@ static WAKER_LAST_REGISTER_PENDING_CELL: AtomicUsize = AtomicUsize::new(0);
 pub struct WakerCellSnapshot {
     pub wake_deliveries: usize,
     pub last_delivery_cell: usize,
+    pub register_contended: usize,
     pub register_pending_wakes: usize,
     pub last_register_pending_cell: usize,
 }
@@ -232,6 +234,7 @@ pub fn waker_cell_snapshot() -> WakerCellSnapshot {
     WakerCellSnapshot {
         wake_deliveries: WAKER_WAKE_DELIVERIES.load(Ordering::Acquire),
         last_delivery_cell: WAKER_LAST_DELIVERY_CELL.load(Ordering::Acquire),
+        register_contended: WAKER_REGISTER_CONTENDED.load(Ordering::Acquire),
         register_pending_wakes: WAKER_REGISTER_PENDING_WAKES.load(Ordering::Acquire),
         last_register_pending_cell: WAKER_LAST_REGISTER_PENDING_CELL.load(Ordering::Acquire),
     }
@@ -253,9 +256,16 @@ impl WakerCell {
             .is_err()
         {
             self.pending.store(true, Ordering::Release);
-            // Registration raced the short interrupt-side wake critical
-            // section. Reschedule once instead of spinning in this poll.
-            waker.wake_by_ref();
+            WAKER_REGISTER_CONTENDED.fetch_add(1, Ordering::Relaxed);
+            // Registration raced a producer's short wake critical section.
+            // Never self-wake from here: on S31 this consumer runs in the
+            // radio interrupt, so repeatedly pending that same interrupt
+            // prevents a preempted lower-priority producer from releasing the
+            // lock. The producer publishes readiness before calling `wake`.
+            // Therefore this poll either observes the ready state directly,
+            // or the producer delivers the previously registered waker after
+            // releasing the lock. `pending` remains the durable fallback for
+            // a later registration if no prior waker was installed.
             return;
         }
 
@@ -310,9 +320,13 @@ unsafe impl Sync for WakerCell {}
 
 #[cfg(test)]
 mod tests {
-    use core::ptr;
+    use core::{
+        ptr,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{RawWaker, RawWakerVTable, Waker},
+    };
 
-    use super::RadioQueue;
+    use super::{RadioQueue, WakerCell};
     use crate::event::PpEvent;
 
     fn event(kind: u32) -> PpEvent {
@@ -320,6 +334,52 @@ mod tests {
             kind,
             argument: ptr::null_mut(),
         }
+    }
+
+    static TEST_WAKES: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe fn test_waker_clone(_data: *const ()) -> RawWaker {
+        RawWaker::new(ptr::null(), &TEST_WAKER_VTABLE)
+    }
+
+    unsafe fn test_waker_wake(_data: *const ()) {
+        TEST_WAKES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    unsafe fn test_waker_wake_by_ref(_data: *const ()) {
+        TEST_WAKES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    unsafe fn test_waker_drop(_data: *const ()) {}
+
+    static TEST_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        test_waker_clone,
+        test_waker_wake,
+        test_waker_wake_by_ref,
+        test_waker_drop,
+    );
+
+    #[test]
+    fn contended_registration_defers_without_self_waking() {
+        TEST_WAKES.store(0, Ordering::Relaxed);
+        let cell = WakerCell::new();
+        let waker =
+            unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &TEST_WAKER_VTABLE)) };
+
+        // Model a lower-priority producer preempted while it owns the wake
+        // cell. The interrupt-side consumer must return so that producer can
+        // run; waking itself here would livelock at interrupt priority.
+        cell.locked.store(true, Ordering::Release);
+        cell.register(&waker);
+        assert_eq!(TEST_WAKES.load(Ordering::Relaxed), 0);
+        assert!(cell.pending.load(Ordering::Acquire));
+
+        // Once the producer releases the cell, the durable pending bit turns
+        // the next registration into exactly one wake.
+        cell.locked.store(false, Ordering::Release);
+        cell.register(&waker);
+        assert_eq!(TEST_WAKES.load(Ordering::Relaxed), 1);
+        assert!(!cell.pending.load(Ordering::Acquire));
     }
 
     #[test]
