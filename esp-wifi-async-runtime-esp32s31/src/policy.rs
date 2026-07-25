@@ -63,6 +63,7 @@ pub enum StrictRuntimeError {
     Config(StrictConfigError),
     StaticVendorBindings(crate::static_bindings::StaticVendorBindingError),
     ChannelStateAdoption(crate::channel_state::ChannelStateAdoptionError),
+    PhyChannelStateAdoption(crate::phy_channel::PhyChannelStateAdoptionError),
     Net80211StateAdoption(crate::net80211_state::Net80211StateAdoptionError),
     TxQueueStateAdoption(crate::tx_queue::TxQueueStateAdoptionError),
     TxDoneStateAdoption(crate::txdone::TxDoneStateAdoptionError),
@@ -278,7 +279,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     crate::channel_switch::adopt_vendor_channel_state()
         .map_err(StrictRuntimeError::ChannelStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
-    crate::phy_channel::adopt_vendor_phy_channel_state();
+    crate::phy_channel::adopt_vendor_phy_channel_state()
+        .map_err(StrictRuntimeError::PhyChannelStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
     crate::net80211_state::adopt_vendor_interface_registry()
         .map_err(StrictRuntimeError::Net80211StateAdoption)?;

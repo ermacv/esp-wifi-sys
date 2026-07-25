@@ -184,6 +184,8 @@ pub use channel_switch::{
     channel_state_snapshot, channel_switch_snapshot, ChannelStateSnapshot, ChannelSwitchError,
     ChannelSwitchSnapshot,
 };
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+pub use phy_channel::PhyChannelStateAdoptionError;
 pub use command::{
     PendingCommandAction, RadioCommandHandler, RadioCommandQueue, RadioCommandReady,
     RadioCommandSnapshot, RadioOwnerFuture, RADIO_COMMAND_CONTEXT_EVENT,

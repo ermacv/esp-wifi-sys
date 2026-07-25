@@ -65,7 +65,6 @@ unsafe extern "C" {
     );
     fn phy_i2c_master_mem_txcap();
     fn phy_bb_cbw_chan_cfg(cbw: u8);
-    fn phy_chan14_mic_cfg_new(enable: u32);
     fn phy_set_rx_comp_new();
     fn phy_dc_mem_clr();
     fn phy_enable_agc();
@@ -76,7 +75,6 @@ struct PhyChannelState {
     adopted: bool,
     frequency_offset: i16,
     xtal_selector: u8,
-    channel_14_mic: bool,
     dot11p_enable: u8,
     dot11p_config: u8,
     current_channel: u16,
@@ -97,7 +95,6 @@ impl PhyChannelState {
             adopted: false,
             frequency_offset: 0,
             xtal_selector: 0,
-            channel_14_mic: false,
             dot11p_enable: 0,
             dot11p_config: 0,
             current_channel: 0,
@@ -124,8 +121,18 @@ unsafe impl Sync for PhyChannelResources {}
 static RESOURCES: PhyChannelResources =
     PhyChannelResources(UnsafeCell::new(PhyChannelState::new()));
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyChannelStateAdoptionError {
+    /// The qualified basic AP/STA profile supports channels 1 through 13.
+    ///
+    /// Channel 14 has a separate maximum-power mutation whose complete ROM
+    /// calibration contract has not yet been recovered.
+    Channel14MicEnabled,
+}
+
 /// Adopt only the fields read or written by the pinned
-/// `libphy.a[phy_rfpll.o]::phy_chip_set_chan` body.
+/// `libphy.a[phy_rfpll.o]::phy_chip_set_chan` and
+/// `libphy.a[phy_tx_gain.o]::phy_wifi_set_tx_gain_new` bodies.
 ///
 /// The offsets are instruction operands in that object. Unknown bytes in the
 /// 508-byte `phy_param` object deliberately remain outside this Rust type.
@@ -133,14 +140,17 @@ static RESOURCES: PhyChannelResources =
 /// # Safety
 /// PHY cold initialization must be complete and no channel transition may run
 /// concurrently.
-pub(crate) unsafe fn adopt_vendor_phy_channel_state() {
+pub(crate) unsafe fn adopt_vendor_phy_channel_state() -> Result<(), PhyChannelStateAdoptionError> {
     let source = ptr::addr_of!(phy_param);
+    if source.add(PHY_CHANNEL_14_MIC).read_volatile() != 0 {
+        return Err(PhyChannelStateAdoptionError::Channel14MicEnabled);
+    }
+
     let state = &mut *RESOURCES.0.get();
     state.frequency_offset = source
         .add(PHY_FREQUENCY_OFFSET)
         .cast::<i16>()
         .read_volatile();
-    state.channel_14_mic = source.add(PHY_CHANNEL_14_MIC).read_volatile() != 0;
     state.dot11p_enable = source.add(PHY_11P_ENABLE).read_volatile();
     state.dot11p_config = source.add(PHY_11P_CONFIG).read_volatile();
     state.xtal_selector = source.add(PHY_XTAL_SELECTOR).read_volatile();
@@ -168,6 +178,7 @@ pub(crate) unsafe fn adopt_vendor_phy_channel_state() {
     state.tx_gain_base = source.add(PHY_TX_GAIN_BASE).read_volatile();
     state.tx_gain_delta = source.add(PHY_TX_GAIN_DELTA).read_volatile();
     state.adopted = true;
+    Ok(())
 }
 
 #[inline(never)]
@@ -237,9 +248,6 @@ pub(crate) unsafe fn program_channel(frequency_mhz: u16, cbw: u8) {
     set_wifi_tx_gain(channel, state);
     phy_i2c_master_mem_txcap();
     phy_bb_cbw_chan_cfg(cbw);
-    if state.channel_14_mic {
-        phy_chan14_mic_cfg_new(u32::from(channel == 14));
-    }
     // The pinned `phy_11p_set` body only writes these same two values back to
     // `phy_param[0x28..=0x29]`; Rust already owns them after handoff.
     phy_set_rx_comp_new();
