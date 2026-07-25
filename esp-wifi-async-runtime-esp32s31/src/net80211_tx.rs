@@ -58,6 +58,12 @@ const POST_REJECTED: u32 = 0x3012;
 const INVALID_STRICT_FRAME: u32 = 0x3002;
 const NET80211_TX_EVENT: u32 = 5;
 pub(crate) const NET80211_POWER_SAVE_CONTINUATION: u32 = u32::MAX - 8;
+// The qualified strict profile owns 32 kind-1 ESF objects. A sleeping peer
+// must not retain the whole pool: half remains available for control traffic,
+// active peers, and hardware-owned frames. The per-peer bound also prevents a
+// single station from consuming the complete deferred half.
+const DEFERRED_POWER_SAVE_CAPACITY: usize = 16;
+const DEFERRED_POWER_SAVE_PER_PEER_CAPACITY: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Net80211TxError {
@@ -65,7 +71,6 @@ pub enum Net80211TxError {
     VendorPendingFrame,
     InvalidOrdinaryFrame,
     UnsupportedPowerSave,
-    PowerSaveQueueFull,
     ContinuationPostRejected,
 }
 
@@ -176,6 +181,7 @@ struct DeferredPeerQueue {
     peer: [u8; 6],
     head: *mut u8,
     tail: *mut u8,
+    len: usize,
     active_after: usize,
     ps_poll_after: usize,
     removal_after: usize,
@@ -187,6 +193,7 @@ impl DeferredPeerQueue {
             peer: [0; 6],
             head: ptr::null_mut(),
             tail: ptr::null_mut(),
+            len: 0,
             active_after: 0,
             ps_poll_after: 0,
             removal_after: 0,
@@ -208,11 +215,13 @@ impl DeferredPeerQueue {
         if self.head.is_null() {
             self.tail = ptr::null_mut();
         }
+        self.len -= 1;
         Some(buffer)
     }
 
     fn clear_identity(&mut self) {
         debug_assert!(self.is_empty());
+        debug_assert_eq!(self.len, 0);
         self.peer = [0; 6];
         self.active_after = 0;
         self.ps_poll_after = 0;
@@ -239,6 +248,10 @@ impl DeferredPeerQueues {
 
     unsafe fn defer(&self, buffer: NonNull<u8>, peer: [u8; 6]) -> bool {
         let queues = &mut *self.0.get();
+        let total = queues.iter().map(|slot| slot.len).sum::<usize>();
+        if total >= DEFERRED_POWER_SAVE_CAPACITY {
+            return false;
+        }
         let slot_index = queues
             .iter()
             .position(|slot| !slot.is_empty() && slot.peer == peer)
@@ -247,6 +260,9 @@ impl DeferredPeerQueues {
             return false;
         };
         let slot = &mut queues[slot_index];
+        if slot.len >= DEFERRED_POWER_SAVE_PER_PEER_CAPACITY {
+            return false;
+        }
 
         let next = buffer.as_ptr().add(ESF_QUEUE_LINK_OFFSET).cast::<*mut u8>();
         next.write(ptr::null_mut());
@@ -263,6 +279,7 @@ impl DeferredPeerQueues {
                 .write(buffer.as_ptr());
         }
         slot.tail = buffer.as_ptr();
+        slot.len += 1;
         true
     }
 
@@ -678,7 +695,12 @@ pub(crate) unsafe fn dispatch_one() -> Result<(), Net80211TxError> {
         ptr::copy_nonoverlapping(ethernet, peer.as_mut_ptr(), peer.len());
         if !DEFERRED_PEER_QUEUES.defer(buffer, peer) {
             esf_buf_recycle(buffer.as_ptr().cast());
-            return Err(Net80211TxError::PowerSaveQueueFull);
+            // A finite AP power-save queue is a normal admission boundary,
+            // not a radio-owner failure. Drop only the newly arrived frame,
+            // keep the older FIFO and leave half of the kind-1 pool available
+            // to active peers and control traffic.
+            crate::ap_power_save::record_overflowed_transmit();
+            return arm_next_event();
         }
         crate::ap_power_save::record_deferred_transmit();
         return arm_next_event();

@@ -22,6 +22,7 @@ static ACTIVE_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static REMOVAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEFERRED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
 static CANCELLED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
+static OVERFLOWED_TRANSMITS: AtomicUsize = AtomicUsize::new(0);
 
 // This matches the fixed WPA2 AP association capacity. The table is written
 // only by serialized callbacks on the radio owner. Atomic fields keep waker
@@ -143,6 +144,7 @@ pub struct ApPowerSaveSnapshot {
     pub removal_observations: usize,
     pub deferred_transmits: usize,
     pub cancelled_transmits: usize,
+    pub overflowed_transmits: usize,
 }
 
 pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
@@ -153,6 +155,7 @@ pub fn ap_power_save_snapshot() -> ApPowerSaveSnapshot {
         removal_observations: REMOVAL_OBSERVATIONS.load(Ordering::Acquire),
         deferred_transmits: DEFERRED_TRANSMITS.load(Ordering::Acquire),
         cancelled_transmits: CANCELLED_TRANSMITS.load(Ordering::Acquire),
+        overflowed_transmits: OVERFLOWED_TRANSMITS.load(Ordering::Acquire),
     }
 }
 
@@ -217,6 +220,10 @@ pub(crate) fn observe_peer_removed(peer: &[u8; 6]) {
 
 pub(crate) fn record_cancelled_transmit() {
     CANCELLED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_overflowed_transmit() {
+    OVERFLOWED_TRANSMITS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
