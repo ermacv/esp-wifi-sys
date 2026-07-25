@@ -713,6 +713,29 @@ ping, DNS, TCP and HTTP 200. Static TX ownership balanced at 18/18 and RX at
 15/15; all allocation counters, failures and other-core stalls remained zero.
 `ppTask` was never entered.
 
+Two complete `libphy.a[phy_reg.o]` leaves are now Rust-owned as well.
+`phy_set_rx_comp_new` replaces the low byte of `0x2010_702c` and the high byte
+of `0x2010_70a0` with `0xed`, preserving the vendor access order.
+`phy_dc_mem_clr` pulses bit 20 of `0x2010_703c`; its Rust body deliberately
+performs the vendor's fresh volatile read between the set and clear writes.
+The exact meaning of the compensation fields and pulse is left undocumented
+beyond those observed transactions rather than guessed from the symbol names.
+
+Both public archive symbols resolve directly to SRAM Rust code.
+`wifi_strict_phy_dc_mem_clr` is the same `0x1c` bytes as the reference body;
+`wifi_strict_phy_set_rx_comp_new` is `0x24` bytes versus the vendor `0x28`
+while preserving both RMW operations. Neither generated body contains a call,
+indirect branch or cycle.
+
+The strict runtime graph is now 11 vendor roots with
+`1 fallback + 9 stateful/unproven + 1 temporary MMIO`; 24 vendor functions
+remain reachable. The exact ELF again passed all 6,407-function control-flow,
+heap and wait checks with zero violations. Hardware qualification switched
+through the passive-scan channel sequence, observed seven APs, completed
+WPA2/DHCP/ping/DNS/TCP/HTTP, and balanced TX at 19/19 and RX at 17/17.
+Allocation and other-core-stall counters remained zero, and `ppTask` was not
+entered.
+
 ## Completed strict-runtime slice: `wDevCtrl`
 
 The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
