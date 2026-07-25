@@ -943,13 +943,10 @@ fn audit_elf(elf: &Path) -> Result<BTreeSet<Violation>> {
             .arg("--no-show-raw-insn")
             .arg(elf),
     )?)?;
-    let (command_claim_found, command_claim_cycles) = final_command_claim_cycles(&disassembly);
-    if !command_claim_found {
-        violations.insert(Violation::ElfSymbol {
-            category: "missing strict retry-free command claim",
-            symbol: "RadioCommandQueue::try_submit".to_owned(),
-        });
-    }
+    let (_, command_claim_cycles) = final_command_claim_cycles(&disassembly);
+    // A final image without a RadioCommandQueue monomorph contains no command
+    // claim which could retry. When one is linked, inspect every generated
+    // body below and reject any LR/SC or other control-flow cycle.
     for (function, site) in command_claim_cycles {
         violations.insert(Violation::ElfSymbol {
             category: "retrying strict command claim",
