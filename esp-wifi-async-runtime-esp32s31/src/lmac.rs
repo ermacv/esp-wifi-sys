@@ -80,7 +80,6 @@ const TX_FRAME_FTM_BIT: u32 = 0x2000_0000;
 const TX_SUCCESS_CLASSIFY_MASK: u32 = 0x0000_0402;
 const TX_SUCCESS_AGGREGATE_STATE_MASK: u32 = 0x40c0_0000;
 const AP_BEACON_SUCCESS_DESCRIPTOR: u32 = 0x0080_0412;
-const TXRX_QUEUE_SIZE: usize = 0x34;
 
 const DISCARD_IDLE: u8 = 0;
 const DISCARD_FIND_TAIL: u8 = 1;
@@ -89,7 +88,6 @@ const DISCARD_WAIT_TX_DONE: u8 = 3;
 
 unsafe extern "C" {
     static mut our_instances_ptr: *mut u8;
-    static mut pTxRx: *mut u8;
     static lmacConfMib: [u8; 48];
     static s_phy_get_max_pwr: i8;
     static mut coex_pti_tab: [u8; 48];
@@ -1108,11 +1106,7 @@ unsafe fn submit_basic_retry(
     apply_basic_rate_override(descriptor);
     configure_basic_timeout(queue_state, descriptor);
     guard_basic_ppdu_inputs(frame, descriptor)?;
-    let txrx = ptr::addr_of_mut!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(LmacAsyncError::TxRxUnavailable);
-    }
-    format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
+    format_basic_non_he_ppdu(queue_state, frame, descriptor)?;
 
     configure_basic_edca(queue_state, descriptor);
     #[cfg(feature = "hil-tx-deep-telemetry")]
@@ -1144,7 +1138,6 @@ unsafe fn format_basic_non_he_ppdu(
     queue_state: *mut u8,
     frame: *mut u8,
     descriptor: *mut u8,
-    txrx: *mut u8,
 ) -> Result<(), LmacAsyncError> {
     let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
     debug_assert!(queue <= 3);
@@ -1191,7 +1184,7 @@ unsafe fn format_basic_non_he_ppdu(
     } else {
         // HE and FTM are rejected before entering this function, so rates
         // 16..=35 are exactly the finite HTSIG path.
-        program_htsig(queue, frame, descriptor, txrx, rate, rts_rate, None);
+        program_htsig(queue, frame, descriptor, rate, rts_rate, None)?;
         let data_rate = if rate <= 25 { rate } else { rate - 10 };
         let data_rate = usize::from(data_rate);
         power_table.add(data_rate * 2).read() as i32 as u32
@@ -1293,11 +1286,10 @@ unsafe fn program_htsig(
     queue: u8,
     frame: *mut u8,
     descriptor: *mut u8,
-    txrx: *mut u8,
     rate: u8,
     rts_rate: u8,
     aggregate_length: Option<u16>,
-) {
+) -> Result<(), LmacAsyncError> {
     let flags = descriptor.cast::<u32>().read();
     let aggregate = aggregate_length.is_some();
     debug_assert_eq!(flags & TX_FRAME_HE_BIT, 0);
@@ -1361,14 +1353,15 @@ unsafe fn program_htsig(
         .add(TX_DESCRIPTOR_QUEUE_WORD_OFFSET)
         .cast::<u32>()
         .read();
-    let index = ((queue_word >> 20) & 0x0f) as usize;
-    let entry = txrx.add(index * TXRX_QUEUE_SIZE);
+    let logical_queue = ((queue_word >> 20) & 0x0f) as u8;
     // `ppCalTxAMPDULength` initializes these adjacent bytes to 0x01/0x01
     // before assembly. Carry those two values explicitly for the Rust-owned
-    // aggregate instead of making hardware formatting depend on scheduler
-    // state in pTxRx.
-    let length_flags = if aggregate { 1 } else { entry.add(0x40).read() };
-    let data_flags = if aggregate { 1 } else { entry.add(0x41).read() };
+    // aggregate instead of changing the adopted per-queue formatter policy.
+    let (length_flags, data_flags) = if aggregate {
+        (1, 1)
+    } else {
+        crate::tx_queue::ppdu_format_flags(logical_queue).ok_or(LmacAsyncError::TxRxUnavailable)?
+    };
     let length_control =
         crate::tx_plcp::basic_length_control_word(rts_rate, length_flags, queue_word);
     let length_control_register =
@@ -1381,6 +1374,7 @@ unsafe fn program_htsig(
             (TXQ_DATA_LENGTH_BASE_REG - usize::from(queue) * TXQ_POWER_STRIDE) as *mut u32;
         data_length_register.write_volatile(data_length);
     }
+    Ok(())
 }
 
 /// Submit one already assembled basic-HT A-MPDU to an idle hardware queue.
@@ -1471,11 +1465,7 @@ pub unsafe fn submit_basic_ht_ampdu(
     queue_state.cast::<*mut u8>().write(chain.first);
     configure_basic_timeout(queue_state, descriptor);
     guard_basic_ampdu_ppdu_inputs(&chain, descriptor)?;
-    let txrx = ptr::addr_of_mut!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(LmacAsyncError::TxRxUnavailable);
-    }
-    format_basic_ht_ampdu_ppdu(queue_state, &chain, descriptor, txrx)?;
+    format_basic_ht_ampdu_ppdu(queue_state, &chain, descriptor)?;
     configure_basic_edca(queue_state, descriptor);
     #[cfg(feature = "hil-tx-deep-telemetry")]
     let trace_chain = (chain.first, chain.subframes, chain.aggregate_length);
@@ -1577,11 +1567,7 @@ pub unsafe fn submit_basic_non_he_frame(
     queue_state.cast::<*mut u8>().write(frame);
     configure_basic_timeout(queue_state, descriptor);
     guard_basic_ppdu_inputs(frame, descriptor)?;
-    let txrx = ptr::addr_of_mut!(pTxRx).read();
-    if txrx.is_null() {
-        return Err(LmacAsyncError::TxRxUnavailable);
-    }
-    format_basic_non_he_ppdu(queue_state, frame, descriptor, txrx)?;
+    format_basic_non_he_ppdu(queue_state, frame, descriptor)?;
     configure_basic_edca(queue_state, descriptor);
     #[cfg(feature = "hil-tx-deep-telemetry")]
     crate::tx_trace::record_descriptor_transition(
@@ -1897,7 +1883,6 @@ unsafe fn format_basic_ht_ampdu_ppdu(
     queue_state: *mut u8,
     chain: &BasicHtAmpduChain,
     descriptor: *mut u8,
-    txrx: *mut u8,
 ) -> Result<(), LmacAsyncError> {
     let queue = queue_state.add(TX_QUEUE_HARDWARE_INDEX_OFFSET).read();
     let rate = descriptor.add(TX_DESCRIPTOR_SELECTED_RATE_OFFSET).read();
@@ -1921,11 +1906,10 @@ unsafe fn format_basic_ht_ampdu_ppdu(
         queue,
         chain.first,
         descriptor,
-        txrx,
         rate,
         rts_rate,
         Some(chain.aggregate_length),
-    );
+    )?;
     let data_rate = usize::from(if rate <= 25 { rate } else { rate - 10 });
     let data_power = power_table.add(data_rate * 2).read() as i32 as u32
         | (power_table.add(data_rate * 2 + 1).read() as i32 as u32) << 8;

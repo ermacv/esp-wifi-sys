@@ -358,10 +358,15 @@ filtering no longer touch `pTxRx`. Hardware qualification completed WPA2,
 ADDBA, the full network workload, 4,096 UDP datagrams, and 4 HTTP transfers
 with balanced TX/RX/PP ownership and an unchanged allocation snapshot.
 
-This still does not make all of `pTxRx` obsolete. Its RX queue and two observed
-PPDU-format bytes are independent live slices. They should move one at a time;
-only then can `pTxRx`/`TxRxCxt` be removed from the static binding and
-linked-state inventory. Final ELF
+The two observed per-logical-queue PPDU-format bytes now move with the
+scheduler state. Their bits are not assigned speculative names: they remain
+opaque adopted PLCP length/data inputs until a register-level meaning is
+proven. The LMAC TX path consequently has no post-handoff `pTxRx` access.
+
+Only the RX producer/consumer slice remains live. Once that queue and the
+required RX processing context have explicit Rust ownership,
+`pTxRx`/`TxRxCxt` can be removed from the static binding and linked-state
+inventory. Final ELF
 verification must continue to use a non-empty STA configuration; otherwise
 the HIL binary deliberately enters `pending()` before Wi-Fi initialization
 and LTO removes the unreachable strict runtime.

@@ -32,6 +32,11 @@ const TXRX_QUEUE_TAIL_LINK_OFFSET: usize = 0x24;
 const TXRX_QUEUE_BUSY_OFFSET: usize = 0x29;
 const TXRX_HARDWARE_MASKS_OFFSET: usize = 0x04;
 const TXRX_HARDWARE_CURSORS_OFFSET: usize = 0x18;
+// The pinned HT formatter reads these bytes relative to the selected logical
+// entry. Their individual bit meanings are not yet known; preserve the exact
+// initialized values as opaque PLCP inputs instead of naming inferred fields.
+const TXRX_PPDU_LENGTH_FLAGS_OFFSET: usize = 0x40;
+const TXRX_PPDU_DATA_FLAGS_OFFSET: usize = 0x41;
 const LOGICAL_QUEUE_COUNT: usize = 16;
 const HARDWARE_QUEUE_COUNT: usize = 4;
 
@@ -51,6 +56,8 @@ pub enum TxQueueStateAdoptionError {
 struct StrictTxQueueState {
     hardware_masks: [u16; HARDWARE_QUEUE_COUNT],
     cursors: [u8; HARDWARE_QUEUE_COUNT],
+    ppdu_length_flags: [u8; LOGICAL_QUEUE_COUNT],
+    ppdu_data_flags: [u8; LOGICAL_QUEUE_COUNT],
     queues: [LogicalQueue; LOGICAL_QUEUE_COUNT],
 }
 
@@ -59,6 +66,8 @@ impl StrictTxQueueState {
         Self {
             hardware_masks: [0; HARDWARE_QUEUE_COUNT],
             cursors: [0; HARDWARE_QUEUE_COUNT],
+            ppdu_length_flags: [0; LOGICAL_QUEUE_COUNT],
+            ppdu_data_flags: [0; LOGICAL_QUEUE_COUNT],
             queues: [LogicalQueue::empty(); LOGICAL_QUEUE_COUNT],
         }
     }
@@ -78,8 +87,8 @@ static STRICT_TX_QUEUE_STATE_ADOPTED: AtomicBool = AtomicBool::new(false);
 /// Adopt only the finite TX scheduler policy from the vendor `pTxRx` object.
 ///
 /// The handoff is intentionally fail-closed: no frame or busy queue may cross
-/// the ownership edge. RX queues, TX-done callbacks, and PPDU-format metadata
-/// remain in the transitional vendor object and are not copied here.
+/// the ownership edge. The initialized scheduler masks, cursors, and two PPDU
+/// format bytes per logical queue are copied into explicit Rust state.
 ///
 /// # Safety
 ///
@@ -95,6 +104,7 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
         return Err(TxQueueStateAdoptionError::TxRxUnavailable);
     }
 
+    let state = &mut *STRICT_TX_QUEUE_STATE.0.get();
     let mut logical = 0_u8;
     while usize::from(logical) < LOGICAL_QUEUE_COUNT {
         let entry = txrx.add(usize::from(logical) * TXRX_QUEUE_SIZE);
@@ -112,10 +122,12 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
         if entry.add(TXRX_QUEUE_BUSY_OFFSET).read() != 0 {
             return Err(TxQueueStateAdoptionError::QueueBusy(logical));
         }
+        state.ppdu_length_flags[usize::from(logical)] =
+            entry.add(TXRX_PPDU_LENGTH_FLAGS_OFFSET).read();
+        state.ppdu_data_flags[usize::from(logical)] = entry.add(TXRX_PPDU_DATA_FLAGS_OFFSET).read();
         logical += 1;
     }
 
-    let state = &mut *STRICT_TX_QUEUE_STATE.0.get();
     let mut hardware = 0_usize;
     while hardware < HARDWARE_QUEUE_COUNT {
         state.hardware_masks[hardware] = txrx
@@ -128,6 +140,15 @@ pub(crate) unsafe fn adopt_vendor_tx_queue_state() -> Result<(), TxQueueStateAdo
     state.queues = [LogicalQueue::empty(); LOGICAL_QUEUE_COUNT];
     STRICT_TX_QUEUE_STATE_ADOPTED.store(true, AtomicOrdering::Release);
     Ok(())
+}
+
+pub(crate) unsafe fn ppdu_format_flags(logical_queue: u8) -> Option<(u8, u8)> {
+    let state = strict_tx_queue_state()?;
+    let index = usize::from(logical_queue);
+    Some((
+        *state.ppdu_length_flags.get(index)?,
+        *state.ppdu_data_flags.get(index)?,
+    ))
 }
 
 #[inline(always)]

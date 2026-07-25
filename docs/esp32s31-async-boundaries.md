@@ -769,8 +769,16 @@ touch `pTxRx` after handoff. A hardware stress run completed WPA2, DHCP,
 ping/DNS/TCP/HTTP, ADDBA, 4,096/4,096 UDP datagrams, and 4/4 HTTP transfers. It
 released 4,786/4,786 TX and 692/692 RX owners, drained 21,295/21,295 PP events,
 and preserved the allocation snapshot. The measured correctness-run rate was
-19.517 Mbit/s. Only RX and the two observed PPDU-format bytes remain live
-`pTxRx` ownership slices.
+19.517 Mbit/s.
+
+The two remaining TX-format bytes per logical queue are now adopted into the
+same `StrictTxQueueState`. Their individual bit meanings are still unknown, so
+the Rust field names deliberately describe only their observed use as opaque
+PLCP length/data inputs. `lmac.rs` no longer references `pTxRx`. A repeated
+hardware stress run again completed WPA2/ADDBA/network traffic, 4,096/4,096 UDP
+datagrams and 4/4 HTTP transfers, with 4,786/4,786 TX and 692/692 RX releases,
+21,320/21,320 PP events, no allocation delta, and 18.466 Mbit/s. RX is now the
+only live strict-runtime `pTxRx` slice.
 
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,

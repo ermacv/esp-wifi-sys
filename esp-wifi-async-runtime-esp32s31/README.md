@@ -240,8 +240,8 @@ then have one single-hart Rust owner. `ppTxPkt`, `ppMapTxQueue`,
 `pp_process_hmac_waiting_txq` are absent from the armed runtime path. The
 TX-done completion links, callback masks, and the six admitted callback
 identities are also adopted into a fixed Rust SRAM registry. The remaining
-`pTxRx` bytes provide only RX and two PPDU-format values and are separate
-migration boundaries.
+two per-queue PPDU-format values are adopted as opaque PLCP inputs in the TX
+scheduler state. Only RX still uses `pTxRx` after strict handoff.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.
