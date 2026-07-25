@@ -679,6 +679,40 @@ handshake, DHCP, gateway ping, DNS, TCP and HTTP 200 without entering
 zero. TX ownership balanced at 18/18, RX ownership at 16/16, the 32-credit TX
 pool returned to zero use, and no other-core stall was observed.
 
+The next qualified group removes five complete MAC-control bodies from the
+pinned `libpp.a` runtime graph:
+
+- `hal_mac_tx_set_cca` is a single read-modify-write of `0x2010_4c5c`. It
+  replaces bits 31:30 with the low two bits implied by the RV32
+  `cca << 30` operation and returns zero.
+- `hal_mac_is_txq_valid`, `hal_mac_set_txq_invalid` and
+  `hal_mac_txq_disable` access queue control word
+  `0x0100_4d70 - 0x10 * queue`. This unusual low address is not an inferred
+  peripheral base: it is the exact modulo-32-bit result of the vendor
+  `(0x2010_04d7 - queue) << 4` sequence. The first reads bit 30, the second
+  clears bit 30, and the third clears bits 31:30.
+- `hal_mac_set_csi_cbw` is an evidenced two-byte `ret`; the pinned S31
+  archive ignores its argument and performs no state mutation.
+
+All five public symbols now alias internal-SRAM Rust leaves. Their generated
+RV32 bodies occupy `0x2f00_8f4e..0x2f00_8fca`, contain no call, indirect
+branch or control-flow cycle, and reproduce the archive masks and access
+addresses mechanically. They are treated as replaced vendor roots rather
+than allow-listed MMIO debt.
+
+The exact credentialed STA image passed the strict audit over 6,407 functions
+with zero violations. Runtime vendor debt is now 13 roots and
+`1 fallback + 9 stateful/unproven + 3 temporary MMIO`; reachable vendor
+functions decreased to 26. Strict-leaf blob state remains zero, all 43 fixed
+cold-init bindings remain active, and the strict-static baseline remains
+82 sections / 312,441 bytes.
+
+Hardware qualification observed six APs, completed WPA2 association and the
+four-way handshake, obtained `192.168.178.138` by DHCP, and passed gateway
+ping, DNS, TCP and HTTP 200. Static TX ownership balanced at 18/18 and RX at
+15/15; all allocation counters, failures and other-core stalls remained zero.
+`ppTask` was never entered.
+
 ## Completed strict-runtime slice: `wDevCtrl`
 
 The pinned `libpp.a[wdev.o]` defines a 72-byte initialized object. Its byte
