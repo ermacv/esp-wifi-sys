@@ -967,6 +967,7 @@ unsafe fn process_protocol(
 /// it dereferences and returns nonzero without transferring ownership when the
 /// private ABI is malformed.
 #[no_mangle]
+#[inline(never)]
 #[link_section = ".rwtext.wifi_strict.rx_proto"]
 pub unsafe extern "C" fn wifi_strict_pp_rx_proto_proc(
     packet: *mut u8,

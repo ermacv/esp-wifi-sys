@@ -57,6 +57,7 @@ unsafe extern "C" {
 /// [`wifi_strict_rc_get_trc`], and `rx_control` must name the current hardware
 /// RX-control block.
 #[no_mangle]
+#[inline(never)]
 #[link_section = ".rwtext.wifi_strict.rx_proto"]
 pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(
     rate_control: *mut u8,
@@ -106,6 +107,7 @@ pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(
 /// `receiver` must point to six readable address bytes owned by the current RX
 /// frame.
 #[no_mangle]
+#[inline(never)]
 #[link_section = ".rwtext.wifi_strict.rx_proto"]
 pub unsafe extern "C" fn wifi_strict_rc_get_trc(
     route: u32,
