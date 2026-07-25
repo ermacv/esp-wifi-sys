@@ -241,7 +241,19 @@ then have one single-hart Rust owner. `ppTxPkt`, `ppMapTxQueue`,
 TX-done completion links, callback masks, and the six admitted callback
 identities are also adopted into a fixed Rust SRAM registry. The remaining
 two per-queue PPDU-format values are adopted as opaque PLCP inputs in the TX
-scheduler state. Only RX still uses `pTxRx` after strict handoff.
+scheduler state. RX callback routing and the interrupt-to-executor intrusive
+queue are adopted as well. Handoff redirects the recovered
+`pp_wdev_funcs+0x1dc` `lmacRxDone` slot to an internal-SRAM Rust callback after
+proving the vendor queue empty. RX readiness is the Rust queue itself, not a
+fallible event entry; `RadioFuture` serves it round-robin with vendor and
+internal events. Consequently no strict-runtime path uses `pTxRx`,
+`lmacRxDone`, or `ppDequeueRxq_Locked`. `pTxRx` remains only a cold-init and
+one-shot adoption source until the corresponding initialization is ported.
+The registered Embassy task waker is still a documented interrupt-boundary
+gap: live JTAG inspection found its vtable/wake leaf in flash, and the leaf
+uses the shared run-queue CAS retry. A dedicated fixed radio interrupt
+executor is required before claiming a fully SRAM-resident, retry-free wake
+closure.
 
 Before the strict-runtime proof is issued, both OSI and direct-C wrappers
 delegate to the original allocator so vendor initialization can complete.

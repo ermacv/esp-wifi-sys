@@ -288,7 +288,8 @@ pub use runtime::WifiRuntimeFuture;
 pub use rx::expire_rx_ampdu_gap;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::{
-    block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxPumpError, StrictRxSnapshot,
+    block_ack_rx_snapshot, strict_rx_snapshot, BlockAckRxSnapshot, RxInterruptAdoptionError,
+    RxPumpError, StrictRxSnapshot,
 };
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 pub use rx::RxStateAdoptionError;

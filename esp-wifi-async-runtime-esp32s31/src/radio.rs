@@ -6,6 +6,16 @@ use core::{
 
 use crate::{event::PpEvent, queue::RadioQueue};
 
+#[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
+fn pending_rx_continuation() -> Option<PpEvent> {
+    crate::rx::pending_continuation()
+}
+
+#[cfg(not(all(target_arch = "riscv32", feature = "strict-no-wait")))]
+fn pending_rx_continuation() -> Option<PpEvent> {
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DispatchControl {
     Continue,
@@ -33,7 +43,7 @@ pub struct RadioFuture<'a, D, const N: usize, const I: usize> {
     dispatcher: D,
     event_budget: usize,
     stop_requested: bool,
-    prefer_internal: bool,
+    next_source: u8,
 }
 
 impl<'a, D, const N: usize, const I: usize> RadioFuture<'a, D, N, I> {
@@ -50,7 +60,8 @@ impl<'a, D, const N: usize, const I: usize> RadioFuture<'a, D, N, I> {
             dispatcher,
             event_budget,
             stop_requested: false,
-            prefer_internal: true,
+            // Preserve the historical first preference for Rust-owned work.
+            next_source: 1,
         }
     }
 
@@ -73,25 +84,28 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
         self.internal_queue.register_waker(cx.waker());
 
         for _ in 0..self.event_budget {
-            let event = if self.prefer_internal {
-                self.internal_queue
-                    .try_pop()
-                    .map(|event| (event, false))
-                    .or_else(|| self.queue.try_pop().map(|event| (event, true)))
-            } else {
-                self.queue
-                    .try_pop()
-                    .map(|event| (event, true))
-                    .or_else(|| self.internal_queue.try_pop().map(|event| (event, false)))
-            };
-            let Some((event, prefer_internal)) = event else {
+            let mut selected = None;
+            for offset in 0..3 {
+                let source = (self.next_source + offset) % 3;
+                let event = match source {
+                    0 => self.queue.try_pop(),
+                    1 => self.internal_queue.try_pop(),
+                    2 => pending_rx_continuation(),
+                    _ => unreachable!(),
+                };
+                if let Some(event) = event {
+                    selected = Some((event, source));
+                    break;
+                }
+            }
+            let Some((event, source)) = selected else {
                 return if self.stop_requested {
                     Poll::Ready(Ok(()))
                 } else {
                     Poll::Pending
                 };
             };
-            self.prefer_internal = prefer_internal;
+            self.next_source = (source + 1) % 3;
 
             match self.dispatcher.dispatch(event) {
                 Ok(DispatchControl::Continue) => {}
@@ -105,7 +119,11 @@ impl<D: PpDispatcher + Unpin, const N: usize, const I: usize> Future for RadioFu
         // Preserve fairness if producers keep the radio queue continuously
         // non-empty. This schedules one additional executor poll, not a busy
         // loop or a stack/context switch.
-        if self.stop_requested || !self.queue.is_empty() || !self.internal_queue.is_empty() {
+        if self.stop_requested
+            || !self.queue.is_empty()
+            || !self.internal_queue.is_empty()
+            || pending_rx_continuation().is_some()
+        {
             cx.waker().wake_by_ref();
         }
         Poll::Pending

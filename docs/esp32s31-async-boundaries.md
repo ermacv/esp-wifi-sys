@@ -790,6 +790,32 @@ ownership transitions, no allocation delta, and 20.931 Mbit/s. The remaining
 RX dependency is the intrusive ISR-to-executor queue plus the protocol and
 recycle leaves.
 
+That intrusive queue has now moved behind an explicit Rust ownership edge.
+The recovered `wdev_funcs_init` table stores `lmacRxDone` at
+`pp_wdev_funcs+0x1dc`; after proving the vendor queue empty under a bounded
+local interrupt mask, handoff replaces that slot with an internal-SRAM Rust
+callback. The ISR and executor share only a fixed intrusive FIFO, serialized
+by the Wi-Fi hart's local interrupt mask. The final ELF forbids any call to
+the ROM producer or `ppDequeueRxq_Locked`.
+
+RX continuation does not consume capacity in either event queue. Queue
+non-emptiness is the durable readiness condition, the ISR only wakes on its
+empty edge, and `RadioFuture` selects RX/vendor/internal work round-robin.
+This removes the possible lost-wakeup case caused by a rejected continuation
+event without adding a poll loop, delay, retry, or RTOS context switch. The
+hardware qualification run completed the full WPA2/network stress workload
+with 4,786/4,786 TX, 691/691 RX, 20,591/20,591 PP events, no allocation delta,
+and 19.634 Mbit/s. `pTxRx` is now read only during one-shot adoption; the
+remaining runtime RX vendor leaves are protocol processing and recycle.
+
+The RX ISR closure is not yet fully SRAM-only. A USB-JTAG read of the live
+registered waker found SRAM task data but a flash vtable and
+`embassy_executor::raw::waker::wake` target. That target also contains the
+shared Embassy run-queue CAS retry. It is therefore an explicit next boundary,
+not an accepted exception: the radio runtime needs a dedicated fixed
+single-task interrupt executor/waker in SRAM, so an RX edge can pend that
+executor without dynamic dispatch or shared run-queue contention.
+
 The post-ADDBA mapper also has a bounded stale-completion guard. A late frame
 object whose first buffer has already been detached cannot be inspected,
 queued, or safely recycled, so exactly one pointer may be quarantined and

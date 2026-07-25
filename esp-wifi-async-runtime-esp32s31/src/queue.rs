@@ -54,6 +54,7 @@ pub struct RadioQueueSnapshot {
     pub capacity: usize,
 }
 
+#[inline(always)]
 fn record_high_water(counter: &AtomicUsize, value: usize) {
     let observed = counter.load(Ordering::Relaxed);
     if value > observed {
@@ -98,6 +99,7 @@ impl<const N: usize> RadioQueue<N> {
     /// interrupt exclusion through both the vendor signal-counter update and
     /// queue publication, then invoke the executor waker after interrupts are
     /// restored. It is still one fixed-cost claim attempt and never retries.
+    #[inline(always)]
     pub(crate) fn try_push_deferred_wake(&self, event: PpEvent) -> Result<(), PushError> {
         if N == 1 {
             let slot = &self.slots[0];
@@ -143,6 +145,7 @@ impl<const N: usize> RadioQueue<N> {
         Ok(())
     }
 
+    #[inline(always)]
     pub(crate) fn wake_consumer(&self) {
         self.waker.wake();
     }
@@ -188,6 +191,7 @@ impl<const N: usize> RadioQueue<N> {
 
     /// Snapshot of messages claimed by producers and not yet claimed by the
     /// consumer. A producer may still be publishing the newest item.
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.enqueue
             .load(Ordering::Acquire)
@@ -256,6 +260,7 @@ impl WakerCell {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn wake(&self) {
         self.pending.store(true, Ordering::Release);
 

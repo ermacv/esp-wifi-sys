@@ -282,6 +282,22 @@ mod target {
         PROBE.exit_interrupt();
     }
 
+    /// Mask only the current hart while a cold-to-strict callback slot and its
+    /// backing ownership are transferred together.
+    ///
+    /// Unlike `strict_wifi_int_disable`, this is valid immediately before the
+    /// strict hart marker is published and deliberately does not claim a
+    /// runtime critical-section sample.
+    #[link_section = ".rwtext.wifi_strict.critical"]
+    pub(crate) unsafe fn handoff_local_interrupts_disable() -> u32 {
+        disable_local_interrupts()
+    }
+
+    #[link_section = ".rwtext.wifi_strict.critical"]
+    pub(crate) unsafe fn handoff_local_interrupts_restore(state: u32) {
+        restore_local_interrupts(state);
+    }
+
     #[link_section = ".rwtext.wifi_strict.critical"]
     unsafe extern "C" fn wifi_int_disable(mux: *mut c_void) -> u32 {
         if strict_wifi_hart_armed() {
@@ -331,8 +347,8 @@ pub use target::{allow_core_stalls_for_wifi_teardown, patch_critical_section_pro
 pub(crate) use target::{critical_callbacks_patched, forbid_runtime_core_stalls};
 #[cfg(target_arch = "riscv32")]
 pub(crate) use target::{
-    current_hart, on_strict_wifi_hart, strict_wifi_hart_armed, strict_wifi_int_disable,
-    strict_wifi_int_restore,
+    current_hart, handoff_local_interrupts_disable, handoff_local_interrupts_restore,
+    on_strict_wifi_hart, strict_wifi_hart_armed, strict_wifi_int_disable, strict_wifi_int_restore,
 };
 
 #[cfg(test)]

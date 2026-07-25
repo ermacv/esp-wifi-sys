@@ -382,12 +382,42 @@ DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096 UDP datagrams and 4 HTTP transfers.
 It released 4,786/4,786 TX and 692/692 RX owners, drained 21,295/21,295 PP
 events, changed no allocation counter, and measured 20.931 Mbit/s.
 
-Only the RX intrusive queue and the `ppRxProtoProc`/recycler compatibility
-leaves remain live. Moving the queue requires intercepting the actual
-interrupt publication path, not merely replacing dequeue: otherwise the ROM
-producer and Rust consumer would have different owners. Once those leaves
-have explicit Rust ownership, `pTxRx`/`TxRxCxt` can be removed from the static
-binding and linked-state inventory. Final ELF verification must continue to
-use a non-empty STA configuration; otherwise the HIL binary deliberately
-enters `pending()` before Wi-Fi initialization and LTO removes the unreachable
-strict runtime.
+The interrupt-to-executor RX queue is now Rust-owned too. Pinned
+`libpp.a[wdev.o]::wdev_funcs_init` stores the ROM `lmacRxDone` address in the
+mutable `pp_wdev_funcs+0x1dc` slot. Handoff masks only local interrupts,
+requires the vendor RX queue to be empty with its canonical tail link, and
+redirects that slot to `wifi_strict_lmac_rx_done`. The replacement appends
+through `packet+0x30` into a fixed internal-SRAM queue; executor dequeue uses
+the same queue and the final ELF forbids calls to both `lmacRxDone` and
+`ppDequeueRxq_Locked`.
+
+RX readiness is durable queue state rather than a fallible continuation
+message. The empty-to-non-empty edge wakes the Rust executor, while
+`RadioFuture` checks RX directly as a third round-robin source beside vendor
+and internal events. Thus a full finite event queue cannot strand an RX
+packet, and a continuously ready RX source cannot starve the other two.
+The SRAM audit pins both the callback and its direct wake leaf. The remaining
+indirect `RawWaker::wake` target is tracked separately and must be replaced
+before the complete interrupt call graph can be claimed as cache-independent.
+USB-JTAG observation of the qualified ELF found the registered waker vtable at
+`0x4000bc5c` and its wake target at `0x400b556e`, both in flash; the task data
+is in SRAM at `0x2f06ab00`. Disassembly identifies the target as
+`embassy_executor::raw::waker::wake`: it atomically marks the task runnable,
+pushes it into the shared executor transfer stack with a CAS retry, then calls
+the SRAM `__pender`. Merely relocating this leaf would fix cache residency but
+would not satisfy the strict no-potential-wait rule. The intended replacement
+is a fixed single-radio-task interrupt executor whose SRAM waker only marks
+readiness and pends its dedicated software interrupt, with no shared run queue.
+
+The final hardware run with the durable Rust producer/consumer queue completed
+scan, WPA2, DHCP, ping, DNS, TCP, HTTP, ADDBA, 4,096/4,096 UDP datagrams and
+4/4 HTTP transfers. It balanced 4,786/4,786 TX and 691/691 RX owners, drained
+20,591/20,591 PP events without rejection, preserved the allocation snapshot,
+and measured 19.634 Mbit/s. No strict-runtime path now dereferences `pTxRx`;
+the object remains a cold-initialization and one-shot handoff oracle until
+those initializers are ported. The remaining RX vendor boundaries are
+`ppRxProtoProc` and `ppRecycleRxPkt`.
+
+Final ELF verification must continue to use a non-empty STA configuration;
+otherwise the HIL binary deliberately enters `pending()` before Wi-Fi
+initialization and LTO removes the unreachable strict runtime.

@@ -835,6 +835,7 @@ pub(crate) fn give_internal_semaphore(handle: *mut c_void) -> bool {
 
 #[cfg(target_arch = "riscv32")]
 #[allow(dead_code)]
+#[link_section = ".rwtext.wifi_strict.internal_event"]
 pub(crate) fn enqueue_internal_event(event: PpEvent) -> bool {
     // Strict internal callbacks share one radio hart, but an interrupt may
     // preempt an executor/callback producer. Their queue deliberately makes
@@ -850,12 +851,25 @@ pub(crate) fn enqueue_internal_event(event: PpEvent) -> bool {
         let queued = STATE.internal_queue.try_push_deferred_wake(event).is_ok();
         unsafe { crate::critical::strict_wifi_int_restore(interrupt_state) };
         if queued {
-            STATE.internal_queue.wake_consumer();
+            wifi_strict_wake_internal_consumer();
         }
         queued
     } else {
         STATE.internal_queue.try_push(event).is_ok()
     }
+}
+
+/// Wake the single Rust radio consumer without inserting a finite queue item.
+///
+/// RX uses this after publishing an empty-to-non-empty transition into its
+/// durable intrusive queue. Keeping this leaf in internal SRAM makes the
+/// callback's direct call graph independent of flash cache availability.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[inline(never)]
+#[link_section = ".rwtext.wifi_strict.internal_event"]
+pub(crate) extern "C" fn wifi_strict_wake_internal_consumer() {
+    STATE.internal_queue.wake_consumer();
 }
 
 /// Queue the vendor's shutdown event without entering `pp_delete_task`, whose

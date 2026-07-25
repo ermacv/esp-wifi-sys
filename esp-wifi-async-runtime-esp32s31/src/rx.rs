@@ -8,13 +8,21 @@ use core::{
 
 use crate::event::PpEvent;
 
-/// Synthetic queue item used to continue a bounded RX drain without touching
-/// the vendor event-17 signal counter a second time.
+/// Synthetic event dispatched directly by [`crate::radio::RadioFuture`] while
+/// the Rust-owned interrupt queue is non-empty. It is never inserted into a
+/// finite event queue, so RX readiness cannot be lost to queue exhaustion.
 pub(crate) const RX_CONTINUATION_EVENT: u32 = u32::MAX - 7;
 const RX_BUDGET: usize = 8;
 const RX_CALLBACK_OFFSET: usize = 0x3f8;
 const RX_AUX_CALLBACK_1_OFFSET: usize = 0x3fc;
 const RX_AUX_CALLBACK_2_OFFSET: usize = 0x400;
+const RX_QUEUE_HEAD_OFFSET: usize = 0x394;
+const RX_QUEUE_TAIL_LINK_OFFSET: usize = 0x398;
+const RX_PACKET_NEXT_OFFSET: usize = 0x30;
+// Pinned `libpp.a[wdev.o]::wdev_funcs_init` stores `lmacRxDone` here. ROM RX
+// completion reaches this mutable table slot instead of requiring a binary
+// patch to the ROM implementation.
+const WDEV_LMAC_RX_DONE_CALLBACK_OFFSET: usize = 0x1dc;
 const LOCAL_ADDRESS_OFFSET: usize = 0x21a;
 // Pinned `sta_input` reconstructs the 14-bit received MPDU length from bytes
 // 0x38 and 0x39 of the internal RX control block before decapsulation.
@@ -28,9 +36,10 @@ type RxCallback = unsafe extern "C" fn(*mut u8, i32, u32);
 
 unsafe extern "C" {
     static mut pTxRx: *mut u8;
+    static mut pp_wdev_funcs: *mut usize;
     static mut g_ic: u8;
 
-    fn ppDequeueRxq_Locked() -> *mut u8;
+    fn lmacRxDone(packet: *mut u8);
     fn ppRxProtoProc(packet: *mut u8, rx_control: *mut u8) -> i32;
     fn ppRecycleRxPkt(packet: *mut u8);
     fn ap_rx_cb(packet: *mut u8, rssi: i32, signal_length: u32);
@@ -48,6 +57,97 @@ pub enum RxStateAdoptionError {
     UnsupportedApCallback,
     NanCallbackInstalled,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RxInterruptAdoptionError {
+    TxRxUnavailable,
+    QueueNotEmpty,
+    InvalidEmptyTailLink,
+    FunctionTableUnavailable,
+    CallbackSlotMismatch,
+    CallbackReadbackMismatch,
+}
+
+struct StrictRxQueue {
+    head: *mut u8,
+    tail: *mut u8,
+    event_armed: bool,
+}
+
+impl StrictRxQueue {
+    const fn empty() -> Self {
+        Self {
+            head: ptr::null_mut(),
+            tail: ptr::null_mut(),
+            event_armed: false,
+        }
+    }
+
+    unsafe fn append(&mut self, packet: *mut u8) -> bool {
+        if packet.is_null() {
+            return false;
+        }
+        packet
+            .add(RX_PACKET_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(ptr::null_mut());
+        if self.tail.is_null() {
+            if !self.head.is_null() {
+                return false;
+            }
+            self.head = packet;
+        } else {
+            self.tail
+                .add(RX_PACKET_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .write(packet);
+        }
+        self.tail = packet;
+        true
+    }
+
+    unsafe fn pop_front(&mut self) -> *mut u8 {
+        let packet = self.head;
+        if packet.is_null() {
+            return packet;
+        }
+        self.head = packet
+            .add(RX_PACKET_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .read();
+        if self.head.is_null() {
+            self.tail = ptr::null_mut();
+        }
+        packet
+            .add(RX_PACKET_NEXT_OFFSET)
+            .cast::<*mut u8>()
+            .write(ptr::null_mut());
+        packet
+    }
+}
+
+struct StrictRxQueueCell(UnsafeCell<StrictRxQueue>);
+
+// ISR append and executor dequeue are serialized by a bounded local interrupt
+// mask on the one configured Wi-Fi hart.
+unsafe impl Sync for StrictRxQueueCell {}
+
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.rx_queue"
+)]
+static STRICT_RX_QUEUE: StrictRxQueueCell =
+    StrictRxQueueCell(UnsafeCell::new(StrictRxQueue::empty()));
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.bss.wifi_strict.rx_queue"
+)]
+static STRICT_RX_QUEUE_ADOPTED: AtomicBool = AtomicBool::new(false);
+#[cfg_attr(
+    target_arch = "riscv32",
+    link_section = ".critical.data.wifi_strict.rx_queue"
+)]
+static STRICT_RX_QUEUE_HART: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 struct StrictRxRegistry {
     station_callback: Option<RxCallback>,
@@ -139,6 +239,186 @@ fn rx_registry() -> Option<&'static StrictRxRegistry> {
         return None;
     }
     Some(unsafe { &*STRICT_RX_REGISTRY.0.get() })
+}
+
+/// Transfer the interrupt-to-executor RX FIFO and its ROM callback slot as one
+/// ownership edge after the initialization `ppTask` has stopped.
+///
+/// The local interrupt mask prevents `lmacRxDone` from publishing between the
+/// empty vendor-queue proof and the callback-table write. No other hart is
+/// stalled, and there is no retry or waiting operation.
+///
+/// # Safety
+///
+/// Must run on the configured Wi-Fi hart after callback registration and
+/// `ppTask` handoff, but before strict runtime interrupts are armed.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn adopt_rx_interrupt_queue() -> Result<(), RxInterruptAdoptionError> {
+    if STRICT_RX_QUEUE_ADOPTED.load(Ordering::Acquire) {
+        return if rx_interrupt_callback_active() {
+            Ok(())
+        } else {
+            Err(RxInterruptAdoptionError::CallbackReadbackMismatch)
+        };
+    }
+
+    let interrupt_state = crate::critical::handoff_local_interrupts_disable();
+    let result = (|| {
+        let txrx = ptr::addr_of!(pTxRx).read();
+        if txrx.is_null() {
+            return Err(RxInterruptAdoptionError::TxRxUnavailable);
+        }
+        let vendor_head_slot = txrx.add(RX_QUEUE_HEAD_OFFSET).cast::<*mut u8>();
+        if !vendor_head_slot.read().is_null() {
+            return Err(RxInterruptAdoptionError::QueueNotEmpty);
+        }
+        let vendor_tail_link = txrx
+            .add(RX_QUEUE_TAIL_LINK_OFFSET)
+            .cast::<*mut *mut u8>()
+            .read();
+        if vendor_tail_link != vendor_head_slot {
+            return Err(RxInterruptAdoptionError::InvalidEmptyTailLink);
+        }
+
+        let table = ptr::addr_of!(pp_wdev_funcs).read_volatile();
+        if table.is_null() {
+            return Err(RxInterruptAdoptionError::FunctionTableUnavailable);
+        }
+        let slot = table
+            .cast::<u8>()
+            .add(WDEV_LMAC_RX_DONE_CALLBACK_OFFSET)
+            .cast::<usize>();
+        let vendor = lmacRxDone as *const () as usize;
+        let replacement = wifi_strict_lmac_rx_done as *const () as usize;
+        let current = slot.read_volatile();
+        if current != vendor && current != replacement {
+            return Err(RxInterruptAdoptionError::CallbackSlotMismatch);
+        }
+
+        STRICT_RX_QUEUE
+            .0
+            .get()
+            .write(StrictRxQueue::empty());
+        STRICT_RX_QUEUE_HART.store(crate::critical::current_hart(), Ordering::Release);
+        // Publish backing ownership before the callback address. Even an
+        // unexpected cross-hart ROM lookup can therefore never observe the
+        // replacement while its queue still appears unavailable.
+        STRICT_RX_QUEUE_ADOPTED.store(true, Ordering::Release);
+        slot.write_volatile(replacement);
+        if slot.read_volatile() != replacement {
+            STRICT_RX_QUEUE_ADOPTED.store(false, Ordering::Release);
+            return Err(RxInterruptAdoptionError::CallbackReadbackMismatch);
+        }
+        Ok(())
+    })();
+    crate::critical::handoff_local_interrupts_restore(interrupt_state);
+    result
+}
+
+#[cfg(target_arch = "riscv32")]
+pub(crate) fn rx_interrupt_callback_active() -> bool {
+    let table = unsafe { ptr::addr_of!(pp_wdev_funcs).read_volatile() };
+    !table.is_null()
+        && unsafe {
+            table
+                .cast::<u8>()
+                .add(WDEV_LMAC_RX_DONE_CALLBACK_OFFSET)
+                .cast::<usize>()
+                .read_volatile()
+        } == wifi_strict_lmac_rx_done as *const () as usize
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn trap_rx_interrupt_invariant(packet: *mut u8, detail: u32) -> ! {
+    core::arch::asm!(
+        "ebreak",
+        in("a0") packet,
+        in("a1") detail,
+        options(noreturn)
+    )
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn with_rx_queue<R>(operation: impl FnOnce(&mut StrictRxQueue) -> R) -> Option<R> {
+    if !STRICT_RX_QUEUE_ADOPTED.load(Ordering::Acquire)
+        || !crate::critical::on_strict_wifi_hart()
+    {
+        return None;
+    }
+    let interrupt_state = crate::critical::strict_wifi_int_disable();
+    let result = operation(&mut *STRICT_RX_QUEUE.0.get());
+    crate::critical::strict_wifi_int_restore(interrupt_state);
+    Some(result)
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn dequeue_owned_rx_packet() -> Option<*mut u8> {
+    with_rx_queue(|queue| queue.pop_front())
+}
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn finish_owned_rx_dispatch() -> Option<bool> {
+    with_rx_queue(|queue| {
+        if queue.head.is_null() {
+            queue.event_armed = false;
+            false
+        } else {
+            true
+        }
+    })
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+unsafe fn dequeue_owned_rx_packet() -> Option<*mut u8> {
+    None
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+unsafe fn finish_owned_rx_dispatch() -> Option<bool> {
+    None
+}
+
+/// ISR-side owner transfer used by the adopted `pp_wdev_funcs+0x1dc` slot.
+///
+/// It appends one intrusive packet in internal SRAM and wakes the executor only
+/// on the empty-to-non-empty edge. RX readiness itself remains represented by
+/// the intrusive queue, not by a fallible event-channel entry. All code and
+/// mutable queue data on this leaf are assigned to internal SRAM sections.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.rx_done"]
+pub unsafe extern "C" fn wifi_strict_lmac_rx_done(packet: *mut u8) {
+    let strict = crate::critical::strict_wifi_hart_armed();
+    if !STRICT_RX_QUEUE_ADOPTED.load(Ordering::Acquire) {
+        trap_rx_interrupt_invariant(packet, 0x5201);
+    }
+    if crate::critical::current_hart() != STRICT_RX_QUEUE_HART.load(Ordering::Acquire) {
+        trap_rx_interrupt_invariant(packet, 0x5202);
+    }
+    let interrupt_state = if strict {
+        crate::critical::strict_wifi_int_disable()
+    } else {
+        crate::critical::handoff_local_interrupts_disable()
+    };
+    let queue = &mut *STRICT_RX_QUEUE.0.get();
+    let publish = queue.head.is_null() && !queue.event_armed;
+    let appended = queue.append(packet);
+    if appended && publish {
+        queue.event_armed = true;
+    }
+    if strict {
+        crate::critical::strict_wifi_int_restore(interrupt_state);
+    } else {
+        crate::critical::handoff_local_interrupts_restore(interrupt_state);
+    }
+
+    if !appended {
+        trap_rx_interrupt_invariant(packet, 0x5203);
+    }
+    if publish {
+        crate::adapter::wifi_strict_wake_internal_consumer();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -376,16 +656,38 @@ pub(crate) const fn is_continuation(kind: u32) -> bool {
     kind == RX_CONTINUATION_EVENT
 }
 
+/// Return a synthetic RX continuation while the owned interrupt queue contains
+/// work. The queue is the durable readiness state; no finite notification
+/// channel can reject or lose this condition.
+#[cfg(target_arch = "riscv32")]
+pub(crate) fn pending_continuation() -> Option<PpEvent> {
+    let pending = unsafe { with_rx_queue(|queue| !queue.head.is_null()) }?;
+    pending.then_some(PpEvent {
+        kind: RX_CONTINUATION_EVENT,
+        argument: ptr::null_mut(),
+    })
+}
+
+#[cfg(not(target_arch = "riscv32"))]
+pub(crate) fn pending_continuation() -> Option<PpEvent> {
+    None
+}
+
 /// Drain a bounded number of PP RX buffers on the single radio-owner stack.
 pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
-    if rx_registry().is_none() {
+    if rx_registry().is_none() || !STRICT_RX_QUEUE_ADOPTED.load(Ordering::Acquire) {
         return Err(RxPumpError::StateUnavailable);
     }
 
     let mut processed = 0;
     while processed < RX_BUDGET {
-        let packet = unsafe { ppDequeueRxq_Locked() };
+        let Some(packet) = (unsafe { dequeue_owned_rx_packet() }) else {
+            return Err(RxPumpError::StateUnavailable);
+        };
         if packet.is_null() {
+            let Some(_) = (unsafe { finish_owned_rx_dispatch() }) else {
+                return Err(RxPumpError::StateUnavailable);
+            };
             return Ok(());
         }
         processed += 1;
@@ -393,12 +695,9 @@ pub(crate) unsafe fn dispatch() -> Result<(), RxPumpError> {
         unsafe { process_one(packet) };
     }
 
-    if !crate::adapter::enqueue_internal_event(PpEvent {
-        kind: RX_CONTINUATION_EVENT,
-        argument: ptr::null_mut(),
-    }) {
-        return Err(RxPumpError::InternalQueueFull);
-    }
+    let Some(_) = (unsafe { finish_owned_rx_dispatch() }) else {
+        return Err(RxPumpError::StateUnavailable);
+    };
     Ok(())
 }
 
@@ -862,7 +1161,51 @@ fn is_frame_to_local_address(frame: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_fragmented;
+    use core::ptr;
+
+    use super::{is_fragmented, StrictRxQueue, RX_PACKET_NEXT_OFFSET};
+
+    #[repr(align(4))]
+    struct Packet([u8; 64]);
+
+    #[test]
+    fn owned_intrusive_queue_preserves_fifo_and_empty_invariant() {
+        let mut first = Packet([0_u8; 64]);
+        let mut second = Packet([0_u8; 64]);
+        let first_ptr = first.0.as_mut_ptr();
+        let second_ptr = second.0.as_mut_ptr();
+        let mut queue = StrictRxQueue::empty();
+
+        unsafe {
+            assert!(queue.append(first_ptr));
+            assert!(queue.append(second_ptr));
+            assert_eq!(queue.pop_front(), first_ptr);
+            assert_eq!(queue.pop_front(), second_ptr);
+            assert!(queue.pop_front().is_null());
+            assert!(queue.head.is_null());
+            assert!(queue.tail.is_null());
+            assert!(first_ptr
+                .add(RX_PACKET_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .read()
+                .is_null());
+            assert!(second_ptr
+                .add(RX_PACKET_NEXT_OFFSET)
+                .cast::<*mut u8>()
+                .read()
+                .is_null());
+        }
+    }
+
+    #[test]
+    fn owned_intrusive_queue_rejects_null_without_mutation() {
+        let mut queue = StrictRxQueue::empty();
+        unsafe {
+            assert!(!queue.append(ptr::null_mut()));
+        }
+        assert!(queue.head.is_null());
+        assert!(queue.tail.is_null());
+    }
 
     #[test]
     fn fragment_gate_matches_80211_more_and_sequence_bits() {

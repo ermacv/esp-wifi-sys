@@ -227,6 +227,8 @@ const REQUIRED_SRAM_CODE: &[&str] = &[
     "wifi_strict_env_is_chip",
     "__wrap_wDev_AppendRxBlocks",
     "__wrap_ppTxPkt",
+    "wifi_strict_lmac_rx_done",
+    "wifi_strict_wake_internal_consumer",
 ];
 const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ic_get_next_tbtt",
@@ -237,6 +239,8 @@ const REPLACED_ROOTS_FORBIDDEN_IN_FINAL_CALLS: &[&str] = &[
     "ppTxPkt",
     "ppMapTxQueue",
     "ppDequeueTxQ",
+    "ppDequeueRxq_Locked",
+    "lmacRxDone",
     "pm_on_coex_schm_status_config",
     "pm_set_beacon_duration",
     "cnx_check_bssid_in_blacklist",

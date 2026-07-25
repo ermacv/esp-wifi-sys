@@ -67,6 +67,7 @@ pub enum StrictRuntimeError {
     TxQueueStateAdoption(crate::tx_queue::TxQueueStateAdoptionError),
     TxDoneStateAdoption(crate::txdone::TxDoneStateAdoptionError),
     RxStateAdoption(crate::rx::RxStateAdoptionError),
+    RxInterruptStateAdoption(crate::rx::RxInterruptAdoptionError),
     RuntimeCallbacksNotPatched,
     PpTaskHandoffIncomplete,
     PpPostLinkWrapperMissing,
@@ -418,6 +419,9 @@ pub unsafe fn prepare_strict_runtime(
     if !crate::adapter::pp_post_link_wrapper_active() {
         return Err(StrictRuntimeError::PpPostLinkWrapperMissing);
     }
+    #[cfg(feature = "strict-no-wait")]
+    crate::rx::adopt_rx_interrupt_queue()
+        .map_err(StrictRuntimeError::RxInterruptStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
     if !crate::net80211_tx::link_wrapper_active() {
         return Err(StrictRuntimeError::Net80211TxLinkWrapperMissing);

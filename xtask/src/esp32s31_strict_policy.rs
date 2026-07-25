@@ -21,7 +21,6 @@ pub const ROOTS: &[&str] = &[
     "ic_set_rx_policy_ubssid_check",
     "ieee80211_getmgtframe",
     "esp_wifi_internal_free_rx_buffer",
-    "ppDequeueRxq_Locked",
     "ppRxProtoProc",
     "ppRecycleRxPkt",
     "ic_del_key",
