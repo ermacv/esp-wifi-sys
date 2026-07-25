@@ -937,6 +937,14 @@ descriptor flags `0x0000_3009`, callback bit 12, and pairwise hardware status
 `0x0404_0349`. The slot-nine completion is admitted only with the same bounded
 pairwise geometry; adjacent `0x0405_0349` remains rejected.
 
+The repeated two-client run then completed 4 MiB and 16 MiB AP-to-laptop TCP
+streams while the Android peer continuously exchanged ICMP traffic. The
+16 MiB stream completed in 22.526 seconds with no changed payload bytes;
+all `15_222` committed hardware TX credits were returned, the software and
+hardware TX queues were empty, and both stations subsequently completed
+20/20 ICMP probes. The final strict ELF audit still reported 24 roots, 6,407
+discovered functions, and zero no-wait/no-heap violations.
+
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
 descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned
