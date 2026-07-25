@@ -157,18 +157,50 @@ ROM indirections to stay exactly zero, and rejects growth in strict static
 storage, the vendor call graph, cold PHY state, or other linked mutable blob
 state.
 
+## Completed slice: typed large-RX ownership
+
+The kind-7 ESF receive path now has an explicit ownership state independent of
+its C ABI pointer:
+
+```text
+Free -> Radio -> Network -> Free
+```
+
+The safe `rx_ownership` module encodes these states in two native-word bitmaps
+and host-tests every transition. `esf.rs` remains the target adapter: it
+validates the exact fixed-pool object and packet range, then creates one
+`OwnedLargeRxNetworkFrame`. A duplicate or stale callback cannot create a
+second safe token. The network channel stores that token rather than three raw
+pointer/length fields, and safe immutable/mutable packet views are available
+only through the token. Its destructor is the sole Network-to-Free transition.
+The generic radio recycler accepts only Radio-owned objects, so it cannot free
+storage still held by the network executor.
+
+The ISR still publishes only the intrusive lower-MAC packet pointer into the
+bounded RX queue; it never sees the network ownership token. This preserves the
+minimal ISR view while moving the cross-context lifetime into safe Rust. The
+new second ownership bitmap costs one native word in the default profile. A
+redundant cumulative data-RX claim counter was removed and is now derived from
+the mutually exclusive admission outcomes, keeping the primary static SRAM
+budget neutral.
+
+This slice does not claim that the WDEV payload, cold ESF, and runtime ESF pools
+have disjoint lifetimes. It makes that lifetime measurable and enforceable
+before any overlay is attempted.
+
 ## Next slices
 
 Priority is now based on ownership leverage and total SRAM, rather than only
 on mutable blob bytes:
 
-1. Complete the `RadioResources` composition root by moving RX resources under
-   a unique owner while retaining a minimal ISR publication view.
-2. Trace the RX lifetime vertically from the hardware descriptor through WDEV
-   and ESF to the network consumer. Port `wDev_ProcessRxSucData`,
-   `ppRxProtoProc`, `ppRecycleRxPkt`, and the free-buffer boundary as their
-   ownership contracts become explicit.
-3. Use measured high-water marks to overlay or remove only storage whose
+1. Move the executor-side RX queue/recycle capability under the unique
+   `RadioResources` owner. Retain only the intrusive queue and wake edge in the
+   ISR publication view.
+2. Replace the remaining raw Radio-owned packet transitions in
+   `wDev_ProcessRxSucData`, `ppRxProtoProc`, `ppRecycleRxPkt`, and
+   `esp_wifi_internal_free_rx_buffer` one vertical boundary at a time.
+3. Use the separate Radio/Network ownership counts and existing high-water
+   marks to overlay or remove only storage whose
    lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
    new throughput qualification because it has reached full occupancy.
 4. Replace NVS-shaped cold configuration storage with typed Rust

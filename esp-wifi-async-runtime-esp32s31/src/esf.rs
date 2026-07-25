@@ -7,6 +7,8 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use crate::rx_ownership::{RxBufferOwner, RxBufferOwnershipWord};
+
 const DESCRIPTOR_COUNT: usize = 11;
 const DESCRIPTOR_SIZE: usize = 0x14;
 const ESF_HEADER_SIZE: usize = 0x90;
@@ -88,8 +90,8 @@ static LARGE_RX_SLOTS: [LargeRxSlot; LARGE_RX_SLOT_CAPACITY] =
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_large_rx_claims"
 )]
-static CLAIMED_LARGE_RX_SLOTS: [AtomicUsize; LARGE_RX_CLAIM_WORDS] =
-    [const { AtomicUsize::new(0) }; LARGE_RX_CLAIM_WORDS];
+static LARGE_RX_OWNERS: [RxBufferOwnershipWord; LARGE_RX_CLAIM_WORDS] =
+    [const { RxBufferOwnershipWord::new() }; LARGE_RX_CLAIM_WORDS];
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".critical.bss.wifi_strict.esf_rejections"
@@ -287,8 +289,8 @@ fn claim_large_rx_slot() -> Option<usize> {
     // allocation never waits or enters a critical section.
     let mut word_index = 0;
     while word_index < LARGE_RX_CLAIM_WORDS {
-        let claims = &CLAIMED_LARGE_RX_SLOTS[word_index];
-        let claimed = claims.load(Ordering::Acquire);
+        let ownership = &LARGE_RX_OWNERS[word_index];
+        let claimed = ownership.claimed_bits();
         let first_slot = word_index * LARGE_RX_CLAIM_WORD_BITS;
         let remaining = LARGE_RX_SLOT_CAPACITY - first_slot;
         let valid_mask = if remaining >= LARGE_RX_CLAIM_WORD_BITS {
@@ -299,9 +301,9 @@ fn claim_large_rx_slot() -> Option<usize> {
         let free = !claimed & valid_mask;
         if free != 0 {
             let word_slot = free.trailing_zeros() as usize;
-            let bit = 1_usize << word_slot;
-            if claims.fetch_or(bit, Ordering::AcqRel) & bit == 0 {
-                return Some(first_slot + word_slot);
+            if ownership.try_claim_radio(word_slot) {
+                let index = first_slot + word_slot;
+                return Some(index);
             }
         }
         word_index += 1;
@@ -312,15 +314,20 @@ fn claim_large_rx_slot() -> Option<usize> {
 #[inline(always)]
 fn large_rx_slot_claimed(index: usize) -> bool {
     let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
-    let bit = 1_usize << (index % LARGE_RX_CLAIM_WORD_BITS);
-    CLAIMED_LARGE_RX_SLOTS[word_index].load(Ordering::Acquire) & bit != 0
+    LARGE_RX_OWNERS[word_index].claimed_bits() & (1_usize << (index % LARGE_RX_CLAIM_WORD_BITS))
+        != 0
 }
 
 #[inline(always)]
-fn release_large_rx_slot(index: usize) -> bool {
+fn release_large_rx_slot(index: usize, owner: RxBufferOwner) -> bool {
     let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
-    let bit = 1_usize << (index % LARGE_RX_CLAIM_WORD_BITS);
-    CLAIMED_LARGE_RX_SLOTS[word_index].fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    LARGE_RX_OWNERS[word_index].try_release(index % LARGE_RX_CLAIM_WORD_BITS, owner)
+}
+
+#[inline(always)]
+fn large_rx_owner(index: usize) -> Option<RxBufferOwner> {
+    let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
+    LARGE_RX_OWNERS[word_index].owner(index % LARGE_RX_CLAIM_WORD_BITS)
 }
 
 #[cfg_attr(
@@ -363,7 +370,8 @@ fn large_rx_slot_index(frame: *mut u8) -> Option<usize> {
 )]
 pub(crate) fn large_rx_slot_id(frame: *mut u8) -> Option<u8> {
     let index = large_rx_slot_index(frame)?;
-    large_rx_slot_claimed(index).then_some(index as u8)
+    (large_rx_slot_claimed(index) && large_rx_owner(index) == Some(RxBufferOwner::Radio))
+        .then_some(index as u8)
 }
 
 /// Resolve a reorder slot ID back to its still-owned ESF object.
@@ -379,67 +387,123 @@ pub(crate) fn large_rx_frame(slot: u8) -> Option<*mut u8> {
     if index >= LARGE_RX_SLOT_CAPACITY {
         return None;
     }
-    if !large_rx_slot_claimed(index) {
+    if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
         return None;
     }
     Some(LARGE_RX_SLOTS[index].0.get().cast::<u8>())
 }
 
-/// Validate transfer of a kind-7 receive object into the safe network channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LargeRxNetworkAdoptionError {
+    NotRustPool,
+    NotRadioOwned,
+    InvalidView,
+}
+
+/// Unique, safe network-stack ownership of one kind-7 ESF frame.
 ///
-/// The ESF slot remains claimed; this only proves that the callback's packet
-/// view is contained by the exact live SRAM object represented by `frame`.
+/// The ABI address is reconstructed from `slot`; it is never exposed to the
+/// network consumer. Dropping this value is the only Network -> Free
+/// transition and returns the backing storage directly to the Rust pool.
+pub(crate) struct OwnedLargeRxNetworkFrame {
+    slot: u8,
+    buffer_offset: u16,
+    length: u16,
+}
+
+impl OwnedLargeRxNetworkFrame {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        let frame = LARGE_RX_SLOTS[usize::from(self.slot)].0.get().cast::<u8>();
+        unsafe {
+            core::slice::from_raw_parts(
+                frame.add(usize::from(self.buffer_offset)),
+                usize::from(self.length),
+            )
+        }
+    }
+
+    pub(crate) fn as_bytes_mut(&mut self) -> &mut [u8] {
+        let frame = LARGE_RX_SLOTS[usize::from(self.slot)].0.get().cast::<u8>();
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                frame.add(usize::from(self.buffer_offset)),
+                usize::from(self.length),
+            )
+        }
+    }
+}
+
+impl Drop for OwnedLargeRxNetworkFrame {
+    fn drop(&mut self) {
+        let index = usize::from(self.slot);
+        let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
+        unsafe {
+            let buffer_descriptor = frame.add(0x04).cast::<*mut u8>().read();
+            let payload = frame
+                .add(ESF_BUFFER_POINTER_OFFSET)
+                .cast::<*mut u8>()
+                .read();
+            if !buffer_descriptor.is_null() {
+                buffer_descriptor.add(4).cast::<*mut u8>().write(payload);
+            }
+        }
+        if !release_large_rx_slot(index, RxBufferOwner::Network) {
+            reject(u32::MAX, frame as usize);
+        }
+    }
+}
+
+/// Transfer a live kind-7 ESF object from the radio owner to the safe network
+/// channel.
+///
+/// This is the sole Radio -> Network ownership edge. A second callback for the
+/// same object is rejected rather than creating another safe token.
+///
+/// # Safety
+///
+/// `frame` and `buffer` come from the pinned RX callback ABI. `buffer` must be
+/// readable for `length` bytes while the radio still owns `frame`.
 #[cfg_attr(
     target_arch = "riscv32",
     link_section = ".rwtext.wifi_strict.esf"
 )]
-pub(crate) unsafe fn owned_large_rx_view_valid(
+pub(crate) unsafe fn adopt_large_rx_for_network(
     frame: *mut u8,
     buffer: *mut u8,
     length: usize,
-) -> bool {
+) -> Result<OwnedLargeRxNetworkFrame, LargeRxNetworkAdoptionError> {
     if buffer.is_null() || length == 0 {
-        return false;
+        return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
     let Some(index) = large_rx_slot_index(frame) else {
-        return false;
+        return Err(LargeRxNetworkAdoptionError::NotRustPool);
     };
-    if !large_rx_slot_claimed(index) {
-        return false;
+    if !large_rx_slot_claimed(index) || large_rx_owner(index) != Some(RxBufferOwner::Radio) {
+        return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
     }
     let start = frame.add(ESF_HEADER_SIZE) as usize;
     let Some(end) = (buffer as usize).checked_add(length) else {
-        return false;
+        return Err(LargeRxNetworkAdoptionError::InvalidView);
     };
-    buffer as usize >= start && end <= start + LARGE_RX_PAYLOAD_CAPACITY
-}
-
-/// Release a kind-7 frame after the safe network-channel owner drops it.
-///
-/// This is the allocation-free leaf of `ppRecycleRxPkt` specialized to the
-/// Rust-owned kind-7 pool. It may run outside the virtual Wi-Fi task because
-/// it touches no vendor list or lock: the sole ownership transition is one
-/// atomic bit clear.
-#[cfg_attr(
-    target_arch = "riscv32",
-    link_section = ".rwtext.wifi_strict.esf"
-)]
-pub(crate) unsafe fn release_owned_large_rx_frame(frame: *mut u8) -> bool {
-    let Some(index) = large_rx_slot_index(frame) else {
-        return false;
-    };
-    let buffer_descriptor = frame
-        .add(0x04)
-        .cast::<*mut u8>()
-        .read();
-    let payload = frame
-        .add(ESF_BUFFER_POINTER_OFFSET)
-        .cast::<*mut u8>()
-        .read();
-    if !buffer_descriptor.is_null() {
-        buffer_descriptor.add(4).cast::<*mut u8>().write(payload);
+    if (buffer as usize) < start || end > start + LARGE_RX_PAYLOAD_CAPACITY {
+        return Err(LargeRxNetworkAdoptionError::InvalidView);
     }
-    release_large_rx_slot(index)
+    if length > u16::MAX as usize {
+        return Err(LargeRxNetworkAdoptionError::InvalidView);
+    }
+    let offset = buffer as usize - frame as usize;
+    if offset > u16::MAX as usize {
+        return Err(LargeRxNetworkAdoptionError::InvalidView);
+    }
+    let word_index = index / LARGE_RX_CLAIM_WORD_BITS;
+    if !LARGE_RX_OWNERS[word_index].try_transfer_to_network(index % LARGE_RX_CLAIM_WORD_BITS) {
+        return Err(LargeRxNetworkAdoptionError::NotRadioOwned);
+    };
+    Ok(OwnedLargeRxNetworkFrame {
+        slot: index as u8,
+        buffer_offset: offset as u16,
+        length: length as u16,
+    })
 }
 
 /// Return whether `frame` belongs to one of the fixed pools handled by the
@@ -476,7 +540,7 @@ unsafe fn allocate_large_rx(source: *const u8, length: usize) -> Option<*mut u8>
     let index = claim_large_rx_slot()?;
     let frame = LARGE_RX_SLOTS[index].0.get().cast::<u8>();
     if initialize_frame(frame, 7, source, length, LARGE_RX_PAYLOAD_CAPACITY).is_none() {
-        release_large_rx_slot(index);
+        release_large_rx_slot(index, RxBufferOwner::Radio);
         return None;
     }
     Some(frame)
@@ -681,7 +745,7 @@ pub unsafe extern "C" fn __wrap_esf_buf_recycle(frame: *mut c_void) {
         return;
     }
     if let Some(index) = large_rx_slot_index(frame) {
-        if !release_large_rx_slot(index) {
+        if !release_large_rx_slot(index, RxBufferOwner::Radio) {
             reject(u32::MAX, frame as usize);
         }
         return;
@@ -703,6 +767,8 @@ pub struct FixedEsfPoolSnapshot {
     pub management_claimed: usize,
     pub management_capacity: usize,
     pub large_rx_claimed: usize,
+    pub large_rx_radio_owned: usize,
+    pub large_rx_network_owned: usize,
     pub large_rx_capacity: usize,
     pub rejected_operations: usize,
     pub last_rejected_kind: u32,
@@ -715,10 +781,16 @@ pub fn fixed_esf_pool_snapshot() -> FixedEsfPoolSnapshot {
             .load(Ordering::Acquire)
             .count_ones() as usize,
         management_capacity: MANAGEMENT_SLOT_CAPACITY,
-        large_rx_claimed: CLAIMED_LARGE_RX_SLOTS
+        large_rx_claimed: LARGE_RX_OWNERS
             .iter()
-            .map(|claims| claims.load(Ordering::Acquire).count_ones() as usize)
+            .map(|ownership| ownership.claimed_bits().count_ones() as usize)
             .sum(),
+        large_rx_radio_owned: (0..LARGE_RX_SLOT_CAPACITY)
+            .filter(|index| large_rx_owner(*index) == Some(RxBufferOwner::Radio))
+            .count(),
+        large_rx_network_owned: (0..LARGE_RX_SLOT_CAPACITY)
+            .filter(|index| large_rx_owner(*index) == Some(RxBufferOwner::Network))
+            .count(),
         large_rx_capacity: LARGE_RX_SLOT_CAPACITY,
         rejected_operations: rejected_esf_operations(),
         last_rejected_kind: LAST_REJECTED_ESF_KIND.load(Ordering::Acquire) as u32,

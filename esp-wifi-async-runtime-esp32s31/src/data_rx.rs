@@ -81,7 +81,6 @@ static RX_SLOTS: [RxSlot; WIFI_DATA_RX_COPY_CAPACITY] =
 )]
 static RX_CHANNEL: BoundedChannel<RxSlotToken, WIFI_DATA_RX_CAPACITY> = BoundedChannel::new();
 static REJECTED_RX_FRAMES: AtomicUsize = AtomicUsize::new(0);
-static RX_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 static RX_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
 static RX_DEQUEUED: AtomicUsize = AtomicUsize::new(0);
 static RX_RELEASED: AtomicUsize = AtomicUsize::new(0);
@@ -155,15 +154,21 @@ pub struct WifiDataRxSnapshot {
 }
 
 pub fn wifi_data_rx_snapshot() -> WifiDataRxSnapshot {
+    let enqueued = RX_ENQUEUED.load(Ordering::Acquire);
+    let rejected_slots_full = RX_REJECTED_SLOTS_FULL.load(Ordering::Acquire);
+    let rejected_channel_contended = RX_REJECTED_CHANNEL_CONTENDED.load(Ordering::Acquire);
     WifiDataRxSnapshot {
-        claimed: RX_CLAIMED.load(Ordering::Acquire),
-        enqueued: RX_ENQUEUED.load(Ordering::Acquire),
+        // Every valid token is either enqueued or rejected by one of the two
+        // bounded admission conditions, so this cumulative value needs no
+        // separate mutable counter.
+        claimed: enqueued + rejected_slots_full + rejected_channel_contended,
+        enqueued,
         dequeued: RX_DEQUEUED.load(Ordering::Acquire),
         released: RX_RELEASED.load(Ordering::Acquire),
         rejected: REJECTED_RX_FRAMES.load(Ordering::Acquire),
         rejected_invalid: RX_REJECTED_INVALID.load(Ordering::Acquire),
-        rejected_slots_full: RX_REJECTED_SLOTS_FULL.load(Ordering::Acquire),
-        rejected_channel_contended: RX_REJECTED_CHANNEL_CONTENDED.load(Ordering::Acquire),
+        rejected_slots_full,
+        rejected_channel_contended,
         occupied: RX_OCCUPIED.load(Ordering::Acquire),
         occupied_high_water: RX_OCCUPIED_HIGH_WATER.load(Ordering::Acquire),
         queued: RX_CHANNEL.len(),
@@ -182,11 +187,7 @@ enum RxStorage {
         index: usize,
     },
     #[cfg(target_arch = "riscv32")]
-    LargeEsf {
-        buffer: *mut u8,
-        length: usize,
-        frame: *mut u8,
-    },
+    LargeEsf(crate::esf::OwnedLargeRxNetworkFrame),
 }
 
 struct RxSlotToken {
@@ -199,9 +200,6 @@ struct RxSlotToken {
     #[cfg(all(target_arch = "riscv32", feature = "rx-pipeline-telemetry"))]
     telemetry_sample: bool,
 }
-
-#[cfg(target_arch = "riscv32")]
-unsafe impl Send for RxSlotToken {}
 
 impl Drop for RxSlotToken {
     fn drop(&mut self) {
@@ -219,11 +217,7 @@ impl Drop for RxSlotToken {
                 RX_SLOTS[*index].occupied.store(false, Ordering::Release);
             }
             #[cfg(target_arch = "riscv32")]
-            RxStorage::LargeEsf { frame, .. } => {
-                if unsafe { !crate::esf::release_owned_large_rx_frame(*frame) } {
-                    RX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            RxStorage::LargeEsf(_) => {}
         }
         RX_RELEASED.fetch_add(1, Ordering::Relaxed);
         RX_OCCUPIED.fetch_sub(1, Ordering::AcqRel);
@@ -246,9 +240,7 @@ impl OwnedWifiDataFrame {
                 &data.bytes[..data.length]
             }
             #[cfg(target_arch = "riscv32")]
-            RxStorage::LargeEsf { buffer, length, .. } => unsafe {
-                core::slice::from_raw_parts(*buffer, *length)
-            },
+            RxStorage::LargeEsf(frame) => frame.as_bytes(),
         }
     }
 
@@ -263,9 +255,7 @@ impl OwnedWifiDataFrame {
                 &mut data.bytes[..data.length]
             }
             #[cfg(target_arch = "riscv32")]
-            RxStorage::LargeEsf { buffer, length, .. } => unsafe {
-                core::slice::from_raw_parts_mut(*buffer, *length)
-            },
+            RxStorage::LargeEsf(frame) => frame.as_bytes_mut(),
         }
     }
 }
@@ -362,7 +352,6 @@ fn enqueue_token(mut token: RxSlotToken) -> bool {
     {
         token.enqueued_cycle = cycle_count();
     }
-    RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
     let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
     record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
     if let Err(error) = RX_CHANNEL.try_send(token) {
@@ -381,7 +370,6 @@ fn enqueue_token(mut token: RxSlotToken) -> bool {
 
 #[cfg(target_arch = "riscv32")]
 fn reject_owned_token_at_capacity(token: RxSlotToken) -> bool {
-    RX_CLAIMED.fetch_add(1, Ordering::Relaxed);
     let occupied = RX_OCCUPIED.fetch_add(1, Ordering::AcqRel) + 1;
     record_high_water(&RX_OCCUPIED_HIGH_WATER, occupied);
     REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -446,20 +434,22 @@ mod target {
         vendor_buffer: *mut c_void,
     ) -> i32 {
         let length = usize::from(length);
-        let owns_large_esf = length <= WIFI_DATA_RX_FRAME_CAPACITY
-            && !vendor_buffer.is_null()
-            && crate::esf::owned_large_rx_view_valid(vendor_buffer.cast(), buffer.cast(), length);
-        let accepted = if owns_large_esf {
+        let large_esf = if length <= WIFI_DATA_RX_FRAME_CAPACITY && !vendor_buffer.is_null() {
+            Some(crate::esf::adopt_large_rx_for_network(
+                vendor_buffer.cast(),
+                buffer.cast(),
+                length,
+            ))
+        } else {
+            None
+        };
+        let accepted = if let Some(Ok(frame)) = large_esf {
             // Transfer the live kind-7 object into the bounded safe channel.
-            // Its token releases the one Rust pool bit directly on Drop, so
-            // no vendor mutex or task identity crosses into embassy-net.
+            // Its typed token performs the sole Network -> Free transition on
+            // Drop, so raw ESF pointers cannot cross into embassy-net.
             let token = RxSlotToken {
                 interface,
-                storage: RxStorage::LargeEsf {
-                    buffer: buffer.cast(),
-                    length,
-                    frame: vendor_buffer.cast(),
-                },
+                storage: RxStorage::LargeEsf(frame),
                 #[cfg(feature = "rx-pipeline-telemetry")]
                 enqueued_cycle: 0,
                 #[cfg(feature = "rx-pipeline-telemetry")]
@@ -472,6 +462,16 @@ mod target {
             } else {
                 enqueue_token(token)
             }
+        } else if matches!(
+            large_esf,
+            Some(Err(crate::esf::LargeRxNetworkAdoptionError::NotRadioOwned))
+        ) {
+            // A duplicate/stale callback must not recycle a frame already
+            // owned by the network task. Fail closed without creating an
+            // alias or freeing live storage.
+            REJECTED_RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+            RX_REJECTED_INVALID.fetch_add(1, Ordering::Relaxed);
+            false
         } else {
             // Small vendor-static frames cannot be returned to their intrusive
             // free list from an arbitrary network task. Copy them into the
