@@ -888,6 +888,14 @@ finite mapper admits only this complete measured tuple and rewrites descriptor
 byte four to the recovered treatment `7`; the group-key selector, an already
 mapped priority, and a pre-association peer remain independently rejected.
 
+An Android station later exposed the adjacent rate-control form of that first
+pairwise downlink: frame control `0x4288`, rate `11`, layout `0x2002`,
+descriptor flags `0x0200_2009`, priority `7`, pairwise selector
+`0x0004_0348`, associated-peer word `0x2100_0000`, and peer flag `1`. It is
+admitted as a separate complete mapper class for the two already-qualified AP
+peer identities. The unrelated `0x0100_0000` flag and mixing priority `0x20`
+into this rate-control class remain rejected.
+
 Its first successful completion retained frame control `0x4288`, lengths
 `0x0022:0x0038`, layout `0x2000`, buffer equation `0xc016_8052`,
 descriptor flags `0x0000_3009`, and callback bit 12, while hardware returned

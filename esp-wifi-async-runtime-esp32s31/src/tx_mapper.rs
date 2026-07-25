@@ -159,6 +159,17 @@ pub(crate) fn strict_sta_ap_treatment(
         && state[1] == 0x20
         && state[2] == 0x0004_0348
         && bounded_ap_peer;
+    // Android exposed the adjacent first-downlink state before the selected
+    // rate has converged to the fixed HT tuple above. The descriptor carries
+    // the already-qualified rate-control bit, rate 11, and the untouched
+    // treatment byte 7. Keep it as a separate complete class: admitting the
+    // bit on the HT tuple would hide an unobserved combination.
+    let ap_pairwise_rate_control_qos = rate == 11
+        && frame_control == 0x4288
+        && state[0] == 0x0200_2009
+        && state[1] == 7
+        && state[2] == 0x0004_0348
+        && bounded_ap_peer;
     // Bytes five through seven are PP aggregation-search hints. They are zero
     // before ADDBA and become nonzero after the peer accepts ADDBA, but the
     // strict single-MPDU path deliberately does not enter ppSearchTxQueue.
@@ -185,6 +196,7 @@ pub(crate) fn strict_sta_ap_treatment(
         || ap_group_ccmp_data
         || ap_addba_response
         || ap_pairwise_ht_qos
+        || ap_pairwise_rate_control_qos
         || ht_qos
         || legacy_qos
     {
@@ -432,6 +444,18 @@ mod tests {
                 0x4288,
                 [0x0000_2009, 0x20, 0x0004_0348, 0x2100_0000, 2],
             ),
+            (
+                11,
+                0x2002,
+                0x4288,
+                [0x0200_2009, 7, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            (
+                11,
+                0x2003,
+                0x4288,
+                [0x0200_2009, 7, 0x0004_0348, 0x2100_0000, 2],
+            ),
             (0, 0x2001, 0x00d0, [0, 7, 0, 0x81, 0]),
             (33, 0x2002, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
             (33, 0x2003, 0x4188, [0x0000_2009, 7, 0x304, 0x81, 0]),
@@ -544,6 +568,24 @@ mod tests {
                 0x2000,
                 0x4288,
                 [0x0000_2009, 7, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                11,
+                0x2002,
+                0x4288,
+                [0x0100_2009, 7, 0x0004_0348, 0x2100_0000, 1],
+            ),
+            None
+        );
+        assert_eq!(
+            strict_sta_ap_treatment(
+                11,
+                0x2002,
+                0x4288,
+                [0x0200_2009, 0x20, 0x0004_0348, 0x2100_0000, 1],
             ),
             None
         );
