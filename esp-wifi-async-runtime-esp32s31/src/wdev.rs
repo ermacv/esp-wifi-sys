@@ -176,6 +176,12 @@ struct RxMetadataProbe {
     extra_only: AtomicUsize,
     sublength_and_extra: AtomicUsize,
     max_payload_offset: AtomicUsize,
+    route_sta: AtomicUsize,
+    route_ap: AtomicUsize,
+    route_nan: AtomicUsize,
+    route_other: AtomicUsize,
+    frame_class_bitmap: AtomicUsize,
+    aggregate_flag_bitmap: AtomicUsize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -194,6 +200,12 @@ impl RxMetadataProbe {
             extra_only: AtomicUsize::new(0),
             sublength_and_extra: AtomicUsize::new(0),
             max_payload_offset: AtomicUsize::new(0),
+            route_sta: AtomicUsize::new(0),
+            route_ap: AtomicUsize::new(0),
+            route_nan: AtomicUsize::new(0),
+            route_other: AtomicUsize::new(0),
+            frame_class_bitmap: AtomicUsize::new(0),
+            aggregate_flag_bitmap: AtomicUsize::new(0),
         }
     }
 }
@@ -213,6 +225,12 @@ pub struct WdevRxMetadataSnapshot {
     pub extra_only: usize,
     pub sublength_and_extra: usize,
     pub max_payload_offset: usize,
+    pub route_sta: usize,
+    pub route_ap: usize,
+    pub route_nan: usize,
+    pub route_other: usize,
+    pub frame_class_bitmap: usize,
+    pub aggregate_flag_bitmap: usize,
 }
 
 #[cfg(target_arch = "riscv32")]
@@ -875,6 +893,33 @@ pub unsafe extern "C" fn wifi_strict_wdev_process_rx_success_data(
         _ => &RX_METADATA_PROBE.status_other,
     }
     .fetch_add(1, Ordering::Relaxed);
+    match prefix[3] & 0x70 {
+        0x10 => &RX_METADATA_PROBE.route_sta,
+        0x20 => &RX_METADATA_PROBE.route_ap,
+        0x40 => &RX_METADATA_PROBE.route_nan,
+        _ => &RX_METADATA_PROBE.route_other,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+    if layout.payload_offset + 10 <= descriptor_length {
+        let frame_control = metadata
+            .add(layout.payload_offset + 8)
+            .cast::<u16>()
+            .read_unaligned();
+        RX_METADATA_PROBE.frame_class_bitmap.fetch_or(
+            1_usize << usize::from(frame_control & 0x0f),
+            Ordering::Relaxed,
+        );
+    }
+    let aggregate_flag = if prefix[1] as i8 >= 0 && prefix[1] & 0xc0 == 0x40 {
+        usize::from(
+            u32::from_le_bytes([prefix[4], prefix[5], prefix[6], prefix[7]]) >> 27 & 1,
+        )
+    } else {
+        1
+    };
+    RX_METADATA_PROBE
+        .aggregate_flag_bitmap
+        .fetch_or(1 << aggregate_flag, Ordering::Relaxed);
 
     __real_wDev_ProcessRxSucData(tail, count);
 }
@@ -1321,6 +1366,14 @@ pub fn rx_metadata_snapshot() -> WdevRxMetadataSnapshot {
             .load(Ordering::Acquire),
         max_payload_offset: RX_METADATA_PROBE
             .max_payload_offset
+            .load(Ordering::Acquire),
+        route_sta: RX_METADATA_PROBE.route_sta.load(Ordering::Acquire),
+        route_ap: RX_METADATA_PROBE.route_ap.load(Ordering::Acquire),
+        route_nan: RX_METADATA_PROBE.route_nan.load(Ordering::Acquire),
+        route_other: RX_METADATA_PROBE.route_other.load(Ordering::Acquire),
+        frame_class_bitmap: RX_METADATA_PROBE.frame_class_bitmap.load(Ordering::Acquire),
+        aggregate_flag_bitmap: RX_METADATA_PROBE
+            .aggregate_flag_bitmap
             .load(Ordering::Acquire),
     }
 }
