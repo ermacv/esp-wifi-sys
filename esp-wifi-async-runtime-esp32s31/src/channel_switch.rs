@@ -45,7 +45,6 @@ unsafe extern "C" {
     fn chm_return_home_channel();
     fn __real_chm_return_home_channel();
     fn ic_set_current_channel(channel: *const u8);
-    fn phy_change_channel(frequency_mhz: u16, init: u32, noise_floor: u32, cbw: u32);
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
 }
@@ -420,7 +419,7 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
         return;
     }
 
-    phy_change_channel(frequency_mhz, 1, 0, u32::from(cbw));
+    crate::phy_channel::program_channel(frequency_mhz, cbw);
     hal_mac_set_csi_cbw(u32::from(cbw));
     let _ = ic_mac_init();
 

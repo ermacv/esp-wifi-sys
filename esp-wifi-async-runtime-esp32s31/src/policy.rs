@@ -278,6 +278,8 @@ pub unsafe fn prepare_strict_runtime_before_handoff(
     crate::channel_switch::adopt_vendor_channel_state()
         .map_err(StrictRuntimeError::ChannelStateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
+    crate::phy_channel::adopt_vendor_phy_channel_state();
+    #[cfg(feature = "strict-no-wait")]
     crate::net80211_state::adopt_vendor_interface_registry()
         .map_err(StrictRuntimeError::Net80211StateAdoption)?;
     #[cfg(feature = "strict-no-wait")]
