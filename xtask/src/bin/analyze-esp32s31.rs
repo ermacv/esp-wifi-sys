@@ -414,7 +414,8 @@ fn analyze(
             .current_dir(temporary)
             .arg("x")
             .arg(net80211_archive)
-            .arg("ieee80211_hostap.o"),
+            .arg("ieee80211_hostap.o")
+            .arg("ieee80211_ht.o"),
     )?;
     let linked_net80211_locals = temporary.join("net80211-async-locals.o");
     checked(
@@ -426,7 +427,8 @@ fn analyze(
             .arg(workspace.join("esp-wifi-async-runtime-esp32s31/ld/esp32s31-net80211-locals.x"))
             .arg("-o")
             .arg(&linked_net80211_locals)
-            .arg(temporary.join("ieee80211_hostap.o")),
+            .arg(temporary.join("ieee80211_hostap.o"))
+            .arg(temporary.join("ieee80211_ht.o")),
     )?;
     let net80211_local_aliases = text(checked(
         Command::new("llvm-nm").arg(&linked_net80211_locals),

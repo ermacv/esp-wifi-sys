@@ -1510,15 +1510,45 @@ skips initialization; zero expands ROM `phy_i2c_sar2_init_code(0x578)` at
 full-byte write of `0x78`. Both branches preserve
 `sar2_reinitialized` in the terminal state.
 
-The prefix now reaches `ReadyForXtalDutyCalibration` only after the first
+The prefix advances into operation twenty-four only after the first
 twenty-three cold-parent operations. SDM and PBus timeouts terminate
-separately and cannot run later hardware steps. The serial runtime suite
-passes 348 tests. The next boundary is operation twenty-four,
-`phy_xtal_duty_cal_init(0)`.
-`phy_freq_reg_init()` belongs to `phy_wakeup_init` and
-`phy_set_chan_freq_hw_init`, not this point in the cold path. The prefix
-remains dead-stripped and does not replace any part of the live parent until
-the remaining three operations have equivalent owned actions.
+separately and cannot run later hardware steps.
+
+The complete `libphy.a[phy_rx_cal.o]::phy_xtal_duty_cal_init` wrapper is
+`0x74` bytes. It reads `(0x61, reg9, bits5:0)`, clears bit five of
+`(0x61, reg7)`, then performs calibration passes at frequency codes `0x988`
+and `0x9b0`. The complete `phy_xtal_duty_cal` body is `0x392` bytes. Each
+pass tests all 31 duty candidates `0x20..=0x3e`; every candidate requires an
+external 20-microsecond timer edge and four signal-power measurements. A
+sample outside `2/3..=3/2` of the initial mean is replaced at most twice.
+The first candidate with the smallest signed filtered mean wins, so equal
+values preserve the earlier candidate.
+
+`XtalDutyCalibrationTransition` and `XtalDutySearchTransition` own that
+wrapper, both passes, all samples and both results. They contain no future,
+waker, allocation, print, delay implementation or self-progressing poll.
+The parent captures `phy_param[0x4f]` and byte two of the image published
+through ROM `phy_param_rom` as typed inputs before entering the transition.
+The latter byte is forwarded by `phy_pbus_xpd_rx_on` to PBus selector zero,
+path two; its electrical meaning is deliberately left unnamed until evidence
+identifies it. `phy_set_txclk_en` and `phy_set_rxclk_en` are now exact Rust
+MMIO leaves for bits 17:16 and 15:14 respectively at `0x2010_0890`.
+
+This is not yet a claim that operation twenty-four is blob-free. Its typed
+`PrepareHardware` and `RestoreHardware` actions are composition boundaries,
+not permission to call the synchronous vendor parent. The remaining
+decomposition is RFPLL frequency programming, tone setup (including the
+`g_phyFuns + 0x30` callback), RX-DCO calibration, IQ-estimator completion and
+PBus restore. The ROM ELF proves that RX-DCO contains a bounded twelve-step
+measurement loop and synchronous delays, while IQ-estimator enable contains a
+hardware-dependent readiness loop and writes `phy_param_rom + 0x1ac`; both
+must become separate timer/interrupt-driven Rust transitions.
+
+The serial runtime suite passes 353 tests. `phy_freq_reg_init()` belongs to
+`phy_wakeup_init` and `phy_set_chan_freq_hw_init`, not this point in the cold
+path. The prefix remains dead-stripped and does not replace any part of the
+live parent until the remaining two parent operations and every operation-24
+hardware boundary have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

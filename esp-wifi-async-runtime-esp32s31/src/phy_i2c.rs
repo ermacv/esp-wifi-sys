@@ -17,6 +17,10 @@ use crate::phy_pbus::{
     PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusClearOutcome, PhyPbusClearTransition,
     PhyPbusForceTest,
 };
+use crate::phy_xtal_duty::{
+    XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
+    XtalDutyCalibrationParameters, XtalDutyCalibrationTransition,
+};
 
 const PHY_I2C_HOST_CONFIG_ADDRESS: usize = 0x2010_f820;
 const PHY_I2C_READ_MASK_ADDRESS: usize = 0x2010_f81c;
@@ -51,6 +55,13 @@ impl PhyI2cAddress {
         } else {
             None
         }
+    }
+
+    /// Constructs an address whose block was recovered from the pinned
+    /// ESP32-S31 implementation and is therefore known to be in range.
+    pub(crate) const fn new_internal(block: u8, register: u8) -> Self {
+        debug_assert!(block >= 0x61 && block <= 0x6d);
+        Self { block, register }
     }
 
     pub const fn block(self) -> u8 {
@@ -1610,11 +1621,12 @@ impl Default for Sar2InitTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForXtalDutyCalibration {
+    ReadyForFrontEndRegisterUpdate {
         bbpll_register_snapshot: u8,
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
         sar2_reinitialized: bool,
+        xtal_duty: XtalDutyCalibrationOutcome,
     },
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
@@ -1658,6 +1670,8 @@ pub enum PhyRfInitPrefixAction {
         low_bit: u8,
     },
     Sar2Init(Sar2InitAction),
+    CaptureXtalDutyParameters,
+    XtalDuty(XtalDutyCalibrationAction),
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -1688,6 +1702,8 @@ pub enum PhyRfInitPrefixCompletion {
     I2cMasterCommandMemoryConfigured,
     Masked69Read(u8),
     Sar2Init(Sar2InitCompletion),
+    XtalDutyParametersCaptured(XtalDutyCalibrationParameters),
+    XtalDuty(XtalDutyCalibrationCompletion),
     DelayElapsed,
 }
 
@@ -1774,10 +1790,23 @@ enum PhyRfInitPrefixStep {
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
     },
+    XtalDutyParameters {
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+    },
+    XtalDuty {
+        transition: XtalDutyCalibrationTransition,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+    },
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through twenty-three in the complete
+/// Event-driven composition of operations one through twenty-four in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -1929,21 +1958,30 @@ impl PhyRfInitPrefixTransition {
                 high_bit: 3,
                 low_bit: 0,
             },
-            PhyRfInitPrefixStep::Sar2Init {
+            PhyRfInitPrefixStep::Sar2Init { transition, .. } => match transition.action() {
+                Sar2InitAction::Complete => PhyRfInitPrefixAction::CaptureXtalDutyParameters,
+                action => PhyRfInitPrefixAction::Sar2Init(action),
+            },
+            PhyRfInitPrefixStep::XtalDutyParameters { .. } => {
+                PhyRfInitPrefixAction::CaptureXtalDutyParameters
+            }
+            PhyRfInitPrefixStep::XtalDuty {
                 transition,
                 bbpll_register_snapshot,
                 parameter,
                 rfpll_lock_observed,
+                sar2_reinitialized,
             } => match transition.action() {
-                Sar2InitAction::Complete => PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
+                XtalDutyCalibrationAction::Complete(xtal_duty) => PhyRfInitPrefixAction::Complete(
+                    PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
                         bbpll_register_snapshot,
                         parameter,
                         rfpll_lock_observed,
-                        sar2_reinitialized: true,
+                        sar2_reinitialized,
+                        xtal_duty,
                     },
                 ),
-                action => PhyRfInitPrefixAction::Sar2Init(action),
+                action => PhyRfInitPrefixAction::XtalDuty(action),
             },
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
@@ -2287,14 +2325,12 @@ impl PhyRfInitPrefixTransition {
                         rfpll_lock_observed,
                     }
                 } else {
-                    PhyRfInitPrefixStep::Complete(
-                        PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
-                            bbpll_register_snapshot,
-                            parameter,
-                            rfpll_lock_observed,
-                            sar2_reinitialized: false,
-                        },
-                    )
+                    PhyRfInitPrefixStep::XtalDutyParameters {
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                        sar2_reinitialized: false,
+                    }
                 }
             }
             (
@@ -2310,14 +2346,12 @@ impl PhyRfInitPrefixTransition {
                     .advance(completion)
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 if transition.action() == Sar2InitAction::Complete {
-                    PhyRfInitPrefixStep::Complete(
-                        PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
-                            bbpll_register_snapshot,
-                            parameter,
-                            rfpll_lock_observed,
-                            sar2_reinitialized: true,
-                        },
-                    )
+                    PhyRfInitPrefixStep::XtalDutyParameters {
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                        sar2_reinitialized: true,
+                    }
                 } else {
                     PhyRfInitPrefixStep::Sar2Init {
                         transition,
@@ -2325,6 +2359,55 @@ impl PhyRfInitPrefixTransition {
                         parameter,
                         rfpll_lock_observed,
                     }
+                }
+            }
+            (
+                PhyRfInitPrefixStep::XtalDutyParameters {
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                    sar2_reinitialized,
+                },
+                PhyRfInitPrefixCompletion::XtalDutyParametersCaptured(xtal_parameters),
+            ) => PhyRfInitPrefixStep::XtalDuty {
+                transition: XtalDutyCalibrationTransition::new(xtal_parameters),
+                bbpll_register_snapshot,
+                parameter,
+                rfpll_lock_observed,
+                sar2_reinitialized,
+            },
+            (
+                PhyRfInitPrefixStep::XtalDuty {
+                    mut transition,
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                    sar2_reinitialized,
+                },
+                PhyRfInitPrefixCompletion::XtalDuty(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    XtalDutyCalibrationAction::Complete(xtal_duty) => {
+                        PhyRfInitPrefixStep::Complete(
+                            PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
+                                bbpll_register_snapshot,
+                                parameter,
+                                rfpll_lock_observed,
+                                sar2_reinitialized,
+                                xtal_duty,
+                            },
+                        )
+                    }
+                    _ => PhyRfInitPrefixStep::XtalDuty {
+                        transition,
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                        sar2_reinitialized,
+                    },
                 }
             }
             (PhyRfInitPrefixStep::Complete(_), _) => {
@@ -2517,6 +2600,150 @@ mod tests {
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
+    use crate::phy_xtal_duty::{
+        XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
+        XtalDutyCalibrationParameters, XtalDutyPassAction, XtalDutyPassCompletion,
+        XtalDutyPassOutcome, XtalDutySearchAction, XtalDutySearchCompletion,
+    };
+
+    fn drive_rf_init_xtal_duty(
+        transition: &mut PhyRfInitPrefixTransition,
+        initial_duty: u8,
+    ) -> XtalDutyCalibrationOutcome {
+        let mut current_candidate = None;
+        loop {
+            match transition.action() {
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
+                    address,
+                    ..
+                }) => {
+                    assert_eq!((address.block(), address.register()), (0x61, 9));
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::InitialDutyRead {
+                                address,
+                                value: initial_duty,
+                            },
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(
+                    XtalDutyCalibrationAction::DisableCalibrationPath { address, .. },
+                ) => {
+                    assert_eq!((address.block(), address.register()), (0x61, 7));
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::CalibrationPathDisabled { address },
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::WriteMasked { address, .. },
+                )) => {
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(
+                                XtalDutyPassCompletion::MaskedWrite { address },
+                            ),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::WriteByte { address, value },
+                )) => {
+                    assert_eq!((address.block(), address.register()), (0x61, 0x0a));
+                    assert_eq!(value, initial_duty);
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(
+                                XtalDutyPassCompletion::ByteWrite { address },
+                            ),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::PrepareHardware {
+                        frequency_code,
+                        rf_frequency_offset_base,
+                        pbus_rx_path_value,
+                    },
+                )) => {
+                    assert!(frequency_code == 0x988 || frequency_code == 0x9b0);
+                    assert_eq!(rf_frequency_offset_base, 0x31);
+                    assert_eq!(pbus_rx_path_value, 0x42);
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(
+                                XtalDutyPassCompletion::HardwarePrepared {
+                                    frequency_code,
+                                    rf_frequency_offset_base,
+                                    pbus_rx_path_value,
+                                },
+                            ),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate(candidate)),
+                )) => {
+                    current_candidate = Some(candidate);
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                                XtalDutySearchCompletion::CandidateWritten(candidate),
+                            )),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros(20)),
+                )) => {
+                    let candidate = current_candidate.unwrap();
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                                XtalDutySearchCompletion::DelayElapsed { candidate },
+                            )),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Search(XtalDutySearchAction::MeasureSignalPower {
+                        candidate,
+                        kind,
+                        ..
+                    }),
+                )) => {
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                                XtalDutySearchCompletion::SignalPowerMeasured {
+                                    candidate,
+                                    kind,
+                                    value: i64::from(0x80 - candidate),
+                                },
+                            )),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::RestoreHardware { frequency_code },
+                )) => {
+                    transition
+                        .advance(PhyRfInitPrefixCompletion::XtalDuty(
+                            XtalDutyCalibrationCompletion::Pass(
+                                XtalDutyPassCompletion::HardwareRestored { frequency_code },
+                            ),
+                        ))
+                        .unwrap();
+                }
+                PhyRfInitPrefixAction::Complete(
+                    PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate { xtal_duty, .. },
+                ) => return xtal_duty,
+                action => panic!("unexpected RF-init crystal-duty action: {action:?}"),
+            }
+        }
+    }
 
     #[test]
     fn recovered_block_table_selects_exact_hosts_and_read_masks() {
@@ -3678,12 +3905,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             already_initialized.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
-                bbpll_register_snapshot: 0xa3,
-                parameter: final_parameter,
-                rfpll_lock_observed: true,
-                sar2_reinitialized: false,
-            })
+            PhyRfInitPrefixAction::CaptureXtalDutyParameters
         );
         transition
             .advance(PhyRfInitPrefixCompletion::Masked69Read(0))
@@ -3712,12 +3934,44 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
-                bbpll_register_snapshot: 0xa3,
-                parameter: final_parameter,
-                rfpll_lock_observed: true,
-                sar2_reinitialized: true,
-            })
+            PhyRfInitPrefixAction::CaptureXtalDutyParameters
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::XtalDutyParametersCaptured(
+                XtalDutyCalibrationParameters {
+                    rf_frequency_offset_base: 0x31,
+                    pbus_rx_path_value: 0x42,
+                },
+            ))
+            .unwrap();
+        let xtal_duty = drive_rf_init_xtal_duty(&mut transition, 0x2a);
+        assert_eq!(
+            xtal_duty,
+            XtalDutyCalibrationOutcome {
+                initial_duty: 0x2a,
+                low_frequency: XtalDutyPassOutcome {
+                    frequency_code: 0x988,
+                    best_candidate: 0x3e,
+                    best_filtered_power: 0x42,
+                },
+                high_frequency: XtalDutyPassOutcome {
+                    frequency_code: 0x9b0,
+                    best_candidate: 0x3e,
+                    best_filtered_power: 0x42,
+                },
+            }
+        );
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(
+                PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
+                    bbpll_register_snapshot: 0xa3,
+                    parameter: final_parameter,
+                    rfpll_lock_observed: true,
+                    sar2_reinitialized: true,
+                    xtal_duty,
+                }
+            )
         );
     }
 
