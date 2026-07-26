@@ -22,6 +22,9 @@ const PHY_GAIN_MEMORY_WORD0_ADDRESS: usize = 0x2010_0848;
 const PHY_GAIN_MEMORY_WORD1_ADDRESS: usize = 0x2010_084c;
 const PHY_GAIN_MEMORY_WORD2_ADDRESS: usize = 0x2010_0850;
 const PHY_GAIN_MEMORY_MAX_ENTRIES: u32 = 32;
+const PHY_FE_CLOCK_GATE_ADDRESS: usize = 0x2010_0400;
+const PHY_FE_BB_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0800;
+const PHY_BB_CLOCK_GATE_ADDRESS: usize = 0x2010_7c80;
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
@@ -53,6 +56,10 @@ const fn without_tx_queue_valid(value: u32) -> u32 {
 
 const fn without_tx_queue_enable(value: u32) -> u32 {
     value & 0x3fff_ffff
+}
+
+const fn without_fe_bb_clock_enable(value: u32) -> u32 {
+    value & !0x3
 }
 
 const fn with_phy_rx_comp_low(value: u32) -> u32 {
@@ -246,6 +253,26 @@ pub unsafe extern "C" fn wifi_strict_phy_dc_mem_clr() {
     control.write_volatile(control.read_volatile() & !PHY_DC_MEMORY_CLEAR_BIT);
 }
 
+/// Close the recovered front-end and baseband clock gates.
+///
+/// Reference: the complete pinned
+/// `libphy.a[phy_init.o]::phy_close_fe_bb_clk` body, size `0x20`. It writes
+/// zero to `0x2010_0400`, clears bits 1:0 of `0x2010_0800`, then writes zero
+/// to `0x2010_7c80`. The field names are retained from the vendor symbol; no
+/// broader register meaning is assumed. There is no call, loop, wait,
+/// allocation, or non-MMIO state access.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_close_fe_bb_clk() {
+    (PHY_FE_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(0);
+
+    let control = PHY_FE_BB_CLOCK_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(without_fe_bb_clock_enable(control.read_volatile()));
+
+    (PHY_BB_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(0);
+}
+
 /// Encode and publish a finite PHY transmit-gain table.
 ///
 /// Reference: pinned
@@ -333,7 +360,7 @@ mod tests {
         encode_phy_gain_memory_words, join_rx_descriptor_address, tsf_latch_mask,
         tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid,
         with_phy_gain_memory_index, with_phy_rx_comp_high, with_phy_rx_comp_low, with_tx_cca,
-        without_tx_queue_enable, without_tx_queue_valid,
+        without_fe_bb_clock_enable, without_tx_queue_enable, without_tx_queue_valid,
     };
 
     #[test]
@@ -379,6 +406,12 @@ mod tests {
         assert_eq!(with_phy_rx_comp_low(u32::MAX), 0xffff_ffed);
         assert_eq!(with_phy_rx_comp_high(0x1234_5678), 0xed34_5678);
         assert_eq!(with_phy_rx_comp_high(u32::MAX), 0xedff_ffff);
+    }
+
+    #[test]
+    fn phy_fe_bb_clock_mask_matches_the_pinned_leaf() {
+        assert_eq!(without_fe_bb_clock_enable(u32::MAX), 0xffff_fffc);
+        assert_eq!(without_fe_bb_clock_enable(0x1234_567b), 0x1234_5678);
     }
 
     #[test]

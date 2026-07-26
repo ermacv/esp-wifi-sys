@@ -14,6 +14,8 @@ const PHY_CALIBRATION_CHECKSUM_OFFSET: usize = PHY_CALIBRATION_PAYLOAD_OFFSET + 
 const PHY_CALIBRATION_PREFIX_LEN: usize = PHY_CALIBRATION_CHECKSUM_OFFSET + 4;
 const EFUSE_RD_MAC_SYS0_ADDRESS: usize = 0x2071_5050;
 const EFUSE_RD_MAC_SYS1_ADDRESS: usize = 0x2071_5054;
+const PHY_XTAL_FREQUENCY_REGISTER_ADDRESS: usize = 0x2010_f028;
+const ESP32S31_XTAL_FREQUENCY_MHZ: u32 = 40;
 const PHY_ROM_FUNCTION_TABLE_POINTER_CELL: usize = 0x2f07_fc3c;
 const PHY_PARAM_ROM_CELL: usize = 0x2f07_fc40;
 const PHY_ROM_FUNCTION_TABLE_ADDRESS: u32 = 0x2f07_f944;
@@ -204,6 +206,18 @@ fn calibration_record_check_or_write(
     }
 }
 
+const fn xtal_parameter_code(frequency_mhz: u32) -> u8 {
+    match frequency_mhz {
+        26 => 1,
+        32 => 2,
+        _ => 0,
+    }
+}
+
+const fn with_xtal_frequency(value: u32, frequency_mhz: u32) -> u32 {
+    (value & !0x3f) | (frequency_mhz.wrapping_sub(1) & 0x3f)
+}
+
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static mut phy_param: [u8; PHY_PARAM_LEN];
@@ -307,6 +321,29 @@ pub unsafe extern "C" fn wifi_strict_phy_get_romfunc_addr() {
     core::ptr::addr_of_mut!((*table).get_bt_tx_table).write_volatile(published.get_bt_tx_table);
 }
 
+/// Publish the ESP32-S31 crystal profile to PHY state and hardware.
+///
+/// Reference: the complete pinned `libphy.a[phy_init.o]::phy_get_xtal_freq`
+/// body, size `0x40`. ESP-IDF and the S31 HAL both define a fixed 40 MHz
+/// crystal for this chip, so the former `rtc_clk_xtal_freq_get` call is a
+/// constant rather than a hidden state query. The vendor body stores crystal
+/// code zero in `phy_param[0x4f]`, then replaces bits 5:0 of `0x2010_f028`
+/// with 39. The field's hardware meaning is not inferred beyond that exact
+/// transaction.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.phy_cold"]
+pub unsafe extern "C" fn wifi_strict_phy_get_xtal_freq() {
+    let parameter = &mut *core::ptr::addr_of_mut!(phy_param);
+    parameter[0x4f] = xtal_parameter_code(ESP32S31_XTAL_FREQUENCY_MHZ);
+
+    let register = PHY_XTAL_FREQUENCY_REGISTER_ADDRESS as *mut u32;
+    register.write_volatile(with_xtal_frequency(
+        register.read_volatile(),
+        ESP32S31_XTAL_FREQUENCY_MHZ,
+    ));
+}
+
 /// Apply the evidenced fields from an ESP32-S31 128-byte PHY init profile.
 ///
 /// Reference: pinned
@@ -402,8 +439,8 @@ mod tests {
     use super::{
         apply_init_data, apply_rom_function_overrides, backup_parameter,
         calibration_identity_from_efuse_words, calibration_record_check_or_write, read_u32_le,
-        recover_parameter, PhyRomFunctionOverrides, PhyRomFunctionTable,
-        PHY_CALIBRATION_CHECKSUM_OFFSET, PHY_CALIBRATION_PAYLOAD_OFFSET,
+        recover_parameter, with_xtal_frequency, xtal_parameter_code, PhyRomFunctionOverrides,
+        PhyRomFunctionTable, PHY_CALIBRATION_CHECKSUM_OFFSET, PHY_CALIBRATION_PAYLOAD_OFFSET,
         PHY_CALIBRATION_PREFIX_LEN, PHY_INIT_DATA_LEN, PHY_PARAM_LEN,
         PHY_ROM_TONE_SAR_DOUT_ADDRESS, PHY_ROM_TXCAL_DEBUG_MODE_ADDRESS,
     };
@@ -549,5 +586,14 @@ mod tests {
             calibration_record_check_or_write(&mut calibration, true, version, mac_sys0, mac_sys1,),
             1
         );
+    }
+
+    #[test]
+    fn xtal_profile_matches_the_complete_pinned_transform() {
+        assert_eq!(xtal_parameter_code(26), 1);
+        assert_eq!(xtal_parameter_code(32), 2);
+        assert_eq!(xtal_parameter_code(40), 0);
+        assert_eq!(with_xtal_frequency(0xffff_ffc0, 40), 0xffff_ffe7);
+        assert_eq!(with_xtal_frequency(0x1234_567f, 26), 0x1234_5659);
     }
 }

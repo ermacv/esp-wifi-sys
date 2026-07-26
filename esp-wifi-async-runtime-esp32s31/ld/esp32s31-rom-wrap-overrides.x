@@ -232,6 +232,19 @@ ASSERT(phy_rfcal_data_check_new ==
            wifi_strict_phy_rfcal_data_check_new,
        "ESP32-S31 PHY calibration record Rust boundary is inactive");
 
+/* The S31 crystal is fixed at 40 MHz. Publish the exact phy_param code and
+ * six-bit hardware divisor without the former clock-query call. */
+EXTERN(wifi_strict_phy_get_xtal_freq);
+phy_get_xtal_freq = wifi_strict_phy_get_xtal_freq;
+ASSERT(phy_get_xtal_freq == wifi_strict_phy_get_xtal_freq,
+       "ESP32-S31 PHY crystal Rust boundary is inactive");
+
+/* Complete three-register FE/baseband clock-close transaction. */
+EXTERN(wifi_strict_phy_close_fe_bb_clk);
+phy_close_fe_bb_clk = wifi_strict_phy_close_fe_bb_clk;
+ASSERT(phy_close_fe_bb_clk == wifi_strict_phy_close_fe_bb_clk,
+       "ESP32-S31 PHY FE/baseband clock Rust boundary is inactive");
+
 /* Publish the ROM PHY ABI table and parameter pointer directly from Rust.
  * The replacement performs no call into phy_get_romfuncs/phy_param_addr and
  * retains the two untouched rev0 ROM callbacks only after validation. */
