@@ -23,6 +23,7 @@ const PHY_TX_CFR_INDEX_FIELD_SHIFT: u8 = 11;
 const PHY_GAIN_MEMORY_CONTROL_RETAIN_MASK: u32 = 0xfff0_0000;
 const PHY_GAIN_MEMORY_WRITE_BIT: u32 = 0x0008_0000;
 const PHY_GAIN_MEMORY_INDEX_SHIFT: u8 = 11;
+pub const PHY_RX_TABLE_ENTRY_COUNT: u8 = 0x4f;
 
 /// Exact four-word input of complete ROM leaf `phy_write_gain_mem`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +39,26 @@ pub struct PhyGainMemoryEntry {
 pub struct PhyRegisterInitParameters {
     pub parameter_121: u8,
     pub parameter_120: u8,
+}
+
+/// Explicit inputs captured before the Rust owner publishes the RX table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhyRxTableInitParameters {
+    pub parameter_002: u8,
+    pub parameter_121: u8,
+}
+
+/// Reproduce one of the 79 fixed-form `phy_rx_table_init` entries.
+pub const fn phy_rx_table_gain_entry(
+    parameters: PhyRxTableInitParameters,
+    index: u8,
+) -> PhyGainMemoryEntry {
+    PhyGainMemoryEntry {
+        word0: 0x4020_0000,
+        word1: 0x0201_0080 | ((parameters.parameter_002 as u32) << 29),
+        word2: ((parameters.parameter_002 >> 6) as u32) | 0x0000_00fc,
+        index,
+    }
 }
 
 /// Reproduce the final control-register value of `phy_write_gain_mem`.
@@ -298,6 +319,9 @@ pub enum PhyBbMmioAction {
     ConfigurePhyRegisters {
         parameters: PhyRegisterInitParameters,
     },
+    ConfigureRxTable {
+        parameters: PhyRxTableInitParameters,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,6 +389,9 @@ impl PhyBbMmioBinding {
             PhyBbMmioAction::ConfigurePhyRegisters { parameters } => {
                 crate::radio_hal::configure_phy_registers(parameters)
             }
+            PhyBbMmioAction::ConfigureRxTable { parameters } => {
+                crate::radio_hal::configure_phy_rx_table(parameters)
+            }
         }
         PhyBbMmioCompletion {
             action: self.action,
@@ -377,9 +404,9 @@ mod tests {
     use super::{
         phy_gain_memory_control_word, phy_tx_cfr_control_word, PhyBbBasebandMode, PhyBbMmioAction,
         PhyBbMmioBinding, PhyGainMemoryEntry, PhyRegisterInitParameters, PhyRfRxSaturationPhase,
-        PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion, PhyTxCfrEntry,
-        PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition, PhyTxCfrTransitionError,
-        PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
+        PhyRxTableInitParameters, PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion,
+        PhyTxCfrEntry, PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition,
+        PhyTxCfrTransitionError, PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
     };
 
     #[test]
@@ -545,6 +572,12 @@ mod tests {
                     parameter_120: 0x4e,
                 },
             },
+            PhyBbMmioAction::ConfigureRxTable {
+                parameters: PhyRxTableInitParameters {
+                    parameter_002: 0xa5,
+                    parameter_121: 0x4e,
+                },
+            },
         ] {
             assert_eq!(PhyBbMmioBinding::new(action).action(), action);
         }
@@ -563,6 +596,40 @@ mod tests {
                 },
             ),
             0xabc8_9000
+        );
+    }
+
+    #[test]
+    fn rx_table_entry_transform_matches_both_parameter_extremes() {
+        assert_eq!(
+            super::phy_rx_table_gain_entry(
+                PhyRxTableInitParameters {
+                    parameter_002: 0,
+                    parameter_121: 0x4e,
+                },
+                0,
+            ),
+            PhyGainMemoryEntry {
+                word0: 0x4020_0000,
+                word1: 0x0201_0080,
+                word2: 0x0000_00fc,
+                index: 0,
+            }
+        );
+        assert_eq!(
+            super::phy_rx_table_gain_entry(
+                PhyRxTableInitParameters {
+                    parameter_002: u8::MAX,
+                    parameter_121: 0x4e,
+                },
+                0x4e,
+            ),
+            PhyGainMemoryEntry {
+                word0: 0x4020_0000,
+                word1: 0xe201_0080,
+                word2: 0x0000_00ff,
+                index: 0x4e,
+            }
         );
     }
 }

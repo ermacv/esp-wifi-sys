@@ -154,6 +154,17 @@ impl PhyColdState {
         &self.parameter
     }
 
+    /// Capture the explicit inputs and apply the sole software-state mutation
+    /// performed by pinned `phy_rx_table_init`.
+    pub fn prepare_rx_table_init(&mut self) -> crate::phy_bb::PhyRxTableInitParameters {
+        let parameters = crate::phy_bb::PhyRxTableInitParameters {
+            parameter_002: self.parameter[0x002],
+            parameter_121: self.parameter[0x121],
+        };
+        self.parameter[0x120] = crate::phy_bb::PHY_RX_TABLE_ENTRY_COUNT;
+        parameters
+    }
+
     /// Apply the exact 71-byte mapping from the 128-byte S31 init profile.
     pub fn apply_init_profile(&mut self, init: &[u8; PHY_INIT_DATA_LEN]) {
         apply_init_data(&mut self.parameter, init);
@@ -2596,6 +2607,24 @@ mod tests {
         assert_eq!(core::mem::size_of::<PhyColdState>(), 0x1fc);
         assert_eq!(core::mem::align_of::<PhyColdState>(), 4);
         assert!(!core::mem::needs_drop::<PhyColdState>());
+    }
+
+    #[test]
+    fn rx_table_preparation_mutates_only_the_explicit_owned_parameter() {
+        let mut image = initial_parameter_image();
+        image[0x121] = 0x4e;
+        image[0x120] = 0xa5;
+        let mut state = PhyColdState::from_parameter_image(image);
+
+        assert_eq!(
+            state.prepare_rx_table_init(),
+            crate::phy_bb::PhyRxTableInitParameters {
+                parameter_002: 0xbf,
+                parameter_121: 0x4e,
+            }
+        );
+        assert_eq!(state.parameter_image()[0x120], 0x4f);
+        assert_eq!(state.parameter_image()[0x121], 0x4e);
     }
 
     #[test]

@@ -498,6 +498,28 @@ pub(crate) unsafe fn configure_phy_registers(parameters: crate::phy_bb::PhyRegis
     enable_phy_mac_baseband();
 }
 
+/// Complete pinned `libphy.a[phy_rx_gain.o]::phy_rx_table_init`, size `0x7c`.
+///
+/// The unique [`crate::phy_cold::PhyColdState`] owner must call
+/// `prepare_rx_table_init` before executing this action. That explicit local
+/// step performs the reference's `phy_param[0x120] = 0x4f` mutation. This leaf
+/// then publishes exactly 79 gain entries and runs the already complete
+/// register-init, AGC-update and AGC-enable suffix.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_rx_table(parameters: crate::phy_bb::PhyRxTableInitParameters) {
+    let mut index = 0_u8;
+    while index != crate::phy_bb::PHY_RX_TABLE_ENTRY_COUNT {
+        program_phy_gain_memory_entry(crate::phy_bb::phy_rx_table_gain_entry(parameters, index));
+        index += 1;
+    }
+    configure_phy_registers(crate::phy_bb::PhyRegisterInitParameters {
+        parameter_121: parameters.parameter_121,
+        parameter_120: crate::phy_bb::PHY_RX_TABLE_ENTRY_COUNT,
+    });
+    configure_phy_bb_agc_register_update();
+    enable_phy_agc();
+}
+
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
         1

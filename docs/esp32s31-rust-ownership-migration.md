@@ -1821,7 +1821,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 11 | `phy_set_pbus_mem()` | finite table transition pending |
 | 12 | `phy_tsens_temp_read()` | shares pending temperature transition |
 | 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
-| 14 | `phy_rx_table_init()` | RX table transition pending |
+| 14 | `phy_rx_table_init()` | complete Rust-owned state plus finite MMIO |
 | 15 | `phy_rfrx_sat_rst(0)` | complete finite Rust MMIO |
 | 16 | `phy_check_rx_sat()` | sampled/deadline transition pending |
 | 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
@@ -1876,12 +1876,20 @@ branches of `phy_rx_11b_opt`, the full `phy_tx_pwctrl_bg_init` →
 reachable body is a fixed register sequence with no allocation, wait,
 hardware-dependent exit, ROM-owned RAM, or indirect dispatch.
 
+`phy_rx_table_init` is complete on top of that graph. Its sole software-state
+write, `phy_param[0x120] = 0x4f`, is now a method on the unique
+`PhyColdState`; the same step captures explicit bytes `0x002` and `0x121`.
+The target action derives and publishes exactly 79 typed gain-memory entries,
+then runs the recovered `phy_reg_init`, AGC-update and AGC-enable suffix. No
+raw parameter pointer, ROM call, polling exit, allocation, or hidden global
+mutation remains in this child.
+
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
 an explicit lowering and the complete parent can reject unknown or
 out-of-order completions without a vendor escape.
 
-All 423 host tests pass. The target
+All 425 host tests pass. The target
 `riscv32imafc-unknown-none-elf` `strict-no-wait,hil-vendor-tx` configuration
 also compiles. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one
