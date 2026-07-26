@@ -238,6 +238,9 @@ source-oracle counts, not “functions left to rewrite”:
 
 - `memcpy`, `memset`, and `__divdi3` become ordinary Rust/core operations;
 - `ets_delay_us` becomes a Rust async timer edge, never a copied delay body;
+- a hardware status poll remains only when no completion interrupt can be
+  evidenced; every read is a one-shot MMIO completion and the Rust owner
+  supplies a finite attempt count or deadline, so no CPU spin loop is copied;
 - `rtc_clk_xtal_freq_get` is an explicit clock input supplied by the HAL;
 - `phy_get_romfuncs`, `phy_param_addr`, and archive
   `phy_get_romfunc_addr` are ABI plumbing to delete;
@@ -269,6 +272,23 @@ unique child roots with 3,002 bytes of direct reference bodies:
 | `phy_set_rx_gain_table` | 650 | archive | port RX gain transition |
 | `phy_chip_set_chan` | 270 | archive | port cold channel transition |
 
+For the current Wi-Fi-only AP/STA target, nine roots / 2,912 direct reference
+bytes are mandatory. The remaining 90-byte `phy_bt_tx_gain_init` root is not
+on the immediate Wi-Fi implementation path; it is retained only as
+BT/coexistence evidence until a later coex profile proves whether the shared
+register programming is required.
+
+There is no vendor global to reproduce as a global in this cold porting set.
+The only blob-owned mutable source object reached by the cold graph is the
+508-byte `phy_param`; its required fields move into `PhyColdState` and typed
+child inputs/outcomes. The four-byte `g_phyFuns` binding, ROM parameter pointer
+and critical-section callbacks are compatibility plumbing to delete when the
+parent is activated, not state to port. Likewise, the active RX fallback's
+`TxRxCxt` (1,044 bytes), `wDevCtrl` (72), `g_wifi_menuconfig` (104) and
+`g_lmac_cnt` (192), plus three ROM-ABI pointer cells, disappear when the
+remaining Rust RX cases are complete; their vendor layouts are not port
+targets.
+
 `phy_set_pbus_mem` is no longer in that code backlog. Its complete 384-byte
 ROM parent, 362-byte `phy_write_pbus_mem` child and 50-byte
 `phy_save_pbus_reg` child are represented by one Rust-owned transition. The
@@ -297,12 +317,14 @@ and two six-bit PHY-I2C reads. The eight results are returned as an owned
 value and committed only to `PhyColdState[0x1a1..=0x1a8]`; no ROM parameter
 pointer is published.
 
-`phy_check_rx_sat` is also no longer in that code backlog: its Rust transition
-and owned `phy_param` mutation are complete. Its target-side 100-sample capture
-producer remains a separate hardware binding. After the 10 roots, the work is
-to compose `phy_bb_init` (362 bytes of reference parent), port the remaining
-outer `register_chipv7_phy` sequencing (486 bytes), and activate the complete
-graph without publishing `phy_param` or `g_phyFuns`.
+`phy_check_rx_sat` is also no longer in that code backlog: its Rust transition,
+one-shot target MMIO sampler and owned `phy_param` mutation are complete. No
+dedicated completion interrupt is evidenced, so the exact 100-register-read
+policy remains as 100 independently completed samples. The executor may yield
+or use an async timer between samples; the MMIO leaf cannot spin. After the 10
+roots, the work is to compose `phy_bb_init` (362 bytes of reference parent),
+port the remaining outer `register_chipv7_phy` sequencing (486 bytes), and
+activate the complete graph without publishing `phy_param` or `g_phyFuns`.
 
 ## Completed slice: typed large-RX ownership
 
@@ -1931,7 +1953,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
 | 14 | `phy_rx_table_init()` | complete Rust-owned state plus finite MMIO |
 | 15 | `phy_rfrx_sat_rst(0)` | complete finite Rust MMIO |
-| 16 | `phy_check_rx_sat()` | Rust-owned async transition complete; target capture binding pending |
+| 16 | `phy_check_rx_sat()` | Rust-owned bounded async polling transition and one-shot MMIO binding complete |
 | 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
 | 18 | `phy_rfrx_sat_rst(1)` | complete finite Rust MMIO |
 | 19 | `phy_reg_init()` | complete composed finite Rust MMIO |
@@ -1996,20 +2018,20 @@ mutation remains in this child.
 The recovered archive body enters PBus debug mode, publishes eleven exact
 PBus commands, blocks for five microseconds, then polls
 `0x2010_08d0[21:20]` exactly 100 times. The replacement exposes the delay as
-an async timer completion and requests one externally completed 100-sample
-capture window instead of reproducing the CPU loop. It always requests PBus
-work-mode restoration before returning success or failure. The unique
-`PhyColdState` captures the only input, former `phy_param[0x002]`, and owns
-the only persistent effect: a nonzero sample count sets byte `0x1ae` to one;
-a zero result never clears it and failed operations cannot mutate it.
+an async timer completion and each register read as a separate identity-bound
+action. It always requests PBus work-mode restoration before returning
+success or failure. The unique `PhyColdState` captures the only input, former
+`phy_param[0x002]`, and owns the only persistent effect: a nonzero sample
+count sets byte `0x1ae` to one; a zero result never clears it and failed
+operations cannot mutate it.
 
-No dedicated completion interrupt for `0x2010_08d0[21:20]` is visible in
-the available S31 PAC/SVD or ROM symbols. Therefore the target capture
-binding remains deliberately unimplemented: it must eventually use an
-interrupt-, DMA-, or timer-sampler-driven producer and deliver one completion
-to the transition. Executor-side register polling, a delay loop, or a fake
-completion is not an acceptable binding, and the outer cold-init transition
-must not activate this child until such a provider exists.
+No dedicated completion interrupt for `0x2010_08d0[21:20]` is visible in the
+available S31 PAC/SVD or ROM symbols. The retained polling is therefore the
+radio contract, but it is no longer a blob or executor spin loop: a
+non-cloneable target binding performs exactly one volatile read, and the Rust
+state machine issues at most 100 such samples. The executor may yield or arm
+an async timer between samples. Hardware-dependent open loops elsewhere must
+likewise gain a finite count or deadline before activation.
 
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
