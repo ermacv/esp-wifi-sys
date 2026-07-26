@@ -15,17 +15,27 @@
 //! merely to obtain its initial data.
 
 use crate::{
-    phy_frequency::PhyChannelFrequencyInitControl,
+    phy_frequency::{
+        PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion,
+        PhyChannelFrequencyInitControl, PhyFrequencyI2cAction, PhyFrequencyI2cCompletion,
+        PhyFrequencyTableAction, PhyFrequencyTableCompletion,
+    },
     phy_i2c::{
-        FilterDcapParameters, PhyI2cAddress, PhyI2cError, PhyRfInitPrefixAction,
+        AdcRateAction, AdcRateCompletion, BiasRegAction, BiasRegCompletion, FilterDcapAction,
+        FilterDcapCompletion, FilterDcapParameters, I2cBbpllAction, I2cBbpllCompletion,
+        I2cInit1Action, I2cInit1Completion, MaskedI2cWriteAction, MaskedI2cWriteCompletion,
+        OpenI2cXpdAction, OpenI2cXpdCompletion, PhyI2cAddress, PhyI2cError, PhyRfInitPrefixAction,
         PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome, PhyRfInitPrefixTransition,
         PhyRfInitPrefixTransitionError, RcCalibrationAction, RcCalibrationCompletion,
+        RcCalibrationSetAction, RcCalibrationSetCompletion, RfpllChargePumpAction,
+        RfpllChargePumpCompletion, Sar2InitAction, Sar2InitCompletion,
     },
     phy_param::{
         apply_init_data, apply_rc_calibration_result, calibration_record_check_or_write,
         xtal_parameter_code, PHY_CALIBRATION_PAYLOAD_OFFSET, PHY_CALIBRATION_PREFIX_LEN,
         PHY_INIT_DATA_LEN, PHY_PARAM_LEN,
     },
+    phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion},
     phy_xtal_duty::XtalDutyCalibrationParameters,
 };
 
@@ -338,7 +348,7 @@ enum PhyColdI2cPhase {
 /// [`PhyColdI2cObservation::StillPending`]; it does not spin, retry, register a
 /// waker, or request an executor poll.  A separate owner must provide either a
 /// later hardware edge or a deadline.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct PhyColdI2cTransaction {
     request: PhyColdI2cRequest,
     phase: PhyColdI2cPhase,
@@ -355,7 +365,7 @@ impl PhyColdI2cTransaction {
         Self { request, phase }
     }
 
-    pub const fn action(self) -> PhyColdI2cAction {
+    pub const fn action(&self) -> PhyColdI2cAction {
         let address = self.request.address();
         match self.phase {
             PhyColdI2cPhase::StartRead => PhyColdI2cAction::StartRead { address },
@@ -467,12 +477,690 @@ impl PhyColdI2cTransaction {
         }
     }
 
-    const fn phase_error(self) -> PhyColdI2cError {
+    const fn phase_error(&self) -> PhyColdI2cError {
         if matches!(self.phase, PhyColdI2cPhase::Complete(_)) {
             PhyColdI2cError::AlreadyComplete
         } else {
             PhyColdI2cError::WrongEdge
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdLoweringError {
+    UnsupportedAction,
+    IncompleteTransaction,
+    UnexpectedOutcome,
+}
+
+/// Identity-bound lowering of one RF-init action to one PHY-I2C transaction.
+///
+/// The original action remains part of the binding until the transaction is
+/// complete. This prevents a completion from being reused for a later action
+/// which happens to address the same PHY-I2C register.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PhyColdI2cBinding {
+    outer_action: PhyRfInitPrefixAction,
+    transaction: PhyColdI2cTransaction,
+}
+
+impl PhyColdI2cBinding {
+    pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        let request = lower_prefix_i2c_request(outer_action)
+            .ok_or(PhyColdLoweringError::UnsupportedAction)?;
+        Ok(Self {
+            outer_action,
+            transaction: PhyColdI2cTransaction::new(request),
+        })
+    }
+
+    pub const fn outer_action(&self) -> PhyRfInitPrefixAction {
+        self.outer_action
+    }
+
+    pub const fn action(&self) -> PhyColdI2cAction {
+        self.transaction.action()
+    }
+
+    pub fn read_started(&mut self) -> Result<(), PhyColdI2cError> {
+        self.transaction.read_started()
+    }
+
+    pub fn write_started(&mut self) -> Result<(), PhyColdI2cError> {
+        self.transaction.write_started()
+    }
+
+    pub fn observe_read_result(
+        &mut self,
+        result: Result<u8, PhyI2cError>,
+    ) -> Result<PhyColdI2cObservation, PhyColdI2cError> {
+        self.transaction.observe_read_result(result)
+    }
+
+    pub fn observe_write_result(
+        &mut self,
+        result: Result<(), PhyI2cError>,
+    ) -> Result<PhyColdI2cObservation, PhyColdI2cError> {
+        self.transaction.observe_write_result(result)
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn start_target(&mut self) -> Result<(), PhyColdI2cError> {
+        self.transaction.start_target()
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn observe_target_edge(&mut self) -> Result<PhyColdI2cObservation, PhyColdI2cError> {
+        self.transaction.observe_target_edge()
+    }
+
+    pub fn into_completion(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        let PhyColdI2cAction::Complete(outcome) = self.transaction.action() else {
+            return Err(PhyColdLoweringError::IncompleteTransaction);
+        };
+        lower_prefix_i2c_completion(self.outer_action, outcome)
+            .ok_or(PhyColdLoweringError::UnexpectedOutcome)
+    }
+}
+
+fn checked_masked_read(
+    address: PhyI2cAddress,
+    high_bit: u8,
+    low_bit: u8,
+) -> Option<PhyColdI2cRequest> {
+    PhyColdI2cRequest::read_masked(address, high_bit, low_bit)
+}
+
+fn checked_masked_write(
+    address: PhyI2cAddress,
+    high_bit: u8,
+    low_bit: u8,
+    value: u8,
+) -> Option<PhyColdI2cRequest> {
+    PhyColdI2cRequest::write_masked(address, high_bit, low_bit, value)
+}
+
+fn lower_prefix_i2c_request(action: PhyRfInitPrefixAction) -> Option<PhyColdI2cRequest> {
+    match action {
+        PhyRfInitPrefixAction::Bias(BiasRegAction::Write { address, value })
+        | PhyRfInitPrefixAction::FilterDcap(FilterDcapAction::Write { address, value })
+        | PhyRfInitPrefixAction::I2cInit1(I2cInit1Action::Write { address, value })
+        | PhyRfInitPrefixAction::Sar2Init(Sar2InitAction::WriteByte { address, value })
+        | PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::WriteByte { address, value })
+        | PhyRfInitPrefixAction::AdcRate(AdcRateAction::WriteI2c { address, value })
+        | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteByte {
+            address,
+            value,
+        }) => Some(PhyColdI2cRequest::write_byte(address, value)),
+        PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ReadSdmSample { address })
+        | PhyRfInitPrefixAction::ReadParameter18e { address }
+        | PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::ReadMaskedByte { address })
+        | PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::ReadSnapshot { address })
+        | PhyRfInitPrefixAction::AdcRate(AdcRateAction::ReadI2c { address })
+        | PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::ReadByte { address })
+        | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::ReadByte {
+            address,
+        })
+        | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+            PhyFrequencyI2cAction::ReadByte { address },
+        )) => Some(PhyColdI2cRequest::read_byte(address)),
+        PhyRfInitPrefixAction::RcCalibrationSet(RcCalibrationSetAction::MaskedWrite(
+            MaskedI2cWriteAction::ReadByte { address },
+        )) => Some(PhyColdI2cRequest::read_byte(address)),
+        PhyRfInitPrefixAction::RcCalibrationSet(RcCalibrationSetAction::MaskedWrite(
+            MaskedI2cWriteAction::WriteByte { address, value },
+        )) => Some(PhyColdI2cRequest::write_byte(address, value)),
+        PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::WriteMasked {
+            address,
+            high_bit,
+            low_bit,
+            value,
+        })
+        | PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::WriteMasked {
+            address,
+            high_bit,
+            low_bit,
+            value,
+        })
+        | PhyRfInitPrefixAction::Sar2Init(Sar2InitAction::WriteMasked {
+            address,
+            high_bit,
+            low_bit,
+            value,
+        })
+        | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteMasked {
+            address,
+            high_bit,
+            low_bit,
+            value,
+        })
+        | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+            PhyFrequencyI2cAction::WriteMasked {
+                address,
+                high_bit,
+                low_bit,
+                value,
+            },
+        )) => checked_masked_write(address, high_bit, low_bit, value),
+        PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::ReadMasked {
+            address,
+            high_bit,
+            low_bit,
+        })
+        | PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::ReadMasked {
+            address,
+            high_bit,
+            low_bit,
+        })
+        | PhyRfInitPrefixAction::ReadMasked69 {
+            address,
+            high_bit,
+            low_bit,
+        } => checked_masked_read(address, high_bit, low_bit),
+        _ => None,
+    }
+}
+
+fn lower_prefix_i2c_completion(
+    action: PhyRfInitPrefixAction,
+    outcome: PhyColdI2cOutcome,
+) -> Option<PhyRfInitPrefixCompletion> {
+    match (action, outcome) {
+        (
+            PhyRfInitPrefixAction::Bias(BiasRegAction::Write { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::Bias(
+            BiasRegCompletion::WriteCompleted { address },
+        )),
+        (
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ReadSdmSample { address }),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::OpenI2cXpd(
+            OpenI2cXpdCompletion::SdmSample(value),
+        )),
+        (
+            PhyRfInitPrefixAction::I2cBbpll(
+                I2cBbpllAction::ReadMaskedByte { address }
+                | I2cBbpllAction::ReadSnapshot { address },
+            ),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::I2cBbpll(
+            I2cBbpllCompletion::I2cReadCompleted { address, value },
+        )),
+        (
+            PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::WriteByte { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::I2cBbpll(
+            I2cBbpllCompletion::I2cWriteCompleted { address },
+        )),
+        (
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::ReadI2c { address }),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::AdcRate(
+            AdcRateCompletion::I2cReadCompleted { address, value },
+        )),
+        (
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::WriteI2c { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::AdcRate(
+            AdcRateCompletion::I2cWriteCompleted { address },
+        )),
+        (
+            PhyRfInitPrefixAction::RcCalibrationSet(RcCalibrationSetAction::MaskedWrite(
+                MaskedI2cWriteAction::ReadByte { address },
+            )),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::RcCalibrationSet(
+            RcCalibrationSetCompletion::MaskedWrite(MaskedI2cWriteCompletion::I2cReadCompleted {
+                address,
+                value,
+            }),
+        )),
+        (
+            PhyRfInitPrefixAction::RcCalibrationSet(RcCalibrationSetAction::MaskedWrite(
+                MaskedI2cWriteAction::WriteByte { address, .. },
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::RcCalibrationSet(
+            RcCalibrationSetCompletion::MaskedWrite(MaskedI2cWriteCompletion::I2cWriteCompleted {
+                address,
+            }),
+        )),
+        (
+            PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::WriteMasked { .. }),
+            PhyColdI2cOutcome::Written { .. },
+        ) => Some(PhyRfInitPrefixCompletion::RcCalibration(
+            RcCalibrationCompletion::Write,
+        )),
+        (
+            PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::ReadMasked { .. }),
+            PhyColdI2cOutcome::Read { value, .. },
+        ) => Some(PhyRfInitPrefixCompletion::RcCalibration(
+            RcCalibrationCompletion::Read(value),
+        )),
+        (
+            PhyRfInitPrefixAction::FilterDcap(FilterDcapAction::Write { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::FilterDcap(
+            FilterDcapCompletion::WriteCompleted { address },
+        )),
+        (
+            PhyRfInitPrefixAction::ReadParameter18e { address },
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => {
+            Some(PhyRfInitPrefixCompletion::Parameter18eRead { address, value })
+        }
+        (
+            PhyRfInitPrefixAction::I2cInit1(I2cInit1Action::Write { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::I2cInit1(
+            I2cInit1Completion::WriteCompleted { address },
+        )),
+        (
+            PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::WriteMasked { .. }),
+            PhyColdI2cOutcome::Written { .. },
+        ) => Some(PhyRfInitPrefixCompletion::RfpllChargePump(
+            RfpllChargePumpCompletion::Write,
+        )),
+        (
+            PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::ReadMasked { .. }),
+            PhyColdI2cOutcome::Read { value, .. },
+        ) => Some(PhyRfInitPrefixCompletion::RfpllChargePump(
+            RfpllChargePumpCompletion::ReadMasked(value),
+        )),
+        (
+            PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::ReadByte { address }),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::RfpllChargePump(
+            RfpllChargePumpCompletion::ReadByte { address, value },
+        )),
+        (PhyRfInitPrefixAction::ReadMasked69 { .. }, PhyColdI2cOutcome::Read { value, .. }) => {
+            Some(PhyRfInitPrefixCompletion::Masked69Read(value))
+        }
+        (
+            PhyRfInitPrefixAction::Sar2Init(Sar2InitAction::WriteMasked { .. }),
+            PhyColdI2cOutcome::Written { .. },
+        ) => Some(PhyRfInitPrefixCompletion::Sar2Init(
+            Sar2InitCompletion::MaskedWrite,
+        )),
+        (
+            PhyRfInitPrefixAction::Sar2Init(Sar2InitAction::WriteByte { address, .. }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::Sar2Init(
+            Sar2InitCompletion::ByteWrite { address },
+        )),
+        (
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteMasked {
+                address,
+                high_bit,
+                low_bit,
+                ..
+            }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::MaskedWrite {
+                address,
+                high_bit,
+                low_bit,
+            },
+        )),
+        (
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteByte {
+                address,
+                ..
+            }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::ByteWrite { address },
+        )),
+        (
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::ReadByte {
+                address,
+            }),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::ByteRead { address, value },
+        )),
+        (
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+                PhyFrequencyI2cAction::WriteMasked {
+                    address,
+                    high_bit,
+                    low_bit,
+                    ..
+                },
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::I2c(PhyFrequencyI2cCompletion::MaskedWrite {
+                address,
+                high_bit,
+                low_bit,
+            }),
+        )),
+        (
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+                PhyFrequencyI2cAction::ReadByte { address },
+            )),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::I2c(PhyFrequencyI2cCompletion::ByteRead {
+                address,
+                value,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct PhyColdMmioBinding {
+    outer_action: PhyRfInitPrefixAction,
+}
+
+impl PhyColdMmioBinding {
+    pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        if lower_prefix_mmio_completion(outer_action).is_none() {
+            return Err(PhyColdLoweringError::UnsupportedAction);
+        }
+        Ok(Self { outer_action })
+    }
+
+    pub const fn outer_action(&self) -> PhyRfInitPrefixAction {
+        self.outer_action
+    }
+
+    pub fn into_completion(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        lower_prefix_mmio_completion(self.outer_action)
+            .ok_or(PhyColdLoweringError::UnsupportedAction)
+    }
+
+    /// Execute exactly one finite target MMIO transaction and consume its
+    /// identity token.
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn execute_target(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        match self.outer_action {
+            PhyRfInitPrefixAction::ConfigureFeBbClock => {
+                crate::radio_hal::wifi_strict_phy_open_fe_bb_clk()
+            }
+            PhyRfInitPrefixAction::ConfigureBbpllCalibration { enabled } => {
+                crate::radio_hal::wifi_strict_phy_bbpll_cal(enabled as u32)
+            }
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay) => {
+                crate::phy_i2c::configure_open_i2c_pre_delay()
+            }
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse) => {
+                crate::phy_i2c::configure_open_i2c_power_and_pulse()
+            }
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureDebugMode) => {
+                crate::radio_hal::configure_phy_pbus_debug_mode()
+            }
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkModePulse) => {
+                crate::radio_hal::configure_phy_pbus_work_mode_pulse()
+            }
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ClearWorkModePulse) => {
+                crate::radio_hal::clear_phy_pbus_work_mode_pulse()
+            }
+            PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection } => {
+                crate::radio_hal::configure_phy_i2c_clock_selection(selection)
+            }
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::ConfigureMmio { rate }) => {
+                crate::radio_hal::configure_phy_adc_rate(rate)
+            }
+            PhyRfInitPrefixAction::ConfigureI2cMasterRegisters => {
+                crate::radio_hal::configure_phy_i2c_master_registers()
+            }
+            PhyRfInitPrefixAction::ConfigurePowerDetectorRegisters => {
+                crate::radio_hal::configure_phy_power_detector_registers()
+            }
+            PhyRfInitPrefixAction::ConfigureFrontEndRegisters => {
+                crate::radio_hal::configure_phy_front_end_registers()
+            }
+            PhyRfInitPrefixAction::ConfigureTemperatureSensorRead => {
+                crate::radio_hal::configure_phy_temperature_sensor_read()
+            }
+            PhyRfInitPrefixAction::ConfigureTxPowerControlBackground => {
+                crate::radio_hal::configure_phy_tx_power_control_background()
+            }
+            PhyRfInitPrefixAction::ConfigureI2cMasterCommandMemory { parameter } => {
+                crate::phy_i2c::configure_i2c_master_command_memory(parameter)
+            }
+            PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate => {
+                crate::radio_hal::configure_phy_front_end_update()
+            }
+            PhyRfInitPrefixAction::ChannelFrequency(
+                PhyChannelFrequencyInitAction::ConfigureFrequencyRegisters { parameter_override },
+            ) => crate::radio_hal::configure_phy_frequency_registers(parameter_override),
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::Table(
+                PhyFrequencyTableAction::WriteMemory {
+                    address,
+                    value,
+                    mode,
+                    ..
+                },
+            ))
+            | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+                PhyFrequencyI2cAction::WriteMemory {
+                    address,
+                    value,
+                    mode,
+                    ..
+                },
+            )) => crate::radio_hal::write_phy_frequency_memory(address, value, mode),
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+                PhyFrequencyI2cAction::ConfigureNumberAddresses(image),
+            )) => crate::radio_hal::configure_phy_frequency_i2c_number_addresses(
+                image.control_field,
+                image.words,
+            ),
+            _ => return Err(PhyColdLoweringError::UnsupportedAction),
+        }
+        self.into_completion()
+    }
+}
+
+fn lower_prefix_mmio_completion(
+    action: PhyRfInitPrefixAction,
+) -> Option<PhyRfInitPrefixCompletion> {
+    match action {
+        PhyRfInitPrefixAction::ConfigureFeBbClock => {
+            Some(PhyRfInitPrefixCompletion::FeBbClockConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureBbpllCalibration { .. } => {
+            Some(PhyRfInitPrefixCompletion::BbpllCalibrationConfigured)
+        }
+        PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay) => Some(
+            PhyRfInitPrefixCompletion::OpenI2cXpd(OpenI2cXpdCompletion::PreDelayConfigured),
+        ),
+        PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse) => Some(
+            PhyRfInitPrefixCompletion::OpenI2cXpd(OpenI2cXpdCompletion::PowerAndPulseConfigured),
+        ),
+        PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureDebugMode) => Some(
+            PhyRfInitPrefixCompletion::PbusClear(PhyPbusClearCompletion::DebugModeConfigured),
+        ),
+        PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkModePulse) => Some(
+            PhyRfInitPrefixCompletion::PbusClear(PhyPbusClearCompletion::WorkModePulseConfigured),
+        ),
+        PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ClearWorkModePulse) => Some(
+            PhyRfInitPrefixCompletion::PbusClear(PhyPbusClearCompletion::WorkModePulseCleared),
+        ),
+        PhyRfInitPrefixAction::ConfigureI2cClockSelection { .. } => {
+            Some(PhyRfInitPrefixCompletion::I2cClockSelectionConfigured)
+        }
+        PhyRfInitPrefixAction::AdcRate(AdcRateAction::ConfigureMmio { .. }) => Some(
+            PhyRfInitPrefixCompletion::AdcRate(AdcRateCompletion::MmioConfigured),
+        ),
+        PhyRfInitPrefixAction::ConfigureI2cMasterRegisters => {
+            Some(PhyRfInitPrefixCompletion::I2cMasterRegistersConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigurePowerDetectorRegisters => {
+            Some(PhyRfInitPrefixCompletion::PowerDetectorRegistersConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureFrontEndRegisters => {
+            Some(PhyRfInitPrefixCompletion::FrontEndRegistersConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureTemperatureSensorRead => {
+            Some(PhyRfInitPrefixCompletion::TemperatureSensorReadConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureTxPowerControlBackground => {
+            Some(PhyRfInitPrefixCompletion::TxPowerControlBackgroundConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureI2cMasterCommandMemory { .. } => {
+            Some(PhyRfInitPrefixCompletion::I2cMasterCommandMemoryConfigured)
+        }
+        PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate => {
+            Some(PhyRfInitPrefixCompletion::FrontEndRegisterUpdateConfigured)
+        }
+        PhyRfInitPrefixAction::ChannelFrequency(
+            PhyChannelFrequencyInitAction::ConfigureFrequencyRegisters { parameter_override },
+        ) => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::FrequencyRegistersConfigured { parameter_override },
+        )),
+        PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::Table(
+            PhyFrequencyTableAction::WriteMemory {
+                entry_index,
+                word_index,
+                address,
+                ..
+            },
+        )) => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::Table(PhyFrequencyTableCompletion {
+                entry_index,
+                word_index,
+                address,
+            }),
+        )),
+        PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+            PhyFrequencyI2cAction::WriteMemory {
+                descriptor_index,
+                copy_index,
+                address,
+                ..
+            },
+        )) => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::I2c(PhyFrequencyI2cCompletion::MemoryWrite {
+                descriptor_index,
+                copy_index,
+                address,
+            }),
+        )),
+        PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+            PhyFrequencyI2cAction::ConfigureNumberAddresses(image),
+        )) => Some(PhyRfInitPrefixCompletion::ChannelFrequency(
+            PhyChannelFrequencyInitCompletion::I2c(
+                PhyFrequencyI2cCompletion::NumberAddressesConfigured(image),
+            ),
+        )),
+        _ => None,
+    }
+}
+
+/// One timer edge belonging to one exact RF-init action.
+///
+/// The value owns no timer implementation and cannot wake itself. The outer
+/// Rust executor arms its timer from [`micros`](Self::micros), then consumes
+/// this binding only when that timer reports expiry.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PhyColdTimerBinding {
+    outer_action: PhyRfInitPrefixAction,
+    micros: u32,
+}
+
+impl PhyColdTimerBinding {
+    pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        let micros = match outer_action {
+            PhyRfInitPrefixAction::DelayMicros(micros)
+            | PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::DelayMicros(micros))
+            | PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::DelayMicros(micros))
+            | PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::DelayMicros(micros))
+            | PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::DelayMicros(micros)) => {
+                micros
+            }
+            _ => return Err(PhyColdLoweringError::UnsupportedAction),
+        };
+        Ok(Self {
+            outer_action,
+            micros,
+        })
+    }
+
+    pub const fn outer_action(&self) -> PhyRfInitPrefixAction {
+        self.outer_action
+    }
+
+    pub const fn micros(&self) -> u32 {
+        self.micros
+    }
+
+    pub fn into_elapsed_completion(
+        self,
+    ) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        match self.outer_action {
+            PhyRfInitPrefixAction::DelayMicros(_) => Ok(PhyRfInitPrefixCompletion::DelayElapsed),
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::DelayMicros(_)) => Ok(
+                PhyRfInitPrefixCompletion::OpenI2cXpd(OpenI2cXpdCompletion::DelayElapsed),
+            ),
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::DelayMicros(_)) => Ok(
+                PhyRfInitPrefixCompletion::PbusClear(PhyPbusClearCompletion::DelayElapsed),
+            ),
+            PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::DelayMicros(_)) => Ok(
+                PhyRfInitPrefixCompletion::RcCalibration(RcCalibrationCompletion::Delay),
+            ),
+            PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::DelayMicros(_)) => Ok(
+                PhyRfInitPrefixCompletion::RfpllChargePump(RfpllChargePumpCompletion::Delay),
+            ),
+            _ => Err(PhyColdLoweringError::UnsupportedAction),
+        }
+    }
+}
+
+/// Exactly one lowered external operation owned by the cold-init executor.
+///
+/// Unsupported nested actions are rejected during construction; there is no
+/// generic vendor callback or synchronous fallback variant.
+#[derive(Debug, Eq, PartialEq)]
+pub enum PhyColdExternalBinding {
+    I2c(PhyColdI2cBinding),
+    Mmio(PhyColdMmioBinding),
+    Timer(PhyColdTimerBinding),
+}
+
+impl PhyColdExternalBinding {
+    pub fn lower(action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        if let Ok(binding) = PhyColdI2cBinding::new(action) {
+            return Ok(Self::I2c(binding));
+        }
+        if let Ok(binding) = PhyColdMmioBinding::new(action) {
+            return Ok(Self::Mmio(binding));
+        }
+        if let Ok(binding) = PhyColdTimerBinding::new(action) {
+            return Ok(Self::Timer(binding));
+        }
+        Err(PhyColdLoweringError::UnsupportedAction)
     }
 }
 
@@ -600,11 +1288,16 @@ impl PhyRfColdInit {
 #[cfg(test)]
 mod tests {
     use super::{
-        initial_parameter_image, PhyCalibrationRecord, PhyColdI2cAction, PhyColdI2cObservation,
-        PhyColdI2cOutcome, PhyColdI2cRequest, PhyColdI2cTransaction, PhyColdState,
-        PHY_COLD_PARAMETER_LEN,
+        initial_parameter_image, PhyCalibrationRecord, PhyColdExternalBinding, PhyColdI2cAction,
+        PhyColdI2cBinding, PhyColdI2cObservation, PhyColdI2cOutcome, PhyColdI2cRequest,
+        PhyColdI2cTransaction, PhyColdLoweringError, PhyColdMmioBinding, PhyColdState,
+        PhyColdTimerBinding, PHY_COLD_PARAMETER_LEN,
     };
-    use crate::phy_i2c::{PhyI2cAddress, PhyI2cError};
+    use crate::phy_frequency::{PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion};
+    use crate::phy_i2c::{
+        BiasRegAction, BiasRegCompletion, PhyI2cAddress, PhyI2cError, PhyRfInitPrefixAction,
+        PhyRfInitPrefixCompletion, RcCalibrationAction, RcCalibrationCompletion,
+    };
 
     #[test]
     fn baseline_matches_the_complete_sparse_vendor_data_image() {
@@ -783,6 +1476,176 @@ mod tests {
                 address,
                 value: 0x0b,
             })
+        );
+    }
+
+    #[test]
+    fn binding_retains_the_exact_outer_action_until_completion() {
+        let address = PhyI2cAddress::new(0x6a, 0).unwrap();
+        let outer_action = PhyRfInitPrefixAction::Bias(BiasRegAction::Write {
+            address,
+            value: 0xaf,
+        });
+        let mut binding = PhyColdI2cBinding::new(outer_action).unwrap();
+        assert_eq!(binding.outer_action(), outer_action);
+        assert_eq!(
+            binding.action(),
+            PhyColdI2cAction::StartWrite {
+                address,
+                value: 0xaf,
+            }
+        );
+
+        binding.write_started().unwrap();
+        assert_eq!(
+            binding.observe_write_result(Ok(())),
+            Ok(PhyColdI2cObservation::EdgeConsumed)
+        );
+        assert_eq!(
+            binding.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::Bias(
+                BiasRegCompletion::WriteCompleted { address }
+            ))
+        );
+    }
+
+    #[test]
+    fn masked_outer_write_is_two_edges_but_one_identity_bound_completion() {
+        let address = PhyI2cAddress::new(0x67, 3).unwrap();
+        let outer_action = PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::WriteMasked {
+            address,
+            high_bit: 6,
+            low_bit: 4,
+            value: 5,
+        });
+        let mut binding = PhyColdI2cBinding::new(outer_action).unwrap();
+
+        binding.read_started().unwrap();
+        binding.observe_read_result(Ok(0x83)).unwrap();
+        assert_eq!(
+            binding.action(),
+            PhyColdI2cAction::StartWrite {
+                address,
+                value: 0xd3,
+            }
+        );
+        binding.write_started().unwrap();
+        assert_eq!(
+            binding.observe_write_result(Err(PhyI2cError::Busy)),
+            Ok(PhyColdI2cObservation::StillPending)
+        );
+        assert_eq!(
+            binding.action(),
+            PhyColdI2cAction::AwaitWriteCompletionEdge { address }
+        );
+
+        binding.observe_write_result(Ok(())).unwrap();
+        assert_eq!(
+            binding.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::RcCalibration(
+                RcCalibrationCompletion::Write
+            ))
+        );
+    }
+
+    #[test]
+    fn non_i2c_outer_action_is_rejected_instead_of_becoming_a_fallback() {
+        assert_eq!(
+            PhyColdI2cBinding::new(PhyRfInitPrefixAction::ConfigureFeBbClock),
+            Err(PhyColdLoweringError::UnsupportedAction)
+        );
+    }
+
+    #[test]
+    fn finite_mmio_binding_preserves_dynamic_frequency_identity() {
+        let outer_action = PhyRfInitPrefixAction::ChannelFrequency(
+            PhyChannelFrequencyInitAction::ConfigureFrequencyRegisters {
+                parameter_override: true,
+            },
+        );
+        let binding = PhyColdMmioBinding::new(outer_action).unwrap();
+        assert_eq!(binding.outer_action(), outer_action);
+        assert_eq!(
+            binding.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::ChannelFrequency(
+                PhyChannelFrequencyInitCompletion::FrequencyRegistersConfigured {
+                    parameter_override: true,
+                }
+            ))
+        );
+
+        assert_eq!(
+            PhyColdMmioBinding::new(PhyRfInitPrefixAction::DelayMicros(10)),
+            Err(PhyColdLoweringError::UnsupportedAction)
+        );
+    }
+
+    #[test]
+    fn timer_binding_consumes_one_exact_delay_edge() {
+        let outer_action =
+            PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::DelayMicros(100));
+        let binding = PhyColdTimerBinding::new(outer_action).unwrap();
+        assert_eq!(binding.outer_action(), outer_action);
+        assert_eq!(binding.micros(), 100);
+        assert_eq!(
+            binding.into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::RcCalibration(
+                RcCalibrationCompletion::Delay
+            ))
+        );
+
+        assert_eq!(
+            PhyColdTimerBinding::new(PhyRfInitPrefixAction::ConfigureFeBbClock),
+            Err(PhyColdLoweringError::UnsupportedAction)
+        );
+    }
+
+    #[test]
+    fn external_lowering_has_no_vendor_or_synchronous_fallback_variant() {
+        assert!(matches!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::DelayMicros(10)),
+            Ok(PhyColdExternalBinding::Timer(_))
+        ));
+        assert!(matches!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::ConfigureFrontEndRegisters),
+            Ok(PhyColdExternalBinding::Mmio(_))
+        ));
+
+        let address = PhyI2cAddress::new(0x62, 1).unwrap();
+        assert!(matches!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::ReadParameter18e { address }),
+            Ok(PhyColdExternalBinding::I2c(_))
+        ));
+        assert_eq!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::CaptureFilterDcapParameters),
+            Err(PhyColdLoweringError::UnsupportedAction)
+        );
+    }
+
+    #[test]
+    fn channel_frequency_i2c_completion_keeps_its_field_identity() {
+        let address = PhyI2cAddress::new(0x63, 6).unwrap();
+        let outer_action =
+            PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteMasked {
+                address,
+                high_bit: 7,
+                low_bit: 3,
+                value: 0x12,
+            });
+        let mut binding = PhyColdI2cBinding::new(outer_action).unwrap();
+        binding.read_started().unwrap();
+        binding.observe_read_result(Ok(0x05)).unwrap();
+        binding.write_started().unwrap();
+        binding.observe_write_result(Ok(())).unwrap();
+        assert_eq!(
+            binding.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::ChannelFrequency(
+                PhyChannelFrequencyInitCompletion::MaskedWrite {
+                    address,
+                    high_bit: 7,
+                    low_bit: 3,
+                }
+            ))
         );
     }
 }

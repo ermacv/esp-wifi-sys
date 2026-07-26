@@ -1741,6 +1741,24 @@ returns `StillPending`. It does not spin, register a waker, or ask the
 executor to poll it again; only a later peripheral edge or an outer Rust
 deadline may cause another observation.
 
+The first executor lowering layer is now concrete rather than only a target
+adapter sketch. `PhyColdExternalBinding` admits exactly three owned operation
+kinds: PHY-I2C, finite MMIO, and Rust timer. It has no vendor callback,
+synchronous fallback, or generic function-pointer variant. Both the binding
+and its in-flight PHY-I2C transaction deliberately are neither `Copy` nor
+`Clone`; producing the transition completion consumes the identity token.
+
+The current lowering covers the direct `phy_rf_init` MMIO operations, command
+memory initialization, bias/filter/init writes, RC and charge-pump I2C
+operations, SAR2, parameter reads, and the non-RFPLL channel-frequency
+I2C/MMIO/memory actions. A masked write retains its outer field identity while
+using two distinct read and write completion edges. Direct delays in the
+outer, open-I2C, PBus-clear, RC, and charge-pump transitions are represented
+by `PhyColdTimerBinding`; expiry is supplied only by the outer Rust executor.
+PBus force/readiness observations and the nested RFPLL, DC/IQ, RX-DCO,
+crystal-duty, signal-power and frequency-table calibration actions are still
+rejected by this lowering layer and remain the next explicit coverage ledger.
+
 This is not yet the live cold-init implementation. The remaining work is to
 map every nested `PhyRfInitPrefixAction` to exactly one finite MMIO
 transaction, PHY-I2C transaction, PBus edge, timer deadline, or readiness
@@ -1749,7 +1767,7 @@ the outer `register_chipv7_phy` sequencing. Only after that graph is complete
 will the HIL publish `PhyColdState` to the temporary ROM ABI and remove the
 vendor `phy_param` definition.
 
-The current verification baseline is intentionally unchanged. All 396 host
+The current verification baseline is intentionally unchanged. All 403 host
 tests pass. The target strict audit covers 6,407 functions with zero
 violations and reports runtime ownership debt of one explicit RX fallback,
 zero stateful/unproven runtime roots, and zero temporary MMIO roots. Strict
