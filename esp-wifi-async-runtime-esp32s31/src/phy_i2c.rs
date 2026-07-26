@@ -570,6 +570,122 @@ impl OpenI2cXpdTransition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cBbpllOutcome {
+    Enabled { register_snapshot: u8 },
+    Restored,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cBbpllAction {
+    ReadMaskedByte { address: PhyI2cAddress },
+    WriteByte { address: PhyI2cAddress, value: u8 },
+    ReadSnapshot { address: PhyI2cAddress },
+    Complete(I2cBbpllOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cBbpllCompletion {
+    I2cReadCompleted { address: PhyI2cAddress, value: u8 },
+    I2cWriteCompleted { address: PhyI2cAddress },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cBbpllTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum I2cBbpllStep {
+    ReadMaskedByte,
+    WriteEnabledByte(u8),
+    ReadSnapshot,
+    WriteRestoredByte(u8),
+    Complete(I2cBbpllOutcome),
+}
+
+/// Owned replacement for complete rev0 ROM `phy_i2c_bbpll_set`.
+///
+/// Enabling performs a masked read/modify/write of bits 3:2 in PHY-I2C
+/// register `(0x66, 4)`, reads the resulting byte again, and returns that byte
+/// as explicit Rust-owned state. ROM stored it through the mutable
+/// `phy_param` indirection at offset `0x4a`. Restoring accepts that byte as an
+/// input instead of reading global C state. Every I2C edge is an external
+/// completion; the transition never polls or retries itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct I2cBbpllTransition {
+    step: I2cBbpllStep,
+}
+
+impl I2cBbpllTransition {
+    const ADDRESS: PhyI2cAddress = PhyI2cAddress {
+        block: 0x66,
+        register: 4,
+    };
+
+    pub const fn enable() -> Self {
+        Self {
+            step: I2cBbpllStep::ReadMaskedByte,
+        }
+    }
+
+    pub const fn restore(register_snapshot: u8) -> Self {
+        Self {
+            step: I2cBbpllStep::WriteRestoredByte(register_snapshot),
+        }
+    }
+
+    pub const fn action(self) -> I2cBbpllAction {
+        match self.step {
+            I2cBbpllStep::ReadMaskedByte => I2cBbpllAction::ReadMaskedByte {
+                address: Self::ADDRESS,
+            },
+            I2cBbpllStep::WriteEnabledByte(value) | I2cBbpllStep::WriteRestoredByte(value) => {
+                I2cBbpllAction::WriteByte {
+                    address: Self::ADDRESS,
+                    value,
+                }
+            }
+            I2cBbpllStep::ReadSnapshot => I2cBbpllAction::ReadSnapshot {
+                address: Self::ADDRESS,
+            },
+            I2cBbpllStep::Complete(outcome) => I2cBbpllAction::Complete(outcome),
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: I2cBbpllCompletion,
+    ) -> Result<(), I2cBbpllTransitionError> {
+        self.step = match (self.step, completion) {
+            (
+                I2cBbpllStep::ReadMaskedByte,
+                I2cBbpllCompletion::I2cReadCompleted { address, value },
+            ) if address == Self::ADDRESS => I2cBbpllStep::WriteEnabledByte(value & !0x0c),
+            (
+                I2cBbpllStep::WriteEnabledByte(_),
+                I2cBbpllCompletion::I2cWriteCompleted { address },
+            ) if address == Self::ADDRESS => I2cBbpllStep::ReadSnapshot,
+            (
+                I2cBbpllStep::ReadSnapshot,
+                I2cBbpllCompletion::I2cReadCompleted { address, value },
+            ) if address == Self::ADDRESS => I2cBbpllStep::Complete(I2cBbpllOutcome::Enabled {
+                register_snapshot: value,
+            }),
+            (
+                I2cBbpllStep::WriteRestoredByte(_),
+                I2cBbpllCompletion::I2cWriteCompleted { address },
+            ) if address == Self::ADDRESS => I2cBbpllStep::Complete(I2cBbpllOutcome::Restored),
+            (I2cBbpllStep::Complete(_), _) => {
+                return Err(I2cBbpllTransitionError::AlreadyComplete);
+            }
+            _ => return Err(I2cBbpllTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdcRateAction {
     ReadI2c { address: PhyI2cAddress },
     WriteI2c { address: PhyI2cAddress, value: u8 },
@@ -664,7 +780,7 @@ impl AdcRateTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForFrequencyRegisterInit,
+    ReadyForFrontEndRegisterInit { bbpll_register_snapshot: u8 },
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -677,9 +793,10 @@ pub enum PhyRfInitPrefixAction {
     OpenI2cXpd(OpenI2cXpdAction),
     PbusClear(PhyPbusClearAction),
     ConfigureI2cClockSelection { selection: u32 },
-    ConfigureFeTxRxReset,
+    I2cBbpll(I2cBbpllAction),
     AdcRate(AdcRateAction),
     ConfigureI2cMasterRegisters,
+    ConfigurePowerDetectorRegisters,
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -692,9 +809,10 @@ pub enum PhyRfInitPrefixCompletion {
     OpenI2cXpd(OpenI2cXpdCompletion),
     PbusClear(PhyPbusClearCompletion),
     I2cClockSelectionConfigured,
-    FeTxRxResetConfigured,
+    I2cBbpll(I2cBbpllCompletion),
     AdcRate(AdcRateCompletion),
     I2cMasterRegistersConfigured,
+    PowerDetectorRegistersConfigured,
     DelayElapsed,
 }
 
@@ -713,13 +831,21 @@ enum PhyRfInitPrefixStep {
     PostI2cDelay,
     PbusClear(PhyPbusClearTransition),
     I2cClockSelection,
-    FeTxRxReset,
-    AdcRate(AdcRateTransition),
-    I2cMasterRegisters,
+    I2cBbpll(I2cBbpllTransition),
+    AdcRate {
+        transition: AdcRateTransition,
+        bbpll_register_snapshot: u8,
+    },
+    I2cMasterRegisters {
+        bbpll_register_snapshot: u8,
+    },
+    PowerDetectorRegisters {
+        bbpll_register_snapshot: u8,
+    },
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through ten in the complete
+/// Event-driven composition of operations one through eleven in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -774,13 +900,18 @@ impl PhyRfInitPrefixTransition {
             PhyRfInitPrefixStep::I2cClockSelection => {
                 PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection: 8 }
             }
-            PhyRfInitPrefixStep::FeTxRxReset => PhyRfInitPrefixAction::ConfigureFeTxRxReset,
-            PhyRfInitPrefixStep::AdcRate(transition) => match transition.action() {
+            PhyRfInitPrefixStep::I2cBbpll(transition) => {
+                PhyRfInitPrefixAction::I2cBbpll(transition.action())
+            }
+            PhyRfInitPrefixStep::AdcRate { transition, .. } => match transition.action() {
                 AdcRateAction::Complete => PhyRfInitPrefixAction::ConfigureI2cMasterRegisters,
                 action => PhyRfInitPrefixAction::AdcRate(action),
             },
-            PhyRfInitPrefixStep::I2cMasterRegisters => {
+            PhyRfInitPrefixStep::I2cMasterRegisters { .. } => {
                 PhyRfInitPrefixAction::ConfigureI2cMasterRegisters
+            }
+            PhyRfInitPrefixStep::PowerDetectorRegisters { .. } => {
+                PhyRfInitPrefixAction::ConfigurePowerDetectorRegisters
             }
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
@@ -853,30 +984,66 @@ impl PhyRfInitPrefixTransition {
             (
                 PhyRfInitPrefixStep::I2cClockSelection,
                 PhyRfInitPrefixCompletion::I2cClockSelectionConfigured,
-            ) => PhyRfInitPrefixStep::FeTxRxReset,
+            ) => PhyRfInitPrefixStep::I2cBbpll(I2cBbpllTransition::enable()),
             (
-                PhyRfInitPrefixStep::FeTxRxReset,
-                PhyRfInitPrefixCompletion::FeTxRxResetConfigured,
-            ) => PhyRfInitPrefixStep::AdcRate(AdcRateTransition::new(true)),
+                PhyRfInitPrefixStep::I2cBbpll(mut transition),
+                PhyRfInitPrefixCompletion::I2cBbpll(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    I2cBbpllAction::Complete(I2cBbpllOutcome::Enabled { register_snapshot }) => {
+                        PhyRfInitPrefixStep::AdcRate {
+                            transition: AdcRateTransition::new(true),
+                            bbpll_register_snapshot: register_snapshot,
+                        }
+                    }
+                    I2cBbpllAction::Complete(I2cBbpllOutcome::Restored) => {
+                        return Err(PhyRfInitPrefixTransitionError::WrongCompletion);
+                    }
+                    _ => PhyRfInitPrefixStep::I2cBbpll(transition),
+                }
+            }
             (
-                PhyRfInitPrefixStep::AdcRate(mut transition),
+                PhyRfInitPrefixStep::AdcRate {
+                    mut transition,
+                    bbpll_register_snapshot,
+                },
                 PhyRfInitPrefixCompletion::AdcRate(completion),
             ) => {
                 transition
                     .advance(completion)
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 if transition.action() == AdcRateAction::Complete {
-                    PhyRfInitPrefixStep::I2cMasterRegisters
+                    PhyRfInitPrefixStep::I2cMasterRegisters {
+                        bbpll_register_snapshot,
+                    }
                 } else {
-                    PhyRfInitPrefixStep::AdcRate(transition)
+                    PhyRfInitPrefixStep::AdcRate {
+                        transition,
+                        bbpll_register_snapshot,
+                    }
                 }
             }
             (
-                PhyRfInitPrefixStep::I2cMasterRegisters,
+                PhyRfInitPrefixStep::I2cMasterRegisters {
+                    bbpll_register_snapshot,
+                },
                 PhyRfInitPrefixCompletion::I2cMasterRegistersConfigured,
-            ) => {
-                PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForFrequencyRegisterInit)
-            }
+            ) => PhyRfInitPrefixStep::PowerDetectorRegisters {
+                bbpll_register_snapshot,
+            },
+            (
+                PhyRfInitPrefixStep::PowerDetectorRegisters {
+                    bbpll_register_snapshot,
+                },
+                PhyRfInitPrefixCompletion::PowerDetectorRegistersConfigured,
+            ) => PhyRfInitPrefixStep::Complete(
+                PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterInit {
+                    bbpll_register_snapshot,
+                },
+            ),
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
             }
@@ -1049,11 +1216,13 @@ mod tests {
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
         read_result, with_phy_i2c_host_config, AdcRateAction, AdcRateCompletion, AdcRateTransition,
         AdcRateTransitionError, BiasRegAction, BiasRegCompletion, BiasRegTransition,
-        BiasRegTransitionError, OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome,
-        OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitPrefixAction,
-        PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome, PhyRfInitPrefixTransition,
-        PhyRfInitPrefixTransitionError, RcCalibrationAction, RcCalibrationCompletion,
-        RcCalibrationTransition, RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
+        BiasRegTransitionError, I2cBbpllAction, I2cBbpllCompletion, I2cBbpllOutcome,
+        I2cBbpllTransition, I2cBbpllTransitionError, OpenI2cXpdAction, OpenI2cXpdCompletion,
+        OpenI2cXpdOutcome, OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress,
+        PhyRfInitPrefixAction, PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome,
+        PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError, RcCalibrationAction,
+        RcCalibrationCompletion, RcCalibrationTransition, RcCalibrationTransitionError,
+        PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
@@ -1294,6 +1463,62 @@ mod tests {
     }
 
     #[test]
+    fn i2c_bbpll_moves_rom_phy_param_snapshot_into_owned_state() {
+        let address = PhyI2cAddress::new(0x66, 4).unwrap();
+        let mut enable = I2cBbpllTransition::enable();
+        assert_eq!(enable.action(), I2cBbpllAction::ReadMaskedByte { address });
+        assert_eq!(
+            enable.advance(I2cBbpllCompletion::I2cWriteCompleted { address }),
+            Err(I2cBbpllTransitionError::WrongCompletion)
+        );
+        enable
+            .advance(I2cBbpllCompletion::I2cReadCompleted {
+                address,
+                value: 0xaf,
+            })
+            .unwrap();
+        assert_eq!(
+            enable.action(),
+            I2cBbpllAction::WriteByte {
+                address,
+                value: 0xa3,
+            }
+        );
+        enable
+            .advance(I2cBbpllCompletion::I2cWriteCompleted { address })
+            .unwrap();
+        assert_eq!(enable.action(), I2cBbpllAction::ReadSnapshot { address });
+        enable
+            .advance(I2cBbpllCompletion::I2cReadCompleted {
+                address,
+                value: 0xa3,
+            })
+            .unwrap();
+        assert_eq!(
+            enable.action(),
+            I2cBbpllAction::Complete(I2cBbpllOutcome::Enabled {
+                register_snapshot: 0xa3,
+            })
+        );
+
+        let mut restore = I2cBbpllTransition::restore(0xa3);
+        assert_eq!(
+            restore.action(),
+            I2cBbpllAction::WriteByte {
+                address,
+                value: 0xa3,
+            }
+        );
+        restore
+            .advance(I2cBbpllCompletion::I2cWriteCompleted { address })
+            .unwrap();
+        assert_eq!(
+            restore.action(),
+            I2cBbpllAction::Complete(I2cBbpllOutcome::Restored)
+        );
+    }
+
+    #[test]
     fn rf_init_prefix_composes_mmio_i2c_and_timer_edges_in_vendor_order() {
         let bias_zero = PhyI2cAddress::new(0x6a, 0).unwrap();
         let bias_one = PhyI2cAddress::new(0x6a, 1).unwrap();
@@ -1417,12 +1642,48 @@ mod tests {
         transition
             .advance(PhyRfInitPrefixCompletion::I2cClockSelectionConfigured)
             .unwrap();
+        let bbpll_address = PhyI2cAddress::new(0x66, 4).unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::ConfigureFeTxRxReset
+            PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::ReadMaskedByte {
+                address: bbpll_address
+            })
         );
         transition
-            .advance(PhyRfInitPrefixCompletion::FeTxRxResetConfigured)
+            .advance(PhyRfInitPrefixCompletion::I2cBbpll(
+                I2cBbpllCompletion::I2cReadCompleted {
+                    address: bbpll_address,
+                    value: 0xaf,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::WriteByte {
+                address: bbpll_address,
+                value: 0xa3,
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::I2cBbpll(
+                I2cBbpllCompletion::I2cWriteCompleted {
+                    address: bbpll_address,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::ReadSnapshot {
+                address: bbpll_address
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::I2cBbpll(
+                I2cBbpllCompletion::I2cReadCompleted {
+                    address: bbpll_address,
+                    value: 0xa3,
+                },
+            ))
             .unwrap();
         let adc_address = PhyI2cAddress::new(0x66, 4).unwrap();
         assert_eq!(
@@ -1471,7 +1732,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForFrequencyRegisterInit)
+            PhyRfInitPrefixAction::ConfigurePowerDetectorRegisters
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::PowerDetectorRegistersConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterInit {
+                bbpll_register_snapshot: 0xa3,
+            })
         );
     }
 

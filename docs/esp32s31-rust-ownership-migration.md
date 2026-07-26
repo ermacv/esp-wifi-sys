@@ -1376,12 +1376,28 @@ Rust preserves the six-write ordering in
 `configure_phy_i2c_clock_selection`; the parent exposes it as the finite
 `ConfigureI2cClockSelection { selection: 8 }` action.
 
-The complete rev0 ROM `phy_fe_txrx_reset` body at `0x2f82788c`, size `0x24`,
-is another finite MMIO leaf. It ignores the parent argument, clears mask
-`0x06000000` at `0x20100440`, then sets the same two bits using a fresh
-read. There is no delay or status observation between the writes. Rust keeps
-that exact pulse as `ConfigureFeTxRxReset`; the unused argument is omitted
-from the owned action rather than pretending it affects hardware.
+The next cold-parent operation is `phy_i2c_bbpll_set(1)`, not
+`phy_fe_txrx_reset(1)`. This is pinned by the relocation at offset `0x4a` in
+`libphy.a[phy_init.o]::phy_rf_init`. The reset leaf occurs in
+`phy_wakeup_init`; an earlier slice accidentally composed that wakeup
+operation into the cold prefix after reading the archive-wide relocation
+table without preserving its section owner. The standalone finite reset HAL
+leaf remains valid for the later wakeup port, but it is no longer part of the
+cold transition.
+
+The complete rev0 ROM `phy_i2c_bbpll_set` body at `0x2f82a67e`, size `0x54`,
+contains three blocking PHY-I2C transactions on `(0x66, 4)` when enabling:
+masked read/modify/write clears bits three and two, then a second read captures
+the resulting byte. ROM stores that byte through the mutable `phy_param`
+indirection at offset `0x4a`. Its disable branch reads the same hidden byte
+and writes it back.
+
+`I2cBbpllTransition` makes both directions explicit. Enable owns the masked
+read, write, and snapshot-read completions and returns
+`Enabled { register_snapshot }`. Restore requires that snapshot as a Rust
+input. The cold parent carries the byte across later steps and returns it in
+`ReadyForPowerDetectorRegisterInit`; it no longer needs to mutate or inspect
+`phy_param[0x4a]`.
 
 The complete rev0 ROM `phy_adc_rate_set` body at `0x2f82a6d2`, size `0x4a`,
 contains one blocking subgraph followed by a finite MMIO suffix. Its
@@ -1401,15 +1417,21 @@ The complete rev0 ROM `phy_i2cmst_reg_init` body at `0x2f8276c4`, size
 the first replaces field `0x600` with `0x400`, and the second sets `0x40`.
 Rust preserves both writes as `ConfigureI2cMasterRegisters`.
 
-The prefix now reaches `ReadyForFrequencyRegisterInit` only after PBus clear,
-clock selection, FE TX/RX reset, ADC-rate completion, and I2C-master register
-initialization. SDM and PBus timeouts terminate separately and cannot run
-later hardware steps. The serial runtime suite passes 336 tests. The next
-boundary is operation eleven, `phy_freq_reg_init()`; unlike operation ten it
-reads PHY parameter byte `0x193`, so its owned input and both conditional
-register-field values must be recovered before composition. The prefix
+The complete rev0 ROM `phy_pwdet_reg_init` body at `0x2f82634a`, size `0x5c`,
+is six finite stores. Rust preserves constants `0x0f0f0fff`,
+`0x00ff0f64`, and `0x0000aaaa`, both separately sampled field updates at
+`0x20100808`, and the final mode field at `0x20701068`. There is no branch,
+call, delay, loop, or software-state access.
+
+The prefix now reaches `ReadyForFrontEndRegisterInit` only after PBus clear,
+clock selection, I2C BBPLL enable, ADC-rate completion, I2C-master register
+initialization, and power-detector initialization. SDM and PBus timeouts
+terminate separately and cannot run later hardware steps. The serial runtime
+suite passes 338 tests. The next cold-parent boundary is operation twelve,
+`phy_fe_reg_init()`. `phy_freq_reg_init()` belongs to `phy_wakeup_init` and
+`phy_set_chan_freq_hw_init`, not this point in the cold path. The prefix
 remains dead-stripped and does not replace any part of the live parent until
-the remaining 16 operations have equivalent owned actions.
+the remaining 15 operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

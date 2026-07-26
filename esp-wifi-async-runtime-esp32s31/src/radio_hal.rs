@@ -66,6 +66,11 @@ const PHY_I2C_CLOCK_SELECTION_2_ADDRESS: usize = 0x2010_f82c;
 const PHY_FE_TXRX_RESET_ADDRESS: usize = 0x2010_0440;
 const PHY_ADC_RATE_ADDRESS: usize = 0x2010_0448;
 const PHY_I2C_MASTER_REGISTER_CONTROL_ADDRESS: usize = 0x2010_f818;
+const PHY_POWER_DETECTOR_CONTROL_ADDRESS: usize = 0x2010_0808;
+const PHY_POWER_DETECTOR_TABLE_0_ADDRESS: usize = 0x2010_0810;
+const PHY_POWER_DETECTOR_TABLE_1_ADDRESS: usize = 0x2010_0814;
+const PHY_POWER_DETECTOR_TABLE_2_ADDRESS: usize = 0x2010_0818;
+const PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS: usize = 0x2070_1068;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -264,6 +269,18 @@ const fn with_phy_i2c_master_register_mode(value: u32) -> u32 {
 
 const fn with_phy_i2c_master_register_enable(value: u32) -> u32 {
     value | 0x0000_0040
+}
+
+const fn with_phy_power_detector_low_field(value: u32) -> u32 {
+    (value & 0xffff_f00f) | 0x0000_0500
+}
+
+const fn with_phy_power_detector_high_field(value: u32) -> u32 {
+    (value & 0xff8f_ffff) | 0x0020_0000
+}
+
+const fn with_phy_power_detector_aux_mode(value: u32) -> u32 {
+    (value & !0x0000_0007) | 0x0000_0004
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -838,6 +855,26 @@ pub(crate) unsafe fn configure_phy_i2c_master_registers() {
     ));
 }
 
+/// Apply complete rev0 ROM `phy_pwdet_reg_init`.
+///
+/// The pinned body at `0x2f82_634a`, size `0x5c`, performs six finite stores
+/// with no branch, call, loop, delay, or mutable software-state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_power_detector_registers() {
+    (PHY_POWER_DETECTOR_TABLE_0_ADDRESS as *mut u32).write_volatile(0x0f0f_0fff);
+    (PHY_POWER_DETECTOR_TABLE_1_ADDRESS as *mut u32).write_volatile(0x00ff_0f64);
+
+    let control = PHY_POWER_DETECTOR_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_power_detector_low_field(control.read_volatile()));
+
+    (PHY_POWER_DETECTOR_TABLE_2_ADDRESS as *mut u32).write_volatile(0x0000_aaaa);
+
+    control.write_volatile(with_phy_power_detector_high_field(control.read_volatile()));
+
+    let auxiliary = PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS as *mut u32;
+    auxiliary.write_volatile(with_phy_power_detector_aux_mode(auxiliary.read_volatile()));
+}
+
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
@@ -981,8 +1018,10 @@ mod tests {
         with_phy_i2c_master_register_enable, with_phy_i2c_master_register_mode,
         with_phy_pbus_debug_control, with_phy_pbus_debug_mode, with_phy_pbus_force_test,
         with_phy_pbus_work_control, with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
-        with_phy_pbus_work_mode_pulse_setup, with_phy_rx_comp_high, with_phy_rx_comp_low,
-        with_phy_rx_control_high, with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
+        with_phy_pbus_work_mode_pulse_setup, with_phy_power_detector_aux_mode,
+        with_phy_power_detector_high_field, with_phy_power_detector_low_field,
+        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
+        with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
         without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_fe_txrx_reset,
         without_phy_pbus_work_mode_pulse, without_tx_queue_enable, without_tx_queue_valid,
         WIFI_MAC_ACTIVE_REGDMA_LINK,
@@ -1150,6 +1189,15 @@ mod tests {
             with_phy_i2c_master_register_enable(0x0000_0400),
             0x0000_0440
         );
+    }
+
+    #[test]
+    fn phy_power_detector_fields_match_complete_rom_body() {
+        assert_eq!(with_phy_power_detector_low_field(0), 0x0000_0500);
+        assert_eq!(with_phy_power_detector_low_field(u32::MAX), 0xffff_f50f);
+        assert_eq!(with_phy_power_detector_high_field(u32::MAX), 0xffaf_ffff);
+        assert_eq!(with_phy_power_detector_aux_mode(u32::MAX), 0xffff_fffc);
+        assert_eq!(with_phy_power_detector_aux_mode(0), 0x0000_0004);
     }
 
     #[test]
