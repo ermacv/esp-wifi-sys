@@ -2598,9 +2598,12 @@ mod tests {
         RfpllChargePumpTransition, Sar2InitAction, Sar2InitCompletion, Sar2InitTransition,
         PHY_I2C_MASTER_COMMAND_COUNT,
     };
+    use crate::phy_dc_iq::{
+        PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
+    };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
-    use crate::phy_rx_dco::{PhyDcIqEstimate, PhyRxDcoAction, PhyRxDcoCompletion};
+    use crate::phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion};
     use crate::phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
         XtalDutyCalibrationParameters, XtalDutyPassAction, XtalDutyPassCompletion,
@@ -2608,6 +2611,48 @@ mod tests {
         XtalDutyRestoreAction, XtalDutyRestoreCompletion, XtalDutySearchAction,
         XtalDutySearchCompletion,
     };
+
+    fn complete_dc_iq(action: PhyDcIqAction) -> PhyDcIqCompletion {
+        match action {
+            PhyDcIqAction::Configure(request) => PhyDcIqCompletion::Configured(request),
+            PhyDcIqAction::SetEnable {
+                request,
+                phase,
+                enabled,
+            } => PhyDcIqCompletion::EnableSet {
+                request,
+                phase,
+                enabled,
+            },
+            PhyDcIqAction::DelayMicros {
+                request,
+                phase,
+                micros,
+            } => PhyDcIqCompletion::DelayElapsed {
+                request,
+                phase,
+                micros,
+            },
+            PhyDcIqAction::AwaitReadinessEdge { request, .. } => {
+                PhyDcIqCompletion::ReadinessObserved {
+                    request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: true,
+                        activity: false,
+                    },
+                }
+            }
+            PhyDcIqAction::ReadAccumulators(request) => PhyDcIqCompletion::AccumulatorsRead {
+                request,
+                snapshot: PhyDcIqAccumulatorSnapshot {
+                    i: 0,
+                    q: 0,
+                    power: 0,
+                },
+            },
+            action => panic!("unexpected terminal DC/IQ action: {action:?}"),
+        }
+    }
 
     fn complete_rx_dco(action: PhyRxDcoAction) -> PhyRxDcoCompletion {
         match action {
@@ -2628,10 +2673,7 @@ mod tests {
             PhyRxDcoAction::DelayMicros { iteration, micros } => {
                 PhyRxDcoCompletion::DelayElapsed { iteration, micros }
             }
-            PhyRxDcoAction::MeasureDcIq(request) => PhyRxDcoCompletion::DcIqMeasured {
-                request,
-                estimate: PhyDcIqEstimate { i: 0, q: 0 },
-            },
+            PhyRxDcoAction::DcIq(action) => PhyRxDcoCompletion::DcIq(complete_dc_iq(action)),
             PhyRxDcoAction::RestoreRxDcoControl {
                 address,
                 saved_field,
@@ -2786,9 +2828,9 @@ mod tests {
                 )) => {
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
-                            XtalDutyCalibrationCompletion::Pass(
-                                XtalDutyPassCompletion::Prepare(complete_xtal_prepare(action)),
-                            ),
+                            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                                complete_xtal_prepare(action),
+                            )),
                         ))
                         .unwrap();
                 }
@@ -2840,9 +2882,9 @@ mod tests {
                 )) => {
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
-                            XtalDutyCalibrationCompletion::Pass(
-                                XtalDutyPassCompletion::Restore(complete_xtal_restore(action)),
-                            ),
+                            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                                complete_xtal_restore(action),
+                            )),
                         ))
                         .unwrap();
                 }

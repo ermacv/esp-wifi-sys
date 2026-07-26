@@ -61,6 +61,13 @@ const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
 const PHY_PBUS_RX_DCO_READ_ADDRESS: usize = 0x2010_1894;
 const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
 const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
+const PHY_IQ_EST_CONFIG_ADDRESS: usize = 0x2010_044c;
+const PHY_IQ_EST_CONTROL_ADDRESS: usize = 0x2010_0450;
+const PHY_IQ_EST_I_ACCUMULATOR_ADDRESS: usize = 0x2010_0464;
+const PHY_IQ_EST_Q_ACCUMULATOR_ADDRESS: usize = 0x2010_0468;
+const PHY_IQ_EST_POWER_ACCUMULATOR_ADDRESS: usize = 0x2010_046c;
+const PHY_IQ_EST_READY_ADDRESS: usize = 0x2010_047c;
+const PHY_IQ_EST_ACTIVITY_ADDRESS: usize = 0x2010_18d0;
 const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
 const PHY_PBUS_WORK_MODE_PULSE_ADDRESS: usize = 0x2010_702c;
 const PHY_I2C_CLOCK_SELECTION_0_ADDRESS: usize = 0x2010_f824;
@@ -93,6 +100,11 @@ const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
 const PHY_PBUS_SETTLE_CONDITION_BIT: u32 = 1 << 1;
 const PHY_PBUS_WORK_MODE_PULSE_BIT: u32 = 1 << 23;
+const PHY_IQ_EST_CONTROL_FIELD_MASK: u32 = 0x0001_fffc;
+const PHY_IQ_EST_START_BIT: u32 = 1 << 0;
+const PHY_IQ_EST_MEASUREMENT_BIT: u32 = 1 << 1;
+const PHY_IQ_EST_READY_BIT: u32 = 1 << 16;
+const PHY_IQ_EST_ACTIVITY_MASK: u32 = 0x0030_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PhyPbusError {
@@ -262,6 +274,27 @@ const fn without_phy_rx_dco_control_field(value: u32) -> u32 {
 
 const fn with_restored_phy_rx_dco_control_field(value: u32, saved_field: u32) -> u32 {
     without_phy_rx_dco_control_field(value) | (saved_field & 0x00c0_0000)
+}
+
+const fn with_phy_iq_est_config(value: u32) -> u32 {
+    (value & !(0x3 << 26)) | (1 << 26)
+}
+
+const fn with_phy_iq_est_mode(value: u32) -> u32 {
+    (value & !(0x3 << 19)) | (1 << 20)
+}
+
+const fn with_phy_iq_est_control(value: u32, control: u16) -> u32 {
+    (value & !PHY_IQ_EST_CONTROL_FIELD_MASK)
+        | ((control as u32).wrapping_shl(2) & PHY_IQ_EST_CONTROL_FIELD_MASK)
+}
+
+const fn with_phy_iq_est_enable(value: u32, bit: u32, enabled: bool) -> u32 {
+    if enabled {
+        value | bit
+    } else {
+        value & !bit
+    }
 }
 
 const fn with_phy_pbus_work_mode_pulse_setup(value: u32) -> u32 {
@@ -819,9 +852,7 @@ pub(crate) unsafe fn try_finish_phy_pbus_force_test() -> Result<(), PhyPbusError
 /// callback, or non-MMIO state access.
 #[cfg(target_arch = "riscv32")]
 pub(crate) unsafe fn read_phy_pbus_rx_dco_value() -> u16 {
-    phy_pbus_rx_dco_read_value(
-        (PHY_PBUS_RX_DCO_READ_ADDRESS as *const u32).read_volatile(),
-    )
+    phy_pbus_rx_dco_read_value((PHY_PBUS_RX_DCO_READ_ADDRESS as *const u32).read_volatile())
 }
 
 /// Enter PBus work mode and return the one sampled settle-condition bit.
@@ -905,6 +936,70 @@ pub(crate) unsafe fn restore_phy_rx_dco_control_field(saved_field: u32) {
         control.read_volatile(),
         saved_field,
     ));
+}
+
+/// Apply the finite register prefix of rev0 ROM `phy_iq_est_enable`.
+///
+/// Reference: `esp32s31_rev0_rom.elf` at `0x2f82_89d4`. The ROM function
+/// performs these three fresh-read transforms before setting either enable
+/// bit. Its write to `phy_param_rom + 0x1ac` is intentionally absent: the
+/// corresponding diagnostic counter is owned by `PhyDcIqEstimateTransition`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_dc_iq_estimator(control_field: u16) {
+    let config = PHY_IQ_EST_CONFIG_ADDRESS as *mut u32;
+    config.write_volatile(with_phy_iq_est_config(config.read_volatile()));
+
+    let control = PHY_IQ_EST_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_iq_est_mode(control.read_volatile()));
+    control.write_volatile(with_phy_iq_est_control(
+        control.read_volatile(),
+        control_field,
+    ));
+}
+
+/// Set or clear exactly one DC/IQ estimator enable bit.
+///
+/// The caller owns ordering and the asynchronous one-microsecond intervals.
+/// This leaf is one finite read/modify/write with no wait or hidden state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn set_phy_dc_iq_estimator_enable(
+    phase: crate::phy_dc_iq::PhyDcIqEnablePhase,
+    enabled: bool,
+) {
+    let bit = match phase {
+        crate::phy_dc_iq::PhyDcIqEnablePhase::Start => PHY_IQ_EST_START_BIT,
+        crate::phy_dc_iq::PhyDcIqEnablePhase::Measurement => PHY_IQ_EST_MEASUREMENT_BIT,
+    };
+    let control = PHY_IQ_EST_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_iq_est_enable(
+        control.read_volatile(),
+        bit,
+        enabled,
+    ));
+}
+
+/// Sample the estimator-ready and diagnostic-activity fields exactly once.
+///
+/// A false result is only an observation; this leaf never loops, delays, or
+/// requests another sample.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn sample_phy_dc_iq_readiness() -> crate::phy_dc_iq::PhyDcIqReadinessSnapshot {
+    crate::phy_dc_iq::PhyDcIqReadinessSnapshot {
+        ready: (PHY_IQ_EST_READY_ADDRESS as *const u32).read_volatile() & PHY_IQ_EST_READY_BIT != 0,
+        activity: (PHY_IQ_EST_ACTIVITY_ADDRESS as *const u32).read_volatile()
+            & PHY_IQ_EST_ACTIVITY_MASK
+            != 0,
+    }
+}
+
+/// Read the three signed DC/IQ accumulator words exactly once each.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_dc_iq_accumulators() -> crate::phy_dc_iq::PhyDcIqAccumulatorSnapshot {
+    crate::phy_dc_iq::PhyDcIqAccumulatorSnapshot {
+        i: (PHY_IQ_EST_I_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
+        q: (PHY_IQ_EST_Q_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
+        power: (PHY_IQ_EST_POWER_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
+    }
 }
 
 /// Apply the complete rev0 ROM `phy_i2c_clk_sel` register transform.
@@ -1213,23 +1308,25 @@ mod tests {
         mac_address_registers, mac_rx_address_policy_address, mac_rx_frame_policy_address,
         mac_rx_management_policy_address, phy_pbus_is_busy, phy_pbus_rx_dco_read_value,
         tsf_latch_mask, tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid,
-        with_bbpll_calibration,
-        with_mac_rx_control_address_policy, with_mac_rx_control_policy,
+        with_bbpll_calibration, with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_adc_rate_high, with_phy_adc_rate_low, with_phy_agc_control, with_phy_agc_window,
         with_phy_fe_txrx_reset, with_phy_ftm_enable, with_phy_gain_memory_index,
         with_phy_i2c_clock_selection_high, with_phy_i2c_clock_selection_low,
         with_phy_i2c_master_register_enable, with_phy_i2c_master_register_mode,
-        with_phy_pbus_debug_control, with_phy_pbus_debug_mode, with_phy_pbus_force_test,
-        with_phy_pbus_work_control, with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
-        with_phy_pbus_work_mode_pulse_setup, with_phy_power_detector_aux_mode,
-        with_phy_power_detector_high_field, with_phy_power_detector_low_field, with_phy_rx_clock,
-        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
-        with_phy_rx_control_low, with_phy_tx_clock, with_register_bits, with_register_field,
-        with_restored_phy_rx_dco_control_field, with_tx_cca, with_wifi_mac_regdma_link,
-        without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_fe_txrx_reset,
-        without_phy_pbus_work_mode_pulse, without_phy_rx_dco_control_field, without_register_bits,
-        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
+        with_phy_iq_est_config, with_phy_iq_est_control, with_phy_iq_est_enable,
+        with_phy_iq_est_mode, with_phy_pbus_debug_control, with_phy_pbus_debug_mode,
+        with_phy_pbus_force_test, with_phy_pbus_work_control, with_phy_pbus_work_mode,
+        with_phy_pbus_work_mode_pulse, with_phy_pbus_work_mode_pulse_setup,
+        with_phy_power_detector_aux_mode, with_phy_power_detector_high_field,
+        with_phy_power_detector_low_field, with_phy_rx_clock, with_phy_rx_comp_high,
+        with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low, with_phy_tx_clock,
+        with_register_bits, with_register_field, with_restored_phy_rx_dco_control_field,
+        with_tx_cca, with_wifi_mac_regdma_link, without_fe_bb_clock_enable,
+        without_mac_tx_retention, without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse,
+        without_phy_rx_dco_control_field, without_register_bits, without_tx_queue_enable,
+        without_tx_queue_valid, PHY_IQ_EST_MEASUREMENT_BIT, PHY_IQ_EST_START_BIT,
+        WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -1357,10 +1454,7 @@ mod tests {
         assert_eq!(with_phy_pbus_work_mode_pulse_setup(u32::MAX), 0x32ff_ffff);
         assert_eq!(with_phy_pbus_work_mode_pulse(0), 0x0080_0000);
         assert_eq!(without_phy_pbus_work_mode_pulse(u32::MAX), 0xff7f_ffff);
-        assert_eq!(
-            without_phy_rx_dco_control_field(0x12ff_5678),
-            0x123f_5678
-        );
+        assert_eq!(without_phy_rx_dco_control_field(0x12ff_5678), 0x123f_5678);
         assert_eq!(
             with_restored_phy_rx_dco_control_field(0xffff_ffff, 0x0040_0000),
             0xff7f_ffff
@@ -1382,6 +1476,21 @@ mod tests {
         assert_eq!(with_phy_rx_clock(u32::MAX, false), 0xffff_3fff);
         assert_eq!(with_phy_rx_clock(0x1234_5678, true), 0x1234_d678);
         assert_eq!(with_phy_rx_clock(0x1234_5678, false), 0x1234_1678);
+    }
+
+    #[test]
+    fn phy_dc_iq_estimator_masks_match_the_complete_rom_prefix() {
+        assert_eq!(with_phy_iq_est_config(0), 0x0400_0000);
+        assert_eq!(with_phy_iq_est_config(u32::MAX), 0xf7ff_ffff);
+        assert_eq!(with_phy_iq_est_mode(0), 0x0010_0000);
+        assert_eq!(with_phy_iq_est_mode(u32::MAX), 0xfff7_ffff);
+        assert_eq!(with_phy_iq_est_control(0, 0x0fa0), 0x0000_3e80);
+        assert_eq!(with_phy_iq_est_control(u32::MAX, 0x0fa0), 0xfffe_3e83);
+        assert_eq!(with_phy_iq_est_enable(0, PHY_IQ_EST_START_BIT, true), 1);
+        assert_eq!(
+            with_phy_iq_est_enable(u32::MAX, PHY_IQ_EST_MEASUREMENT_BIT, false),
+            0xffff_fffd
+        );
     }
 
     #[test]

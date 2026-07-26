@@ -8,9 +8,8 @@ use crate::{
     phy_i2c::PhyI2cAddress,
     phy_pbus::PhyPbusForceTest,
     phy_rx_dco::{
-        PhyRxDcoAction, PhyRxDcoCompletion, PhyRxDcoFailure, PhyRxDcoOutcome,
-        PhyRxDcoRequest, PhyRxDcoTransition, RX_DCO_CONTROL_ADDRESS,
-        RX_DCO_CONTROL_FIELD_MASK,
+        PhyRxDcoAction, PhyRxDcoCompletion, PhyRxDcoFailure, PhyRxDcoOutcome, PhyRxDcoRequest,
+        PhyRxDcoTransition, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
     },
 };
 
@@ -423,8 +422,7 @@ pub enum XtalDutyPrepareAction {
         address: usize,
         clear_mask: u32,
     },
-    /// Complete Rust-owned RX-DCO loop. Its remaining IQ-estimator child is
-    /// visible through `PhyRxDcoAction::MeasureDcIq`.
+    /// Complete Rust-owned RX-DCO and IQ-estimator graph.
     RxDco(PhyRxDcoAction),
     RestoreRxDcoControl {
         address: usize,
@@ -502,8 +500,8 @@ enum XtalDutyPrepareStep {
 ///
 /// PBus commands are individual externally completed operations. Nothing in
 /// this transition retries a busy register, polls, delays, allocates, or
-/// invokes a callback. RFPLL, tone and RX-DCO remain named child boundaries
-/// until their own register/timer transitions are complete.
+/// invokes a callback. RFPLL and tone remain named child boundaries; RX-DCO
+/// and its IQ estimator are complete nested register/timer transitions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct XtalDutyPrepareTransition {
     frequency_code: u16,
@@ -512,10 +510,7 @@ pub struct XtalDutyPrepareTransition {
 }
 
 impl XtalDutyPrepareTransition {
-    pub const fn new(
-        frequency_code: u16,
-        parameter: XtalDutyCalibrationParameters,
-    ) -> Self {
+    pub const fn new(frequency_code: u16, parameter: XtalDutyCalibrationParameters) -> Self {
         Self {
             frequency_code,
             parameter,
@@ -525,54 +520,42 @@ impl XtalDutyPrepareTransition {
 
     pub const fn action(self) -> XtalDutyPrepareAction {
         match self.step {
-            XtalDutyPrepareStep::ProgramRfFrequency => {
-                XtalDutyPrepareAction::ProgramRfFrequency {
-                    rf_frequency_offset_base: self.parameter.rf_frequency_offset_base,
-                    frequency_code: self.frequency_code.wrapping_sub(5),
-                    mode: 0,
-                }
-            }
-            XtalDutyPrepareStep::StartTone => {
-                XtalDutyPrepareAction::ConfigureCalibrationTone {
-                    enabled: true,
-                    selector: 0x80,
-                    step: 0,
-                }
-            }
+            XtalDutyPrepareStep::ProgramRfFrequency => XtalDutyPrepareAction::ProgramRfFrequency {
+                rf_frequency_offset_base: self.parameter.rf_frequency_offset_base,
+                frequency_code: self.frequency_code.wrapping_sub(5),
+                mode: 0,
+            },
+            XtalDutyPrepareStep::StartTone => XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled: true,
+                selector: 0x80,
+                step: 0,
+            },
             XtalDutyPrepareStep::EnableRxClock => {
                 XtalDutyPrepareAction::ConfigureRxClock { enabled: true }
             }
             XtalDutyPrepareStep::EnableTxClock => {
                 XtalDutyPrepareAction::ConfigureTxClock { enabled: true }
             }
-            XtalDutyPrepareStep::PbusDebugMode => {
-                XtalDutyPrepareAction::ConfigurePbusDebugMode
-            }
+            XtalDutyPrepareStep::PbusDebugMode => XtalDutyPrepareAction::ConfigurePbusDebugMode,
             XtalDutyPrepareStep::PbusForce(index) => XtalDutyPrepareAction::ForcePbus(
                 prepare_pbus_transaction(index, self.parameter.pbus_rx_path_value),
             ),
-            XtalDutyPrepareStep::MaskRxDcoControl => {
-                XtalDutyPrepareAction::MaskRxDcoControl {
-                    address: RX_DCO_CONTROL_ADDRESS,
-                    clear_mask: RX_DCO_CONTROL_FIELD_MASK,
-                }
-            }
+            XtalDutyPrepareStep::MaskRxDcoControl => XtalDutyPrepareAction::MaskRxDcoControl {
+                address: RX_DCO_CONTROL_ADDRESS,
+                clear_mask: RX_DCO_CONTROL_FIELD_MASK,
+            },
             XtalDutyPrepareStep::RxDco { transition, .. } => {
                 XtalDutyPrepareAction::RxDco(transition.action())
             }
             XtalDutyPrepareStep::RestoreRxDcoControl { saved_field, .. }
-            | XtalDutyPrepareStep::RestoreRxDcoControlAfterFailure {
-                saved_field, ..
-            } => {
+            | XtalDutyPrepareStep::RestoreRxDcoControlAfterFailure { saved_field, .. } => {
                 XtalDutyPrepareAction::RestoreRxDcoControl {
                     address: RX_DCO_CONTROL_ADDRESS,
                     field_mask: RX_DCO_CONTROL_FIELD_MASK,
                     saved_field,
                 }
             }
-            XtalDutyPrepareStep::Complete(outcome) => {
-                XtalDutyPrepareAction::Complete(outcome)
-            }
+            XtalDutyPrepareStep::Complete(outcome) => XtalDutyPrepareAction::Complete(outcome),
             XtalDutyPrepareStep::Failed(failure) => XtalDutyPrepareAction::Failed(failure),
         }
     }
@@ -642,12 +625,10 @@ impl XtalDutyPrepareTransition {
                     address: RX_DCO_CONTROL_ADDRESS,
                     saved_field,
                 },
-            ) if saved_field & !RX_DCO_CONTROL_FIELD_MASK == 0 => {
-                XtalDutyPrepareStep::RxDco {
-                    saved_field,
-                    transition: PhyRxDcoTransition::new(PhyRxDcoRequest::XTAL_DUTY),
-                }
-            }
+            ) if saved_field & !RX_DCO_CONTROL_FIELD_MASK == 0 => XtalDutyPrepareStep::RxDco {
+                saved_field,
+                transition: PhyRxDcoTransition::new(PhyRxDcoRequest::XTAL_DUTY),
+            },
             (
                 XtalDutyPrepareStep::RxDco {
                     saved_field,
@@ -659,12 +640,10 @@ impl XtalDutyPrepareTransition {
                     .advance(completion)
                     .map_err(|_| XtalDutyPrepareTransitionError::WrongCompletion)?;
                 match transition.action() {
-                    PhyRxDcoAction::Complete(outcome) => {
-                        XtalDutyPrepareStep::RestoreRxDcoControl {
-                            saved_field,
-                            outcome,
-                        }
-                    }
+                    PhyRxDcoAction::Complete(outcome) => XtalDutyPrepareStep::RestoreRxDcoControl {
+                        saved_field,
+                        outcome,
+                    },
                     PhyRxDcoAction::Failed(failure) => {
                         XtalDutyPrepareStep::RestoreRxDcoControlAfterFailure {
                             saved_field,
@@ -792,13 +771,11 @@ impl XtalDutyRestoreTransition {
 
     pub const fn action(self) -> XtalDutyRestoreAction {
         match self.step {
-            XtalDutyRestoreStep::StopTone => {
-                XtalDutyRestoreAction::ConfigureCalibrationTone {
-                    enabled: false,
-                    selector: 0x80,
-                    step: 0x28,
-                }
-            }
+            XtalDutyRestoreStep::StopTone => XtalDutyRestoreAction::ConfigureCalibrationTone {
+                enabled: false,
+                selector: 0x80,
+                step: 0x28,
+            },
             XtalDutyRestoreStep::DisableRxClock => {
                 XtalDutyRestoreAction::ConfigureRxClock { enabled: false }
             }
@@ -810,9 +787,7 @@ impl XtalDutyRestoreTransition {
             }
             XtalDutyRestoreStep::WorkMode => XtalDutyRestoreAction::ConfigurePbusWorkMode,
             XtalDutyRestoreStep::SettleDelay => XtalDutyRestoreAction::DelayMicros(1),
-            XtalDutyRestoreStep::WorkModePulse => {
-                XtalDutyRestoreAction::ConfigurePbusWorkModePulse
-            }
+            XtalDutyRestoreStep::WorkModePulse => XtalDutyRestoreAction::ConfigurePbusWorkModePulse,
             XtalDutyRestoreStep::PulseDelay => XtalDutyRestoreAction::DelayMicros(2),
             XtalDutyRestoreStep::ClearWorkModePulse => {
                 XtalDutyRestoreAction::ClearPbusWorkModePulse
@@ -856,11 +831,9 @@ impl XtalDutyRestoreTransition {
             (
                 XtalDutyRestoreStep::PbusForce(index),
                 XtalDutyRestoreCompletion::PbusForceTimedOut(transaction),
-            ) if transaction == restore_pbus_transaction(index) => {
-                XtalDutyRestoreStep::Failed(XtalDutyHardwareFailure::PbusForceTestTimedOut(
-                    transaction,
-                ))
-            }
+            ) if transaction == restore_pbus_transaction(index) => XtalDutyRestoreStep::Failed(
+                XtalDutyHardwareFailure::PbusForceTestTimedOut(transaction),
+            ),
             (
                 XtalDutyRestoreStep::WorkMode,
                 XtalDutyRestoreCompletion::PbusWorkModeConfigured {
@@ -931,12 +904,8 @@ pub enum XtalDutyPassAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutyPassCompletion {
-    MaskedWrite {
-        address: PhyI2cAddress,
-    },
-    ByteWrite {
-        address: PhyI2cAddress,
-    },
+    MaskedWrite { address: PhyI2cAddress },
+    ByteWrite { address: PhyI2cAddress },
     Prepare(XtalDutyPrepareCompletion),
     Search(XtalDutySearchCompletion),
     Restore(XtalDutyRestoreCompletion),
@@ -1273,18 +1242,62 @@ mod tests {
     use super::{
         PhyI2cAddress, XtalDutyCalibrationAction, XtalDutyCalibrationCompletion,
         XtalDutyCalibrationOutcome, XtalDutyCalibrationParameters, XtalDutyCalibrationTransition,
-        XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPassOutcome, XtalDutyPassTransition,
-        XtalDutyHardwareFailure, XtalDutyPassTransitionError, XtalDutyPrepareAction,
+        XtalDutyHardwareFailure, XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPassOutcome,
+        XtalDutyPassTransition, XtalDutyPassTransitionError, XtalDutyPrepareAction,
         XtalDutyPrepareCompletion, XtalDutyPrepareTransition, XtalDutyRestoreAction,
         XtalDutyRestoreCompletion, XtalDutyRestoreTransition, XtalDutySampleKind,
         XtalDutySearchAction, XtalDutySearchCompletion, XtalDutySearchOutcome,
         XtalDutySearchTransition, XtalDutySearchTransitionError,
     };
+    use crate::phy_dc_iq::{
+        PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
+    };
     use crate::phy_pbus::PhyPbusForceTest;
     use crate::phy_rx_dco::{
-        PhyDcIqEstimate, PhyRxDcoAction, PhyRxDcoCompletion,
-        RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
+        PhyRxDcoAction, PhyRxDcoCompletion, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
     };
+
+    fn complete_dc_iq_action(action: PhyDcIqAction) -> PhyDcIqCompletion {
+        match action {
+            PhyDcIqAction::Configure(request) => PhyDcIqCompletion::Configured(request),
+            PhyDcIqAction::SetEnable {
+                request,
+                phase,
+                enabled,
+            } => PhyDcIqCompletion::EnableSet {
+                request,
+                phase,
+                enabled,
+            },
+            PhyDcIqAction::DelayMicros {
+                request,
+                phase,
+                micros,
+            } => PhyDcIqCompletion::DelayElapsed {
+                request,
+                phase,
+                micros,
+            },
+            PhyDcIqAction::AwaitReadinessEdge { request, .. } => {
+                PhyDcIqCompletion::ReadinessObserved {
+                    request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: true,
+                        activity: false,
+                    },
+                }
+            }
+            PhyDcIqAction::ReadAccumulators(request) => PhyDcIqCompletion::AccumulatorsRead {
+                request,
+                snapshot: PhyDcIqAccumulatorSnapshot {
+                    i: 0,
+                    q: 0,
+                    power: 0,
+                },
+            },
+            action => panic!("unexpected terminal DC/IQ action: {action:?}"),
+        }
+    }
 
     fn complete_rx_dco_action(action: PhyRxDcoAction) -> PhyRxDcoCompletion {
         match action {
@@ -1305,10 +1318,7 @@ mod tests {
             PhyRxDcoAction::DelayMicros { iteration, micros } => {
                 PhyRxDcoCompletion::DelayElapsed { iteration, micros }
             }
-            PhyRxDcoAction::MeasureDcIq(request) => PhyRxDcoCompletion::DcIqMeasured {
-                request,
-                estimate: PhyDcIqEstimate { i: 0, q: 0 },
-            },
+            PhyRxDcoAction::DcIq(action) => PhyRxDcoCompletion::DcIq(complete_dc_iq_action(action)),
             PhyRxDcoAction::RestoreRxDcoControl {
                 address,
                 saved_field,
@@ -1674,9 +1684,7 @@ mod tests {
                 XtalDutyPrepareAction::ForcePbus(transaction)
             );
             transition
-                .advance(XtalDutyPrepareCompletion::PbusForceCompleted(
-                    transaction,
-                ))
+                .advance(XtalDutyPrepareCompletion::PbusForceCompleted(transaction))
                 .unwrap();
         }
 
@@ -1702,16 +1710,20 @@ mod tests {
         );
         while let XtalDutyPrepareAction::RxDco(action) = transition.action() {
             transition
-                .advance(XtalDutyPrepareCompletion::RxDco(
-                    complete_rx_dco_action(action),
-                ))
+                .advance(XtalDutyPrepareCompletion::RxDco(complete_rx_dco_action(
+                    action,
+                )))
                 .unwrap();
         }
         let outcome = crate::phy_rx_dco::PhyRxDcoOutcome {
             configuration: [0x0100_0100; 2],
             iterations: 1,
             converged: true,
-            last_estimate: PhyDcIqEstimate { i: 0, q: 0 },
+            last_estimate: crate::phy_dc_iq::PhyDcIqEstimate {
+                i: 0,
+                q: 0,
+                power: 0,
+            },
         };
         assert_eq!(
             transition.action(),
@@ -1761,9 +1773,7 @@ mod tests {
                 XtalDutyRestoreAction::ForcePbus(transaction)
             );
             transition
-                .advance(XtalDutyRestoreCompletion::PbusForceCompleted(
-                    transaction,
-                ))
+                .advance(XtalDutyRestoreCompletion::PbusForceCompleted(transaction))
                 .unwrap();
         }
 
@@ -1776,10 +1786,7 @@ mod tests {
                 settle_required: true,
             })
             .unwrap();
-        assert_eq!(
-            transition.action(),
-            XtalDutyRestoreAction::DelayMicros(1)
-        );
+        assert_eq!(transition.action(), XtalDutyRestoreAction::DelayMicros(1));
         assert!(transition
             .advance(XtalDutyRestoreCompletion::DelayElapsed { micros: 2 })
             .is_err());
@@ -1793,10 +1800,7 @@ mod tests {
         transition
             .advance(XtalDutyRestoreCompletion::PbusWorkModePulseConfigured)
             .unwrap();
-        assert_eq!(
-            transition.action(),
-            XtalDutyRestoreAction::DelayMicros(2)
-        );
+        assert_eq!(transition.action(), XtalDutyRestoreAction::DelayMicros(2));
         transition
             .advance(XtalDutyRestoreCompletion::DelayElapsed { micros: 2 })
             .unwrap();
@@ -1812,9 +1816,7 @@ mod tests {
         let mut timed_out = XtalDutyRestoreTransition::new();
         for _ in 0..3 {
             let action = timed_out.action();
-            timed_out
-                .advance(complete_restore_action(action))
-                .unwrap();
+            timed_out.advance(complete_restore_action(action)).unwrap();
         }
         let XtalDutyRestoreAction::ForcePbus(transaction) = timed_out.action() else {
             panic!("expected first restore PBus command");
@@ -1824,9 +1826,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             timed_out.action(),
-            XtalDutyRestoreAction::Failed(
-                XtalDutyHardwareFailure::PbusForceTestTimedOut(transaction)
-            )
+            XtalDutyRestoreAction::Failed(XtalDutyHardwareFailure::PbusForceTestTimedOut(
+                transaction
+            ))
         );
     }
 
@@ -1859,10 +1861,11 @@ mod tests {
         assert_eq!(
             transition.advance(XtalDutyPassCompletion::Prepare(
                 XtalDutyPrepareCompletion::RfFrequencyProgrammed {
-                frequency_code: 0x983,
-                rf_frequency_offset_base: 0x31,
-                mode: 1,
-            })),
+                    frequency_code: 0x983,
+                    rf_frequency_offset_base: 0x31,
+                    mode: 1,
+                }
+            )),
             Err(XtalDutyPassTransitionError::WrongCompletion)
         );
         assert_eq!(

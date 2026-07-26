@@ -1549,8 +1549,8 @@ a typed terminal failure, never a retry or poll.
 
 This is still not a claim that operation twenty-four is blob-free. The
 remaining named child decomposition is RFPLL frequency programming, tone
-setup (including the `g_phyFuns + 0x30` callback), and the IQ estimator used
-by RX-DCO and signal-power measurements.
+setup (including the `g_phyFuns + 0x30` callback), and
+`phy_get_rx_sig_pwr(12)` used by the crystal-duty candidate search.
 
 `esp32s31_rev0_rom.elf` supplies the exact symbolized RX-DCO reference:
 `phy_pbus_rx_dco_cal` is at `0x2f82_8f44`, size `0x228`.
@@ -1562,12 +1562,26 @@ restoration. The fixed `phy_pbus_rd(1, 2)` jump-table path is one Rust MMIO
 read of the low nine bits at `0x2010_1894`. No ROM RX-DCO parent or
 synchronous delay is required by the transition.
 
-The remaining `phy_dc_iq_est` child calls `phy_iq_est_enable`; the ROM ELF
-shows that enable contains a hardware-dependent readiness loop and writes
-`phy_param_rom + 0x1ac`. It remains an explicit measurement action until its
-MMIO setup, readiness edge and disable tail are separate Rust states.
+The RX-DCO `phy_dc_iq_est` child is now fully decomposed as
+`PhyDcIqEstimateTransition`. The exact rev0 ROM references are
+`phy_iq_est_enable` at `0x2f82_89d4`, `phy_iq_est_disable` at
+`0x2f82_8a88`, `phy_dc_iq_est` at `0x2f82_8ab4`, and `phy_linear_to_db` at
+`0x2f82_6542`. Rust owns the setup writes at `0x2010_044c` and
+`0x2010_0450`, both one-microsecond timer boundaries, the single-sample
+readiness observation at `0x2010_047c`, activity observation at
+`0x2010_18d0`, all three signed accumulators, the exact fixed-table power
+conversion, and the ordered disable tail.
 
-The serial runtime suite passes 359 tests. `phy_freq_reg_init()` belongs to
+The ROM readiness spin is not reproduced. Each false readiness observation
+must be delivered by an independent hardware/timer edge; it cannot self-wake
+or request another sample. The owner may instead deliver a typed timeout.
+Both success and timeout clear measurement bit one, cross an external
+one-microsecond timer edge, and then clear start bit zero. The hidden
+halfword at `phy_param_rom + 0x1ac` has no write in the Rust path: its
+diagnostic activity count is an ordinary field in the transition outcome or
+failure.
+
+The serial runtime suite passes 364 tests. `phy_freq_reg_init()` belongs to
 `phy_wakeup_init` and `phy_set_chan_freq_hw_init`, not this point in the cold
 path. The prefix remains dead-stripped and does not replace any part of the
 live parent until the remaining two parent operations and every operation-24

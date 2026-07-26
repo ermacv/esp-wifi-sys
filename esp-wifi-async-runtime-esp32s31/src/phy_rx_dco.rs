@@ -3,11 +3,14 @@
 //! Primary reference: `esp32s31_rev0_rom.elf::phy_pbus_rx_dco_cal` at
 //! `0x2f82_8f44`, size `0x228`. The crystal-duty caller uses the fixed
 //! argument tuple `(0x0fa0, configuration, 10, 0, 0)`. This module owns the
-//! complete reachable twelve-iteration control loop. The remaining
-//! `phy_dc_iq_est` measurement is deliberately exposed as a child action:
-//! its ROM implementation contains its own hardware-ready loop and must not
-//! run synchronously in the async radio owner.
+//! complete reachable twelve-iteration control loop. Its `phy_dc_iq_est`
+//! child is another Rust-owned transition, so the ROM hardware-ready spin and
+//! synchronous delays are absent from the complete reachable graph.
 
+use crate::phy_dc_iq::{
+    PhyDcIqAction, PhyDcIqCompletion, PhyDcIqEstimateTransition, PhyDcIqFailure,
+};
+pub use crate::phy_dc_iq::{PhyDcIqEstimate, PhyDcIqEstimateRequest};
 use crate::phy_pbus::PhyPbusForceTest;
 
 pub const RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
@@ -38,20 +41,6 @@ impl PhyRxDcoRequest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PhyDcIqEstimateRequest {
-    pub iteration: u8,
-    pub chain: u8,
-    pub control: u16,
-    pub mode: u8,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PhyDcIqEstimate {
-    pub i: i32,
-    pub q: i32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PhyRxDcoOutcome {
     pub configuration: [u32; 2],
     /// Number of completed IQ measurements, in `1..=12`.
@@ -65,7 +54,7 @@ pub struct PhyRxDcoOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRxDcoFailure {
     PbusForceTimedOut(PhyPbusForceTest),
-    DcIqMeasurementFailed(PhyDcIqEstimateRequest),
+    DcIq(PhyDcIqFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,7 +72,7 @@ pub enum PhyRxDcoAction {
         iteration: u8,
         micros: u32,
     },
-    MeasureDcIq(PhyDcIqEstimateRequest),
+    DcIq(PhyDcIqAction),
     RestoreRxDcoControl {
         address: usize,
         field_mask: u32,
@@ -95,30 +84,13 @@ pub enum PhyRxDcoAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRxDcoCompletion {
-    RxDcoControlMasked {
-        address: usize,
-        saved_field: u32,
-    },
-    PbusRead {
-        selector: u8,
-        path: u8,
-        value: u32,
-    },
+    RxDcoControlMasked { address: usize, saved_field: u32 },
+    PbusRead { selector: u8, path: u8, value: u32 },
     PbusForceCompleted(PhyPbusForceTest),
     PbusForceTimedOut(PhyPbusForceTest),
-    DelayElapsed {
-        iteration: u8,
-        micros: u32,
-    },
-    DcIqMeasured {
-        request: PhyDcIqEstimateRequest,
-        estimate: PhyDcIqEstimate,
-    },
-    DcIqMeasurementFailed(PhyDcIqEstimateRequest),
-    RxDcoControlRestored {
-        address: usize,
-        saved_field: u32,
-    },
+    DelayElapsed { iteration: u8, micros: u32 },
+    DcIq(PhyDcIqCompletion),
+    RxDcoControlRestored { address: usize, saved_field: u32 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +120,7 @@ enum PhyRxDcoStep {
     },
     Measure {
         saved_field: u32,
+        transition: PhyDcIqEstimateTransition,
     },
     RestoreSuccess {
         saved_field: u32,
@@ -251,7 +224,11 @@ impl PhyRxDcoTransition {
             threshold: 0,
             current_i: initial_i(request.configuration),
             current_q: initial_q(request.configuration),
-            previous: PhyDcIqEstimate { i: 0, q: 0 },
+            previous: PhyDcIqEstimate {
+                i: 0,
+                q: 0,
+                power: 0,
+            },
             iteration: 0,
         }
     }
@@ -290,7 +267,7 @@ impl PhyRxDcoTransition {
                 iteration: self.iteration,
                 micros: self.request.delay_micros,
             },
-            PhyRxDcoStep::Measure { .. } => PhyRxDcoAction::MeasureDcIq(self.estimate_request()),
+            PhyRxDcoStep::Measure { transition, .. } => PhyRxDcoAction::DcIq(transition.action()),
             PhyRxDcoStep::RestoreSuccess { saved_field, .. }
             | PhyRxDcoStep::RestoreFailure { saved_field, .. } => {
                 PhyRxDcoAction::RestoreRxDcoControl {
@@ -460,22 +437,38 @@ impl PhyRxDcoTransition {
                 PhyRxDcoStep::Delay { saved_field },
                 PhyRxDcoCompletion::DelayElapsed { iteration, micros },
             ) if iteration == self.iteration && micros == self.request.delay_micros => {
-                self.step = PhyRxDcoStep::Measure { saved_field };
-            }
-            (
-                PhyRxDcoStep::Measure { saved_field },
-                PhyRxDcoCompletion::DcIqMeasured { request, estimate },
-            ) if request == self.estimate_request() => {
-                self.accept_estimate(saved_field, estimate);
-            }
-            (
-                PhyRxDcoStep::Measure { saved_field },
-                PhyRxDcoCompletion::DcIqMeasurementFailed(request),
-            ) if request == self.estimate_request() => {
-                self.step = PhyRxDcoStep::RestoreFailure {
+                self.step = PhyRxDcoStep::Measure {
                     saved_field,
-                    failure: PhyRxDcoFailure::DcIqMeasurementFailed(request),
+                    transition: PhyDcIqEstimateTransition::new(self.estimate_request()),
                 };
+            }
+            (
+                PhyRxDcoStep::Measure {
+                    saved_field,
+                    mut transition,
+                },
+                PhyRxDcoCompletion::DcIq(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRxDcoTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    PhyDcIqAction::Complete(outcome) => {
+                        self.accept_estimate(saved_field, outcome.estimate);
+                    }
+                    PhyDcIqAction::Failed(failure) => {
+                        self.step = PhyRxDcoStep::RestoreFailure {
+                            saved_field,
+                            failure: PhyRxDcoFailure::DcIq(failure),
+                        };
+                    }
+                    _ => {
+                        self.step = PhyRxDcoStep::Measure {
+                            saved_field,
+                            transition,
+                        };
+                    }
+                }
             }
             (
                 PhyRxDcoStep::RestoreSuccess {
@@ -513,6 +506,57 @@ impl PhyRxDcoTransition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::phy_dc_iq::{
+        PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
+    };
+
+    fn complete_dc_iq_action(
+        action: PhyDcIqAction,
+        estimate: PhyDcIqEstimate,
+    ) -> PhyDcIqCompletion {
+        match action {
+            PhyDcIqAction::Configure(request) => PhyDcIqCompletion::Configured(request),
+            PhyDcIqAction::SetEnable {
+                request,
+                phase,
+                enabled,
+            } => PhyDcIqCompletion::EnableSet {
+                request,
+                phase,
+                enabled,
+            },
+            PhyDcIqAction::DelayMicros {
+                request,
+                phase,
+                micros,
+            } => PhyDcIqCompletion::DelayElapsed {
+                request,
+                phase,
+                micros,
+            },
+            PhyDcIqAction::AwaitReadinessEdge { request, .. } => {
+                PhyDcIqCompletion::ReadinessObserved {
+                    request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: true,
+                        activity: false,
+                    },
+                }
+            }
+            PhyDcIqAction::ReadAccumulators(request) => {
+                let divisor = i32::from(request.control) + 1;
+                PhyDcIqCompletion::AccumulatorsRead {
+                    request,
+                    snapshot: PhyDcIqAccumulatorSnapshot {
+                        i: estimate.i.wrapping_mul(divisor).wrapping_shl(6),
+                        q: estimate.q.wrapping_mul(divisor).wrapping_shl(6),
+                        power: 0,
+                    },
+                }
+            }
+            action => panic!("unexpected terminal DC/IQ action: {action:?}"),
+        }
+    }
 
     fn complete_until_measurement(transition: &mut PhyRxDcoTransition, saved_field: u32) {
         transition
@@ -536,19 +580,23 @@ mod tests {
                 PhyRxDcoAction::DelayMicros { iteration, micros } => transition
                     .advance(PhyRxDcoCompletion::DelayElapsed { iteration, micros })
                     .unwrap(),
-                PhyRxDcoAction::MeasureDcIq(_) => return,
+                PhyRxDcoAction::DcIq(_) => return,
                 action => panic!("unexpected RX-DCO setup action: {action:?}"),
             }
         }
     }
 
     fn complete_one_measurement(transition: &mut PhyRxDcoTransition, estimate: PhyDcIqEstimate) {
-        let PhyRxDcoAction::MeasureDcIq(request) = transition.action() else {
-            panic!("RX-DCO measurement was not requested");
-        };
-        transition
-            .advance(PhyRxDcoCompletion::DcIqMeasured { request, estimate })
-            .unwrap();
+        loop {
+            let PhyRxDcoAction::DcIq(action) = transition.action() else {
+                return;
+            };
+            transition
+                .advance(PhyRxDcoCompletion::DcIq(complete_dc_iq_action(
+                    action, estimate,
+                )))
+                .unwrap();
+        }
     }
 
     fn advance_to_next_measurement(transition: &mut PhyRxDcoTransition) {
@@ -560,7 +608,7 @@ mod tests {
                 PhyRxDcoAction::DelayMicros { iteration, micros } => transition
                     .advance(PhyRxDcoCompletion::DelayElapsed { iteration, micros })
                     .unwrap(),
-                PhyRxDcoAction::MeasureDcIq(_) => return,
+                PhyRxDcoAction::DcIq(_) => return,
                 action => panic!("unexpected RX-DCO loop action: {action:?}"),
             }
         }
@@ -579,7 +627,14 @@ mod tests {
     fn early_success_restores_control_field_before_completion() {
         let mut transition = PhyRxDcoTransition::new(PhyRxDcoRequest::XTAL_DUTY);
         complete_until_measurement(&mut transition, 0x0080_0000);
-        complete_one_measurement(&mut transition, PhyDcIqEstimate { i: 2, q: -2 });
+        complete_one_measurement(
+            &mut transition,
+            PhyDcIqEstimate {
+                i: 2,
+                q: -2,
+                power: 0,
+            },
+        );
 
         let PhyRxDcoAction::RestoreRxDcoControl {
             address,
@@ -612,7 +667,14 @@ mod tests {
         let mut transition = PhyRxDcoTransition::new(PhyRxDcoRequest::XTAL_DUTY);
         complete_until_measurement(&mut transition, 0);
         for iteration in 0..MAX_ITERATIONS {
-            complete_one_measurement(&mut transition, PhyDcIqEstimate { i: 100, q: -100 });
+            complete_one_measurement(
+                &mut transition,
+                PhyDcIqEstimate {
+                    i: 100,
+                    q: -100,
+                    power: 0,
+                },
+            );
             if iteration + 1 != MAX_ITERATIONS {
                 advance_to_next_measurement(&mut transition);
             }
