@@ -63,6 +63,13 @@ const ROM_ABI_BACKINGS: &[(&str, &str)] = &[
     ("g_send_wake_null_timer_ptr", "send_wake_null_timer"),
 ];
 
+// Public data names still referenced by pinned vendor objects, but whose
+// storage and initial value are owned by Rust. These aliases are only removed
+// from the blob-state inventory after their final-link identity, size and SRAM
+// placement have been validated.
+const RUST_OWNED_ABI_DATA_ALIASES: &[(&str, &str, u64)] =
+    &[("g_phyFuns", "wifi_strict_phy_rom_function_table_binding", 4)];
+
 #[derive(Clone)]
 struct Symbol {
     address: u64,
@@ -142,6 +149,7 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
     let sections = parse_sections(&text(checked(
         Command::new("llvm-readelf").arg("-S").arg("-W").arg(elf),
     )?)?);
+    let rust_owned_data_aliases = validate_rust_owned_data_aliases(&final_symbols, &sections)?;
     let reachable = reachable_vendor_functions(&inventory.calls);
     let cold_phy_reachable = reachable_from_roots(&inventory.calls, &["register_chipv7_phy"], &[]);
     let mut reverse_references = reverse_references(&inventory.references);
@@ -156,6 +164,9 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
     let mut linked_other_globals = Vec::new();
     let mut cold_phy_globals = Vec::new();
     for (name, owners) in &inventory.data_owners {
+        if rust_owned_data_aliases.contains(name) {
+            continue;
+        }
         let Some(symbol) = final_symbols.get(name) else {
             continue;
         };
@@ -375,6 +386,14 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
     pushln(
         &mut report,
         &format!(
+            "- validated Rust-owned ABI data aliases: {} / {}",
+            rust_owned_data_aliases.len(),
+            RUST_OWNED_ABI_DATA_ALIASES.len()
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
             "- live mutable blob globals outside the strict-root graph: {} symbols / {} bytes",
             linked_other_globals.len(),
             other_bytes
@@ -529,6 +548,34 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
                 backing_symbol.size,
                 placement(backing_symbol.address),
                 section_name(backing_symbol.address, &sections),
+            ),
+        );
+    }
+
+    pushln(&mut report, "");
+    pushln(&mut report, "## Rust-owned ABI data aliases");
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "Pinned vendor objects may still load these public C data names. The final link proves that each name resolves directly to explicit Rust-owned storage of the required size in internal SRAM; no separate blob allocation remains.",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "| public ABI name | Rust-owned backing | address | bytes | placement |",
+    );
+    pushln(&mut report, "|---|---|---:|---:|---|");
+    for (public_name, backing_name, expected_size) in RUST_OWNED_ABI_DATA_ALIASES {
+        let public = &final_symbols[*public_name];
+        let backing = &final_symbols[*backing_name];
+        pushln(
+            &mut report,
+            &format!(
+                "| `{public_name}` | `{backing_name}` | `0x{:08x}` | {} | `{}` / `{}` |",
+                public.address,
+                expected_size,
+                placement(backing.address),
+                section_name(backing.address, &sections),
             ),
         );
     }
@@ -1101,6 +1148,47 @@ fn parse_sections(readelf: &str) -> Vec<Section> {
     sections
 }
 
+fn validate_rust_owned_data_aliases(
+    final_symbols: &BTreeMap<String, Symbol>,
+    sections: &[Section],
+) -> Result<BTreeSet<String>> {
+    let mut validated = BTreeSet::new();
+    for (public_name, backing_name, expected_size) in RUST_OWNED_ABI_DATA_ALIASES {
+        let public = final_symbols
+            .get(*public_name)
+            .with_context(|| format!("missing Rust-owned ABI data alias {public_name}"))?;
+        let backing = final_symbols
+            .get(*backing_name)
+            .with_context(|| format!("missing Rust-owned ABI data backing {backing_name}"))?;
+        if public.address == 0 || public.address != backing.address {
+            bail!(
+                "Rust-owned ABI data alias {public_name} at 0x{:08x} does not resolve to \
+                 {backing_name} at 0x{:08x}",
+                public.address,
+                backing.address
+            );
+        }
+        if backing.size != *expected_size {
+            bail!(
+                "Rust-owned ABI data backing {backing_name} has {} bytes, expected {}",
+                backing.size,
+                expected_size
+            );
+        }
+        if !is_mutable_data(backing.kind)
+            || placement(backing.address) != "internal SRAM"
+            || section_name(backing.address, sections) == "unknown"
+        {
+            bail!(
+                "Rust-owned ABI data backing {backing_name} is not writable internal-SRAM \
+                 storage in a final ELF section"
+            );
+        }
+        validated.insert((*public_name).to_owned());
+    }
+    Ok(validated)
+}
+
 fn section_name(address: u64, sections: &[Section]) -> &str {
     sections
         .iter()
@@ -1242,9 +1330,9 @@ mod tests {
     use super::{
         definition_name, enforce_primary_state_baseline, linked_code_referrers, local_data_aliases,
         parse_archive_relocations, parse_archive_symbol, parse_posix_symbols, parse_sections,
-        placement, reachable_vendor_functions, target_placement, ArchiveInventory, StateMetrics,
-        Symbol, PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS, ROOTS,
-        RUST_BOUNDARIES_WITH_VENDOR_FALLBACK, STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS,
+        placement, reachable_vendor_functions, target_placement, validate_rust_owned_data_aliases,
+        ArchiveInventory, Section, StateMetrics, Symbol, PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS,
+        ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK, STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS,
         TEMPORARY_EVIDENCED_MMIO_ROOTS,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -1376,6 +1464,42 @@ mod tests {
         assert_eq!(target_placement(0x2f82_b9f8), "ROM export");
         assert_eq!(target_placement(0x2f83_f6ff), "ROM export");
         assert_eq!(target_placement(0x2f83_f700), "internal SRAM");
+    }
+
+    #[test]
+    fn rust_owned_phy_callback_alias_requires_exact_sram_backing() {
+        let symbols = BTreeMap::from([
+            (
+                "g_phyFuns".to_owned(),
+                Symbol {
+                    address: 0x2f06_7a90,
+                    size: 0,
+                    kind: 'D',
+                },
+            ),
+            (
+                "wifi_strict_phy_rom_function_table_binding".to_owned(),
+                Symbol {
+                    address: 0x2f06_7a90,
+                    size: 4,
+                    kind: 'D',
+                },
+            ),
+        ]);
+        let sections = vec![Section {
+            name: ".critical.data.wifi_strict.phy_rom_function_table_binding".to_owned(),
+            address: 0x2f06_7a90,
+            size: 4,
+        }];
+
+        assert_eq!(
+            validate_rust_owned_data_aliases(&symbols, &sections).unwrap(),
+            BTreeSet::from(["g_phyFuns".to_owned()])
+        );
+
+        let mut wrong_address = symbols.clone();
+        wrong_address.get_mut("g_phyFuns").unwrap().address += 4;
+        assert!(validate_rust_owned_data_aliases(&wrong_address, &sections).is_err());
     }
 
     #[test]
