@@ -664,7 +664,7 @@ impl AdcRateTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForI2cMasterRegInit,
+    ReadyForFrequencyRegisterInit,
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -679,6 +679,7 @@ pub enum PhyRfInitPrefixAction {
     ConfigureI2cClockSelection { selection: u32 },
     ConfigureFeTxRxReset,
     AdcRate(AdcRateAction),
+    ConfigureI2cMasterRegisters,
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -693,6 +694,7 @@ pub enum PhyRfInitPrefixCompletion {
     I2cClockSelectionConfigured,
     FeTxRxResetConfigured,
     AdcRate(AdcRateCompletion),
+    I2cMasterRegistersConfigured,
     DelayElapsed,
 }
 
@@ -713,10 +715,11 @@ enum PhyRfInitPrefixStep {
     I2cClockSelection,
     FeTxRxReset,
     AdcRate(AdcRateTransition),
+    I2cMasterRegisters,
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through nine in the complete
+/// Event-driven composition of operations one through ten in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -773,11 +776,12 @@ impl PhyRfInitPrefixTransition {
             }
             PhyRfInitPrefixStep::FeTxRxReset => PhyRfInitPrefixAction::ConfigureFeTxRxReset,
             PhyRfInitPrefixStep::AdcRate(transition) => match transition.action() {
-                AdcRateAction::Complete => PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit,
-                ),
+                AdcRateAction::Complete => PhyRfInitPrefixAction::ConfigureI2cMasterRegisters,
                 action => PhyRfInitPrefixAction::AdcRate(action),
             },
+            PhyRfInitPrefixStep::I2cMasterRegisters => {
+                PhyRfInitPrefixAction::ConfigureI2cMasterRegisters
+            }
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
     }
@@ -862,10 +866,16 @@ impl PhyRfInitPrefixTransition {
                     .advance(completion)
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 if transition.action() == AdcRateAction::Complete {
-                    PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit)
+                    PhyRfInitPrefixStep::I2cMasterRegisters
                 } else {
                     PhyRfInitPrefixStep::AdcRate(transition)
                 }
+            }
+            (
+                PhyRfInitPrefixStep::I2cMasterRegisters,
+                PhyRfInitPrefixCompletion::I2cMasterRegistersConfigured,
+            ) => {
+                PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForFrequencyRegisterInit)
             }
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
@@ -1454,7 +1464,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit)
+            PhyRfInitPrefixAction::ConfigureI2cMasterRegisters
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::I2cMasterRegistersConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForFrequencyRegisterInit)
         );
     }
 

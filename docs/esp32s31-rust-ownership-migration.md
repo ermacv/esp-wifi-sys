@@ -1396,13 +1396,20 @@ bits one and zero separately.
 owned by the transition, so no hidden byte or mutable C state crosses the
 async edges. It never retries or samples from `poll`.
 
-The prefix now reaches `ReadyForI2cMasterRegInit` only after PBus clear, clock
-selection, FE TX/RX reset, and ADC-rate completion. SDM and PBus timeouts
-terminate separately and cannot run later hardware steps. The serial runtime
-suite passes 335 tests. The next boundary is operation ten,
-`phy_i2cmst_reg_init()`; the prefix remains dead-stripped and does not replace
-any part of the live parent until the remaining 17 operations have equivalent
-owned actions.
+The complete rev0 ROM `phy_i2cmst_reg_init` body at `0x2f8276c4`, size
+`0x22`, is finite MMIO-only code. It uses two fresh reads of `0x2010f818`:
+the first replaces field `0x600` with `0x400`, and the second sets `0x40`.
+Rust preserves both writes as `ConfigureI2cMasterRegisters`.
+
+The prefix now reaches `ReadyForFrequencyRegisterInit` only after PBus clear,
+clock selection, FE TX/RX reset, ADC-rate completion, and I2C-master register
+initialization. SDM and PBus timeouts terminate separately and cannot run
+later hardware steps. The serial runtime suite passes 336 tests. The next
+boundary is operation eleven, `phy_freq_reg_init()`; unlike operation ten it
+reads PHY parameter byte `0x193`, so its owned input and both conditional
+register-field values must be recovered before composition. The prefix
+remains dead-stripped and does not replace any part of the live parent until
+the remaining 16 operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

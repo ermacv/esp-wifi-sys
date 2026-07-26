@@ -65,6 +65,7 @@ const PHY_I2C_CLOCK_SELECTION_1_ADDRESS: usize = 0x2010_f828;
 const PHY_I2C_CLOCK_SELECTION_2_ADDRESS: usize = 0x2010_f82c;
 const PHY_FE_TXRX_RESET_ADDRESS: usize = 0x2010_0440;
 const PHY_ADC_RATE_ADDRESS: usize = 0x2010_0448;
+const PHY_I2C_MASTER_REGISTER_CONTROL_ADDRESS: usize = 0x2010_f818;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -255,6 +256,14 @@ const fn with_phy_adc_rate_high(value: u32, rate: u32) -> u32 {
 
 const fn with_phy_adc_rate_low(value: u32, rate: u32) -> u32 {
     (value & !0x0000_0001) | (rate & 0x0000_0001)
+}
+
+const fn with_phy_i2c_master_register_mode(value: u32) -> u32 {
+    (value & !0x0000_0600) | 0x0000_0400
+}
+
+const fn with_phy_i2c_master_register_enable(value: u32) -> u32 {
+    value | 0x0000_0040
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -815,6 +824,20 @@ pub(crate) unsafe fn configure_phy_adc_rate(rate: u32) {
     register.write_volatile(with_phy_adc_rate_low(register.read_volatile(), rate));
 }
 
+/// Apply complete rev0 ROM `phy_i2cmst_reg_init`.
+///
+/// The pinned body at `0x2f82_76c4`, size `0x22`, uses two fresh reads of
+/// `0x2010_f818`: field `0x600` becomes `0x400`, then bit `0x40` is set.
+/// It contains no call, branch, wait, delay, or mutable software state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_i2c_master_registers() {
+    let register = PHY_I2C_MASTER_REGISTER_CONTROL_ADDRESS as *mut u32;
+    register.write_volatile(with_phy_i2c_master_register_mode(register.read_volatile()));
+    register.write_volatile(with_phy_i2c_master_register_enable(
+        register.read_volatile(),
+    ));
+}
+
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
@@ -955,6 +978,7 @@ mod tests {
         with_phy_adc_rate_high, with_phy_adc_rate_low, with_phy_agc_control, with_phy_agc_window,
         with_phy_fe_txrx_reset, with_phy_ftm_enable, with_phy_gain_memory_index,
         with_phy_i2c_clock_selection_high, with_phy_i2c_clock_selection_low,
+        with_phy_i2c_master_register_enable, with_phy_i2c_master_register_mode,
         with_phy_pbus_debug_control, with_phy_pbus_debug_mode, with_phy_pbus_force_test,
         with_phy_pbus_work_control, with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
         with_phy_pbus_work_mode_pulse_setup, with_phy_rx_comp_high, with_phy_rx_comp_low,
@@ -1116,6 +1140,16 @@ mod tests {
         assert_eq!(with_phy_adc_rate_low(0x0000_0002, 1), 0x0000_0003);
         assert_eq!(with_phy_adc_rate_high(u32::MAX, 0), 0xffff_fffd);
         assert_eq!(with_phy_adc_rate_low(u32::MAX, 0), 0xffff_fffe);
+    }
+
+    #[test]
+    fn phy_i2c_master_register_init_matches_both_rom_writes() {
+        assert_eq!(with_phy_i2c_master_register_mode(0), 0x0000_0400);
+        assert_eq!(with_phy_i2c_master_register_mode(u32::MAX), 0xffff_fdff);
+        assert_eq!(
+            with_phy_i2c_master_register_enable(0x0000_0400),
+            0x0000_0440
+        );
     }
 
     #[test]
