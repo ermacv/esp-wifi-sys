@@ -26,8 +26,47 @@ const STA_PAIRWISE_HARDWARE_INDEX: u8 = 4;
 const STA_GROUP_HARDWARE_INDEX: u8 = 1;
 const AP_GROUP_HARDWARE_INDEX_BASE: u8 = 1;
 const MAX_WPA2_GTK_ID: u8 = 3;
+const CRYPTO_INTERFACE_COUNT: usize = 3;
 #[cfg(target_arch = "riscv32")]
 const MAX_VENDOR_KEY_INDEX: u8 = 24;
+
+const fn crypto_control_address(interface: u32) -> Option<usize> {
+    if interface < CRYPTO_INTERFACE_COUNT as u32 {
+        Some(0x2010_4800 + interface as usize * 4)
+    } else {
+        None
+    }
+}
+
+const fn crypto_enable_control(
+    interface: u32,
+    algorithm: u32,
+    enable: u32,
+    spp: u32,
+) -> Option<(usize, u32, u32)> {
+    let address = match crypto_control_address(interface) {
+        Some(address) => address,
+        None => return None,
+    };
+    let base = if interface == 2 && enable == 0 {
+        0x0001_0000
+    } else {
+        0x0003_0000
+    };
+    let mut first = base | 0x103;
+    if algorithm & 0xfb == 1 {
+        first |= 0x1000_0000;
+    }
+    if spp != 0 {
+        first |= 0x200;
+    }
+    let final_value = if algorithm == 4 {
+        (first & 0x3fff_ffff) | 0x8000_0000
+    } else {
+        first & 0x3fff_ffff
+    };
+    Some((address, first, final_value))
+}
 
 #[cfg(target_arch = "riscv32")]
 static STATIC_VENDOR_KEY_SLOTS: [AtomicUsize; MAX_VENDOR_KEY_INDEX as usize + 1] =
@@ -282,8 +321,7 @@ pub(crate) unsafe fn owned_static_vendor_key_object(hardware_index: u8) -> Optio
     if hardware_index > MAX_VENDOR_KEY_INDEX {
         return None;
     }
-    let slot_address =
-        STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].load(Ordering::Acquire);
+    let slot_address = STATIC_VENDOR_KEY_SLOTS[usize::from(hardware_index)].load(Ordering::Acquire);
     if slot_address == 0 {
         return None;
     }
@@ -435,6 +473,7 @@ mod target {
     const CRYPTO_KEY_TABLE_BASE: usize = 0x2010_5800;
     const CRYPTO_KEY_ENTRY_STRIDE: usize = 40;
     const CRYPTO_KEY_VALID_BITMAP: *mut u32 = 0x2010_4814 as *mut u32;
+    const CRYPTO_POLICY_CONTROL: *mut u32 = 0x2010_4810 as *mut u32;
     const MAX_HARDWARE_KEY_BYTES: usize = 32;
     unsafe extern "C" {
         static ccmp: [u8; 24];
@@ -916,6 +955,148 @@ mod target {
         destination.add(word).write_volatile(value);
     }
 
+    unsafe fn clear_hardware_key_entry(hardware_index: u32) {
+        let valid = CRYPTO_KEY_VALID_BITMAP.read_volatile();
+        CRYPTO_KEY_VALID_BITMAP.write_volatile(valid & !(1_u32 << hardware_index));
+        let entry =
+            (CRYPTO_KEY_TABLE_BASE + hardware_index as usize * CRYPTO_KEY_ENTRY_STRIDE) as *mut u32;
+        let mut word = 0;
+        while word < CRYPTO_KEY_ENTRY_STRIDE / size_of::<u32>() {
+            entry.add(word).write_volatile(0);
+            word += 1;
+        }
+    }
+
+    unsafe fn enable_hardware_crypto(
+        interface: u32,
+        algorithm: u32,
+        enable: u32,
+        spp: u32,
+    ) -> bool {
+        let Some((control_address, first_control, final_control)) =
+            crypto_enable_control(interface, algorithm, enable, spp)
+        else {
+            return false;
+        };
+        let control = control_address as *mut u32;
+        control.write_volatile(first_control);
+        let policy = CRYPTO_POLICY_CONTROL.read_volatile();
+        if algorithm == 4 {
+            CRYPTO_POLICY_CONTROL.write_volatile(policy | 0x003f_ffc0);
+        } else {
+            CRYPTO_POLICY_CONTROL.write_volatile(policy & 0xffc0_003f);
+        }
+        let current = control.read_volatile();
+        let final_value = if algorithm == 4 {
+            (current & 0x3fff_ffff) | 0x8000_0000
+        } else {
+            current & 0x3fff_ffff
+        };
+        debug_assert_eq!(final_value, final_control);
+        control.write_volatile(final_value);
+        true
+    }
+
+    /// Complete Rust replacement for
+    /// `libpp.a[wdev.o]::wDev_Insert_KeyEntry`.
+    ///
+    /// The nine-byte metadata record, key-table writes and crypto-enable MMIO
+    /// follow the pinned `0x8e` body. Its legacy `wDevCtrl` bitmap write is
+    /// intentionally absent: `StaticWpa2Keys` and the static vendor-slot
+    /// tokens are already the single Rust owner, while removal always clears
+    /// the explicit hardware index. Mirroring that unused C teardown cache
+    /// would add a second ownership ledger.
+    #[no_mangle]
+    pub unsafe extern "C" fn wifi_strict_wdev_insert_key_entry(
+        algorithm: u32,
+        interface: u32,
+        logical_key_index: u32,
+        peer: *const u8,
+        hardware_index: u32,
+        key: *const u8,
+        key_length: usize,
+        enable: u32,
+        spp: u32,
+    ) {
+        if interface >= CRYPTO_INTERFACE_COUNT as u32
+            || algorithm > u8::MAX as u32
+            || logical_key_index > u8::MAX as u32
+            || hardware_index > u32::from(MAX_VENDOR_KEY_INDEX)
+            || peer.is_null()
+            || key.is_null()
+            || key_length == 0
+            || key_length > MAX_HARDWARE_KEY_BYTES
+        {
+            return;
+        }
+
+        let mut metadata = [0_u8; 9];
+        metadata[0] = interface as u8;
+        metadata[1] = algorithm as u8;
+        metadata[2] = logical_key_index as u8;
+        ptr::copy_nonoverlapping(peer, metadata.as_mut_ptr().add(3), 6);
+        __wrap_hal_crypto_set_key_entry(hardware_index, key, key_length, metadata.as_ptr());
+        let _ = enable_hardware_crypto(interface, algorithm, enable, spp & 0xff);
+    }
+
+    /// Complete Rust replacement for `libpp.a[if_hwctrl.o]::ic_set_key`.
+    ///
+    /// The C `if_ctrl[interface].ptk_alg/gtk_alg` compatibility cache is not
+    /// mirrored: the admitted WPA2 path carries cipher and key kind in its
+    /// typed Rust key object. All hardware and ownership inputs are validated
+    /// before MMIO is changed.
+    #[no_mangle]
+    pub unsafe extern "C" fn wifi_strict_ic_set_key(
+        interface: u32,
+        algorithm: u32,
+        logical_key_index: u32,
+        peer: *const u8,
+        hardware_index: u32,
+        key: *const u8,
+        key_length: usize,
+        enable: u32,
+        spp: u32,
+    ) {
+        if interface >= CRYPTO_INTERFACE_COUNT as u32
+            || algorithm > u8::MAX as u32
+            || logical_key_index > u8::MAX as u32
+            || hardware_index > u32::from(MAX_VENDOR_KEY_INDEX)
+            || peer.is_null()
+            || key.is_null()
+            || key_length == 0
+            || key_length > MAX_HARDWARE_KEY_BYTES
+        {
+            return;
+        }
+
+        wifi_strict_wdev_insert_key_entry(
+            algorithm,
+            interface,
+            logical_key_index,
+            peer,
+            hardware_index,
+            key,
+            key_length,
+            enable,
+            spp,
+        );
+    }
+
+    /// Complete Rust replacement for `libpp.a[if_hwctrl.o]::ic_del_key`.
+    ///
+    /// It performs the complete pinned `hal_crypto_clr_key_entry` bitmap
+    /// update plus ten zeroing MMIO stores. The typed caller releases its
+    /// static software-key token separately, so this leaf neither guesses nor
+    /// duplicates software ownership. Invalid indices fail before any shift
+    /// or address calculation.
+    #[no_mangle]
+    pub unsafe extern "C" fn wifi_strict_ic_del_key(hardware_index: u32) {
+        if hardware_index > u32::from(MAX_VENDOR_KEY_INDEX) {
+            return;
+        }
+        clear_hardware_key_entry(hardware_index);
+    }
+
     /// Allocation-free replacement for the pinned `0x1c2`-byte HAL leaf.
     ///
     /// The stock implementation allocates a temporary buffer solely when the
@@ -1287,7 +1468,10 @@ mod target {
         }
 
         fn reset_sta_link(&mut self, peer: [u8; 6]) -> Result<(), S31Wpa2IoError> {
-            if self.sta_authorized_peer.is_some_and(|authorized| authorized != peer) {
+            if self
+                .sta_authorized_peer
+                .is_some_and(|authorized| authorized != peer)
+            {
                 return Err(S31Wpa2IoError::StaPeerMismatch);
             }
             if !unsafe { crate::sta_link::can_reset_static_sta_link() } {
@@ -1530,9 +1714,7 @@ mod target {
                         crate::ap_power_save::ps_poll_credit_after(self.ap_ps_poll_epoch, &peer)
                     })
                     .flatten();
-                if ap_owner_power_save_retry(&peer, sleeping, flags)
-                    && ps_poll_credit.is_none()
-                {
+                if ap_owner_power_save_retry(&peer, sleeping, flags) && ps_poll_credit.is_none() {
                     // Publish the exact recovered AID bit through the finite
                     // Rust leaf. The owned command remains with the Rust radio
                     // owner; no vendor PS queue or OSI primitive is entered.
@@ -2054,6 +2236,27 @@ mod tests {
         assert_eq!(hardware_key_direction(ccmp, 4), 3);
         assert_eq!(hardware_key_direction(ccmp, 1), 6);
         assert_eq!(hardware_key_direction(0x0004_0000, 4), 7);
+    }
+
+    #[test]
+    fn crypto_enable_plan_matches_all_three_pinned_interface_branches() {
+        assert_eq!(
+            crypto_enable_control(0, 3, 0, 0),
+            Some((0x2010_4800, 0x0003_0103, 0x0003_0103))
+        );
+        assert_eq!(
+            crypto_enable_control(1, 4, 0, 1),
+            Some((0x2010_4804, 0x0003_0303, 0x8003_0303))
+        );
+        assert_eq!(
+            crypto_enable_control(2, 3, 0, 0),
+            Some((0x2010_4808, 0x0001_0103, 0x0001_0103))
+        );
+        assert_eq!(
+            crypto_enable_control(2, 1, 1, 0),
+            Some((0x2010_4808, 0x1003_0103, 0x1003_0103))
+        );
+        assert_eq!(crypto_enable_control(3, 3, 1, 0), None);
     }
 
     #[test]

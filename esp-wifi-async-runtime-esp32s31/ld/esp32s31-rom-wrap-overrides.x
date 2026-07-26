@@ -201,6 +201,23 @@ ieee80211_getmgtframe = wifi_strict_ieee80211_getmgtframe;
 ASSERT(ieee80211_getmgtframe == wifi_strict_ieee80211_getmgtframe,
        "ESP32-S31 ieee80211_getmgtframe Rust boundary is inactive");
 
+/* WPA2/WPA3 hardware-key publication has one Rust-owned logical ledger and
+ * finite key-table MMIO leaves. */
+EXTERN(wifi_strict_ic_set_key);
+ic_set_key = wifi_strict_ic_set_key;
+ASSERT(ic_set_key == wifi_strict_ic_set_key,
+       "ESP32-S31 ic_set_key Rust boundary is inactive");
+
+EXTERN(wifi_strict_ic_del_key);
+ic_del_key = wifi_strict_ic_del_key;
+ASSERT(ic_del_key == wifi_strict_ic_del_key,
+       "ESP32-S31 ic_del_key Rust boundary is inactive");
+
+EXTERN(wifi_strict_wdev_insert_key_entry);
+wDev_Insert_KeyEntry = wifi_strict_wdev_insert_key_entry;
+ASSERT(wDev_Insert_KeyEntry == wifi_strict_wdev_insert_key_entry,
+       "ESP32-S31 wDev_Insert_KeyEntry Rust boundary is inactive");
+
 /* Complete finite PHY-register leaves recovered from libphy.a[phy_reg.o].
  * Keep the exact read/modify/write order, but make Rust the only linked
  * runtime owner; neither vendor body contains a call or hidden state access. */
