@@ -2600,13 +2600,49 @@ mod tests {
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
+    use crate::phy_rx_dco::{PhyDcIqEstimate, PhyRxDcoAction, PhyRxDcoCompletion};
     use crate::phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
         XtalDutyCalibrationParameters, XtalDutyPassAction, XtalDutyPassCompletion,
         XtalDutyPassOutcome, XtalDutyPrepareAction, XtalDutyPrepareCompletion,
-        XtalDutyRestoreAction, XtalDutyRestoreCompletion, XtalDutyRxDcoOutcome,
-        XtalDutySearchAction, XtalDutySearchCompletion,
+        XtalDutyRestoreAction, XtalDutyRestoreCompletion, XtalDutySearchAction,
+        XtalDutySearchCompletion,
     };
+
+    fn complete_rx_dco(action: PhyRxDcoAction) -> PhyRxDcoCompletion {
+        match action {
+            PhyRxDcoAction::MaskRxDcoControl { address, .. } => {
+                PhyRxDcoCompletion::RxDcoControlMasked {
+                    address,
+                    saved_field: 0,
+                }
+            }
+            PhyRxDcoAction::ReadPbus { selector, path } => PhyRxDcoCompletion::PbusRead {
+                selector,
+                path,
+                value: 0,
+            },
+            PhyRxDcoAction::ForcePbus(transaction) => {
+                PhyRxDcoCompletion::PbusForceCompleted(transaction)
+            }
+            PhyRxDcoAction::DelayMicros { iteration, micros } => {
+                PhyRxDcoCompletion::DelayElapsed { iteration, micros }
+            }
+            PhyRxDcoAction::MeasureDcIq(request) => PhyRxDcoCompletion::DcIqMeasured {
+                request,
+                estimate: PhyDcIqEstimate { i: 0, q: 0 },
+            },
+            PhyRxDcoAction::RestoreRxDcoControl {
+                address,
+                saved_field,
+                ..
+            } => PhyRxDcoCompletion::RxDcoControlRestored {
+                address,
+                saved_field,
+            },
+            action => panic!("unexpected terminal RX-DCO action: {action:?}"),
+        }
+    }
 
     fn complete_xtal_prepare(action: XtalDutyPrepareAction) -> XtalDutyPrepareCompletion {
         match action {
@@ -2646,13 +2682,8 @@ mod tests {
                     saved_field: 0x0040_0000,
                 }
             }
-            XtalDutyPrepareAction::CalibrateRxDco(request) => {
-                XtalDutyPrepareCompletion::RxDcoCalibrated {
-                    request,
-                    outcome: XtalDutyRxDcoOutcome {
-                        configuration: request.configuration,
-                    },
-                }
+            XtalDutyPrepareAction::RxDco(action) => {
+                XtalDutyPrepareCompletion::RxDco(complete_rx_dco(action))
             }
             XtalDutyPrepareAction::RestoreRxDcoControl {
                 address,

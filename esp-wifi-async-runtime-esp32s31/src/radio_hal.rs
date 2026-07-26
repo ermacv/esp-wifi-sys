@@ -58,6 +58,7 @@ const PHY_AGC_SAT_GAIN_VALUE: u32 = 0x0818_212d;
 const PHY_PBUS_CONTROL_ADDRESS: usize = 0x2010_0884;
 const PHY_PBUS_MODE_ADDRESS: usize = 0x2010_088c;
 const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
+const PHY_PBUS_RX_DCO_READ_ADDRESS: usize = 0x2010_1894;
 const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
 const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
 const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
@@ -241,6 +242,10 @@ const fn with_phy_pbus_force_test(value: u32, selector: u8, path: u8, test_value
 
 const fn phy_pbus_is_busy(value: u32) -> bool {
     value & PHY_PBUS_BUSY_BIT != 0
+}
+
+const fn phy_pbus_rx_dco_read_value(value: u32) -> u16 {
+    (value & 0x1ff) as u16
 }
 
 const fn with_phy_tx_clock(value: u32, enabled: bool) -> u32 {
@@ -804,6 +809,21 @@ pub(crate) unsafe fn try_finish_phy_pbus_force_test() -> Result<(), PhyPbusError
     Ok(())
 }
 
+/// Read the exact PBus field consumed by RX-DCO calibration.
+///
+/// The rev0 ROM chain
+/// `phy_pbus_rd(1, 2) -> phy_pbus_rd_addr/phy_pbus_rd_shift` resolves to one
+/// volatile read at `0x2010_1894`, shift zero, masked to nine bits. The jump
+/// tables are present in `esp32s31_rev0_rom.elf` at `0x2f84_d910` and
+/// `0x2f84_d924`. This Rust leaf has no call, branch, loop, wait, allocation,
+/// callback, or non-MMIO state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_pbus_rx_dco_value() -> u16 {
+    phy_pbus_rx_dco_read_value(
+        (PHY_PBUS_RX_DCO_READ_ADDRESS as *const u32).read_volatile(),
+    )
+}
+
 /// Enter PBus work mode and return the one sampled settle-condition bit.
 ///
 /// The returned boolean selects the ROM's optional 1 us / pulse / 2 us tail;
@@ -1191,8 +1211,9 @@ mod tests {
     use super::{
         encode_mac_address, encode_phy_gain_memory_words, join_rx_descriptor_address,
         mac_address_registers, mac_rx_address_policy_address, mac_rx_frame_policy_address,
-        mac_rx_management_policy_address, phy_pbus_is_busy, tsf_latch_mask, tx_baseband_gain_index,
-        tx_queue_control_address, tx_queue_is_valid, with_bbpll_calibration,
+        mac_rx_management_policy_address, phy_pbus_is_busy, phy_pbus_rx_dco_read_value,
+        tsf_latch_mask, tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid,
+        with_bbpll_calibration,
         with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_adc_rate_high, with_phy_adc_rate_low, with_phy_agc_control, with_phy_agc_window,
@@ -1330,6 +1351,8 @@ mod tests {
         assert_eq!(with_phy_pbus_force_test(u32::MAX, 3, 2, 0x100), 0xffff_400f);
         assert!(!phy_pbus_is_busy(0x7fff_ffff));
         assert!(phy_pbus_is_busy(0x8000_0000));
+        assert_eq!(phy_pbus_rx_dco_read_value(0xffff_ffff), 0x01ff);
+        assert_eq!(phy_pbus_rx_dco_read_value(0x1234_0123), 0x0123);
 
         assert_eq!(with_phy_pbus_work_mode_pulse_setup(u32::MAX), 0x32ff_ffff);
         assert_eq!(with_phy_pbus_work_mode_pulse(0), 0x0080_0000);

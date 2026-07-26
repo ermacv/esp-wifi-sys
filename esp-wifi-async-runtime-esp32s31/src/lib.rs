@@ -72,6 +72,7 @@ mod phy_channel;
 pub mod phy_i2c;
 pub mod phy_pbus;
 mod phy_param;
+pub mod phy_rx_dco;
 pub mod phy_xtal_duty;
 pub mod policy;
 pub mod queue;
