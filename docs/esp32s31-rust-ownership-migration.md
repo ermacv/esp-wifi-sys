@@ -1423,15 +1423,64 @@ is six finite stores. Rust preserves constants `0x0f0f0fff`,
 `0x20100808`, and the final mode field at `0x20701068`. There is no branch,
 call, delay, loop, or software-state access.
 
-The prefix now reaches `ReadyForFrontEndRegisterInit` only after PBus clear,
-clock selection, I2C BBPLL enable, ADC-rate completion, I2C-master register
-initialization, and power-detector initialization. SDM and PBus timeouts
-terminate separately and cannot run later hardware steps. The serial runtime
-suite passes 338 tests. The next cold-parent boundary is operation twelve,
-`phy_fe_reg_init()`. `phy_freq_reg_init()` belongs to `phy_wakeup_init` and
+The complete rev0 ROM `phy_fe_reg_init` body at `0x2f827740`, size `0xf6`,
+contains seventeen MMIO writes across ten registers. Rust uses explicitly
+unrolled set/clear/replace operations and preserves every fresh read,
+including the repeated bit-one/bit-zero writes at `0x20100448`. It contains
+no wait, delay, loop, callback, or software-state access.
+
+The complete pinned `libphy.a[phy_tsens.o]::phy_tsens_read_init` body is
+`0x36` bytes. Instruction inspection proves that it ignores both ABI
+arguments: it performs four MMIO writes, loads constant one into `a0`, and
+tail-calls ROM `phy_set_tsens_power_` at `0x2f825dc8`, size `0x1c`.
+Consequently the parent load of `phy_param[0x16]` is dead at the callee
+boundary and Rust does not carry or publish that byte.
+
+Complete ROM `phy_tx_pwctrl_bg_init` at `0x2f8267f6`, together with
+`phy_en_pwdet` and `phy_pwdet_sar2_init`, is another finite MMIO chain.
+Rust preserves three separate power-detector bit clears, both SAR2 field
+updates, the `0x16a` store, the auxiliary-mode update, and the final
+background-control bit.
+
+Complete ROM `phy_i2c_rc_cal_set` at `0x2f82a634`, size `0x4a`, performs
+three blocking `phy_i2c_writeReg_Mask` calls: `(0x6b, 0x11, bits 5:4, 3)`,
+`(0x6b, 0x0f, bits 7:3, 1)`, and
+`(0x6b, 0x13, bits 5:2, 9)`. Rust now has a reusable
+`MaskedI2cWriteTransition` which explicitly owns the read byte, pure field
+transform, and later write completion. `RcCalibrationSetTransition` composes
+the three operations without a synchronous sub-call or hidden wait.
+
+The complete pinned `libphy.a[phy_init.o]::phy_rc_cal_init` wrapper supplies
+only three fixed byte tables to ROM `phy_rc_cal` at `0x2f826242`, size
+`0x108`. Rust now owns the complete operation rather than retaining that ROM
+parent. It first exposes the calibration-complete flag (bit 23 of parameter
+word `0xa4`) as an explicit owner observation. If the bit is clear,
+`RcCalibrationTransition` performs the exact four masked writes, an async
+100-microsecond timer edge, one masked read, and two cleanup writes recovered
+from ROM `phy_get_rc_dout`. The final `ApplyResult` action invokes the
+already-Rust-owned arithmetic transform on the explicit parameter image,
+including bytes `0xe8..=0xf0` and the completion flag. If the flag was
+already set, no I2C action or delay is scheduled.
+
+Complete ROM `phy_filter_dcap_set` at `0x2f82a476`, size `0x1be`, reads only
+parameter offsets `0xe9`, `0xea`, `0xed`, `0xee`, and `0xf0`, applies the
+finite `phy_get_data_sat` transform, then performs 18 blocking full-byte
+PHY-I2C writes to block `0x67`. Rust captures those five bytes into
+`FilterDcapParameters` after RC calibration and owns the exact write order in
+`FilterDcapTransition`. Every write requires a matching non-blocking I2C
+completion; the transition has no ROM call, global lookup, delay, retry, or
+self-wake.
+
+The prefix now reaches `ReadyForParameter18eRead` only after the first
+seventeen cold-parent operations. SDM and PBus timeouts terminate separately
+and cannot run later hardware steps. The serial runtime suite passes 344
+tests. The next boundary is operation eighteen, the full-byte
+`phy_i2c_readReg(0x62, 1, 0x0f)` whose result replaces hidden
+`phy_param[0x18e]`.
+`phy_freq_reg_init()` belongs to `phy_wakeup_init` and
 `phy_set_chan_freq_hw_init`, not this point in the cold path. The prefix
 remains dead-stripped and does not replace any part of the live parent until
-the remaining 15 operations have equivalent owned actions.
+the remaining nine operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

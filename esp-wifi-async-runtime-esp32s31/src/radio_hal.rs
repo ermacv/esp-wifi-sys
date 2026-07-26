@@ -71,6 +71,20 @@ const PHY_POWER_DETECTOR_TABLE_0_ADDRESS: usize = 0x2010_0810;
 const PHY_POWER_DETECTOR_TABLE_1_ADDRESS: usize = 0x2010_0814;
 const PHY_POWER_DETECTOR_TABLE_2_ADDRESS: usize = 0x2010_0818;
 const PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS: usize = 0x2070_1068;
+const PHY_FE_CONTROL_0408_ADDRESS: usize = 0x2010_0408;
+const PHY_FE_CONTROL_040C_ADDRESS: usize = 0x2010_040c;
+const PHY_FE_CONTROL_0438_ADDRESS: usize = 0x2010_0438;
+const PHY_FE_CONTROL_0444_ADDRESS: usize = 0x2010_0444;
+const PHY_FE_CONTROL_0448_ADDRESS: usize = 0x2010_0448;
+const PHY_FE_CONTROL_086C_ADDRESS: usize = 0x2010_086c;
+const PHY_FE_CONTROL_0894_ADDRESS: usize = 0x2010_0894;
+const PHY_FE_CONTROL_0C08_ADDRESS: usize = 0x2010_0c08;
+const PHY_FE_CONTROL_0C0C_ADDRESS: usize = 0x2010_0c0c;
+const PHY_FE_CONTROL_0C20_ADDRESS: usize = 0x2010_0c20;
+const PHY_TEMPERATURE_SENSOR_POWER_ADDRESS: usize = 0x2081_8000;
+const PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS: usize = 0x2081_8018;
+const PHY_TEMPERATURE_SENSOR_SYSTEM_CONTROL_ADDRESS: usize = 0x2071_0030;
+const PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS: usize = 0x2010_080c;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -281,6 +295,18 @@ const fn with_phy_power_detector_high_field(value: u32) -> u32 {
 
 const fn with_phy_power_detector_aux_mode(value: u32) -> u32 {
     (value & !0x0000_0007) | 0x0000_0004
+}
+
+const fn with_register_bits(value: u32, bits: u32) -> u32 {
+    value | bits
+}
+
+const fn without_register_bits(value: u32, bits: u32) -> u32 {
+    value & !bits
+}
+
+const fn with_register_field(value: u32, mask: u32, field: u32) -> u32 {
+    (value & !mask) | (field & mask)
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -877,6 +903,94 @@ pub(crate) unsafe fn configure_phy_power_detector_registers() {
 
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
+unsafe fn set_register_bits(address: usize, bits: u32) {
+    let register = address as *mut u32;
+    register.write_volatile(with_register_bits(register.read_volatile(), bits));
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn clear_register_bits(address: usize, bits: u32) {
+    let register = address as *mut u32;
+    register.write_volatile(without_register_bits(register.read_volatile(), bits));
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn replace_register_field(address: usize, mask: u32, field: u32) {
+    let register = address as *mut u32;
+    register.write_volatile(with_register_field(register.read_volatile(), mask, field));
+}
+
+/// Apply complete rev0 ROM `phy_fe_reg_init`.
+///
+/// The pinned body at `0x2f82_7740`, size `0xf6`, is a finite sequence of
+/// seventeen MMIO writes. Calls below are deliberately unrolled and retain
+/// repeated fresh-read writes to the same register. There is no wait, delay,
+/// loop, callback, or mutable software-state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_front_end_registers() {
+    set_register_bits(PHY_FE_CONTROL_0894_ADDRESS, 0x0010_0000);
+    set_register_bits(PHY_FE_CONTROL_0C08_ADDRESS, 0x0200_0000);
+    set_register_bits(PHY_FE_CONTROL_0C08_ADDRESS, 0x0400_0000);
+    clear_register_bits(PHY_FE_CONTROL_0444_ADDRESS, 0x0000_0100);
+    replace_register_field(PHY_FE_CONTROL_0408_ADDRESS, 0xff00_0000, 0xa000_0000);
+    set_register_bits(PHY_FE_CONTROL_040C_ADDRESS, 0x0000_0004);
+    set_register_bits(PHY_FE_CONTROL_0438_ADDRESS, 0x6000_0000);
+    set_register_bits(PHY_FE_CONTROL_0C0C_ADDRESS, 0x0000_6000);
+    clear_register_bits(PHY_FE_CONTROL_0444_ADDRESS, 0x0000_0800);
+    set_register_bits(PHY_FE_CONTROL_0448_ADDRESS, 0x0000_0002);
+    set_register_bits(PHY_FE_CONTROL_0448_ADDRESS, 0x0000_0001);
+    replace_register_field(PHY_FE_CONTROL_086C_ADDRESS, 0x0000_00ff, 0x0000_0004);
+    set_register_bits(PHY_FE_CONTROL_0448_ADDRESS, 0x0000_0001);
+    set_register_bits(PHY_FE_CONTROL_0448_ADDRESS, 0x0000_0002);
+    set_register_bits(PHY_FE_CONTROL_0438_ADDRESS, 0x8000_0000);
+    set_register_bits(PHY_FE_CONTROL_0C0C_ADDRESS, 0x0000_8000);
+    replace_register_field(PHY_FE_CONTROL_0C20_ADDRESS, 0x0000_00ff, 0x0000_0057);
+}
+
+/// Apply complete vendor `phy_tsens_read_init` and its ROM tail leaf.
+///
+/// The pinned 0x36-byte archive body ignores both ABI arguments, performs
+/// four MMIO writes, forces power argument one, and tail-calls the complete
+/// 0x1c-byte ROM `phy_set_tsens_power_` body. Rust therefore needs no
+/// `phy_param[0x16]` input.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_temperature_sensor_read() {
+    set_register_bits(PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS, 0x0000_0001);
+    set_register_bits(PHY_TEMPERATURE_SENSOR_SYSTEM_CONTROL_ADDRESS, 0x4000_0000);
+    set_register_bits(PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS, 0x0080_0000);
+    set_register_bits(PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS, 0x0000_0200);
+    replace_register_field(
+        PHY_TEMPERATURE_SENSOR_POWER_ADDRESS,
+        0x0040_0000,
+        0x0040_0000,
+    );
+}
+
+/// Apply complete rev0 ROM `phy_tx_pwctrl_bg_init` including both callees.
+///
+/// The exact chain clears three power-detector bits as separate fresh-read
+/// writes, configures SAR2, republishes the auxiliary mode, and finally sets
+/// the background-control bit. It is finite and owns no software state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_tx_power_control_background() {
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0004);
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0002);
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0008);
+    set_register_bits(PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS, 0x0000_3000);
+    clear_register_bits(PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS, 0x0000_0200);
+    (PHY_POWER_DETECTOR_TABLE_2_ADDRESS as *mut u32).write_volatile(0x0000_016a);
+    replace_register_field(
+        PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS,
+        0x0000_0007,
+        0x0000_0004,
+    );
+    set_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0001_0000);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
     (PHY_AGC_SAT_GAIN_LOW_ADDRESS as *mut u32).write_volatile(value);
     (PHY_AGC_SAT_GAIN_HIGH_ADDRESS as *mut u32).write_volatile(value);
@@ -1021,10 +1135,10 @@ mod tests {
         with_phy_pbus_work_mode_pulse_setup, with_phy_power_detector_aux_mode,
         with_phy_power_detector_high_field, with_phy_power_detector_low_field,
         with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
-        with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
-        without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_fe_txrx_reset,
-        without_phy_pbus_work_mode_pulse, without_tx_queue_enable, without_tx_queue_valid,
-        WIFI_MAC_ACTIVE_REGDMA_LINK,
+        with_phy_rx_control_low, with_register_bits, with_register_field, with_tx_cca,
+        with_wifi_mac_regdma_link, without_fe_bb_clock_enable, without_mac_tx_retention,
+        without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse, without_register_bits,
+        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -1198,6 +1312,46 @@ mod tests {
         assert_eq!(with_phy_power_detector_high_field(u32::MAX), 0xffaf_ffff);
         assert_eq!(with_phy_power_detector_aux_mode(u32::MAX), 0xffff_fffc);
         assert_eq!(with_phy_power_detector_aux_mode(0), 0x0000_0004);
+    }
+
+    #[test]
+    fn phy_front_end_register_transforms_preserve_exact_masks() {
+        assert_eq!(with_register_bits(0x1234_5678, 0x0010_0000), 0x1234_5678);
+        assert_eq!(with_register_bits(0x1234_5678, 0x8000_0000), 0x9234_5678);
+        assert_eq!(without_register_bits(u32::MAX, 0x0000_0900), 0xffff_f6ff);
+        assert_eq!(
+            with_register_field(u32::MAX, 0xff00_0000, 0xa000_0000),
+            0xa0ff_ffff
+        );
+        assert_eq!(
+            with_register_field(0x1234_56ff, 0x0000_00ff, 0x0000_0057),
+            0x1234_5657
+        );
+    }
+
+    #[test]
+    fn phy_temperature_sensor_power_forces_the_instruction_proven_constant() {
+        assert_eq!(
+            with_register_field(0, 0x0040_0000, 0x0040_0000),
+            0x0040_0000
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x0040_0000, 0x0040_0000),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn phy_tx_power_background_masks_match_complete_rom_chain() {
+        assert_eq!(without_register_bits(u32::MAX, 0x0000_000e), 0xffff_fff1);
+        assert_eq!(
+            with_register_bits(0, 0x0000_3000 | 0x0001_0000),
+            0x0001_3000
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x0000_0007, 0x0000_0004),
+            0xffff_fffc
+        );
     }
 
     #[test]

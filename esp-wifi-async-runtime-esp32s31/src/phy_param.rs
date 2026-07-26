@@ -208,8 +208,14 @@ fn calibration_record_check_or_write(
     }
 }
 
-pub(crate) fn saturate_phy_value(value: i32, upper: u8, lower: u8) -> u8 {
-    value.clamp(lower as i32, upper as i32) as u8
+pub(crate) const fn saturate_phy_value(value: i32, upper: u8, lower: u8) -> u8 {
+    if value < lower as i32 {
+        lower
+    } else if value > upper as i32 {
+        upper
+    } else {
+        value as u8
+    }
 }
 
 /// Apply the arithmetic half of ROM `phy_rc_cal` to the explicit parameter
