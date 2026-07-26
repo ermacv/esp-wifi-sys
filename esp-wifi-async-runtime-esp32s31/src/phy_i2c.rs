@@ -570,8 +570,101 @@ impl OpenI2cXpdTransition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdcRateAction {
+    ReadI2c { address: PhyI2cAddress },
+    WriteI2c { address: PhyI2cAddress, value: u8 },
+    ConfigureMmio { rate: u32 },
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdcRateCompletion {
+    I2cReadCompleted { address: PhyI2cAddress, value: u8 },
+    I2cWriteCompleted { address: PhyI2cAddress },
+    MmioConfigured,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdcRateTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdcRateStep {
+    ReadI2c,
+    WriteI2c(u8),
+    ConfigureMmio,
+    Complete,
+}
+
+/// Event-driven replacement for complete rev0 ROM `phy_adc_rate_set`.
+///
+/// ROM uses `phy_i2c_writeReg_Mask(0x66, 0, 4, 3, 2, !rate * 2)`,
+/// whose nested read and write both busy-wait. Rust owns those as two
+/// separately completed PHY-I2C transactions, then emits the finite two-write
+/// MMIO suffix. No action polls or repeats itself.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdcRateTransition {
+    step: AdcRateStep,
+    rate: bool,
+}
+
+impl AdcRateTransition {
+    const ADDRESS: PhyI2cAddress = PhyI2cAddress {
+        block: 0x66,
+        register: 4,
+    };
+
+    pub const fn new(rate: bool) -> Self {
+        Self {
+            step: AdcRateStep::ReadI2c,
+            rate,
+        }
+    }
+
+    pub const fn action(self) -> AdcRateAction {
+        match self.step {
+            AdcRateStep::ReadI2c => AdcRateAction::ReadI2c {
+                address: Self::ADDRESS,
+            },
+            AdcRateStep::WriteI2c(value) => AdcRateAction::WriteI2c {
+                address: Self::ADDRESS,
+                value,
+            },
+            AdcRateStep::ConfigureMmio => AdcRateAction::ConfigureMmio {
+                rate: self.rate as u32,
+            },
+            AdcRateStep::Complete => AdcRateAction::Complete,
+        }
+    }
+
+    pub fn advance(&mut self, completion: AdcRateCompletion) -> Result<(), AdcRateTransitionError> {
+        self.step = match (self.step, completion) {
+            (AdcRateStep::ReadI2c, AdcRateCompletion::I2cReadCompleted { address, value })
+                if address == Self::ADDRESS =>
+            {
+                let field = if self.rate { 0 } else { 0x08 };
+                AdcRateStep::WriteI2c((value & !0x0c) | field)
+            }
+            (AdcRateStep::WriteI2c(_), AdcRateCompletion::I2cWriteCompleted { address })
+                if address == Self::ADDRESS =>
+            {
+                AdcRateStep::ConfigureMmio
+            }
+            (AdcRateStep::ConfigureMmio, AdcRateCompletion::MmioConfigured) => {
+                AdcRateStep::Complete
+            }
+            (AdcRateStep::Complete, _) => return Err(AdcRateTransitionError::AlreadyComplete),
+            _ => return Err(AdcRateTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForFeTxRxReset,
+    ReadyForI2cMasterRegInit,
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -584,6 +677,8 @@ pub enum PhyRfInitPrefixAction {
     OpenI2cXpd(OpenI2cXpdAction),
     PbusClear(PhyPbusClearAction),
     ConfigureI2cClockSelection { selection: u32 },
+    ConfigureFeTxRxReset,
+    AdcRate(AdcRateAction),
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -596,6 +691,8 @@ pub enum PhyRfInitPrefixCompletion {
     OpenI2cXpd(OpenI2cXpdCompletion),
     PbusClear(PhyPbusClearCompletion),
     I2cClockSelectionConfigured,
+    FeTxRxResetConfigured,
+    AdcRate(AdcRateCompletion),
     DelayElapsed,
 }
 
@@ -614,10 +711,12 @@ enum PhyRfInitPrefixStep {
     PostI2cDelay,
     PbusClear(PhyPbusClearTransition),
     I2cClockSelection,
+    FeTxRxReset,
+    AdcRate(AdcRateTransition),
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through seven in the complete
+/// Event-driven composition of operations one through nine in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -672,6 +771,13 @@ impl PhyRfInitPrefixTransition {
             PhyRfInitPrefixStep::I2cClockSelection => {
                 PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection: 8 }
             }
+            PhyRfInitPrefixStep::FeTxRxReset => PhyRfInitPrefixAction::ConfigureFeTxRxReset,
+            PhyRfInitPrefixStep::AdcRate(transition) => match transition.action() {
+                AdcRateAction::Complete => PhyRfInitPrefixAction::Complete(
+                    PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit,
+                ),
+                action => PhyRfInitPrefixAction::AdcRate(action),
+            },
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
     }
@@ -743,7 +849,24 @@ impl PhyRfInitPrefixTransition {
             (
                 PhyRfInitPrefixStep::I2cClockSelection,
                 PhyRfInitPrefixCompletion::I2cClockSelectionConfigured,
-            ) => PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForFeTxRxReset),
+            ) => PhyRfInitPrefixStep::FeTxRxReset,
+            (
+                PhyRfInitPrefixStep::FeTxRxReset,
+                PhyRfInitPrefixCompletion::FeTxRxResetConfigured,
+            ) => PhyRfInitPrefixStep::AdcRate(AdcRateTransition::new(true)),
+            (
+                PhyRfInitPrefixStep::AdcRate(mut transition),
+                PhyRfInitPrefixCompletion::AdcRate(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                if transition.action() == AdcRateAction::Complete {
+                    PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit)
+                } else {
+                    PhyRfInitPrefixStep::AdcRate(transition)
+                }
+            }
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
             }
@@ -914,7 +1037,8 @@ impl Default for RcCalibrationTransition {
 mod tests {
     use super::{
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
-        read_result, with_phy_i2c_host_config, BiasRegAction, BiasRegCompletion, BiasRegTransition,
+        read_result, with_phy_i2c_host_config, AdcRateAction, AdcRateCompletion, AdcRateTransition,
+        AdcRateTransitionError, BiasRegAction, BiasRegCompletion, BiasRegTransition,
         BiasRegTransitionError, OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome,
         OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitPrefixAction,
         PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome, PhyRfInitPrefixTransition,
@@ -1113,6 +1237,53 @@ mod tests {
     }
 
     #[test]
+    fn adc_rate_owns_masked_i2c_read_write_and_mmio_edges() {
+        let address = PhyI2cAddress::new(0x66, 4).unwrap();
+        let mut high_rate = AdcRateTransition::new(true);
+        assert_eq!(high_rate.action(), AdcRateAction::ReadI2c { address });
+        assert_eq!(
+            high_rate.advance(AdcRateCompletion::I2cWriteCompleted { address }),
+            Err(AdcRateTransitionError::WrongCompletion)
+        );
+        high_rate
+            .advance(AdcRateCompletion::I2cReadCompleted {
+                address,
+                value: 0xaf,
+            })
+            .unwrap();
+        assert_eq!(
+            high_rate.action(),
+            AdcRateAction::WriteI2c {
+                address,
+                value: 0xa3,
+            }
+        );
+        high_rate
+            .advance(AdcRateCompletion::I2cWriteCompleted { address })
+            .unwrap();
+        assert_eq!(high_rate.action(), AdcRateAction::ConfigureMmio { rate: 1 });
+        high_rate
+            .advance(AdcRateCompletion::MmioConfigured)
+            .unwrap();
+        assert_eq!(high_rate.action(), AdcRateAction::Complete);
+
+        let mut low_rate = AdcRateTransition::new(false);
+        low_rate
+            .advance(AdcRateCompletion::I2cReadCompleted {
+                address,
+                value: 0xa3,
+            })
+            .unwrap();
+        assert_eq!(
+            low_rate.action(),
+            AdcRateAction::WriteI2c {
+                address,
+                value: 0xab,
+            }
+        );
+    }
+
+    #[test]
     fn rf_init_prefix_composes_mmio_i2c_and_timer_edges_in_vendor_order() {
         let bias_zero = PhyI2cAddress::new(0x6a, 0).unwrap();
         let bias_one = PhyI2cAddress::new(0x6a, 1).unwrap();
@@ -1238,7 +1409,52 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForFeTxRxReset)
+            PhyRfInitPrefixAction::ConfigureFeTxRxReset
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::FeTxRxResetConfigured)
+            .unwrap();
+        let adc_address = PhyI2cAddress::new(0x66, 4).unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::ReadI2c {
+                address: adc_address
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::AdcRate(
+                AdcRateCompletion::I2cReadCompleted {
+                    address: adc_address,
+                    value: 0xff,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::WriteI2c {
+                address: adc_address,
+                value: 0xf3,
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::AdcRate(
+                AdcRateCompletion::I2cWriteCompleted {
+                    address: adc_address,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::AdcRate(AdcRateAction::ConfigureMmio { rate: 1 })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::AdcRate(
+                AdcRateCompletion::MmioConfigured,
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForI2cMasterRegInit)
         );
     }
 

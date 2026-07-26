@@ -1374,13 +1374,35 @@ or mutable software state in the leaf.
 
 Rust preserves the six-write ordering in
 `configure_phy_i2c_clock_selection`; the parent exposes it as the finite
-`ConfigureI2cClockSelection { selection: 8 }` action. The prefix now reaches
-`ReadyForFeTxRxReset` only after both PBus clear and the matching clock
-selection completion. SDM and PBus timeouts terminate separately and cannot
-run later hardware steps. The serial runtime suite passes 332 tests. The next
-boundary is operation eight, `phy_fe_txrx_reset(1)`; the prefix remains
-dead-stripped and does not replace any part of the live parent until the
-remaining 19 operations have equivalent owned actions.
+`ConfigureI2cClockSelection { selection: 8 }` action.
+
+The complete rev0 ROM `phy_fe_txrx_reset` body at `0x2f82788c`, size `0x24`,
+is another finite MMIO leaf. It ignores the parent argument, clears mask
+`0x06000000` at `0x20100440`, then sets the same two bits using a fresh
+read. There is no delay or status observation between the writes. Rust keeps
+that exact pulse as `ConfigureFeTxRxReset`; the unused argument is omitted
+from the owned action rather than pretending it affects hardware.
+
+The complete rev0 ROM `phy_adc_rate_set` body at `0x2f82a6d2`, size `0x4a`,
+contains one blocking subgraph followed by a finite MMIO suffix. Its
+`phy_i2c_writeReg_Mask(0x66, 0, 4, 3, 2, !rate * 2)` call first reads the
+PHY-I2C byte, replaces bits two and three, then writes the byte back; both ROM
+transactions busy-wait. For the parent rate `1`, that field is cleared.
+The suffix uses two fresh reads of `0x20100448` to publish rate bit zero into
+bits one and zero separately.
+
+`AdcRateTransition` separates the masked operation into identity-bound
+`ReadI2c`, `WriteI2c`, and finite `ConfigureMmio` actions. The read result is
+owned by the transition, so no hidden byte or mutable C state crosses the
+async edges. It never retries or samples from `poll`.
+
+The prefix now reaches `ReadyForI2cMasterRegInit` only after PBus clear, clock
+selection, FE TX/RX reset, and ADC-rate completion. SDM and PBus timeouts
+terminate separately and cannot run later hardware steps. The serial runtime
+suite passes 335 tests. The next boundary is operation ten,
+`phy_i2cmst_reg_init()`; the prefix remains dead-stripped and does not replace
+any part of the live parent until the remaining 17 operations have equivalent
+owned actions.
 
 ## In-progress slice: `g_ic`
 
