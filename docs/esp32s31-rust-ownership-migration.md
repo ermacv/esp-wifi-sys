@@ -1977,3 +1977,42 @@ state machine, then open authentication, HT20/WMM association, WPA2 M1-M4,
 DHCP, gateway ping, DNS and HTTP 200 completed. It returned 18/18 TX and
 15/15 RX owners with zero allocation/reallocation/free calls, zero
 other-core stalls, no ESF rejection, and no `ppTask` entry.
+
+## Completed MAC-restart runtime boundary
+
+The strict channel switch no longer calls `ic_mac_init`. The replacement is a
+Rust-owned, finite MMIO transaction derived from the complete pinned bodies:
+
+- `libpp.a[if_hwctrl.o]::ic_mac_init`, 40 bytes;
+- `libpp.a[hal_mac.o]::hal_mac_init`, 48 bytes;
+- `libpp.a[hal_pwr.o]::pwr_hal_select_wifimac_regdma_link`, 32 bytes;
+- `libpp.a[pm.o]::pm_get_tx_blocks_retention_mask`, 36 bytes;
+- `libpp.a[pm.o]::pm_set_wifimac_regdma_link_selection`, 10 bytes.
+
+The handoff already sets `WIFI_PS_NONE` and reads it back before strict
+operation. Under that invariant the retention-mask query returns all ones.
+Rust therefore clears the evidenced `0x00ff_1000` mask at `0x2010_4cac`,
+then selects REGDMA link four in bits 20:17 of `0x2010_d83c`. Both are one
+ordered volatile read/modify/write.
+
+The final vendor store of one to `g_wifimac_regdma_link_selected` is not
+reproduced. It is a cache consumed by the vendor PM getters, while strict PM
+hooks are disabled under the verified no-power-save profile. Keeping the
+write would preserve hidden C state with no strict consumer. The Rust leaf
+has no call, loop, wait, delay, allocation, or non-MMIO mutable state; the
+channel state machine provides its single-owner serialization.
+
+This completes the stateful runtime-root ledger. Strict vendor roots decrease
+from two to one, reachable vendor functions from eight to three, and ownership
+debt from `1 fallback + 1 stateful/unproven` to
+`1 fallback + 0 stateful/unproven`. The sole remaining runtime root is the
+explicit `wDev_ProcessRxSucData` compatibility fallback. The 6,407-function
+audit reports zero violations, zero mutable blob globals reachable from strict
+leaves, and zero ROM-ABI state cells. Internal-SRAM strict storage remains
+313,293 bytes and the CPU0 stack remains 16,432 bytes.
+
+The hardware regression completed a six-record passive scan, open
+authentication, HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and
+HTTP 200. It returned 18/18 TX and 16/16 RX owners, recorded zero allocation,
+reallocation, or free calls, zero other-core stalls, no ESF rejection, and no
+`ppTask` entry.
