@@ -206,6 +206,57 @@ fn calibration_record_check_or_write(
     }
 }
 
+fn saturate_rc_value(value: i32, upper: u8, lower: u8) -> u8 {
+    value.clamp(lower as i32, upper as i32) as u8
+}
+
+/// Apply the arithmetic half of ROM `phy_rc_cal` to the explicit parameter
+/// image after the asynchronous owner has obtained the six-bit RC result.
+///
+/// Reference: `esp32s31_rev0_rom.elf` SHA-256
+/// `a52ad7513deb656a910a5740125f1cce2c7941f11ce57213b7b43aea93d5ab87`,
+/// complete `phy_rc_cal` body at `0x2f82_6242` and its finite saturation leaf
+/// `phy_get_data_sat` at `0x2f82_6024`.
+pub(crate) fn apply_rc_calibration_result(parameter: &mut [u8; PHY_PARAM_LEN], result: u8) {
+    const NUMERATOR_SCALE: i32 = 82;
+    const AUXILIARY_NUMERATOR_SCALE: i32 = 0x334;
+    const AUXILIARY_DIVISOR_SCALE: i32 = 104;
+    const UPPER_BOUNDS: [u8; 4] = [0x28, 0x14, 0x1e, 0x14];
+    const PRIMARY_DIVISORS: [u8; 2] = [0x14, 0x28];
+    const AUXILIARY_DIVISORS: [u8; 4] = [0x24, 0x28, 0x16, 0x20];
+
+    parameter[0xe8] = result;
+    let bounded_result = if result > 45 { 50 } else { result };
+    let base = bounded_result as i32 + 56;
+    let primary_numerator = base * NUMERATOR_SCALE;
+
+    let mut index = 0;
+    while index != PRIMARY_DIVISORS.len() {
+        let divisor = PRIMARY_DIVISORS[index] as i32 * 10;
+        let value = primary_numerator / divisor - 8;
+        parameter[0xe9 + index] = saturate_rc_value(value, UPPER_BOUNDS[index], 2);
+        index += 1;
+    }
+
+    let auxiliary_numerator = base * AUXILIARY_NUMERATOR_SCALE;
+    index = 0;
+    while index != AUXILIARY_DIVISORS.len() {
+        let divisor = AUXILIARY_DIVISORS[index] as i32 * AUXILIARY_DIVISOR_SCALE;
+        let value = auxiliary_numerator / divisor - 8;
+        parameter[0xed + index] = saturate_rc_value(value, UPPER_BOUNDS[2 + (index & 1)], 0);
+        index += 1;
+    }
+
+    let mut flags = u32::from_le_bytes([
+        parameter[0xa4],
+        parameter[0xa5],
+        parameter[0xa6],
+        parameter[0xa7],
+    ]);
+    flags |= 1 << 23;
+    parameter[0xa4..0xa8].copy_from_slice(&flags.to_le_bytes());
+}
+
 const fn xtal_parameter_code(frequency_mhz: u32) -> u8 {
     match frequency_mhz {
         26 => 1,
@@ -437,12 +488,12 @@ pub unsafe extern "C" fn wifi_strict_phy_rfcal_data_check_new(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_init_data, apply_rom_function_overrides, backup_parameter,
-        calibration_identity_from_efuse_words, calibration_record_check_or_write, read_u32_le,
-        recover_parameter, with_xtal_frequency, xtal_parameter_code, PhyRomFunctionOverrides,
-        PhyRomFunctionTable, PHY_CALIBRATION_CHECKSUM_OFFSET, PHY_CALIBRATION_PAYLOAD_OFFSET,
-        PHY_CALIBRATION_PREFIX_LEN, PHY_INIT_DATA_LEN, PHY_PARAM_LEN,
-        PHY_ROM_TONE_SAR_DOUT_ADDRESS, PHY_ROM_TXCAL_DEBUG_MODE_ADDRESS,
+        apply_init_data, apply_rc_calibration_result, apply_rom_function_overrides,
+        backup_parameter, calibration_identity_from_efuse_words, calibration_record_check_or_write,
+        read_u32_le, recover_parameter, with_xtal_frequency, xtal_parameter_code,
+        PhyRomFunctionOverrides, PhyRomFunctionTable, PHY_CALIBRATION_CHECKSUM_OFFSET,
+        PHY_CALIBRATION_PAYLOAD_OFFSET, PHY_CALIBRATION_PREFIX_LEN, PHY_INIT_DATA_LEN,
+        PHY_PARAM_LEN, PHY_ROM_TONE_SAR_DOUT_ADDRESS, PHY_ROM_TXCAL_DEBUG_MODE_ADDRESS,
     };
 
     #[test]
@@ -595,5 +646,27 @@ mod tests {
         assert_eq!(xtal_parameter_code(40), 0);
         assert_eq!(with_xtal_frequency(0xffff_ffc0, 40), 0xffff_ffe7);
         assert_eq!(with_xtal_frequency(0x1234_567f, 26), 0x1234_5659);
+    }
+
+    #[test]
+    fn rc_calibration_arithmetic_matches_both_rom_threshold_branches() {
+        let mut parameter = [0_u8; PHY_PARAM_LEN];
+        parameter[0xa4..0xa8].copy_from_slice(&0x1200_0042_u32.to_le_bytes());
+        apply_rc_calibration_result(&mut parameter, 45);
+        assert_eq!(parameter[0xe8..0xeb], [45, 33, 12]);
+        assert_eq!(parameter[0xed..0xf1], [14, 11, 28, 16]);
+        assert_eq!(
+            u32::from_le_bytes(parameter[0xa4..0xa8].try_into().unwrap()),
+            0x1280_0042
+        );
+
+        parameter.fill(0);
+        apply_rc_calibration_result(&mut parameter, 46);
+        assert_eq!(parameter[0xe8..0xeb], [46, 35, 13]);
+        assert_eq!(parameter[0xed..0xf1], [15, 12, 29, 18]);
+        assert_eq!(
+            u32::from_le_bytes(parameter[0xa4..0xa8].try_into().unwrap()),
+            1 << 23
+        );
     }
 }
