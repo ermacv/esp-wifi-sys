@@ -11,6 +11,10 @@ use crate::{
         PhyRxDcoAction, PhyRxDcoCompletion, PhyRxDcoFailure, PhyRxDcoOutcome, PhyRxDcoRequest,
         PhyRxDcoTransition, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
     },
+    phy_signal_power::{
+        PhySignalPowerAction, PhySignalPowerCompletion, PhySignalPowerFailure,
+        PhySignalPowerRequest, PhySignalPowerTransition,
+    },
 };
 
 const FIRST_CANDIDATE: u8 = 0x20;
@@ -29,12 +33,9 @@ pub enum XtalDutySampleKind {
 pub enum XtalDutySearchAction {
     WriteCandidate(u8),
     DelayMicros(u32),
-    MeasureSignalPower {
-        candidate: u8,
-        shift: u8,
-        kind: XtalDutySampleKind,
-    },
+    SignalPower(PhySignalPowerAction),
     Complete(XtalDutySearchOutcome),
+    Failed(PhySignalPowerFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,11 +44,7 @@ pub enum XtalDutySearchCompletion {
     DelayElapsed {
         candidate: u8,
     },
-    SignalPowerMeasured {
-        candidate: u8,
-        kind: XtalDutySampleKind,
-        value: i64,
-    },
+    SignalPower(PhySignalPowerCompletion),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +97,7 @@ enum XtalDutySearchStep {
         filtered_sum: i64,
     },
     Complete(XtalDutySearchOutcome),
+    Failed(PhySignalPowerFailure),
 }
 
 /// Fixed-size translation of the vendor crystal-duty candidate search.
@@ -111,6 +109,7 @@ enum XtalDutySearchStep {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct XtalDutySearchTransition {
     step: XtalDutySearchStep,
+    signal_power: Option<PhySignalPowerTransition>,
     best_candidate: u8,
     best_filtered_power: i64,
     has_best: bool,
@@ -122,6 +121,7 @@ impl XtalDutySearchTransition {
             step: XtalDutySearchStep::WriteCandidate {
                 candidate: FIRST_CANDIDATE,
             },
+            signal_power: None,
             best_candidate: FIRST_CANDIDATE,
             best_filtered_power: 0,
             has_best: false,
@@ -129,37 +129,58 @@ impl XtalDutySearchTransition {
     }
 
     pub const fn action(self) -> XtalDutySearchAction {
+        if let Some(transition) = self.signal_power {
+            return XtalDutySearchAction::SignalPower(transition.action());
+        }
         match self.step {
             XtalDutySearchStep::WriteCandidate { candidate } => {
                 XtalDutySearchAction::WriteCandidate(candidate)
             }
             XtalDutySearchStep::Delay { .. } => XtalDutySearchAction::DelayMicros(20),
+            XtalDutySearchStep::InitialSamples { .. }
+            | XtalDutySearchStep::Review { .. }
+            | XtalDutySearchStep::FirstReplacement { .. }
+            | XtalDutySearchStep::SecondReplacement { .. } => {
+                panic!()
+            }
+            XtalDutySearchStep::Complete(outcome) => XtalDutySearchAction::Complete(outcome),
+            XtalDutySearchStep::Failed(failure) => XtalDutySearchAction::Failed(failure),
+        }
+    }
+
+    const fn measurement_request(candidate: u8, kind: XtalDutySampleKind) -> PhySignalPowerRequest {
+        let kind = match kind {
+            XtalDutySampleKind::Initial(index) => index,
+            XtalDutySampleKind::FirstReplacement(index) => 4 + index,
+            XtalDutySampleKind::SecondReplacement(index) => 8 + index,
+        };
+        PhySignalPowerRequest {
+            measurement: ((candidate as u16) << 4) | kind as u16,
+            shift: SIGNAL_POWER_SHIFT,
+        }
+    }
+
+    fn arm_signal_power(&mut self) {
+        if self.signal_power.is_some() {
+            return;
+        }
+        let request = match self.step {
             XtalDutySearchStep::InitialSamples {
                 candidate, count, ..
-            } => XtalDutySearchAction::MeasureSignalPower {
-                candidate,
-                shift: SIGNAL_POWER_SHIFT,
-                kind: XtalDutySampleKind::Initial(count),
-            },
-            XtalDutySearchStep::Review {
+            } => Self::measurement_request(candidate, XtalDutySampleKind::Initial(count)),
+            XtalDutySearchStep::FirstReplacement {
                 candidate, index, ..
+            } => {
+                Self::measurement_request(candidate, XtalDutySampleKind::FirstReplacement(index))
             }
-            | XtalDutySearchStep::FirstReplacement {
-                candidate, index, ..
-            } => XtalDutySearchAction::MeasureSignalPower {
-                candidate,
-                shift: SIGNAL_POWER_SHIFT,
-                kind: XtalDutySampleKind::FirstReplacement(index),
-            },
             XtalDutySearchStep::SecondReplacement {
                 candidate, index, ..
-            } => XtalDutySearchAction::MeasureSignalPower {
-                candidate,
-                shift: SIGNAL_POWER_SHIFT,
-                kind: XtalDutySampleKind::SecondReplacement(index),
-            },
-            XtalDutySearchStep::Complete(outcome) => XtalDutySearchAction::Complete(outcome),
-        }
+            } => {
+                Self::measurement_request(candidate, XtalDutySampleKind::SecondReplacement(index))
+            }
+            _ => return,
+        };
+        self.signal_power = Some(PhySignalPowerTransition::new(request));
     }
 
     fn outlier(value: i64, lower: i64, upper: i64) -> bool {
@@ -225,37 +246,13 @@ impl XtalDutySearchTransition {
         }
     }
 
-    pub fn advance(
-        &mut self,
-        completion: XtalDutySearchCompletion,
-    ) -> Result<(), XtalDutySearchTransitionError> {
-        self.step = match (self.step, completion) {
-            (
-                XtalDutySearchStep::WriteCandidate { candidate },
-                XtalDutySearchCompletion::CandidateWritten(completed),
-            ) if candidate == completed => XtalDutySearchStep::Delay { candidate },
-            (
-                XtalDutySearchStep::Delay { candidate },
-                XtalDutySearchCompletion::DelayElapsed {
-                    candidate: completed,
-                },
-            ) if candidate == completed => XtalDutySearchStep::InitialSamples {
+    fn accept_signal_power(&mut self, value: i64) -> Result<(), XtalDutySearchTransitionError> {
+        self.step = match self.step {
+            XtalDutySearchStep::InitialSamples {
                 candidate,
-                samples: [0; INITIAL_SAMPLE_COUNT as usize],
-                count: 0,
-            },
-            (
-                XtalDutySearchStep::InitialSamples {
-                    candidate,
-                    mut samples,
-                    count,
-                },
-                XtalDutySearchCompletion::SignalPowerMeasured {
-                    candidate: completed,
-                    kind: XtalDutySampleKind::Initial(completed_count),
-                    value,
-                },
-            ) if candidate == completed && count == completed_count => {
+                mut samples,
+                count,
+            } => {
                 samples[count as usize] = value;
                 if count + 1 != INITIAL_SAMPLE_COUNT {
                     XtalDutySearchStep::InitialSamples {
@@ -278,21 +275,14 @@ impl XtalDutySearchTransition {
                     }
                 }
             }
-            (
-                XtalDutySearchStep::FirstReplacement {
-                    candidate,
-                    samples,
-                    lower,
-                    upper,
-                    index,
-                    filtered_sum,
-                },
-                XtalDutySearchCompletion::SignalPowerMeasured {
-                    candidate: completed,
-                    kind: XtalDutySampleKind::FirstReplacement(completed_index),
-                    value,
-                },
-            ) if candidate == completed && index == completed_index => {
+            XtalDutySearchStep::FirstReplacement {
+                candidate,
+                samples,
+                lower,
+                upper,
+                index,
+                filtered_sum,
+            } => {
                 if Self::outlier(value, lower, upper) {
                     XtalDutySearchStep::SecondReplacement {
                         candidate,
@@ -313,21 +303,14 @@ impl XtalDutySearchTransition {
                     }
                 }
             }
-            (
-                XtalDutySearchStep::SecondReplacement {
-                    candidate,
-                    samples,
-                    lower,
-                    upper,
-                    index,
-                    filtered_sum,
-                },
-                XtalDutySearchCompletion::SignalPowerMeasured {
-                    candidate: completed,
-                    kind: XtalDutySampleKind::SecondReplacement(completed_index),
-                    value,
-                },
-            ) if candidate == completed && index == completed_index => XtalDutySearchStep::Review {
+            XtalDutySearchStep::SecondReplacement {
+                candidate,
+                samples,
+                lower,
+                upper,
+                index,
+                filtered_sum,
+            } => XtalDutySearchStep::Review {
                 candidate,
                 samples,
                 lower,
@@ -335,12 +318,62 @@ impl XtalDutySearchTransition {
                 index: index + 1,
                 filtered_sum: filtered_sum.wrapping_add(value),
             },
-            (XtalDutySearchStep::Complete(_), _) => {
+            _ => return Err(XtalDutySearchTransitionError::WrongCompletion),
+        };
+        self.normalize_review();
+        self.arm_signal_power();
+        Ok(())
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: XtalDutySearchCompletion,
+    ) -> Result<(), XtalDutySearchTransitionError> {
+        if let Some(mut transition) = self.signal_power {
+            let XtalDutySearchCompletion::SignalPower(completion) = completion else {
+                return Err(XtalDutySearchTransitionError::WrongCompletion);
+            };
+            transition
+                .advance(completion)
+                .map_err(|_| XtalDutySearchTransitionError::WrongCompletion)?;
+            return match transition.action() {
+                PhySignalPowerAction::Complete(outcome) => {
+                    self.signal_power = None;
+                    self.accept_signal_power(outcome.value)
+                }
+                PhySignalPowerAction::Failed(failure) => {
+                    self.signal_power = None;
+                    self.step = XtalDutySearchStep::Failed(failure);
+                    Ok(())
+                }
+                _ => {
+                    self.signal_power = Some(transition);
+                    Ok(())
+                }
+            };
+        }
+        self.step = match (self.step, completion) {
+            (
+                XtalDutySearchStep::WriteCandidate { candidate },
+                XtalDutySearchCompletion::CandidateWritten(completed),
+            ) if candidate == completed => XtalDutySearchStep::Delay { candidate },
+            (
+                XtalDutySearchStep::Delay { candidate },
+                XtalDutySearchCompletion::DelayElapsed {
+                    candidate: completed,
+                },
+            ) if candidate == completed => XtalDutySearchStep::InitialSamples {
+                candidate,
+                samples: [0; INITIAL_SAMPLE_COUNT as usize],
+                count: 0,
+            },
+            (XtalDutySearchStep::Complete(_), _) | (XtalDutySearchStep::Failed(_), _) => {
                 return Err(XtalDutySearchTransitionError::AlreadyComplete);
             }
             _ => return Err(XtalDutySearchTransitionError::WrongCompletion),
         };
         self.normalize_review();
+        self.arm_signal_power();
         Ok(())
     }
 }
@@ -1245,8 +1278,8 @@ mod tests {
         XtalDutyHardwareFailure, XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPassOutcome,
         XtalDutyPassTransition, XtalDutyPassTransitionError, XtalDutyPrepareAction,
         XtalDutyPrepareCompletion, XtalDutyPrepareTransition, XtalDutyRestoreAction,
-        XtalDutyRestoreCompletion, XtalDutyRestoreTransition, XtalDutySampleKind,
-        XtalDutySearchAction, XtalDutySearchCompletion, XtalDutySearchOutcome,
+        XtalDutyRestoreCompletion, XtalDutyRestoreTransition, XtalDutySearchAction,
+        XtalDutySearchCompletion, XtalDutySearchOutcome,
         XtalDutySearchTransition, XtalDutySearchTransitionError,
     };
     use crate::phy_dc_iq::{
@@ -1256,6 +1289,115 @@ mod tests {
     use crate::phy_rx_dco::{
         PhyRxDcoAction, PhyRxDcoCompletion, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
     };
+    use crate::phy_signal_power::{
+        PhySignalPowerAccumulatorSnapshot, PhySignalPowerAction, PhySignalPowerCompletion,
+    };
+
+    fn signal_components(value: i64) -> (i32, i32) {
+        for first in 0..=512_i32 {
+            for second in 0..=512_i32 {
+                if i64::from(first * first + second * second) == value {
+                    return (first, second);
+                }
+            }
+        }
+        panic!("test signal power is not a bounded sum of two squares");
+    }
+
+    fn complete_signal_power_action(
+        action: PhySignalPowerAction,
+        value: i64,
+    ) -> PhySignalPowerCompletion {
+        match action {
+            PhySignalPowerAction::ConfigureClock {
+                request,
+                clock,
+                enabled,
+            } => PhySignalPowerCompletion::ClockConfigured {
+                request,
+                clock,
+                enabled,
+            },
+            PhySignalPowerAction::SetEstimatorEnable {
+                request,
+                phase,
+                enabled,
+            } => PhySignalPowerCompletion::EstimatorEnableSet {
+                request,
+                phase,
+                enabled,
+            },
+            PhySignalPowerAction::DelayMicros {
+                request,
+                phase,
+                micros,
+            } => PhySignalPowerCompletion::DelayElapsed {
+                request,
+                phase,
+                micros,
+            },
+            PhySignalPowerAction::ConfigureEstimator { request, control } => {
+                PhySignalPowerCompletion::EstimatorConfigured { request, control }
+            }
+            PhySignalPowerAction::AwaitReadinessEdge { request, .. } => {
+                PhySignalPowerCompletion::ReadinessObserved {
+                    request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: true,
+                        activity: false,
+                    },
+                }
+            }
+            PhySignalPowerAction::ReadAccumulators(request) => {
+                let (sum, difference) = signal_components(value);
+                let shift = u32::from(request.shift.wrapping_sub(2)) & 0x1f;
+                PhySignalPowerCompletion::AccumulatorsRead {
+                    request,
+                    snapshot: PhySignalPowerAccumulatorSnapshot {
+                        sum_i: sum.wrapping_shl(shift),
+                        difference_i: difference.wrapping_shl(shift),
+                        difference_q: 0,
+                        sum_q: 0,
+                    },
+                }
+            }
+            action => panic!("unexpected terminal signal-power action: {action:?}"),
+        }
+    }
+
+    fn signal_power_request(
+        action: PhySignalPowerAction,
+    ) -> crate::phy_signal_power::PhySignalPowerRequest {
+        match action {
+            PhySignalPowerAction::ConfigureClock { request, .. }
+            | PhySignalPowerAction::SetEstimatorEnable { request, .. }
+            | PhySignalPowerAction::DelayMicros { request, .. }
+            | PhySignalPowerAction::ConfigureEstimator { request, .. }
+            | PhySignalPowerAction::AwaitReadinessEdge { request, .. }
+            | PhySignalPowerAction::ReadAccumulators(request) => request,
+            action => panic!("unexpected terminal signal-power action: {action:?}"),
+        }
+    }
+
+    fn complete_search_measurement(transition: &mut XtalDutySearchTransition, value: i64) {
+        let XtalDutySearchAction::SignalPower(first_action) = transition.action() else {
+            panic!("signal-power measurement was not armed");
+        };
+        let request = signal_power_request(first_action);
+        loop {
+            let XtalDutySearchAction::SignalPower(action) = transition.action() else {
+                return;
+            };
+            if signal_power_request(action) != request {
+                return;
+            }
+            transition
+                .advance(XtalDutySearchCompletion::SignalPower(
+                    complete_signal_power_action(action, value),
+                ))
+                .unwrap();
+        }
+    }
 
     fn complete_dc_iq_action(action: PhyDcIqAction) -> PhyDcIqCompletion {
         match action {
@@ -1487,20 +1629,19 @@ mod tests {
                         .unwrap();
                 }
                 XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Search(
-                    XtalDutySearchAction::MeasureSignalPower {
-                        candidate,
-                        shift: 12,
-                        kind,
-                    },
+                    XtalDutySearchAction::SignalPower(action),
                 )) => {
+                    let candidate = current_candidate.unwrap();
+                    let component = i64::from(0x80 - candidate);
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
                             XtalDutyPassCompletion::Search(
-                                XtalDutySearchCompletion::SignalPowerMeasured {
-                                    candidate,
-                                    kind,
-                                    value: i64::from(0x80 - candidate),
-                                },
+                                XtalDutySearchCompletion::SignalPower(
+                                    complete_signal_power_action(
+                                        action,
+                                        component.wrapping_mul(component),
+                                    ),
+                                ),
                             ),
                         ))
                         .unwrap();
@@ -1543,26 +1684,21 @@ mod tests {
                         .advance(XtalDutySearchCompletion::DelayElapsed { candidate })
                         .unwrap();
                 }
-                XtalDutySearchAction::MeasureSignalPower {
-                    candidate,
-                    shift: 12,
-                    kind,
-                } => {
+                XtalDutySearchAction::SignalPower(_) => {
                     measurements += 1;
-                    transition
-                        .advance(XtalDutySearchCompletion::SignalPowerMeasured {
-                            candidate,
-                            kind,
-                            value: i64::from(0x80 - candidate),
-                        })
-                        .unwrap();
+                    let candidate = 0x20 + writes - 1;
+                    let component = i64::from(0x80 - candidate);
+                    complete_search_measurement(
+                        &mut transition,
+                        component.wrapping_mul(component),
+                    );
                 }
                 XtalDutySearchAction::Complete(outcome) => {
                     assert_eq!(
                         outcome,
                         XtalDutySearchOutcome {
                             best_candidate: 0x3e,
-                            best_filtered_power: 0x42,
+                            best_filtered_power: 0x42 * 0x42,
                         }
                     );
                     break;
@@ -1584,53 +1720,23 @@ mod tests {
         transition
             .advance(XtalDutySearchCompletion::DelayElapsed { candidate: 0x20 })
             .unwrap();
-        for (index, value) in [1, 100, 100, 100].into_iter().enumerate() {
-            transition
-                .advance(XtalDutySearchCompletion::SignalPowerMeasured {
-                    candidate: 0x20,
-                    kind: XtalDutySampleKind::Initial(index as u8),
-                    value,
-                })
-                .unwrap();
+        for value in [1, 100, 100, 100] {
+            complete_search_measurement(&mut transition, value);
         }
-        assert_eq!(
+        assert!(matches!(
             transition.action(),
-            XtalDutySearchAction::MeasureSignalPower {
-                candidate: 0x20,
-                shift: 12,
-                kind: XtalDutySampleKind::FirstReplacement(0),
-            }
-        );
+            XtalDutySearchAction::SignalPower(_)
+        ));
         assert_eq!(
-            transition.advance(XtalDutySearchCompletion::SignalPowerMeasured {
-                candidate: 0x21,
-                kind: XtalDutySampleKind::FirstReplacement(0),
-                value: 200,
-            }),
+            transition.advance(XtalDutySearchCompletion::CandidateWritten(0x21)),
             Err(XtalDutySearchTransitionError::WrongCompletion)
         );
-        transition
-            .advance(XtalDutySearchCompletion::SignalPowerMeasured {
-                candidate: 0x20,
-                kind: XtalDutySampleKind::FirstReplacement(0),
-                value: 200,
-            })
-            .unwrap();
-        assert_eq!(
+        complete_search_measurement(&mut transition, 200);
+        assert!(matches!(
             transition.action(),
-            XtalDutySearchAction::MeasureSignalPower {
-                candidate: 0x20,
-                shift: 12,
-                kind: XtalDutySampleKind::SecondReplacement(0),
-            }
-        );
-        transition
-            .advance(XtalDutySearchCompletion::SignalPowerMeasured {
-                candidate: 0x20,
-                kind: XtalDutySampleKind::SecondReplacement(0),
-                value: 60,
-            })
-            .unwrap();
+            XtalDutySearchAction::SignalPower(_)
+        ));
+        complete_search_measurement(&mut transition, 64);
         assert_eq!(
             transition.action(),
             XtalDutySearchAction::WriteCandidate(0x21)
@@ -1926,12 +2032,12 @@ mod tests {
                 low_frequency: XtalDutyPassOutcome {
                     frequency_code: 0x988,
                     best_candidate: 0x3e,
-                    best_filtered_power: 0x42,
+                    best_filtered_power: 0x42 * 0x42,
                 },
                 high_frequency: XtalDutyPassOutcome {
                     frequency_code: 0x9b0,
                     best_candidate: 0x3e,
-                    best_filtered_power: 0x42,
+                    best_filtered_power: 0x42 * 0x42,
                 },
             })
         );

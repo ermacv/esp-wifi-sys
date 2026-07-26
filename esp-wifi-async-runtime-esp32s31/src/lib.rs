@@ -68,6 +68,7 @@ mod net80211_timer;
 mod net80211_tx;
 pub mod osi;
 pub mod phy_dc_iq;
+pub mod phy_signal_power;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod phy_channel;
 pub mod phy_i2c;

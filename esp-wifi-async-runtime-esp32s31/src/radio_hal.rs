@@ -63,6 +63,10 @@ const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
 const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
 const PHY_IQ_EST_CONFIG_ADDRESS: usize = 0x2010_044c;
 const PHY_IQ_EST_CONTROL_ADDRESS: usize = 0x2010_0450;
+const PHY_SIGNAL_POWER_SUM_I_ADDRESS: usize = 0x2010_0454;
+const PHY_SIGNAL_POWER_DIFFERENCE_I_ADDRESS: usize = 0x2010_0458;
+const PHY_SIGNAL_POWER_DIFFERENCE_Q_ADDRESS: usize = 0x2010_045c;
+const PHY_SIGNAL_POWER_SUM_Q_ADDRESS: usize = 0x2010_0460;
 const PHY_IQ_EST_I_ACCUMULATOR_ADDRESS: usize = 0x2010_0464;
 const PHY_IQ_EST_Q_ACCUMULATOR_ADDRESS: usize = 0x2010_0468;
 const PHY_IQ_EST_POWER_ACCUMULATOR_ADDRESS: usize = 0x2010_046c;
@@ -999,6 +1003,22 @@ pub(crate) unsafe fn read_phy_dc_iq_accumulators() -> crate::phy_dc_iq::PhyDcIqA
         i: (PHY_IQ_EST_I_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
         q: (PHY_IQ_EST_Q_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
         power: (PHY_IQ_EST_POWER_ACCUMULATOR_ADDRESS as *const i32).read_volatile(),
+    }
+}
+
+/// Read the four signed accumulator words consumed by `phy_get_rx_sig_pwr`.
+///
+/// Reference: complete rev0 ROM body at `0x2f82_9ea2`, offsets
+/// `0x2c..0x4a`. Arithmetic remains in the Rust transition; this leaf is four
+/// ordered volatile reads with no loop, wait, callback, or software state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_signal_power_accumulators(
+) -> crate::phy_signal_power::PhySignalPowerAccumulatorSnapshot {
+    crate::phy_signal_power::PhySignalPowerAccumulatorSnapshot {
+        sum_i: (PHY_SIGNAL_POWER_SUM_I_ADDRESS as *const i32).read_volatile(),
+        difference_i: (PHY_SIGNAL_POWER_DIFFERENCE_I_ADDRESS as *const i32).read_volatile(),
+        difference_q: (PHY_SIGNAL_POWER_DIFFERENCE_Q_ADDRESS as *const i32).read_volatile(),
+        sum_q: (PHY_SIGNAL_POWER_SUM_Q_ADDRESS as *const i32).read_volatile(),
     }
 }
 

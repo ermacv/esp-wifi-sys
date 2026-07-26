@@ -2604,6 +2604,9 @@ mod tests {
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
     use crate::phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion};
+    use crate::phy_signal_power::{
+        PhySignalPowerAccumulatorSnapshot, PhySignalPowerAction, PhySignalPowerCompletion,
+    };
     use crate::phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
         XtalDutyCalibrationParameters, XtalDutyPassAction, XtalDutyPassCompletion,
@@ -2651,6 +2654,66 @@ mod tests {
                 },
             },
             action => panic!("unexpected terminal DC/IQ action: {action:?}"),
+        }
+    }
+
+    fn complete_signal_power(
+        action: PhySignalPowerAction,
+        component: i32,
+    ) -> PhySignalPowerCompletion {
+        match action {
+            PhySignalPowerAction::ConfigureClock {
+                request,
+                clock,
+                enabled,
+            } => PhySignalPowerCompletion::ClockConfigured {
+                request,
+                clock,
+                enabled,
+            },
+            PhySignalPowerAction::SetEstimatorEnable {
+                request,
+                phase,
+                enabled,
+            } => PhySignalPowerCompletion::EstimatorEnableSet {
+                request,
+                phase,
+                enabled,
+            },
+            PhySignalPowerAction::DelayMicros {
+                request,
+                phase,
+                micros,
+            } => PhySignalPowerCompletion::DelayElapsed {
+                request,
+                phase,
+                micros,
+            },
+            PhySignalPowerAction::ConfigureEstimator { request, control } => {
+                PhySignalPowerCompletion::EstimatorConfigured { request, control }
+            }
+            PhySignalPowerAction::AwaitReadinessEdge { request, .. } => {
+                PhySignalPowerCompletion::ReadinessObserved {
+                    request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: true,
+                        activity: false,
+                    },
+                }
+            }
+            PhySignalPowerAction::ReadAccumulators(request) => {
+                let shift = u32::from(request.shift.wrapping_sub(2)) & 0x1f;
+                PhySignalPowerCompletion::AccumulatorsRead {
+                    request,
+                    snapshot: PhySignalPowerAccumulatorSnapshot {
+                        sum_i: component.wrapping_shl(shift),
+                        difference_i: 0,
+                        difference_q: 0,
+                        sum_q: 0,
+                    },
+                }
+            }
+            action => panic!("unexpected terminal signal-power action: {action:?}"),
         }
     }
 
@@ -2859,20 +2922,16 @@ mod tests {
                         .unwrap();
                 }
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
-                    XtalDutyPassAction::Search(XtalDutySearchAction::MeasureSignalPower {
-                        candidate,
-                        kind,
-                        ..
-                    }),
+                    XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(action)),
                 )) => {
+                    let candidate = current_candidate.unwrap();
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
-                                XtalDutySearchCompletion::SignalPowerMeasured {
-                                    candidate,
-                                    kind,
-                                    value: i64::from(0x80 - candidate),
-                                },
+                                XtalDutySearchCompletion::SignalPower(complete_signal_power(
+                                    action,
+                                    i32::from(0x80 - candidate),
+                                )),
                             )),
                         ))
                         .unwrap();
@@ -4103,12 +4162,12 @@ mod tests {
                 low_frequency: XtalDutyPassOutcome {
                     frequency_code: 0x988,
                     best_candidate: 0x3e,
-                    best_filtered_power: 0x42,
+                    best_filtered_power: 0x42 * 0x42,
                 },
                 high_frequency: XtalDutyPassOutcome {
                     frequency_code: 0x9b0,
                     best_candidate: 0x3e,
-                    best_filtered_power: 0x42,
+                    best_filtered_power: 0x42 * 0x42,
                 },
             }
         );

@@ -1549,8 +1549,7 @@ a typed terminal failure, never a retry or poll.
 
 This is still not a claim that operation twenty-four is blob-free. The
 remaining named child decomposition is RFPLL frequency programming, tone
-setup (including the `g_phyFuns + 0x30` callback), and
-`phy_get_rx_sig_pwr(12)` used by the crystal-duty candidate search.
+setup (including the `g_phyFuns + 0x30` callback).
 
 `esp32s31_rev0_rom.elf` supplies the exact symbolized RX-DCO reference:
 `phy_pbus_rx_dco_cal` is at `0x2f82_8f44`, size `0x228`.
@@ -1581,7 +1580,19 @@ halfword at `phy_param_rom + 0x1ac` has no write in the Rust path: its
 diagnostic activity count is an ordinary field in the transition outcome or
 failure.
 
-The serial runtime suite passes 364 tests. `phy_freq_reg_init()` belongs to
+The complete rev0 ROM `phy_get_rx_sig_pwr` body at `0x2f82_9ea2`, size
+`0x76`, is now `PhySignalPowerTransition`. For every crystal-duty sample it
+owns both clock-enable actions, the asynchronous disable tail for the
+previous estimator session, `shift = 12` estimator setup, readiness edge,
+and the four signed MMIO reads at `0x2010_0454..=0x2010_0460`. Its stateless
+suffix preserves the ROM arithmetic shifts, wrapping 32-bit sum/difference,
+signed full-width squares, carry and wrapping 64-bit addition. Success leaves
+the estimator enabled exactly as ROM does; the next sample begins by
+disabling it. A readiness timeout instead performs the complete disable tail
+before exposing a typed failure. Crystal-duty search therefore has no
+remaining synchronous signal-power callback.
+
+The serial runtime suite passes 368 tests. `phy_freq_reg_init()` belongs to
 `phy_wakeup_init` and `phy_set_chan_freq_hw_init`, not this point in the cold
 path. The prefix remains dead-stripped and does not replace any part of the
 live parent until the remaining two parent operations and every operation-24
