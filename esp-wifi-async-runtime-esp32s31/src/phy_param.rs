@@ -18,7 +18,7 @@ const PHY_XTAL_FREQUENCY_REGISTER_ADDRESS: usize = 0x2010_f028;
 const ESP32S31_XTAL_FREQUENCY_MHZ: u32 = 40;
 const PHY_ROM_FUNCTION_TABLE_POINTER_CELL: usize = 0x2f07_fc3c;
 const PHY_PARAM_ROM_CELL: usize = 0x2f07_fc40;
-const PHY_ROM_FUNCTION_TABLE_ADDRESS: u32 = 0x2f07_f944;
+pub(crate) const PHY_ROM_FUNCTION_TABLE_ADDRESS: u32 = 0x2f07_f944;
 const PHY_ROM_TXCAL_DEBUG_MODE_ADDRESS: u32 = 0x2f82_44fe;
 const PHY_ROM_TONE_SAR_DOUT_ADDRESS: u32 = 0x2f82_66da;
 
@@ -272,7 +272,6 @@ const fn with_xtal_frequency(value: u32, frequency_mhz: u32) -> u32 {
 #[cfg(target_arch = "riscv32")]
 unsafe extern "C" {
     static mut phy_param: [u8; PHY_PARAM_LEN];
-    static mut g_phyFuns: *mut PhyRomFunctionTable;
 
     fn phy_get_i2c_read_mask_new();
     fn phy_get_i2c_hostid_new();
@@ -306,6 +305,22 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_enter_critical() {}
 #[link_section = ".rwtext.wifi_strict.phy_cold"]
 pub unsafe extern "C" fn wifi_strict_phy_i2c_exit_critical() {}
 
+/// Immutable Rust-owned backing for the temporary vendor `g_phyFuns` ABI.
+///
+/// Ten still-delegated cold/calibration functions load the public
+/// `g_phyFuns` symbol before dispatching through the fixed rev0 ROM callback
+/// table. The linker aliases that public name to this word. Consequently
+/// those functions retain their input ABI without owning or mutating a C
+/// `.bss` pointer.
+///
+/// Keep the word in internal SRAM: some PHY callbacks execute while cached
+/// flash is unavailable. The table itself is the rev0 ROM-ABI RAM object
+/// validated by [`wifi_strict_phy_get_romfunc_addr`].
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".critical.data.wifi_strict.phy_rom_function_table_binding"]
+pub static wifi_strict_phy_rom_function_table_binding: u32 = PHY_ROM_FUNCTION_TABLE_ADDRESS;
+
 /// Publish the Rust PHY parameter object and typed rev0 ROM callback table.
 ///
 /// Reference: pinned `libphy.a[phy_init.o]::phy_get_romfunc_addr`, size
@@ -334,8 +349,6 @@ pub unsafe extern "C" fn wifi_strict_phy_get_romfunc_addr() {
 
     let parameter_address = core::ptr::addr_of_mut!(phy_param).cast::<u8>() as usize as u32;
     (PHY_PARAM_ROM_CELL as *mut u32).write_volatile(parameter_address);
-    core::ptr::addr_of_mut!(g_phyFuns).write_volatile(table);
-
     let replacements = PhyRomFunctionOverrides {
         i2c_enter_critical: wifi_strict_phy_i2c_enter_critical as usize as u32,
         i2c_exit_critical: wifi_strict_phy_i2c_exit_critical as usize as u32,

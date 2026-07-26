@@ -2,7 +2,7 @@ use core::{
     cell::UnsafeCell,
     ffi::c_void,
     ptr,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::{
@@ -24,7 +24,6 @@ unsafe extern "C" {
     static mut g_mac_deinit_count: u32;
     static mut g_mac_deinit_rxing: u8;
     static mut g_mac_deinit_txing: u8;
-    static mut g_phyFuns: *const c_void;
 
     fn chm_start_op(
         channel: *const u8,
@@ -173,8 +172,6 @@ unsafe impl Sync for ChannelResources {}
 static RESOURCES: ChannelResources = ChannelResources::new();
 static FAILURE: AtomicU32 = AtomicU32::new(ChannelSwitchError::None as u32);
 static MAC_FAILURE_STATUS: AtomicU32 = AtomicU32::new(0);
-static PHY_FUNCTION_TABLE_EXPECTED: AtomicUsize = AtomicUsize::new(0);
-static PHY_FUNCTION_TABLE_CURRENT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn link_wrappers_active() -> bool {
     core::ptr::eq(chm_start_op as *const (), __wrap_chm_start_op as *const ())
@@ -185,19 +182,14 @@ pub(crate) fn link_wrappers_active() -> bool {
 }
 
 pub fn channel_switch_snapshot() -> ChannelSwitchSnapshot {
-    #[cfg(target_arch = "riscv32")]
-    let live_phy_function_table = unsafe { ptr::addr_of!(g_phyFuns).read_volatile() as usize };
-    #[cfg(not(target_arch = "riscv32"))]
-    let live_phy_function_table = PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire);
-    PHY_FUNCTION_TABLE_CURRENT.store(live_phy_function_table, Ordering::Release);
     let state = unsafe { &*RESOURCES.machine.get() };
     ChannelSwitchSnapshot {
         started: state.started,
         completed: state.completed,
         failed: decode_error(FAILURE.load(Ordering::Acquire)),
         mac_status: MAC_FAILURE_STATUS.load(Ordering::Acquire),
-        phy_function_table_expected: PHY_FUNCTION_TABLE_EXPECTED.load(Ordering::Acquire),
-        phy_function_table_current: PHY_FUNCTION_TABLE_CURRENT.load(Ordering::Acquire),
+        phy_function_table_expected: crate::phy_param::PHY_ROM_FUNCTION_TABLE_ADDRESS as usize,
+        phy_function_table_current: crate::phy_param::PHY_ROM_FUNCTION_TABLE_ADDRESS as usize,
     }
 }
 
@@ -400,25 +392,6 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
     };
     if !(*RESOURCES.machine.get()).active {
         fail(ChannelSwitchError::Busy, 0);
-        return;
-    }
-
-    let current_phy_function_table = ptr::addr_of!(g_phyFuns).read_volatile() as usize;
-    PHY_FUNCTION_TABLE_CURRENT.store(current_phy_function_table, Ordering::Release);
-    let expected_phy_function_table = match PHY_FUNCTION_TABLE_EXPECTED.compare_exchange(
-        0,
-        current_phy_function_table,
-        Ordering::AcqRel,
-        Ordering::Acquire,
-    ) {
-        Ok(_) => current_phy_function_table,
-        Err(expected) => expected,
-    };
-    if current_phy_function_table == 0 || current_phy_function_table != expected_phy_function_table {
-        fail(
-            ChannelSwitchError::PhyFunctionTableChanged,
-            current_phy_function_table as u32,
-        );
         return;
     }
 

@@ -303,6 +303,15 @@ ASSERT(phy_i2c_master_cmd_mem_init ==
            wifi_strict_phy_i2c_master_cmd_mem_init,
        "ESP32-S31 PHY I2C command-memory Rust boundary is inactive");
 
+/* Still-delegated calibration leaves expect the public g_phyFuns ABI to be a
+ * word containing the rev0 callback-table address. Redirect that name to an
+ * immutable Rust-owned SRAM word. The discarded phy_init.o .bss cell no
+ * longer owns the binding. */
+EXTERN(wifi_strict_phy_rom_function_table_binding);
+g_phyFuns = wifi_strict_phy_rom_function_table_binding;
+ASSERT(g_phyFuns == wifi_strict_phy_rom_function_table_binding,
+       "ESP32-S31 PHY ROM function-table binding is not Rust-owned");
+
 /* Publish the ROM PHY ABI table and parameter pointer directly from Rust.
  * The replacement performs no call into phy_get_romfuncs/phy_param_addr and
  * retains the two untouched rev0 ROM callbacks only after validation. */
