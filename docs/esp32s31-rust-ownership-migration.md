@@ -1547,9 +1547,37 @@ work-mode tail. That tail can progress through its one- and two-microsecond
 states only from identity-bound external timer completions. A PBus timeout is
 a typed terminal failure, never a retry or poll.
 
-This is still not a claim that operation twenty-four is blob-free. The
-remaining named child decomposition is RFPLL frequency programming, tone
-setup (including the `g_phyFuns + 0x30` callback).
+Tone setup is now a complete Rust-owned S31 MMIO leaf. The primary references
+are pinned `libphy.a[phy_reg.o]::phy_start_tx_tone_step_new`, size `0xc2`,
+and its former `g_phyFuns + 0x30` target
+`phy_txgain_comp_pacfg_new`, size `0x54`. Rust preserves the initial two
+zero writes at `0x2010_0410` and `0x2010_0414`, both selector-field writes at
+`0x2010_0428`, the two path images at `0x2010_041c` and `0x2010_0420`, and
+all four final compensation writes at `0x2010_0410`. The start request is
+exactly `(1, 0x80, 0, 0, 0, 0)` and the restoration request is exactly
+`(0, 0x80, 0x28, 0, 0, 0)`. No callback-table load, indirect call, hidden
+software state, allocation, loop, delay, or status wait remains in this
+operation.
+
+RFPLL frequency programming is now a complete Rust-owned transition as well.
+The exact rev0 ROM graph is rooted at `phy_set_rf_freq_offset` at
+`0x2f82_5c10` and includes `phy_set_rfpll_freq`, `phy_rfpll_set_freq`,
+`phy_write_rfpll_sdm`, `phy_restart_cal`, `phy_wait_rfpll_cal_end`,
+`phy_read_pll_cap`, `phy_write_pll_cap`, and
+`phy_rfpll_cap_init_cal`. `RfpllFrequencyTransition` owns the five-byte SDM
+image, all 13 fixed prefix writes, the 100 externally delivered
+`20-microsecond + lock-read` attempts, both capacitor reads, every candidate
+write, and each external five-microsecond edge. The missed-lock print is
+replaced by `lock_observed = false`.
+
+The ROM capacitor search normally shares its offset, sum, and sample count
+between downward and upward phases. Rust preserves that order and arithmetic.
+If the upward phase misses the ROM's `offset == 10` equality exit, the ROM
+can remain hardware-dependent without a software bound. Rust permits ten
+additional externally completed upward observations and then reports
+`CapacitorSearchDeadlineExceeded`; it never creates an unbounded poll or
+self-wake loop. Operation twenty-four therefore has no remaining vendor/ROM
+child boundary.
 
 `esp32s31_rev0_rom.elf` supplies the exact symbolized RX-DCO reference:
 `phy_pbus_rx_dco_cal` is at `0x2f82_8f44`, size `0x228`.
@@ -1592,11 +1620,22 @@ disabling it. A readiness timeout instead performs the complete disable tail
 before exposing a typed failure. Crystal-duty search therefore has no
 remaining synchronous signal-power callback.
 
-The serial runtime suite passes 368 tests. `phy_freq_reg_init()` belongs to
-`phy_wakeup_init` and `phy_set_chan_freq_hw_init`, not this point in the cold
-path. The prefix remains dead-stripped and does not replace any part of the
-live parent until the remaining two parent operations and every operation-24
-hardware boundary have equivalent owned actions.
+Operation twenty-five is also complete. The pinned archive body
+`libphy.a[phy_reg.o]::phy_fe_reg_update`, size `0x32`, is deliberately used
+instead of the similarly named ROM function: the archive call site performs
+two fresh-read RMW updates at `0x20100c08`, setting `0x02000000` and then
+`0x04000000`, followed by a fresh-read RMW at `0x20100448` setting bits 1:0.
+It then returns. The ROM variant has an additional
+`phy_dac_scale_set(1)` tail-call which is not present in this pinned cold-init
+path and is therefore not invented in Rust.
+
+The serial runtime suite passes 375 tests. `phy_freq_reg_init()` belongs to
+`phy_wakeup_init` and operation twenty-six
+`phy_set_chan_freq_hw_init(2, 4)`, not the earlier crystal-duty point. The
+prefix now exposes `ReadyForChannelFrequencyInitialization` only after the
+front-end update completion edge. It remains dead-stripped and does not
+replace any part of the live parent until the final composite operation 26
+has an equivalent owned transition.
 
 ## In-progress slice: `g_ic`
 

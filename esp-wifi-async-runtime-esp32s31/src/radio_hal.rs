@@ -61,6 +61,11 @@ const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
 const PHY_PBUS_RX_DCO_READ_ADDRESS: usize = 0x2010_1894;
 const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
 const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
+const PHY_TONE_PATH0_CONTROL_ADDRESS: usize = 0x2010_041c;
+const PHY_TONE_PATH1_CONTROL_ADDRESS: usize = 0x2010_0420;
+const PHY_TONE_SELECTOR_CONTROL_ADDRESS: usize = 0x2010_0428;
+const PHY_TX_GAIN_COMPENSATION_CONTROL_ADDRESS: usize = 0x2010_0410;
+const PHY_TX_GAIN_COMPENSATION_AUX_ADDRESS: usize = 0x2010_0414;
 const PHY_IQ_EST_CONFIG_ADDRESS: usize = 0x2010_044c;
 const PHY_IQ_EST_CONTROL_ADDRESS: usize = 0x2010_0450;
 const PHY_SIGNAL_POWER_SUM_I_ADDRESS: usize = 0x2010_0454;
@@ -280,6 +285,42 @@ const fn with_restored_phy_rx_dco_control_field(value: u32, saved_field: u32) ->
     without_phy_rx_dco_control_field(value) | (saved_field & 0x00c0_0000)
 }
 
+const fn with_phy_tone_path(
+    value: u32,
+    enable: i32,
+    selector: i32,
+    step: i32,
+) -> u32 {
+    let encoded = (enable as u32).wrapping_shl(18)
+        | ((selector >> 2) as u32)
+        | ((step.wrapping_neg() as u32) & 0xff).wrapping_shl(10);
+    (value & 0xf000_0000) | (encoded & 0x0fff_ffff)
+}
+
+const fn with_phy_tone_path0_selector(value: u32, selector: i32) -> u32 {
+    (value & !0x3) | ((selector as u32) & 0x3)
+}
+
+const fn with_phy_tone_path1_selector(value: u32, selector: i32) -> u32 {
+    (value & !0xc) | (((selector as u32).wrapping_shl(2)) & 0xc)
+}
+
+const fn without_phy_tx_gain_compensation_low_byte(value: u32) -> u32 {
+    value & 0xffff_ff00
+}
+
+const fn with_phy_tx_gain_compensation_byte1(value: u32) -> u32 {
+    (value & 0xffff_00ff) | 0x0000_fa00
+}
+
+const fn with_phy_tx_gain_compensation_byte2(value: u32) -> u32 {
+    value | 0x00ff_0000
+}
+
+const fn without_phy_tx_gain_compensation_high_byte(value: u32) -> u32 {
+    value & 0x00ff_ffff
+}
+
 const fn with_phy_iq_est_config(value: u32) -> u32 {
     (value & !(0x3 << 26)) | (1 << 26)
 }
@@ -359,6 +400,18 @@ const fn with_phy_power_detector_aux_mode(value: u32) -> u32 {
 
 const fn with_register_bits(value: u32, bits: u32) -> u32 {
     value | bits
+}
+
+const fn with_phy_front_end_update_first(value: u32) -> u32 {
+    with_register_bits(value, 0x0200_0000)
+}
+
+const fn with_phy_front_end_update_second(value: u32) -> u32 {
+    with_register_bits(value, 0x0400_0000)
+}
+
+const fn with_phy_front_end_adc_update(value: u32) -> u32 {
+    with_register_bits(value, 0x0000_0003)
 }
 
 const fn without_register_bits(value: u32, bits: u32) -> u32 {
@@ -915,6 +968,69 @@ pub(crate) unsafe fn configure_phy_rx_clock(enabled: bool) {
     control.write_volatile(with_phy_rx_clock(control.read_volatile(), enabled));
 }
 
+/// Program the complete crystal-duty calibration tone without `g_phyFuns`.
+///
+/// Primary reference: pinned
+/// `libphy.a[phy_reg.o]::phy_start_tx_tone_step_new`, size `0xc2`, together
+/// with its `g_phyFuns + 0x30` target
+/// `phy_txgain_comp_pacfg_new`, size `0x54`.
+///
+/// The calibration caller supplies only the three nonzero-capable arguments;
+/// the second path is zero in both evidenced calls. `enabled=true` reproduces
+/// `(1, 0x80, 0, 0, 0, 0)`, while `enabled=false` reproduces
+/// `(0, 0x80, 0x28, 0, 0, 0)`. Every fresh volatile read and intermediate
+/// write is retained because the registers are hardware state. There is no
+/// callback, loop, wait, allocation, or software-global access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_calibration_tone(
+    enabled: bool,
+    selector: u8,
+    step: u8,
+) {
+    let compensation = PHY_TX_GAIN_COMPENSATION_CONTROL_ADDRESS as *mut u32;
+    let compensation_aux = PHY_TX_GAIN_COMPENSATION_AUX_ADDRESS as *mut u32;
+
+    // Exact `configure_tx_gain_compensation(0)` callback body.
+    compensation.write_volatile(0);
+    compensation_aux.write_volatile(0);
+
+    let selectors = PHY_TONE_SELECTOR_CONTROL_ADDRESS as *mut u32;
+    selectors.write_volatile(with_phy_tone_path0_selector(
+        selectors.read_volatile(),
+        i32::from(selector),
+    ));
+    selectors.write_volatile(with_phy_tone_path1_selector(
+        selectors.read_volatile(),
+        0,
+    ));
+
+    let path0 = PHY_TONE_PATH0_CONTROL_ADDRESS as *mut u32;
+    path0.write_volatile(with_phy_tone_path(
+        path0.read_volatile(),
+        enabled as i32,
+        i32::from(selector),
+        i32::from(step),
+    ));
+
+    let path1 = PHY_TONE_PATH1_CONTROL_ADDRESS as *mut u32;
+    path1.write_volatile(with_phy_tone_path(path1.read_volatile(), 0, 0, 0));
+
+    // Exact `configure_tx_gain_compensation(1)` callback body. Preserve the
+    // four writes rather than collapsing their final value.
+    compensation.write_volatile(without_phy_tx_gain_compensation_low_byte(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(with_phy_tx_gain_compensation_byte1(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(with_phy_tx_gain_compensation_byte2(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(without_phy_tx_gain_compensation_high_byte(
+        compensation.read_volatile(),
+    ));
+}
+
 /// Save and clear bits 23:22 around crystal-duty RX-DCO calibration.
 ///
 /// Reference: pinned `libphy.a[phy_rx_cal.o]::phy_xtal_duty_cal` offsets
@@ -1153,6 +1269,23 @@ pub(crate) unsafe fn configure_phy_front_end_registers() {
     replace_register_field(PHY_FE_CONTROL_0C20_ADDRESS, 0x0000_00ff, 0x0000_0057);
 }
 
+/// Apply complete pinned `libphy.a[phy_reg.o]::phy_fe_reg_update`.
+///
+/// The 0x32-byte archive body used by `phy_rf_init` is smaller than the
+/// similarly named ROM function: it performs exactly three fresh-read MMIO
+/// updates and returns. In particular, this call site does not include the ROM
+/// tail-call to `phy_dac_scale_set`. There is no loop, delay, callback, or
+/// mutable software-state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_front_end_update() {
+    let front_end = PHY_FE_CONTROL_0C08_ADDRESS as *mut u32;
+    front_end.write_volatile(with_phy_front_end_update_first(front_end.read_volatile()));
+    front_end.write_volatile(with_phy_front_end_update_second(front_end.read_volatile()));
+
+    let adc = PHY_FE_CONTROL_0448_ADDRESS as *mut u32;
+    adc.write_volatile(with_phy_front_end_adc_update(adc.read_volatile()));
+}
+
 /// Apply complete vendor `phy_tsens_read_init` and its ROM tail leaf.
 ///
 /// The pinned 0x36-byte archive body ignores both ABI arguments, performs
@@ -1340,8 +1473,14 @@ mod tests {
         with_phy_pbus_work_mode_pulse, with_phy_pbus_work_mode_pulse_setup,
         with_phy_power_detector_aux_mode, with_phy_power_detector_high_field,
         with_phy_power_detector_low_field, with_phy_rx_clock, with_phy_rx_comp_high,
-        with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low, with_phy_tx_clock,
-        with_register_bits, with_register_field, with_restored_phy_rx_dco_control_field,
+        with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low,
+        with_phy_tone_path, with_phy_tone_path0_selector, with_phy_tone_path1_selector,
+        with_phy_tx_clock, with_phy_tx_gain_compensation_byte1,
+        with_phy_tx_gain_compensation_byte2, without_phy_tx_gain_compensation_high_byte,
+        without_phy_tx_gain_compensation_low_byte,
+        with_phy_front_end_adc_update, with_phy_front_end_update_first,
+        with_phy_front_end_update_second, with_register_bits, with_register_field,
+        with_restored_phy_rx_dco_control_field,
         with_tx_cca, with_wifi_mac_regdma_link, without_fe_bb_clock_enable,
         without_mac_tx_retention, without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse,
         without_phy_rx_dco_control_field, without_register_bits, without_tx_queue_enable,
@@ -1499,6 +1638,35 @@ mod tests {
     }
 
     #[test]
+    fn phy_calibration_tone_matches_both_evidenced_call_images() {
+        assert_eq!(with_phy_tone_path0_selector(u32::MAX, 0x80), 0xffff_fffc);
+        assert_eq!(with_phy_tone_path1_selector(u32::MAX, 0), 0xffff_fff3);
+
+        assert_eq!(
+            with_phy_tone_path(0xa000_0000, 1, 0x80, 0),
+            0xa004_0020
+        );
+        assert_eq!(
+            with_phy_tone_path(0xa000_0000, 0, 0x80, 0x28),
+            0xa003_6020
+        );
+        assert_eq!(with_phy_tone_path(0xbfff_ffff, 0, 0, 0), 0xb000_0000);
+    }
+
+    #[test]
+    fn phy_tone_gain_compensation_preserves_all_four_vendor_writes() {
+        let first = without_phy_tx_gain_compensation_low_byte(0x1234_5678);
+        let second = with_phy_tx_gain_compensation_byte1(first);
+        let third = with_phy_tx_gain_compensation_byte2(second);
+        let fourth = without_phy_tx_gain_compensation_high_byte(third);
+
+        assert_eq!(first, 0x1234_5600);
+        assert_eq!(second, 0x1234_fa00);
+        assert_eq!(third, 0x12ff_fa00);
+        assert_eq!(fourth, 0x00ff_fa00);
+    }
+
+    #[test]
     fn phy_dc_iq_estimator_masks_match_the_complete_rom_prefix() {
         assert_eq!(with_phy_iq_est_config(0), 0x0400_0000);
         assert_eq!(with_phy_iq_est_config(u32::MAX), 0xf7ff_ffff);
@@ -1574,6 +1742,17 @@ mod tests {
             with_register_field(0x1234_56ff, 0x0000_00ff, 0x0000_0057),
             0x1234_5657
         );
+    }
+
+    #[test]
+    fn phy_front_end_update_preserves_archive_masks_and_fresh_read_order() {
+        let initial = 0x8100_4000;
+        let first = with_phy_front_end_update_first(initial);
+        let second = with_phy_front_end_update_second(first);
+
+        assert_eq!(first, 0x8300_4000);
+        assert_eq!(second, 0x8700_4000);
+        assert_eq!(with_phy_front_end_adc_update(0xa5a5_0100), 0xa5a5_0103);
     }
 
     #[test]

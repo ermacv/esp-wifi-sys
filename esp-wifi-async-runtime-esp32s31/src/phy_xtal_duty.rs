@@ -7,6 +7,10 @@
 use crate::{
     phy_i2c::PhyI2cAddress,
     phy_pbus::PhyPbusForceTest,
+    phy_rfpll::{
+        RfpllFrequencyAction, RfpllFrequencyCompletion, RfpllFrequencyFailure,
+        RfpllFrequencyRequest, RfpllFrequencyTransition,
+    },
     phy_rx_dco::{
         PhyRxDcoAction, PhyRxDcoCompletion, PhyRxDcoFailure, PhyRxDcoOutcome, PhyRxDcoRequest,
         PhyRxDcoTransition, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
@@ -422,20 +426,18 @@ const fn restore_pbus_transaction(index: u8) -> PhyPbusForceTest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutyHardwareFailure {
+    Rfpll(RfpllFrequencyFailure),
     PbusForceTestTimedOut(PhyPbusForceTest),
     RxDco(PhyRxDcoFailure),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutyPrepareAction {
-    /// Temporary boundary for `phy_set_rf_freq_offset`. Its three observed
-    /// inputs are explicit; the synchronous vendor parent is not permitted.
-    ProgramRfFrequency {
-        rf_frequency_offset_base: u8,
-        frequency_code: u16,
-        mode: u8,
-    },
-    /// Temporary boundary for `phy_start_tx_tone_step_new(1, 0x80, 0, 0, 0, 0)`.
+    /// Complete Rust-owned RFPLL I2C/timer transition.
+    Rfpll(RfpllFrequencyAction),
+    /// Complete Rust MMIO replacement for
+    /// `phy_start_tx_tone_step_new(1, 0x80, 0, 0, 0, 0)`, including both
+    /// former `g_phyFuns + 0x30` callback invocations.
     ConfigureCalibrationTone {
         enabled: bool,
         selector: u8,
@@ -468,11 +470,7 @@ pub enum XtalDutyPrepareAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutyPrepareCompletion {
-    RfFrequencyProgrammed {
-        rf_frequency_offset_base: u8,
-        frequency_code: u16,
-        mode: u8,
-    },
+    Rfpll(RfpllFrequencyCompletion),
     CalibrationToneConfigured {
         enabled: bool,
         selector: u8,
@@ -506,7 +504,7 @@ pub enum XtalDutyPrepareTransitionError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum XtalDutyPrepareStep {
-    ProgramRfFrequency,
+    Rfpll(RfpllFrequencyTransition),
     StartTone,
     EnableRxClock,
     EnableTxClock,
@@ -533,11 +531,11 @@ enum XtalDutyPrepareStep {
 ///
 /// PBus commands are individual externally completed operations. Nothing in
 /// this transition retries a busy register, polls, delays, allocates, or
-/// invokes a callback. RFPLL and tone remain named child boundaries; RX-DCO
-/// and its IQ estimator are complete nested register/timer transitions.
+/// invokes a callback. RFPLL is a complete nested I2C/timer transition, tone
+/// is a complete Rust MMIO leaf, and RX-DCO with its IQ estimator is a
+/// complete nested register/timer transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct XtalDutyPrepareTransition {
-    frequency_code: u16,
     parameter: XtalDutyCalibrationParameters,
     step: XtalDutyPrepareStep,
 }
@@ -545,19 +543,22 @@ pub struct XtalDutyPrepareTransition {
 impl XtalDutyPrepareTransition {
     pub const fn new(frequency_code: u16, parameter: XtalDutyCalibrationParameters) -> Self {
         Self {
-            frequency_code,
             parameter,
-            step: XtalDutyPrepareStep::ProgramRfFrequency,
+            step: XtalDutyPrepareStep::Rfpll(RfpllFrequencyTransition::new(
+                RfpllFrequencyRequest {
+                    crystal_selector: parameter.rf_frequency_offset_base,
+                    frequency_code: frequency_code.wrapping_sub(5),
+                    offset: 0,
+                },
+            )),
         }
     }
 
     pub const fn action(self) -> XtalDutyPrepareAction {
         match self.step {
-            XtalDutyPrepareStep::ProgramRfFrequency => XtalDutyPrepareAction::ProgramRfFrequency {
-                rf_frequency_offset_base: self.parameter.rf_frequency_offset_base,
-                frequency_code: self.frequency_code.wrapping_sub(5),
-                mode: 0,
-            },
+            XtalDutyPrepareStep::Rfpll(transition) => {
+                XtalDutyPrepareAction::Rfpll(transition.action())
+            }
             XtalDutyPrepareStep::StartTone => XtalDutyPrepareAction::ConfigureCalibrationTone {
                 enabled: true,
                 selector: 0x80,
@@ -599,16 +600,19 @@ impl XtalDutyPrepareTransition {
     ) -> Result<(), XtalDutyPrepareTransitionError> {
         self.step = match (self.step, completion) {
             (
-                XtalDutyPrepareStep::ProgramRfFrequency,
-                XtalDutyPrepareCompletion::RfFrequencyProgrammed {
-                    rf_frequency_offset_base,
-                    frequency_code,
-                    mode: 0,
-                },
-            ) if rf_frequency_offset_base == self.parameter.rf_frequency_offset_base
-                && frequency_code == self.frequency_code.wrapping_sub(5) =>
-            {
-                XtalDutyPrepareStep::StartTone
+                XtalDutyPrepareStep::Rfpll(mut transition),
+                XtalDutyPrepareCompletion::Rfpll(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| XtalDutyPrepareTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    RfpllFrequencyAction::Complete(_) => XtalDutyPrepareStep::StartTone,
+                    RfpllFrequencyAction::Failed(failure) => {
+                        XtalDutyPrepareStep::Failed(XtalDutyHardwareFailure::Rfpll(failure))
+                    }
+                    _ => XtalDutyPrepareStep::Rfpll(transition),
+                }
             }
             (
                 XtalDutyPrepareStep::StartTone,
@@ -722,7 +726,9 @@ impl XtalDutyPrepareTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutyRestoreAction {
-    /// Temporary boundary for `phy_start_tx_tone_step_new(0, 0x80, 0x28, 0, 0, 0)`.
+    /// Complete Rust MMIO replacement for
+    /// `phy_start_tx_tone_step_new(0, 0x80, 0x28, 0, 0, 0)`, including both
+    /// former `g_phyFuns + 0x30` callback invocations.
     ConfigureCalibrationTone {
         enabled: bool,
         selector: u8,
@@ -1286,6 +1292,7 @@ mod tests {
         PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
     };
     use crate::phy_pbus::PhyPbusForceTest;
+    use crate::phy_rfpll::{RfpllFrequencyAction, RfpllFrequencyCompletion};
     use crate::phy_rx_dco::{
         PhyRxDcoAction, PhyRxDcoCompletion, RX_DCO_CONTROL_ADDRESS, RX_DCO_CONTROL_FIELD_MASK,
     };
@@ -1473,17 +1480,63 @@ mod tests {
         }
     }
 
-    fn complete_prepare_action(action: XtalDutyPrepareAction) -> XtalDutyPrepareCompletion {
+    fn complete_rfpll_action(
+        action: RfpllFrequencyAction,
+        cap_status_reads: &mut u8,
+    ) -> RfpllFrequencyCompletion {
         match action {
-            XtalDutyPrepareAction::ProgramRfFrequency {
-                rf_frequency_offset_base,
-                frequency_code,
-                mode,
-            } => XtalDutyPrepareCompletion::RfFrequencyProgrammed {
-                rf_frequency_offset_base,
-                frequency_code,
-                mode,
+            RfpllFrequencyAction::WriteMasked {
+                address,
+                high_bit,
+                low_bit,
+                ..
+            } => RfpllFrequencyCompletion::MaskedWrite {
+                address,
+                high_bit,
+                low_bit,
             },
+            RfpllFrequencyAction::WriteByte { address, .. } => {
+                RfpllFrequencyCompletion::ByteWrite { address }
+            }
+            RfpllFrequencyAction::ReadMasked {
+                address,
+                high_bit,
+                low_bit,
+            } => RfpllFrequencyCompletion::MaskedRead {
+                address,
+                high_bit,
+                low_bit,
+                value: if high_bit == 1 { 1 } else { 0 },
+            },
+            RfpllFrequencyAction::ReadByte { address } => {
+                let value = if address.register() == 5 {
+                    100
+                } else {
+                    let value = if *cap_status_reads % 3 == 0 {
+                        0
+                    } else {
+                        1 << 2
+                    };
+                    *cap_status_reads = (*cap_status_reads).wrapping_add(1);
+                    value
+                };
+                RfpllFrequencyCompletion::ByteRead { address, value }
+            }
+            RfpllFrequencyAction::DelayMicros(micros) => {
+                RfpllFrequencyCompletion::DelayElapsed(micros)
+            }
+            action => panic!("unexpected terminal RFPLL action: {action:?}"),
+        }
+    }
+
+    fn complete_prepare_action(
+        action: XtalDutyPrepareAction,
+        rfpll_cap_status_reads: &mut u8,
+    ) -> XtalDutyPrepareCompletion {
+        match action {
+            XtalDutyPrepareAction::Rfpll(action) => XtalDutyPrepareCompletion::Rfpll(
+                complete_rfpll_action(action, rfpll_cap_status_reads),
+            ),
             XtalDutyPrepareAction::ConfigureCalibrationTone {
                 enabled,
                 selector,
@@ -1557,10 +1610,11 @@ mod tests {
 
     fn drive_pass(
         transition: &mut XtalDutyCalibrationTransition,
-        expected_frequency_code: u16,
+        _expected_frequency_code: u16,
         initial_duty: u8,
     ) {
         let mut current_candidate = None;
+        let mut rfpll_cap_status_reads = 0;
         loop {
             match transition.action() {
                 XtalDutyCalibrationAction::Pass(XtalDutyPassAction::WriteMasked {
@@ -1589,18 +1643,12 @@ mod tests {
                         .unwrap();
                 }
                 XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Prepare(action)) => {
-                    if let XtalDutyPrepareAction::ProgramRfFrequency {
-                        rf_frequency_offset_base,
-                        frequency_code,
-                        mode: 0,
-                    } = action
-                    {
-                        assert_eq!(frequency_code, expected_frequency_code - 5);
-                        assert_eq!(rf_frequency_offset_base, 0x31);
-                    }
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
-                            XtalDutyPassCompletion::Prepare(complete_prepare_action(action)),
+                            XtalDutyPassCompletion::Prepare(complete_prepare_action(
+                                action,
+                                &mut rfpll_cap_status_reads,
+                            )),
                         ))
                         .unwrap();
                 }
@@ -1750,13 +1798,18 @@ mod tests {
             pbus_rx_path_value: 0x42,
         };
         let mut transition = XtalDutyPrepareTransition::new(0x988, parameter);
+        let mut rfpll_cap_status_reads = 0;
+
+        while let XtalDutyPrepareAction::Rfpll(action) = transition.action() {
+            transition
+                .advance(XtalDutyPrepareCompletion::Rfpll(complete_rfpll_action(
+                    action,
+                    &mut rfpll_cap_status_reads,
+                )))
+                .unwrap();
+        }
 
         for expected in [
-            XtalDutyPrepareAction::ProgramRfFrequency {
-                rf_frequency_offset_base: 0x31,
-                frequency_code: 0x983,
-                mode: 0,
-            },
             XtalDutyPrepareAction::ConfigureCalibrationTone {
                 enabled: true,
                 selector: 0x80,
@@ -1768,7 +1821,10 @@ mod tests {
         ] {
             assert_eq!(transition.action(), expected);
             transition
-                .advance(complete_prepare_action(expected))
+                .advance(complete_prepare_action(
+                    expected,
+                    &mut rfpll_cap_status_reads,
+                ))
                 .unwrap();
         }
 
@@ -1966,22 +2022,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.advance(XtalDutyPassCompletion::Prepare(
-                XtalDutyPrepareCompletion::RfFrequencyProgrammed {
-                    frequency_code: 0x983,
-                    rf_frequency_offset_base: 0x31,
-                    mode: 1,
-                }
+                XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::DelayElapsed(20))
             )),
             Err(XtalDutyPassTransitionError::WrongCompletion)
         );
-        assert_eq!(
+        assert!(matches!(
             transition.action(),
-            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ProgramRfFrequency {
-                frequency_code: 0x983,
-                rf_frequency_offset_base: 0x31,
-                mode: 0,
-            })
-        );
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::WriteMasked { .. }
+            ))
+        ));
     }
 
     #[test]

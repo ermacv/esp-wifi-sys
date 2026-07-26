@@ -1621,7 +1621,7 @@ impl Default for Sar2InitTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForFrontEndRegisterUpdate {
+    ReadyForChannelFrequencyInitialization {
         bbpll_register_snapshot: u8,
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
@@ -1672,6 +1672,7 @@ pub enum PhyRfInitPrefixAction {
     Sar2Init(Sar2InitAction),
     CaptureXtalDutyParameters,
     XtalDuty(XtalDutyCalibrationAction),
+    ConfigureFrontEndRegisterUpdate,
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -1704,6 +1705,7 @@ pub enum PhyRfInitPrefixCompletion {
     Sar2Init(Sar2InitCompletion),
     XtalDutyParametersCaptured(XtalDutyCalibrationParameters),
     XtalDuty(XtalDutyCalibrationCompletion),
+    FrontEndRegisterUpdateConfigured,
     DelayElapsed,
 }
 
@@ -1803,10 +1805,17 @@ enum PhyRfInitPrefixStep {
         rfpll_lock_observed: bool,
         sar2_reinitialized: bool,
     },
+    FrontEndRegisterUpdate {
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+        xtal_duty: XtalDutyCalibrationOutcome,
+    },
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through twenty-four in the complete
+/// Event-driven composition of operations one through twenty-five in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -1967,22 +1976,16 @@ impl PhyRfInitPrefixTransition {
             }
             PhyRfInitPrefixStep::XtalDuty {
                 transition,
-                bbpll_register_snapshot,
-                parameter,
-                rfpll_lock_observed,
-                sar2_reinitialized,
+                ..
             } => match transition.action() {
-                XtalDutyCalibrationAction::Complete(xtal_duty) => PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
-                        bbpll_register_snapshot,
-                        parameter,
-                        rfpll_lock_observed,
-                        sar2_reinitialized,
-                        xtal_duty,
-                    },
-                ),
+                XtalDutyCalibrationAction::Complete(_) => {
+                    PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate
+                }
                 action => PhyRfInitPrefixAction::XtalDuty(action),
             },
+            PhyRfInitPrefixStep::FrontEndRegisterUpdate { .. } => {
+                PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate
+            }
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
     }
@@ -2391,15 +2394,13 @@ impl PhyRfInitPrefixTransition {
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 match transition.action() {
                     XtalDutyCalibrationAction::Complete(xtal_duty) => {
-                        PhyRfInitPrefixStep::Complete(
-                            PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
-                                bbpll_register_snapshot,
-                                parameter,
-                                rfpll_lock_observed,
-                                sar2_reinitialized,
-                                xtal_duty,
-                            },
-                        )
+                        PhyRfInitPrefixStep::FrontEndRegisterUpdate {
+                            bbpll_register_snapshot,
+                            parameter,
+                            rfpll_lock_observed,
+                            sar2_reinitialized,
+                            xtal_duty,
+                        }
                     }
                     _ => PhyRfInitPrefixStep::XtalDuty {
                         transition,
@@ -2410,6 +2411,24 @@ impl PhyRfInitPrefixTransition {
                     },
                 }
             }
+            (
+                PhyRfInitPrefixStep::FrontEndRegisterUpdate {
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                    sar2_reinitialized,
+                    xtal_duty,
+                },
+                PhyRfInitPrefixCompletion::FrontEndRegisterUpdateConfigured,
+            ) => PhyRfInitPrefixStep::Complete(
+                PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                    sar2_reinitialized,
+                    xtal_duty,
+                },
+            ),
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
             }
@@ -2591,7 +2610,8 @@ mod tests {
         OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome, OpenI2cXpdTransition,
         OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitParameterSnapshot,
         PhyRfInitPrefixAction, PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome,
-        PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError, RcCalibrationAction,
+        PhyRfInitPrefixStep, PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError,
+        RcCalibrationAction,
         RcCalibrationCompletion, RcCalibrationSetAction, RcCalibrationSetCompletion,
         RcCalibrationSetTransition, RcCalibrationTransition, RcCalibrationTransitionError,
         RfpllChargePumpAction, RfpllChargePumpCompletion, RfpllChargePumpOutcome,
@@ -2603,6 +2623,7 @@ mod tests {
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
+    use crate::phy_rfpll::{RfpllFrequencyAction, RfpllFrequencyCompletion};
     use crate::phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion};
     use crate::phy_signal_power::{
         PhySignalPowerAccumulatorSnapshot, PhySignalPowerAction, PhySignalPowerCompletion,
@@ -2749,17 +2770,66 @@ mod tests {
         }
     }
 
-    fn complete_xtal_prepare(action: XtalDutyPrepareAction) -> XtalDutyPrepareCompletion {
+    fn complete_rfpll(
+        action: RfpllFrequencyAction,
+        cap_status_reads: &mut u8,
+    ) -> RfpllFrequencyCompletion {
         match action {
-            XtalDutyPrepareAction::ProgramRfFrequency {
-                rf_frequency_offset_base,
-                frequency_code,
-                mode,
-            } => XtalDutyPrepareCompletion::RfFrequencyProgrammed {
-                rf_frequency_offset_base,
-                frequency_code,
-                mode,
+            RfpllFrequencyAction::WriteMasked {
+                address,
+                high_bit,
+                low_bit,
+                ..
+            } => RfpllFrequencyCompletion::MaskedWrite {
+                address,
+                high_bit,
+                low_bit,
             },
+            RfpllFrequencyAction::WriteByte { address, .. } => {
+                RfpllFrequencyCompletion::ByteWrite { address }
+            }
+            RfpllFrequencyAction::ReadMasked {
+                address,
+                high_bit,
+                low_bit,
+            } => RfpllFrequencyCompletion::MaskedRead {
+                address,
+                high_bit,
+                low_bit,
+                value: if high_bit == 1 { 1 } else { 0 },
+            },
+            RfpllFrequencyAction::ReadByte { address } => {
+                let value = if address.register() == 5 {
+                    100
+                } else {
+                    let value = if *cap_status_reads % 3 == 0 {
+                        0
+                    } else {
+                        1 << 2
+                    };
+                    *cap_status_reads = (*cap_status_reads).wrapping_add(1);
+                    value
+                };
+                RfpllFrequencyCompletion::ByteRead { address, value }
+            }
+            RfpllFrequencyAction::DelayMicros(micros) => {
+                RfpllFrequencyCompletion::DelayElapsed(micros)
+            }
+            action => panic!("unexpected terminal RFPLL action: {action:?}"),
+        }
+    }
+
+    fn complete_xtal_prepare(
+        action: XtalDutyPrepareAction,
+        rfpll_cap_status_reads: &mut u8,
+    ) -> XtalDutyPrepareCompletion {
+        match action {
+            XtalDutyPrepareAction::Rfpll(action) => {
+                XtalDutyPrepareCompletion::Rfpll(complete_rfpll(
+                    action,
+                    rfpll_cap_status_reads,
+                ))
+            }
             XtalDutyPrepareAction::ConfigureCalibrationTone {
                 enabled,
                 selector,
@@ -2836,6 +2906,7 @@ mod tests {
         initial_duty: u8,
     ) -> XtalDutyCalibrationOutcome {
         let mut current_candidate = None;
+        let mut rfpll_cap_status_reads = 0;
         loop {
             match transition.action() {
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
@@ -2892,7 +2963,7 @@ mod tests {
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
-                                complete_xtal_prepare(action),
+                                complete_xtal_prepare(action, &mut rfpll_cap_status_reads),
                             )),
                         ))
                         .unwrap();
@@ -2947,8 +3018,19 @@ mod tests {
                         ))
                         .unwrap();
                 }
+                PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate => {
+                    if let PhyRfInitPrefixStep::FrontEndRegisterUpdate { xtal_duty, .. } =
+                        transition.step
+                    {
+                        return xtal_duty;
+                    }
+                    panic!("front-end update action without its owned step");
+                }
                 PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate { xtal_duty, .. },
+                    PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
+                        xtal_duty,
+                        ..
+                    },
                 ) => return xtal_duty,
                 action => panic!("unexpected RF-init crystal-duty action: {action:?}"),
             }
@@ -4173,8 +4255,15 @@ mod tests {
         );
         assert_eq!(
             transition.action(),
+            PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::FrontEndRegisterUpdateConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
             PhyRfInitPrefixAction::Complete(
-                PhyRfInitPrefixOutcome::ReadyForFrontEndRegisterUpdate {
+                PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
                     bbpll_register_snapshot: 0xa3,
                     parameter: final_parameter,
                     rfpll_lock_observed: true,
