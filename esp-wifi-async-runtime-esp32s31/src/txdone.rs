@@ -764,7 +764,7 @@ unsafe fn read_noise_floor() -> i32 {
 }
 
 /// Direct port of the complete `hal_he_set_bf_report_rate` register body.
-unsafe fn set_bf_report_rate(mode: u8, rate: u16, dcm: bool, ersu: bool) {
+pub(crate) unsafe fn set_bf_report_rate(mode: u8, rate: u16, dcm: bool, ersu: bool) {
     let mut encoded = rate;
     if mode != 0 {
         let mode_bits = (u16::from(mode) << 5) & 0x60;
@@ -792,7 +792,7 @@ unsafe fn set_bf_report_rate(mode: u8, rate: u16, dcm: bool, ersu: bool) {
 }
 
 /// Direct port of the complete `hal_he_set_ersu_ack_rate` register body.
-unsafe fn set_ersu_ack_rate(enabled: bool) {
+pub(crate) unsafe fn set_ersu_ack_rate(enabled: bool) {
     let value = if enabled { 0xa0_u32 } else { 0x80_u32 };
     let register = HE_ERSU_ACK_RATE_REGISTER;
 

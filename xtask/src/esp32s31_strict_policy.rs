@@ -144,6 +144,8 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "trc_update_ifx_phy_mode",
         "wifi_strict_trc_update_ifx_phy_mode",
     ),
+    ("rcAttach", "wifi_strict_rc_attach"),
+    ("rcUpdatePhyMode", "wifi_strict_rc_update_phy_mode"),
     (
         "lmacRequestTxopQueue",
         "wifi_strict_lmac_request_txop_queue",

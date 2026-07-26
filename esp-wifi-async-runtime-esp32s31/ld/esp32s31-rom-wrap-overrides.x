@@ -302,6 +302,22 @@ trc_update_ifx_phy_mode = wifi_strict_trc_update_ifx_phy_mode;
 ASSERT(trc_update_ifx_phy_mode == wifi_strict_trc_update_ifx_phy_mode,
        "ESP32-S31 TRC PHY-mode Rust boundary is inactive");
 
+/* rcAttach only initialized shared table indices and four control words.
+ * Indices are materialized in Rust literals; no vendor schedule arena may be
+ * pulled back into SRAM by this cold initializer. */
+EXTERN(wifi_strict_rc_attach);
+rcAttach = wifi_strict_rc_attach;
+ASSERT(rcAttach == wifi_strict_rc_attach,
+       "ESP32-S31 rcAttach Rust boundary is inactive");
+
+/* The vendor PHY-mode selector held archive-local references to every mutable
+ * rate schedule. Route it through the typed Rust selector so the old 852-byte
+ * bank can be garbage-collected. */
+EXTERN(wifi_strict_rc_update_phy_mode);
+rcUpdatePhyMode = wifi_strict_rc_update_phy_mode;
+ASSERT(rcUpdatePhyMode == wifi_strict_rc_update_phy_mode,
+       "ESP32-S31 rcUpdatePhyMode Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 

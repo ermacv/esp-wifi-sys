@@ -9,7 +9,11 @@
 use core::ptr;
 
 use crate::{
-    rate_control::{RateControlRecord, RATE_CONTROL_RECORD_SIZE},
+    rate_control::{
+        ampdu_limit_for_rate, beamforming_report_rate_for_metric, rate_to_schedule_index,
+        select_phy_mode, PhyModeSelectionInput, RateControlRecord, RateIndexMap,
+        RATE_CONTROL_RECORD_SIZE,
+    },
     rate_schedule::{schedule_pointer, RateScheduleKind, RateScheduleRef},
 };
 
@@ -28,6 +32,21 @@ const FLAGS_OFFSET: usize = 0x0c;
 const CURRENT_RATE_OFFSET: usize = 0x28;
 const IDENTITY_OFFSET: usize = 0x85;
 const FINAL_STATE_OFFSET: usize = 0x87;
+const PHY_TYPE_OFFSET: usize = 0x86;
+const FEATURE_ENABLED_OFFSET: usize = 0x8b;
+const HE_TYPE_OFFSET: usize = 0x8e;
+const HE_FEATURE_8F_OFFSET: usize = 0x8f;
+const HE_FEATURE_90_OFFSET: usize = 0x90;
+const LINK_METRIC_OFFSET: usize = 0x1c;
+const HIGHEST_INDEX_OFFSET: usize = 0x04;
+const MAXIMUM_INDEX_OFFSET: usize = 0x05;
+const SCHEDULE_COUNT_OFFSET: usize = 0x06;
+const RATE_INDEX_CALLBACK_OFFSET: usize = 0x78;
+const AMPDU_BASE_LIMIT_OFFSET: usize = 0x7c;
+const AMPDU_HALF_LIMIT_OFFSET: usize = 0x7e;
+const AMPDU_FULL_LIMIT_OFFSET: usize = 0x80;
+const REEVALUATE_AFTER_OFFSET: usize = 0x60;
+const REEVALUATE_AFTER_US: u32 = 500_000;
 const ESP_OK: i32 = 0;
 const ESP_ERR_WIFI_STATE: i32 = 0x3006;
 
@@ -41,7 +60,7 @@ static mut STATIC_TRC_CONTEXTS: [RateControlRecord; TRC_CONTEXT_COUNT] = [
 unsafe extern "C" {
     static mut g_ic: u8;
     static mut g_per_conn_trc: u8;
-    static trc_ctl: u8;
+    static mut trc_ctl: u8;
     static wDevCtrl: u8;
 }
 
@@ -170,6 +189,60 @@ pub(crate) unsafe fn owns_rate_control_record(candidate: *mut u8) -> bool {
     false
 }
 
+unsafe fn owns_any_rate_control_record(candidate: *mut u8) -> bool {
+    owns_rate_control_record(candidate) || crate::allocation::owns_rate_control_record(candidate)
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wifi_strict_rc11b_rate_to_schedule_index(rate: u32) -> u32 {
+    u32::from(rate_to_schedule_index(RateIndexMap::Dot11B, rate as u8))
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wifi_strict_rc11g_rate_to_schedule_index(rate: u32) -> u32 {
+    u32::from(rate_to_schedule_index(RateIndexMap::Dot11G, rate as u8))
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wifi_strict_rc11n_rate_to_schedule_index(rate: u32) -> u32 {
+    u32::from(rate_to_schedule_index(RateIndexMap::Dot11N, rate as u8))
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wifi_strict_rc11ax_rate_to_schedule_index(rate: u32) -> u32 {
+    u32::from(rate_to_schedule_index(RateIndexMap::Dot11Ax, rate as u8))
+}
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn wifi_strict_lora_rate_to_schedule_index(rate: u32) -> u32 {
+    u32::from(rate_to_schedule_index(RateIndexMap::Lora, rate as u8))
+}
+
+fn rate_index_callback(map: RateIndexMap) -> usize {
+    match map {
+        RateIndexMap::Dot11B => {
+            wifi_strict_rc11b_rate_to_schedule_index as *const () as usize
+        }
+        RateIndexMap::Dot11G => {
+            wifi_strict_rc11g_rate_to_schedule_index as *const () as usize
+        }
+        RateIndexMap::Dot11N => {
+            wifi_strict_rc11n_rate_to_schedule_index as *const () as usize
+        }
+        RateIndexMap::Dot11Ax => {
+            wifi_strict_rc11ax_rate_to_schedule_index as *const () as usize
+        }
+        RateIndexMap::Lora => {
+            wifi_strict_lora_rate_to_schedule_index as *const () as usize
+        }
+    }
+}
+
 unsafe fn initialize_context(context: *mut u8, identity: u8) {
     // These are the exact post-`trc_init` records recovered from the pinned
     // archive: B[3] for current/fallback, P2P-G[7], and B[0] as the legacy
@@ -239,6 +312,157 @@ unsafe fn publish_schedule_set(
         .add(LEGACY_RATE_OFFSET)
         .cast::<*mut u8>()
         .write_unaligned(schedule_pointer(legacy));
+}
+
+/// Replace the vendor `rcAttach` initializer.
+///
+/// The seven `rcBuildIndex` calls only wrote the record number to byte 0x0a.
+/// Rust schedule literals already contain those indices, leaving four finite
+/// compatibility control words to reset while their remaining readers are
+/// migrated.
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_rc_attach() {
+    let controls = ptr::addr_of_mut!(trc_ctl);
+    controls.add(4).cast::<u32>().write_unaligned(0);
+    controls.add(8).cast::<u32>().write_unaligned(0);
+    controls.add(12).cast::<u32>().write_unaligned(0);
+    controls.add(20).cast::<u32>().write_unaligned(0);
+}
+
+unsafe fn clear_current_schedule_state(context: *mut u8) {
+    // The vendor leaf additionally cleared schedule[11]. That byte belonged
+    // to its shared mutable arena; strict runtime eliminated its last reader
+    // and therefore keeps all per-context mutation inside this record.
+    context
+        .add(REEVALUATE_AFTER_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(REEVALUATE_AFTER_US);
+    for offset in [0x30, 0x2c, 0x40] {
+        context.add(offset).cast::<u32>().write_unaligned(0);
+    }
+    for offset in [0x1d, 0x1e, 0x07] {
+        context.add(offset).write(0);
+    }
+}
+
+unsafe fn initialize_ampdu_state(context: *mut u8, limit_rate: u8) {
+    let requested = ampdu_limit_for_rate(limit_rate);
+    let base = context
+        .add(AMPDU_BASE_LIMIT_OFFSET)
+        .cast::<u16>()
+        .read_unaligned();
+    context
+        .add(AMPDU_FULL_LIMIT_OFFSET)
+        .cast::<u16>()
+        .write_unaligned(requested.min(base));
+    context
+        .add(AMPDU_HALF_LIMIT_OFFSET)
+        .cast::<u16>()
+        .write_unaligned((requested >> 1).min(base));
+
+    let active_tids = context.add(0x12).read();
+    for tid in 0..8 {
+        if active_tids & (1 << tid) != 0 {
+            context.add(0x13 + tid).write(4);
+        }
+    }
+    context.add(0x10).write(4);
+    for offset in [0x48, 0x44, 0x4c, 0x5c] {
+        context.add(offset).cast::<u32>().write_unaligned(0);
+    }
+    for offset in [0x1f, 0x20, 0x11] {
+        context.add(offset).write(0);
+    }
+    context
+        .add(REEVALUATE_AFTER_OFFSET)
+        .cast::<u32>()
+        .write_unaligned(REEVALUATE_AFTER_US);
+}
+
+/// Complete Rust-owned replacement for `libpp.a[trc.o]::rcUpdatePhyMode`.
+///
+/// The ABI projection is accepted only for a fixed default context or a
+/// currently claimed Rust peer record. Schedule choice, highest-rate lookup,
+/// rate-code mapping and AMPDU limits are safe value operations. The only
+/// compatibility global write left here is `trc_ctl[0x18] = 0x0808`, whose
+/// downstream vendor readers are tracked for the later record-layout removal.
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_rc_update_phy_mode(
+    context: *mut u8,
+    metric: i32,
+    p2p: u32,
+    supplied_highest_rate: u32,
+    use_supplied_highest_rate: u32,
+) {
+    if context.is_null() || !owns_any_rate_control_record(context) {
+        return;
+    }
+
+    let phy_type = context.add(PHY_TYPE_OFFSET).read();
+    let he_type = context.add(HE_TYPE_OFFSET).read();
+    let feature_enabled = context.add(FEATURE_ENABLED_OFFSET).read() != 0;
+    let selection = select_phy_mode(PhyModeSelectionInput {
+        phy_type,
+        he_type,
+        metric,
+        p2p: p2p != 0,
+        supplied_highest_rate,
+        use_supplied_highest_rate: use_supplied_highest_rate != 0,
+        feature_enabled,
+    });
+
+    context.add(LINK_METRIC_OFFSET).write(metric as u8);
+    context
+        .add(PRIMARY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(selection.current));
+    context
+        .add(SECONDARY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(selection.secondary));
+    context
+        .add(FALLBACK_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(selection.fallback));
+    context
+        .add(LEGACY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(selection.legacy));
+    context
+        .add(HIGHEST_INDEX_OFFSET)
+        .write(selection.highest_index);
+    context
+        .add(MAXIMUM_INDEX_OFFSET)
+        .write(selection.maximum_index);
+    context
+        .add(SCHEDULE_COUNT_OFFSET)
+        .write(selection.schedule_count);
+    context
+        .add(RATE_INDEX_CALLBACK_OFFSET)
+        .cast::<usize>()
+        .write_unaligned(rate_index_callback(selection.index_map));
+
+    if let Some(limit_rate) = selection.ampdu_limit_rate {
+        // Preserve this short-lived compatibility publication until all
+        // consumers of the old trc_ctl layout have typed Rust owners.
+        ptr::addr_of_mut!(trc_ctl)
+            .add(0x18)
+            .cast::<u16>()
+            .write_unaligned(0x0808);
+        context.add(0x0f).write(limit_rate);
+        initialize_ampdu_state(context, limit_rate);
+
+        let report = beamforming_report_rate_for_metric(
+            metric,
+            context.add(HE_FEATURE_8F_OFFSET).read() != 0,
+            context.add(HE_FEATURE_90_OFFSET).read() != 0,
+        );
+        crate::txdone::set_bf_report_rate(report.mode, report.rate, report.dcm, report.ersu);
+        crate::txdone::set_ersu_ack_rate(report.ersu_ack);
+    }
+
+    clear_current_schedule_state(context);
+    context.cast::<u32>().write_unaligned(0x7f7f_7f7f);
 }
 
 /// Replace the complete default-context schedule selector recovered from
