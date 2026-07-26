@@ -1818,3 +1818,43 @@ zero vendor fallbacks, zero indication fallbacks, and zero copy/allocation
 rejects. WPA2, DHCP, ICMP, DNS, TCP/HTTP, 4,096/4,096 UDP datagrams and 4/4
 HTTP transfers passed at 30.332 Mbit/s with 4,787/4,787 TX owners returned and
 an all-zero allocation snapshot.
+
+## Completed MAC address and RX-policy MMIO slice
+
+The public `ic_set_mac`, `ic_set_rx_policy`, and
+`ic_set_rx_policy_ubssid_check` symbols are now Rust-owned. Their complete
+references are the pinned `libpp.a[if_hwctrl.o]` wrappers and
+`libpp.a[hal_mac.o]` leaves:
+
+- MAC address programming packs six caller-owned bytes into the register pair
+  starting at `0x2010_405c + interface * 8`, then sets the evidenced
+  high-register valid bit;
+- RX policy uses the three bounded queue records at `0x2010_40d8`, the
+  address-policy records at `0x2010_4004`, and the management-policy records
+  at `0x2010_4060`;
+- unique-BSSID policy admits exactly queues zero through three and performs
+  the two recovered ordered read/modify/write operations.
+
+All address calculations and masks are pure tested transforms. The ABI leaves
+contain finite volatile MMIO only: no ROM/vendor call, loop, wait, delay,
+allocation, or global driver state. Invalid MAC pointers/interfaces trap
+before dereference; invalid RX-policy queues preserve the recovered wrapper
+return contract. The known archive callers are interface and supplicant
+configuration paths, not interrupt handlers, so these three functions remain
+flash-mapped and do not consume the 48-byte CPU0 stack margin. A trial SRAM
+placement was correctly rejected by the 16 KiB stack gate.
+
+The qualified final ELF resolves every public name to its corresponding
+`wifi_strict_*` symbol. Runtime ownership debt decreases from
+`1 fallback + 9 stateful/unproven` to
+`1 fallback + 6 stateful/unproven`; strict vendor roots decrease from ten to
+seven and reachable vendor functions from 23 to 17. The 6,407-function audit
+still reports zero no-wait/no-heap violations, zero mutable blob globals
+reachable from strict leaves, and zero temporary MMIO roots. Internal-SRAM
+strict storage remains 313,293 bytes and the CPU0 stack remains 16,432 bytes.
+
+The flashed ESP32-S31 image completed passive scan, open authentication,
+HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and HTTP 200.
+It returned 19/19 TX and 16/16 RX owners without queue rejection, recorded
+zero allocation/reallocation/free calls, zero other-core stalls, and no
+`ppTask` entry.
