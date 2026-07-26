@@ -1471,16 +1471,54 @@ PHY-I2C writes to block `0x67`. Rust captures those five bytes into
 completion; the transition has no ROM call, global lookup, delay, retry, or
 self-wake.
 
-The prefix now reaches `ReadyForParameter18eRead` only after the first
-seventeen cold-parent operations. SDM and PBus timeouts terminate separately
-and cannot run later hardware steps. The serial runtime suite passes 344
-tests. The next boundary is operation eighteen, the full-byte
-`phy_i2c_readReg(0x62, 1, 0x0f)` whose result replaces hidden
-`phy_param[0x18e]`.
+Operation eighteen is the full-byte
+`phy_i2c_readReg(0x62, 1, 0x0f)`. The archive parent immediately stores its
+result into hidden `phy_param[0x18e]`. Rust instead publishes one
+identity-bound `ReadParameter18e` action through the existing non-blocking
+start/finish primitive. Its completion inserts the byte into
+`PhyRfInitParameterSnapshot`; neither the transition nor its result touches
+the C global.
+
+The complete pinned `libphy.a[phy_i2c.o]::phy_i2c_init1` body is a fixed
+sequence of 26 blocking full-byte writes. Twenty-four values are constants;
+the remaining two inputs are the newly read parameter byte `0x18e` and
+`phy_param[0xee].wrapping_add(2)`. `PhyRfInitParameterSnapshot` now owns both
+dynamic inputs together with the five-byte filter snapshot.
+`I2cInit1Transition` publishes the exact 26-write order and advances only on
+an address-matching completion.
+
+Complete ROM `phy_rfpll_chgp_cal` at `0x2f825cd4`, size `0xf4`, begins with
+three masked writes, then performs up to 100 synchronous
+`delay(20 microseconds) + masked lock read` iterations. On the final miss it
+calls blocking `ets_printf`, continues with a second calibration read, two
+masked writes, and refreshes parameter byte `0x18e`.
+`RfpllChargePumpTransition` exposes every delay and I2C operation as a
+separate external edge. The final miss is retained as
+`rfpll_lock_observed = false` instead of invoking a print path, and the
+refreshed byte replaces the value in the owned parameter snapshot.
+
+Operation twenty-one reuses the already recovered 45-word command-RAM
+template, but no longer requires its temporary `phy_param` ABI. A second
+finite adapter accepts `PhyRfInitParameterSnapshot`; host tests prove that
+all 45 encoded words are identical to the global-image path. The cold parent
+publishes that owned snapshot in `ConfigureI2cMasterCommandMemory`.
+
+Operations twenty-two and twenty-three are now explicit as well. A
+non-blocking masked read observes `(0x69, reg4, bits3:0)`. A nonzero value
+skips initialization; zero expands ROM `phy_i2c_sar2_init_code(0x578)` at
+`0x2f82a444`, size `0x32`, into one masked write of value `5` and one
+full-byte write of `0x78`. Both branches preserve
+`sar2_reinitialized` in the terminal state.
+
+The prefix now reaches `ReadyForXtalDutyCalibration` only after the first
+twenty-three cold-parent operations. SDM and PBus timeouts terminate
+separately and cannot run later hardware steps. The serial runtime suite
+passes 348 tests. The next boundary is operation twenty-four,
+`phy_xtal_duty_cal_init(0)`.
 `phy_freq_reg_init()` belongs to `phy_wakeup_init` and
 `phy_set_chan_freq_hw_init`, not this point in the cold path. The prefix
 remains dead-stripped and does not replace any part of the live parent until
-the remaining nine operations have equivalent owned actions.
+the remaining three operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

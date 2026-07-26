@@ -160,35 +160,58 @@ const PHY_I2C_MASTER_DYNAMIC_INDICES: [usize; 19] = [
 ];
 
 fn master_dynamic_values(parameter: &[u8; PHY_PARAM_LEN]) -> [u8; 19] {
-    let high_filter = saturate_phy_value(parameter[0xed] as i32 + 6, 0x3c, 2);
-    let low_filter = saturate_phy_value(parameter[0xed] as i32 - 2, 0x3c, 2);
-    let auxiliary = parameter[0xee].wrapping_add(2);
-    [
+    master_dynamic_values_from_snapshot(PhyRfInitParameterSnapshot::new(
+        FilterDcapParameters::from_parameter_image(parameter),
         parameter[0x18e],
-        parameter[0xe9],
-        parameter[0xe9],
-        parameter[0xea],
-        parameter[0xea],
-        parameter[0xe9],
-        parameter[0xe9],
-        parameter[0xea],
-        parameter[0xea],
+    ))
+}
+
+fn master_dynamic_values_from_snapshot(parameter: PhyRfInitParameterSnapshot) -> [u8; 19] {
+    let filter = parameter.filter_dcap();
+    let high_filter = saturate_phy_value(filter.parameter_ed as i32 + 6, 0x3c, 2);
+    let low_filter = saturate_phy_value(filter.parameter_ed as i32 - 2, 0x3c, 2);
+    let auxiliary = filter.parameter_ee.wrapping_add(2);
+    [
+        parameter.parameter_18e(),
+        filter.parameter_e9,
+        filter.parameter_e9,
+        filter.parameter_ea,
+        filter.parameter_ea,
+        filter.parameter_e9,
+        filter.parameter_e9,
+        filter.parameter_ea,
+        filter.parameter_ea,
         high_filter,
         high_filter,
         low_filter,
-        parameter[0xed],
+        filter.parameter_ed,
         auxiliary,
         auxiliary,
-        parameter[0xf0],
-        parameter[0xf0],
-        parameter[0xf0] | 0x40,
-        parameter[0xf0],
+        filter.parameter_f0,
+        filter.parameter_f0,
+        filter.parameter_f0 | 0x40,
+        filter.parameter_f0,
     ]
 }
 
 fn master_command(index: usize, parameter: &[u8; PHY_PARAM_LEN]) -> u32 {
     let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
     let dynamic_values = master_dynamic_values(parameter);
+    let mut cursor = 0;
+    let mut value = fixed_value;
+    while cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len() {
+        if PHY_I2C_MASTER_DYNAMIC_INDICES[cursor] == index {
+            value = dynamic_values[cursor];
+            break;
+        }
+        cursor += 1;
+    }
+    encode_master_command(block, register, value)
+}
+
+fn master_command_from_snapshot(index: usize, parameter: PhyRfInitParameterSnapshot) -> u32 {
+    let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
+    let dynamic_values = master_dynamic_values_from_snapshot(parameter);
     let mut cursor = 0;
     let mut value = fixed_value;
     while cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len() {
@@ -232,6 +255,33 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_master_cmd_mem_init() {
             // The preceding comparison proves `dynamic_cursor < 19`. Keep
             // this explicit so the final cold-init leaf cannot retain even
             // an unreachable panic call (and therefore no indirect `jalr`).
+            let value = *dynamic_values.get_unchecked(dynamic_cursor);
+            dynamic_cursor += 1;
+            value
+        } else {
+            fixed_value
+        };
+        let destination = (PHY_I2C_MASTER_COMMAND_MEMORY_ADDRESS
+            + index * core::mem::size_of::<u32>()) as *mut u32;
+        destination.write_volatile(encode_master_command(block, register, value));
+        index += 1;
+    }
+}
+
+/// Program the complete PHY-I2C command RAM from Rust-owned cold state.
+///
+/// Safety: the caller must exclusively own the cold PHY and command memory
+/// for the duration of the finite 45-store transaction.
+#[cfg(target_arch = "riscv32")]
+pub unsafe fn configure_i2c_master_command_memory(parameter: PhyRfInitParameterSnapshot) {
+    let dynamic_values = master_dynamic_values_from_snapshot(parameter);
+    let mut index = 0;
+    let mut dynamic_cursor = 0;
+    while index != PHY_I2C_MASTER_COMMAND_COUNT {
+        let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
+        let value = if dynamic_cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len()
+            && *PHY_I2C_MASTER_DYNAMIC_INDICES.get_unchecked(dynamic_cursor) == index
+        {
             let value = *dynamic_values.get_unchecked(dynamic_cursor);
             dynamic_cursor += 1;
             value
@@ -1034,6 +1084,10 @@ impl FilterDcapParameters {
             parameter[0xf0],
         )
     }
+
+    pub const fn parameter_ee(self) -> u8 {
+        self.parameter_ee
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1069,6 +1123,10 @@ impl FilterDcapTransition {
             parameter,
             index: 0,
         }
+    }
+
+    pub const fn parameters(self) -> FilterDcapParameters {
+        self.parameter
     }
 
     const fn write(register: u8, value: u8) -> FilterDcapAction {
@@ -1126,8 +1184,438 @@ impl FilterDcapTransition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhyRfInitParameterSnapshot {
+    filter_dcap: FilterDcapParameters,
+    parameter_18e: u8,
+}
+
+impl PhyRfInitParameterSnapshot {
+    pub const fn new(filter_dcap: FilterDcapParameters, parameter_18e: u8) -> Self {
+        Self {
+            filter_dcap,
+            parameter_18e,
+        }
+    }
+
+    pub const fn filter_dcap(self) -> FilterDcapParameters {
+        self.filter_dcap
+    }
+
+    pub const fn parameter_18e(self) -> u8 {
+        self.parameter_18e
+    }
+
+    pub const fn with_parameter_18e(self, parameter_18e: u8) -> Self {
+        Self {
+            filter_dcap: self.filter_dcap,
+            parameter_18e,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cInit1Action {
+    Write { address: PhyI2cAddress, value: u8 },
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cInit1Completion {
+    WriteCompleted { address: PhyI2cAddress },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum I2cInit1TransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+/// Exact finite 26-write plan recovered from
+/// `libphy.a[phy_i2c.o]::phy_i2c_init1`.
+///
+/// The vendor body reads `phy_param[0x18e]` and `phy_param[0xee]`. This
+/// transition receives both through an owned snapshot and binds every write
+/// completion to the address that was published.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct I2cInit1Transition {
+    parameter: PhyRfInitParameterSnapshot,
+    index: u8,
+}
+
+impl I2cInit1Transition {
+    pub const fn new(parameter: PhyRfInitParameterSnapshot) -> Self {
+        Self {
+            parameter,
+            index: 0,
+        }
+    }
+
+    const fn write(block: u8, register: u8, value: u8) -> I2cInit1Action {
+        I2cInit1Action::Write {
+            address: PhyI2cAddress { block, register },
+            value,
+        }
+    }
+
+    pub const fn action(self) -> I2cInit1Action {
+        let parameter_ee_plus_two = self.parameter.filter_dcap().parameter_ee().wrapping_add(2);
+        match self.index {
+            0 => Self::write(0x6b, 0x01, 0x01),
+            1 => Self::write(0x6b, 0x02, 0x73),
+            2 => Self::write(0x6b, 0x03, 0xba),
+            3 => Self::write(0x6b, 0x04, 0x88),
+            4 => Self::write(0x6b, 0x0e, 0xf4),
+            5 => Self::write(0x6b, 0x09, 0x02),
+            6 => Self::write(0x6b, 0x07, 0xfd),
+            7 => Self::write(0x6b, 0x08, 0xbb),
+            8 => Self::write(0x6b, 0x05, 0x01),
+            9 => Self::write(0x6b, 0x06, 0x11),
+            10 => Self::write(0x6b, 0x0c, 0xa7),
+            11 => Self::write(0x6b, 0x0d, 0x7a),
+            12 => Self::write(0x6b, 0x0a, 0x08),
+            13 => Self::write(0x6b, 0x0b, 0x04),
+            14 => Self::write(0x6b, 0x0f, 0x81),
+            15 => Self::write(0x62, 0x00, 0x68),
+            16 => Self::write(0x62, 0x04, 0xa8),
+            17 => Self::write(0x62, 0x0f, self.parameter.parameter_18e()),
+            18 => Self::write(0x62, 0x0b, 0x44),
+            19 => Self::write(0x62, 0x15, 0x08),
+            20 => Self::write(0x63, 0x06, 0x00),
+            21 => Self::write(0x62, 0x0d, 0x0a),
+            22 => Self::write(0x67, 0x02, 0x27),
+            23 => Self::write(0x66, 0x02, 0x70),
+            24 => Self::write(0x67, 0x18, parameter_ee_plus_two),
+            25 => Self::write(0x67, 0x19, parameter_ee_plus_two),
+            _ => I2cInit1Action::Complete,
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: I2cInit1Completion,
+    ) -> Result<(), I2cInit1TransitionError> {
+        match (self.action(), completion) {
+            (
+                I2cInit1Action::Write { address, .. },
+                I2cInit1Completion::WriteCompleted { address: completed },
+            ) if address == completed => {
+                self.index += 1;
+                Ok(())
+            }
+            (I2cInit1Action::Complete, _) => Err(I2cInit1TransitionError::AlreadyComplete),
+            _ => Err(I2cInit1TransitionError::WrongCompletion),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RfpllChargePumpOutcome {
+    pub parameter_18e: u8,
+    pub lock_observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RfpllChargePumpAction {
+    WriteMasked {
+        address: PhyI2cAddress,
+        high_bit: u8,
+        low_bit: u8,
+        value: u8,
+    },
+    DelayMicros(u32),
+    ReadMasked {
+        address: PhyI2cAddress,
+        high_bit: u8,
+        low_bit: u8,
+    },
+    ReadByte {
+        address: PhyI2cAddress,
+    },
+    Complete(RfpllChargePumpOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RfpllChargePumpCompletion {
+    Write,
+    Delay,
+    ReadMasked(u8),
+    ReadByte { address: PhyI2cAddress, value: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RfpllChargePumpTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RfpllChargePumpStep {
+    InitialWrite(u8),
+    Delay { attempt: u8 },
+    LockRead { attempt: u8 },
+    CapRead { lock_observed: bool },
+    EnableAdjustedValue { value: u8, lock_observed: bool },
+    WriteAdjustedValue { value: u8, lock_observed: bool },
+    FinalRead { lock_observed: bool },
+    Complete(RfpllChargePumpOutcome),
+}
+
+/// Event-driven replacement for complete ROM `phy_rfpll_chgp_cal`.
+///
+/// The ROM body performs as many as 100 synchronous 20-microsecond
+/// delay/read iterations and prints on the final miss. Rust exposes every
+/// delay and I2C observation as an external completion. The non-blocking
+/// result retains `lock_observed` instead of invoking `ets_printf`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RfpllChargePumpTransition {
+    step: RfpllChargePumpStep,
+}
+
+impl RfpllChargePumpTransition {
+    const REGISTER_F: PhyI2cAddress = PhyI2cAddress {
+        block: 0x62,
+        register: 0x0f,
+    };
+    const REGISTER_E: PhyI2cAddress = PhyI2cAddress {
+        block: 0x62,
+        register: 0x0e,
+    };
+
+    pub const fn new() -> Self {
+        Self {
+            step: RfpllChargePumpStep::InitialWrite(0),
+        }
+    }
+
+    const fn initial_write(index: u8) -> RfpllChargePumpAction {
+        let (high_bit, value) = match index {
+            0 => (6, 0),
+            1 => (5, 0),
+            _ => (5, 1),
+        };
+        RfpllChargePumpAction::WriteMasked {
+            address: Self::REGISTER_F,
+            high_bit,
+            low_bit: high_bit,
+            value,
+        }
+    }
+
+    pub const fn action(self) -> RfpllChargePumpAction {
+        match self.step {
+            RfpllChargePumpStep::InitialWrite(index) => Self::initial_write(index),
+            RfpllChargePumpStep::Delay { .. } => RfpllChargePumpAction::DelayMicros(20),
+            RfpllChargePumpStep::LockRead { .. } => RfpllChargePumpAction::ReadMasked {
+                address: Self::REGISTER_E,
+                high_bit: 7,
+                low_bit: 7,
+            },
+            RfpllChargePumpStep::CapRead { .. } => RfpllChargePumpAction::ReadMasked {
+                address: Self::REGISTER_E,
+                high_bit: 4,
+                low_bit: 0,
+            },
+            RfpllChargePumpStep::EnableAdjustedValue { .. } => RfpllChargePumpAction::WriteMasked {
+                address: Self::REGISTER_F,
+                high_bit: 6,
+                low_bit: 6,
+                value: 1,
+            },
+            RfpllChargePumpStep::WriteAdjustedValue { value, .. } => {
+                RfpllChargePumpAction::WriteMasked {
+                    address: Self::REGISTER_F,
+                    high_bit: 4,
+                    low_bit: 0,
+                    value,
+                }
+            }
+            RfpllChargePumpStep::FinalRead { .. } => RfpllChargePumpAction::ReadByte {
+                address: Self::REGISTER_F,
+            },
+            RfpllChargePumpStep::Complete(outcome) => RfpllChargePumpAction::Complete(outcome),
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: RfpllChargePumpCompletion,
+    ) -> Result<(), RfpllChargePumpTransitionError> {
+        self.step = match (self.step, completion) {
+            (RfpllChargePumpStep::InitialWrite(index), RfpllChargePumpCompletion::Write) => {
+                if index == 2 {
+                    RfpllChargePumpStep::Delay { attempt: 0 }
+                } else {
+                    RfpllChargePumpStep::InitialWrite(index + 1)
+                }
+            }
+            (RfpllChargePumpStep::Delay { attempt }, RfpllChargePumpCompletion::Delay) => {
+                RfpllChargePumpStep::LockRead { attempt }
+            }
+            (
+                RfpllChargePumpStep::LockRead { attempt },
+                RfpllChargePumpCompletion::ReadMasked(value),
+            ) => {
+                if value != 0 {
+                    RfpllChargePumpStep::CapRead {
+                        lock_observed: true,
+                    }
+                } else if attempt == 99 {
+                    RfpllChargePumpStep::CapRead {
+                        lock_observed: false,
+                    }
+                } else {
+                    RfpllChargePumpStep::Delay {
+                        attempt: attempt + 1,
+                    }
+                }
+            }
+            (
+                RfpllChargePumpStep::CapRead { lock_observed },
+                RfpllChargePumpCompletion::ReadMasked(value),
+            ) => {
+                let adjusted = ((u16::from(value) * 7) / 6 + 9).min(0x1f) as u8;
+                RfpllChargePumpStep::EnableAdjustedValue {
+                    value: adjusted,
+                    lock_observed,
+                }
+            }
+            (
+                RfpllChargePumpStep::EnableAdjustedValue {
+                    value,
+                    lock_observed,
+                },
+                RfpllChargePumpCompletion::Write,
+            ) => RfpllChargePumpStep::WriteAdjustedValue {
+                value,
+                lock_observed,
+            },
+            (
+                RfpllChargePumpStep::WriteAdjustedValue { lock_observed, .. },
+                RfpllChargePumpCompletion::Write,
+            ) => RfpllChargePumpStep::FinalRead { lock_observed },
+            (
+                RfpllChargePumpStep::FinalRead { lock_observed },
+                RfpllChargePumpCompletion::ReadByte { address, value },
+            ) if address == Self::REGISTER_F => {
+                RfpllChargePumpStep::Complete(RfpllChargePumpOutcome {
+                    parameter_18e: value,
+                    lock_observed,
+                })
+            }
+            (RfpllChargePumpStep::Complete(_), _) => {
+                return Err(RfpllChargePumpTransitionError::AlreadyComplete);
+            }
+            _ => return Err(RfpllChargePumpTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+impl Default for RfpllChargePumpTransition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sar2InitAction {
+    WriteMasked {
+        address: PhyI2cAddress,
+        high_bit: u8,
+        low_bit: u8,
+        value: u8,
+    },
+    WriteByte {
+        address: PhyI2cAddress,
+        value: u8,
+    },
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sar2InitCompletion {
+    MaskedWrite,
+    ByteWrite { address: PhyI2cAddress },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sar2InitTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+/// Exact two-write expansion of ROM `phy_i2c_sar2_init_code(0x578)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Sar2InitTransition {
+    step: u8,
+}
+
+impl Sar2InitTransition {
+    const CONTROL_ADDRESS: PhyI2cAddress = PhyI2cAddress {
+        block: 0x69,
+        register: 4,
+    };
+    const VALUE_ADDRESS: PhyI2cAddress = PhyI2cAddress {
+        block: 0x69,
+        register: 3,
+    };
+
+    pub const fn new() -> Self {
+        Self { step: 0 }
+    }
+
+    pub const fn action(self) -> Sar2InitAction {
+        match self.step {
+            0 => Sar2InitAction::WriteMasked {
+                address: Self::CONTROL_ADDRESS,
+                high_bit: 3,
+                low_bit: 0,
+                value: 5,
+            },
+            1 => Sar2InitAction::WriteByte {
+                address: Self::VALUE_ADDRESS,
+                value: 0x78,
+            },
+            _ => Sar2InitAction::Complete,
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: Sar2InitCompletion,
+    ) -> Result<(), Sar2InitTransitionError> {
+        match (self.action(), completion) {
+            (Sar2InitAction::WriteMasked { .. }, Sar2InitCompletion::MaskedWrite) => {
+                self.step = 1;
+                Ok(())
+            }
+            (
+                Sar2InitAction::WriteByte { address, .. },
+                Sar2InitCompletion::ByteWrite { address: completed },
+            ) if address == completed => {
+                self.step = 2;
+                Ok(())
+            }
+            (Sar2InitAction::Complete, _) => Err(Sar2InitTransitionError::AlreadyComplete),
+            _ => Err(Sar2InitTransitionError::WrongCompletion),
+        }
+    }
+}
+
+impl Default for Sar2InitTransition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForParameter18eRead { bbpll_register_snapshot: u8 },
+    ReadyForXtalDutyCalibration {
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+    },
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -1135,11 +1623,15 @@ pub enum PhyRfInitPrefixOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixAction {
     ConfigureFeBbClock,
-    ConfigureBbpllCalibration { enabled: bool },
+    ConfigureBbpllCalibration {
+        enabled: bool,
+    },
     Bias(BiasRegAction),
     OpenI2cXpd(OpenI2cXpdAction),
     PbusClear(PhyPbusClearAction),
-    ConfigureI2cClockSelection { selection: u32 },
+    ConfigureI2cClockSelection {
+        selection: u32,
+    },
     I2cBbpll(I2cBbpllAction),
     AdcRate(AdcRateAction),
     ConfigureI2cMasterRegisters,
@@ -1152,6 +1644,20 @@ pub enum PhyRfInitPrefixAction {
     RcCalibration(RcCalibrationAction),
     CaptureFilterDcapParameters,
     FilterDcap(FilterDcapAction),
+    ReadParameter18e {
+        address: PhyI2cAddress,
+    },
+    I2cInit1(I2cInit1Action),
+    RfpllChargePump(RfpllChargePumpAction),
+    ConfigureI2cMasterCommandMemory {
+        parameter: PhyRfInitParameterSnapshot,
+    },
+    ReadMasked69 {
+        address: PhyI2cAddress,
+        high_bit: u8,
+        low_bit: u8,
+    },
+    Sar2Init(Sar2InitAction),
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -1176,6 +1682,12 @@ pub enum PhyRfInitPrefixCompletion {
     RcCalibration(RcCalibrationCompletion),
     FilterDcapParametersCaptured(FilterDcapParameters),
     FilterDcap(FilterDcapCompletion),
+    Parameter18eRead { address: PhyI2cAddress, value: u8 },
+    I2cInit1(I2cInit1Completion),
+    RfpllChargePump(RfpllChargePumpCompletion),
+    I2cMasterCommandMemoryConfigured,
+    Masked69Read(u8),
+    Sar2Init(Sar2InitCompletion),
     DelayElapsed,
 }
 
@@ -1232,10 +1744,40 @@ enum PhyRfInitPrefixStep {
         transition: FilterDcapTransition,
         bbpll_register_snapshot: u8,
     },
+    Parameter18eRead {
+        bbpll_register_snapshot: u8,
+        filter_dcap: FilterDcapParameters,
+    },
+    I2cInit1 {
+        transition: I2cInit1Transition,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+    },
+    RfpllChargePump {
+        transition: RfpllChargePumpTransition,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+    },
+    I2cMasterCommandMemory {
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+    },
+    Masked69Read {
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+    },
+    Sar2Init {
+        transition: Sar2InitTransition,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+    },
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through seventeen in the complete
+/// Event-driven composition of operations one through twenty-three in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -1336,14 +1878,72 @@ impl PhyRfInitPrefixTransition {
             }
             PhyRfInitPrefixStep::FilterDcap {
                 transition,
-                bbpll_register_snapshot,
+                bbpll_register_snapshot: _,
             } => match transition.action() {
-                FilterDcapAction::Complete => PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForParameter18eRead {
+                FilterDcapAction::Complete => PhyRfInitPrefixAction::ReadParameter18e {
+                    address: PhyI2cAddress {
+                        block: 0x62,
+                        register: 0x0f,
+                    },
+                },
+                action => PhyRfInitPrefixAction::FilterDcap(action),
+            },
+            PhyRfInitPrefixStep::Parameter18eRead { .. } => {
+                PhyRfInitPrefixAction::ReadParameter18e {
+                    address: PhyI2cAddress {
+                        block: 0x62,
+                        register: 0x0f,
+                    },
+                }
+            }
+            PhyRfInitPrefixStep::I2cInit1 {
+                transition,
+                bbpll_register_snapshot: _,
+                parameter: _,
+            } => match transition.action() {
+                I2cInit1Action::Complete => PhyRfInitPrefixAction::RfpllChargePump(
+                    RfpllChargePumpTransition::new().action(),
+                ),
+                action => PhyRfInitPrefixAction::I2cInit1(action),
+            },
+            PhyRfInitPrefixStep::RfpllChargePump {
+                transition,
+                bbpll_register_snapshot: _,
+                parameter,
+            } => match transition.action() {
+                RfpllChargePumpAction::Complete(outcome) => {
+                    PhyRfInitPrefixAction::ConfigureI2cMasterCommandMemory {
+                        parameter: parameter.with_parameter_18e(outcome.parameter_18e),
+                    }
+                }
+                action => PhyRfInitPrefixAction::RfpllChargePump(action),
+            },
+            PhyRfInitPrefixStep::I2cMasterCommandMemory { parameter, .. } => {
+                PhyRfInitPrefixAction::ConfigureI2cMasterCommandMemory { parameter }
+            }
+            PhyRfInitPrefixStep::Masked69Read { .. } => PhyRfInitPrefixAction::ReadMasked69 {
+                address: PhyI2cAddress {
+                    block: 0x69,
+                    register: 4,
+                },
+                high_bit: 3,
+                low_bit: 0,
+            },
+            PhyRfInitPrefixStep::Sar2Init {
+                transition,
+                bbpll_register_snapshot,
+                parameter,
+                rfpll_lock_observed,
+            } => match transition.action() {
+                Sar2InitAction::Complete => PhyRfInitPrefixAction::Complete(
+                    PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
                         bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                        sar2_reinitialized: true,
                     },
                 ),
-                action => PhyRfInitPrefixAction::FilterDcap(action),
+                action => PhyRfInitPrefixAction::Sar2Init(action),
             },
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
@@ -1578,15 +2178,152 @@ impl PhyRfInitPrefixTransition {
                     .advance(completion)
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 if transition.action() == FilterDcapAction::Complete {
-                    PhyRfInitPrefixStep::Complete(
-                        PhyRfInitPrefixOutcome::ReadyForParameter18eRead {
-                            bbpll_register_snapshot,
-                        },
-                    )
+                    PhyRfInitPrefixStep::Parameter18eRead {
+                        bbpll_register_snapshot,
+                        filter_dcap: transition.parameters(),
+                    }
                 } else {
                     PhyRfInitPrefixStep::FilterDcap {
                         transition,
                         bbpll_register_snapshot,
+                    }
+                }
+            }
+            (
+                PhyRfInitPrefixStep::Parameter18eRead {
+                    bbpll_register_snapshot,
+                    filter_dcap,
+                },
+                PhyRfInitPrefixCompletion::Parameter18eRead { address, value },
+            ) if address
+                == (PhyI2cAddress {
+                    block: 0x62,
+                    register: 0x0f,
+                }) =>
+            {
+                let parameter = PhyRfInitParameterSnapshot::new(filter_dcap, value);
+                PhyRfInitPrefixStep::I2cInit1 {
+                    transition: I2cInit1Transition::new(parameter),
+                    bbpll_register_snapshot,
+                    parameter,
+                }
+            }
+            (
+                PhyRfInitPrefixStep::I2cInit1 {
+                    mut transition,
+                    bbpll_register_snapshot,
+                    parameter,
+                },
+                PhyRfInitPrefixCompletion::I2cInit1(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                if transition.action() == I2cInit1Action::Complete {
+                    PhyRfInitPrefixStep::RfpllChargePump {
+                        transition: RfpllChargePumpTransition::new(),
+                        bbpll_register_snapshot,
+                        parameter,
+                    }
+                } else {
+                    PhyRfInitPrefixStep::I2cInit1 {
+                        transition,
+                        bbpll_register_snapshot,
+                        parameter,
+                    }
+                }
+            }
+            (
+                PhyRfInitPrefixStep::RfpllChargePump {
+                    mut transition,
+                    bbpll_register_snapshot,
+                    parameter,
+                },
+                PhyRfInitPrefixCompletion::RfpllChargePump(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    RfpllChargePumpAction::Complete(outcome) => {
+                        PhyRfInitPrefixStep::I2cMasterCommandMemory {
+                            bbpll_register_snapshot,
+                            parameter: parameter.with_parameter_18e(outcome.parameter_18e),
+                            rfpll_lock_observed: outcome.lock_observed,
+                        }
+                    }
+                    _ => PhyRfInitPrefixStep::RfpllChargePump {
+                        transition,
+                        bbpll_register_snapshot,
+                        parameter,
+                    },
+                }
+            }
+            (
+                PhyRfInitPrefixStep::I2cMasterCommandMemory {
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                },
+                PhyRfInitPrefixCompletion::I2cMasterCommandMemoryConfigured,
+            ) => PhyRfInitPrefixStep::Masked69Read {
+                bbpll_register_snapshot,
+                parameter,
+                rfpll_lock_observed,
+            },
+            (
+                PhyRfInitPrefixStep::Masked69Read {
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                },
+                PhyRfInitPrefixCompletion::Masked69Read(value),
+            ) => {
+                if value == 0 {
+                    PhyRfInitPrefixStep::Sar2Init {
+                        transition: Sar2InitTransition::new(),
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                    }
+                } else {
+                    PhyRfInitPrefixStep::Complete(
+                        PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
+                            bbpll_register_snapshot,
+                            parameter,
+                            rfpll_lock_observed,
+                            sar2_reinitialized: false,
+                        },
+                    )
+                }
+            }
+            (
+                PhyRfInitPrefixStep::Sar2Init {
+                    mut transition,
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                },
+                PhyRfInitPrefixCompletion::Sar2Init(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                if transition.action() == Sar2InitAction::Complete {
+                    PhyRfInitPrefixStep::Complete(
+                        PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
+                            bbpll_register_snapshot,
+                            parameter,
+                            rfpll_lock_observed,
+                            sar2_reinitialized: true,
+                        },
+                    )
+                } else {
+                    PhyRfInitPrefixStep::Sar2Init {
+                        transition,
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
                     }
                 }
             }
@@ -1760,18 +2497,23 @@ impl Default for RcCalibrationTransition {
 mod tests {
     use super::{
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
-        read_result, with_phy_i2c_host_config, AdcRateAction, AdcRateCompletion, AdcRateTransition,
-        AdcRateTransitionError, BiasRegAction, BiasRegCompletion, BiasRegTransition,
-        BiasRegTransitionError, FilterDcapAction, FilterDcapCompletion, FilterDcapParameters,
-        FilterDcapTransition, FilterDcapTransitionError, I2cBbpllAction, I2cBbpllCompletion,
-        I2cBbpllOutcome, I2cBbpllTransition, I2cBbpllTransitionError, MaskedI2cWriteAction,
+        master_command_from_snapshot, read_result, with_phy_i2c_host_config, AdcRateAction,
+        AdcRateCompletion, AdcRateTransition, AdcRateTransitionError, BiasRegAction,
+        BiasRegCompletion, BiasRegTransition, BiasRegTransitionError, FilterDcapAction,
+        FilterDcapCompletion, FilterDcapParameters, FilterDcapTransition,
+        FilterDcapTransitionError, I2cBbpllAction, I2cBbpllCompletion, I2cBbpllOutcome,
+        I2cBbpllTransition, I2cBbpllTransitionError, I2cInit1Action, I2cInit1Completion,
+        I2cInit1Transition, I2cInit1TransitionError, MaskedI2cWriteAction,
         MaskedI2cWriteCompletion, MaskedI2cWriteTransition, MaskedI2cWriteTransitionError,
         OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome, OpenI2cXpdTransition,
-        OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitPrefixAction, PhyRfInitPrefixCompletion,
-        PhyRfInitPrefixOutcome, PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError,
-        RcCalibrationAction, RcCalibrationCompletion, RcCalibrationSetAction,
-        RcCalibrationSetCompletion, RcCalibrationSetTransition, RcCalibrationTransition,
-        RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
+        OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitParameterSnapshot,
+        PhyRfInitPrefixAction, PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome,
+        PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError, RcCalibrationAction,
+        RcCalibrationCompletion, RcCalibrationSetAction, RcCalibrationSetCompletion,
+        RcCalibrationSetTransition, RcCalibrationTransition, RcCalibrationTransitionError,
+        RfpllChargePumpAction, RfpllChargePumpCompletion, RfpllChargePumpOutcome,
+        RfpllChargePumpTransition, Sar2InitAction, Sar2InitCompletion, Sar2InitTransition,
+        PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
@@ -1873,11 +2615,21 @@ mod tests {
             (0x6a, 0x01, 0x7f),
         ];
         assert_eq!(expected.len(), PHY_I2C_MASTER_COMMAND_COUNT);
+        let snapshot = PhyRfInitParameterSnapshot::new(
+            FilterDcapParameters::from_parameter_image(&parameter),
+            parameter[0x18e],
+        );
         for (index, (block, register, value)) in expected.into_iter().enumerate() {
+            let expected_word = (block as u32) | ((register as u32) << 8) | ((value as u32) << 16);
             assert_eq!(
                 master_command(index, &parameter),
-                (block as u32) | ((register as u32) << 8) | ((value as u32) << 16),
+                expected_word,
                 "master command {index}"
+            );
+            assert_eq!(
+                master_command_from_snapshot(index, snapshot),
+                expected_word,
+                "owned master command {index}"
             );
         }
     }
@@ -2140,6 +2892,232 @@ mod tests {
             FilterDcapParameters::from_parameter_image(&image),
             FilterDcapParameters::new(1, 2, 3, 4, 5)
         );
+    }
+
+    #[test]
+    fn i2c_init1_owns_both_dynamic_parameters_and_all_26_writes() {
+        let filter = FilterDcapParameters::new(1, 2, 3, 0xfe, 5);
+        let parameter = PhyRfInitParameterSnapshot::new(filter, 0x55);
+        let mut transition = I2cInit1Transition::new(parameter);
+        let expected = [
+            (0x6b, 0x01, 0x01),
+            (0x6b, 0x02, 0x73),
+            (0x6b, 0x03, 0xba),
+            (0x6b, 0x04, 0x88),
+            (0x6b, 0x0e, 0xf4),
+            (0x6b, 0x09, 0x02),
+            (0x6b, 0x07, 0xfd),
+            (0x6b, 0x08, 0xbb),
+            (0x6b, 0x05, 0x01),
+            (0x6b, 0x06, 0x11),
+            (0x6b, 0x0c, 0xa7),
+            (0x6b, 0x0d, 0x7a),
+            (0x6b, 0x0a, 0x08),
+            (0x6b, 0x0b, 0x04),
+            (0x6b, 0x0f, 0x81),
+            (0x62, 0x00, 0x68),
+            (0x62, 0x04, 0xa8),
+            (0x62, 0x0f, 0x55),
+            (0x62, 0x0b, 0x44),
+            (0x62, 0x15, 0x08),
+            (0x63, 0x06, 0x00),
+            (0x62, 0x0d, 0x0a),
+            (0x67, 0x02, 0x27),
+            (0x66, 0x02, 0x70),
+            (0x67, 0x18, 0x00),
+            (0x67, 0x19, 0x00),
+        ];
+
+        for (block, register, value) in expected {
+            let address = PhyI2cAddress::new(block, register).unwrap();
+            assert_eq!(
+                transition.action(),
+                I2cInit1Action::Write { address, value }
+            );
+            transition
+                .advance(I2cInit1Completion::WriteCompleted { address })
+                .unwrap();
+        }
+        assert_eq!(transition.action(), I2cInit1Action::Complete);
+        assert_eq!(
+            transition.advance(I2cInit1Completion::WriteCompleted {
+                address: PhyI2cAddress::new(0x67, 0x19).unwrap(),
+            }),
+            Err(I2cInit1TransitionError::AlreadyComplete)
+        );
+        assert_eq!(parameter.parameter_18e(), 0x55);
+        assert_eq!(parameter.filter_dcap(), filter);
+    }
+
+    fn complete_rfpll_initial_writes(transition: &mut RfpllChargePumpTransition) {
+        for (high_bit, value) in [(6, 0), (5, 0), (5, 1)] {
+            assert_eq!(
+                transition.action(),
+                RfpllChargePumpAction::WriteMasked {
+                    address: PhyI2cAddress::new(0x62, 0x0f).unwrap(),
+                    high_bit,
+                    low_bit: high_bit,
+                    value,
+                }
+            );
+            transition
+                .advance(RfpllChargePumpCompletion::Write)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn rfpll_charge_pump_lock_path_uses_async_delay_and_owned_result() {
+        let mut transition = RfpllChargePumpTransition::new();
+        complete_rfpll_initial_writes(&mut transition);
+        assert_eq!(transition.action(), RfpllChargePumpAction::DelayMicros(20));
+        transition
+            .advance(RfpllChargePumpCompletion::Delay)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::ReadMasked {
+                address: PhyI2cAddress::new(0x62, 0x0e).unwrap(),
+                high_bit: 7,
+                low_bit: 7,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::ReadMasked(1))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::ReadMasked {
+                address: PhyI2cAddress::new(0x62, 0x0e).unwrap(),
+                high_bit: 4,
+                low_bit: 0,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::ReadMasked(12))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::WriteMasked {
+                address: PhyI2cAddress::new(0x62, 0x0f).unwrap(),
+                high_bit: 6,
+                low_bit: 6,
+                value: 1,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::Write)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::WriteMasked {
+                address: PhyI2cAddress::new(0x62, 0x0f).unwrap(),
+                high_bit: 4,
+                low_bit: 0,
+                value: 23,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::Write)
+            .unwrap();
+        let final_address = PhyI2cAddress::new(0x62, 0x0f).unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::ReadByte {
+                address: final_address,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::ReadByte {
+                address: final_address,
+                value: 0xaa,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::Complete(RfpllChargePumpOutcome {
+                parameter_18e: 0xaa,
+                lock_observed: true,
+            })
+        );
+    }
+
+    #[test]
+    fn rfpll_charge_pump_final_miss_is_data_not_a_blocking_print() {
+        let mut transition = RfpllChargePumpTransition::new();
+        complete_rfpll_initial_writes(&mut transition);
+        for attempt in 0..100 {
+            assert_eq!(transition.action(), RfpllChargePumpAction::DelayMicros(20));
+            transition
+                .advance(RfpllChargePumpCompletion::Delay)
+                .unwrap();
+            transition
+                .advance(RfpllChargePumpCompletion::ReadMasked(0))
+                .unwrap();
+            if attempt != 99 {
+                assert_eq!(transition.action(), RfpllChargePumpAction::DelayMicros(20));
+            }
+        }
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::ReadMasked {
+                address: PhyI2cAddress::new(0x62, 0x0e).unwrap(),
+                high_bit: 4,
+                low_bit: 0,
+            }
+        );
+        transition
+            .advance(RfpllChargePumpCompletion::ReadMasked(31))
+            .unwrap();
+        transition
+            .advance(RfpllChargePumpCompletion::Write)
+            .unwrap();
+        transition
+            .advance(RfpllChargePumpCompletion::Write)
+            .unwrap();
+        let final_address = PhyI2cAddress::new(0x62, 0x0f).unwrap();
+        transition
+            .advance(RfpllChargePumpCompletion::ReadByte {
+                address: final_address,
+                value: 0xbb,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            RfpllChargePumpAction::Complete(RfpllChargePumpOutcome {
+                parameter_18e: 0xbb,
+                lock_observed: false,
+            })
+        );
+    }
+
+    #[test]
+    fn sar2_zero_branch_expands_0x578_into_two_owned_writes() {
+        let mut transition = Sar2InitTransition::new();
+        assert_eq!(
+            transition.action(),
+            Sar2InitAction::WriteMasked {
+                address: PhyI2cAddress::new(0x69, 4).unwrap(),
+                high_bit: 3,
+                low_bit: 0,
+                value: 5,
+            }
+        );
+        transition.advance(Sar2InitCompletion::MaskedWrite).unwrap();
+        let value_address = PhyI2cAddress::new(0x69, 3).unwrap();
+        assert_eq!(
+            transition.action(),
+            Sar2InitAction::WriteByte {
+                address: value_address,
+                value: 0x78,
+            }
+        );
+        transition
+            .advance(Sar2InitCompletion::ByteWrite {
+                address: value_address,
+            })
+            .unwrap();
+        assert_eq!(transition.action(), Sar2InitAction::Complete);
     }
 
     #[test]
@@ -2604,10 +3582,141 @@ mod tests {
                 ))
                 .unwrap();
         }
+        let parameter_18e_address = PhyI2cAddress::new(0x62, 0x0f).unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForParameter18eRead {
+            PhyRfInitPrefixAction::ReadParameter18e {
+                address: parameter_18e_address,
+            }
+        );
+        assert_eq!(
+            transition.advance(PhyRfInitPrefixCompletion::Parameter18eRead {
+                address: PhyI2cAddress::new(0x62, 0x0e).unwrap(),
+                value: 0x55,
+            }),
+            Err(PhyRfInitPrefixTransitionError::WrongCompletion)
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::Parameter18eRead {
+                address: parameter_18e_address,
+                value: 0x55,
+            })
+            .unwrap();
+        while let PhyRfInitPrefixAction::I2cInit1(I2cInit1Action::Write { address, .. }) =
+            transition.action()
+        {
+            transition
+                .advance(PhyRfInitPrefixCompletion::I2cInit1(
+                    I2cInit1Completion::WriteCompleted { address },
+                ))
+                .unwrap();
+        }
+        for _ in 0..3 {
+            transition
+                .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                    RfpllChargePumpCompletion::Write,
+                ))
+                .unwrap();
+        }
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::Delay,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::ReadMasked(1),
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::ReadMasked(12),
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::Write,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::Write,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::RfpllChargePump(
+                RfpllChargePumpCompletion::ReadByte {
+                    address: parameter_18e_address,
+                    value: 0xaa,
+                },
+            ))
+            .unwrap();
+        let final_parameter = PhyRfInitParameterSnapshot::new(
+            FilterDcapParameters::new(0x12, 0x34, 0x3a, 0x56, 0x87),
+            0xaa,
+        );
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::ConfigureI2cMasterCommandMemory {
+                parameter: final_parameter,
+            }
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::I2cMasterCommandMemoryConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::ReadMasked69 {
+                address: PhyI2cAddress::new(0x69, 4).unwrap(),
+                high_bit: 3,
+                low_bit: 0,
+            }
+        );
+        let mut already_initialized = transition;
+        already_initialized
+            .advance(PhyRfInitPrefixCompletion::Masked69Read(1))
+            .unwrap();
+        assert_eq!(
+            already_initialized.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
                 bbpll_register_snapshot: 0xa3,
+                parameter: final_parameter,
+                rfpll_lock_observed: true,
+                sar2_reinitialized: false,
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::Masked69Read(0))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Sar2Init(Sar2InitAction::WriteMasked {
+                address: PhyI2cAddress::new(0x69, 4).unwrap(),
+                high_bit: 3,
+                low_bit: 0,
+                value: 5,
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::Sar2Init(
+                Sar2InitCompletion::MaskedWrite,
+            ))
+            .unwrap();
+        let sar2_value_address = PhyI2cAddress::new(0x69, 3).unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::Sar2Init(
+                Sar2InitCompletion::ByteWrite {
+                    address: sar2_value_address,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForXtalDutyCalibration {
+                bbpll_register_snapshot: 0xa3,
+                parameter: final_parameter,
+                rfpll_lock_observed: true,
+                sar2_reinitialized: true,
             })
         );
     }
