@@ -113,6 +113,14 @@ const PHY_TEMPERATURE_SENSOR_POWER_ADDRESS: usize = 0x2081_8000;
 const PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS: usize = 0x2081_8018;
 const PHY_TEMPERATURE_SENSOR_SYSTEM_CONTROL_ADDRESS: usize = 0x2071_0030;
 const PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS: usize = 0x2010_080c;
+const PHY_BASEBAND_MODE_ADDRESS: usize = 0x2010_0028;
+const PHY_WIFI_ENABLE_ADDRESS: usize = 0x2010_9c18;
+const PHY_AGC_ENABLE_CONTROL_ADDRESS: usize = 0x2010_702c;
+const PHY_AGC_ENABLE_AUX_ADDRESS: usize = 0x2010_7030;
+const PHY_TX_POWER_TRACK_CONTROL_0_ADDRESS: usize = 0x2010_7454;
+const PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS: usize = 0x2010_7458;
+const PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS: usize = 0x2010_745c;
+const PHY_TX_POWER_TRACK_CONTROL_3_ADDRESS: usize = 0x2010_7460;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -127,6 +135,132 @@ const PHY_IQ_EST_ACTIVITY_MASK: u32 = 0x0030_0000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PhyPbusError {
     Busy,
+}
+
+/// Publish exactly one entry of the cold TX-CFR table.
+///
+/// The transition and register encoding live in `phy_bb`; this narrow target
+/// leaf performs the four finite MMIO accesses from the pinned vendor body.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn program_phy_tx_cfr_entry(entry: crate::phy_bb::PhyTxCfrEntry) {
+    let data = PHY_GAIN_MEMORY_WORD0_ADDRESS as *mut u32;
+    let control = PHY_GAIN_MEMORY_CONTROL_ADDRESS as *mut u32;
+
+    data.write_volatile(entry.data);
+    control.write_volatile(crate::phy_bb::phy_tx_cfr_control_word(
+        control.read_volatile(),
+        entry,
+    ));
+    control.write_volatile(control.read_volatile() | 0x0020_0000);
+    control.write_volatile(control.read_volatile() & !0x0020_0000);
+}
+
+/// Apply the two finite parent MMIO operations at `phy_bb_init+0x0..0x28`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn enable_phy_baseband_initialization() {
+    set_register_bits(PHY_FE_BB_CLOCK_CONTROL_ADDRESS, 1 << 2);
+}
+
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn set_phy_baseband_mode(mode: u8) {
+    replace_register_field(PHY_BASEBAND_MODE_ADDRESS, 0x3, u32::from(mode) & 0x3);
+}
+
+/// Complete rev0 ROM `phy_bb_agc_reg_update`, size `0xa6`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_bb_agc_register_update() {
+    (0x2010_8070 as *mut u32).write_volatile(0x0000_08c7);
+    (0x2010_78a4 as *mut u32).write_volatile(0x0001_721f);
+    clear_register_bits(0x2010_8004, 0x0400_0000);
+    (0x2010_8010 as *mut u32).write_volatile(0x0008_52a1);
+    (0x2010_8018 as *mut u32).write_volatile(0x0060_0030);
+    (0x2010_801c as *mut u32).write_volatile(0x0100_00a0);
+    (0x2010_8020 as *mut u32).write_volatile(0x0000_0180);
+    (0x2010_8028 as *mut u32).write_volatile(0xc040_3020);
+    (0x2010_802c as *mut u32).write_volatile(0x0100_0080);
+    set_register_bits(0x2010_8078, 0x0070_0000);
+    (0x2010_7044 as *mut u32).write_volatile(0xfe3f_e1fe);
+    (0x2010_7048 as *mut u32).write_volatile(0xff7d_a4f3);
+    (0x2010_7104 as *mut u32).write_volatile(0x06ac_c7c8);
+    (0x2010_7124 as *mut u32).write_volatile(0xb220_8553);
+    set_register_bits(PHY_WIFI_ENABLE_ADDRESS, 0x0000_3800);
+}
+
+/// Complete rev0 ROM `phy_enable_agc`, size `0x28`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn enable_phy_agc() {
+    clear_register_bits(PHY_AGC_ENABLE_AUX_ADDRESS, 0x2000_0000);
+    set_register_bits(PHY_AGC_ENABLE_CONTROL_ADDRESS, 0x0080_0000);
+    clear_register_bits(PHY_AGC_ENABLE_CONTROL_ADDRESS, 0x0080_0000);
+}
+
+/// Complete rev0 ROM `phy_wifi_enable_set`, size `0x18`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn set_phy_wifi_enabled(enabled: bool) {
+    if enabled {
+        set_register_bits(PHY_WIFI_ENABLE_ADDRESS, 1 << 1);
+    } else {
+        clear_register_bits(PHY_WIFI_ENABLE_ADDRESS, 1 << 1);
+    }
+}
+
+/// Complete pinned `phy_bb_txpwr_track`, size `0xf4`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_bb_tx_power_tracking(enabled: bool) {
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_0_ADDRESS,
+        0x0000_0001,
+        u32::from(enabled),
+    );
+    clear_register_bits(PHY_TX_POWER_TRACK_CONTROL_0_ADDRESS, 0x0000_001e);
+    set_register_bits(PHY_TX_POWER_TRACK_CONTROL_0_ADDRESS, 0x0000_03e0);
+    clear_register_bits(PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS, 0x0000_0001);
+    clear_register_bits(PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS, 0x0000_0002);
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_3_ADDRESS,
+        0x0000_ff00,
+        0x0000_7900,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_3_ADDRESS,
+        0x0000_00ff,
+        0x0000_0083,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS,
+        0xff00_0000,
+        0x8d00_0000,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS,
+        0x00ff_0000,
+        0x0096_0000,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS,
+        0x0000_ff00,
+        0x0000_a000,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS,
+        0x0000_00ff,
+        0x0000_00b1,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS,
+        0x7f80_0000,
+        0x5f00_0000,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS,
+        0x007f_8000,
+        0x0069_0000,
+    );
+    replace_register_field(
+        PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS,
+        0x0000_7f80,
+        0x0000_7300,
+    );
 }
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
@@ -1915,6 +2049,38 @@ mod tests {
         assert_eq!(with_phy_ftm_enable(0xffff_fffe, 1), u32::MAX);
         assert_eq!(with_phy_ftm_enable(u32::MAX, 0), 0xffff_fffe);
         assert_eq!(with_phy_ftm_enable(0, 3), 1);
+    }
+
+    #[test]
+    fn phy_bb_tx_power_tracking_fields_match_the_complete_archive_body() {
+        assert_eq!(
+            with_register_field(u32::MAX, 0x0000_ff00, 0x0000_7900),
+            0xffff_79ff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0xff00_0000, 0x8d00_0000),
+            0x8dff_ffff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x00ff_0000, 0x0096_0000),
+            0xff96_ffff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x0000_ff00, 0x0000_a000),
+            0xffff_a0ff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x7f80_0000, 0x5f00_0000),
+            0xdf7f_ffff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x007f_8000, 0x0069_0000),
+            0xffe9_7fff
+        );
+        assert_eq!(
+            with_register_field(u32::MAX, 0x0000_7f80, 0x0000_7300),
+            0xffff_f37f
+        );
     }
 
     #[test]

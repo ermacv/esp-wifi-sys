@@ -1790,7 +1790,75 @@ larger `phy_bb_init` calibration suffix, and then port the outer
 HIL publish `PhyColdState` to the temporary ROM ABI and remove the vendor
 `phy_param` definition.
 
-All 412 host tests pass. The last qualified target strict audit covers 6,407
+## First Rust-owned `phy_bb_init` slices
+
+The next pinned parent is `libphy.a[phy_init.o]::phy_bb_init`, size `0x16a`.
+Its complete relocation graph contains 26 direct child-call sites naming 24
+unique functions. Exact disassembly establishes two branches:
+
+- `phy_param[0xa4] & 0x08` skips the first eight calibration children; a
+  completed first pass sets that same bit;
+- nonzero `phy_param[0x196]` requests `phy_wifi_enable_set(0)` before the
+  unconditional TX-rate initialization.
+
+The parent begins by setting bit two of `0x2010_0800` and replacing bits 1:0
+of `0x2010_0028` with two. It restores the latter field to zero after
+`phy_chip_set_chan(11, 0)`. Both operations are now typed finite
+`PhyBbMmioAction` transactions. The complete direct call ledger is:
+
+| order | pinned child and arguments | current Rust status |
+|---:|---|---|
+| 1 | `phy_txdc_cal_init(&phy_param[0xa8], 15, 0, 0)` | calibration transition pending |
+| 2 | `phy_pwdet_code_cal()` | calibration transition pending |
+| 3 | `phy_tx_cap_init()` | calibration transition pending |
+| 4 | `phy_tsens_temp_read()` | temperature transition pending |
+| 5 | `phy_tx_pwctrl_init(0)` | calibration transition pending |
+| 6 | `phy_txdc_cal_pwdet_init(1, 0, 0)` | calibration transition pending |
+| 7 | `phy_dcode_cal_init()` | calibration transition pending |
+| 8 | `phy_txiq_cal_init()` | calibration transition pending |
+| 9 | `phy_set_tx_cfr_mem(32)` | complete Rust-owned transition |
+| 10 | `phy_bt_tx_gain_init()` | calibration transition pending |
+| 11 | `phy_set_pbus_mem()` | finite table transition pending |
+| 12 | `phy_tsens_temp_read()` | shares pending temperature transition |
+| 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
+| 14 | `phy_rx_table_init()` | RX table transition pending |
+| 15 | `phy_rfrx_sat_rst(0)` | reset transition pending |
+| 16 | `phy_check_rx_sat()` | sampled/deadline transition pending |
+| 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
+| 18 | `phy_rfrx_sat_rst(1)` | shares pending reset transition |
+| 19 | `phy_reg_init()` | composed finite register graph pending |
+| 20 | `phy_bb_agc_reg_update()` | complete finite Rust MMIO |
+| 21 | `phy_reg_update_new()` | existing complete finite Rust MMIO |
+| 22 | `phy_enable_agc()` | complete finite Rust MMIO |
+| 23 | `phy_chip_set_chan(11, 0)` | cold-state channel transition pending |
+| 24 | conditional `phy_wifi_enable_set(0)` | complete finite Rust MMIO |
+| 25 | `phy_i2c_txrate_init()` | MMIO plus `g_phyFuns` slot removal pending |
+| 26 | tail `phy_bb_txpwr_track(1)` | complete finite Rust MMIO |
+
+`phy_set_tx_cfr_mem(32)` is now `PhyTxCfrTransition`. It reads the high byte
+of `0x2010_0408` exactly once, retains that byte in Rust state, then exposes
+32 separately completed entry publications. Entries zero through nine use
+data word `0x0e13`; the remainder use zero. Each entry updates the eight-bit
+wrapping address field in `0x2010_0844`, writes `0x2010_0848`, and performs
+the exact commit-bit pulse. A non-cloneable `PhyTxCfrMmioBinding` consumes
+one external operation identity; there is no loop in the target leaf,
+callback, delay, wait, or fallback.
+
+The complete ROM `phy_bb_agc_reg_update`, `phy_enable_agc`, and
+`phy_wifi_enable_set` bodies plus archive `phy_bb_txpwr_track` are now direct
+Rust register transactions as well. Their raw MMIO remains isolated in
+`radio_hal`; `phy_bb` contains the ownership, sequencing vocabulary, and
+pure TX-CFR address transform. No unported child is represented by a generic
+vendor-call action.
+
+This baseband work is still preparatory and dead-stripped from the qualified
+image. Activation is deliberately deferred until every reachable child has
+an explicit lowering and the complete parent can reject unknown or
+out-of-order completions without a vendor escape.
+
+All 419 host tests pass. The target
+`riscv32imafc-unknown-none-elf` `strict-no-wait,hil-vendor-tx` configuration
+also compiles. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one
 explicit RX fallback, zero stateful/unproven runtime roots, and zero
 temporary MMIO roots. Strict
