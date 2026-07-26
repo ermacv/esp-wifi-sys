@@ -10,10 +10,11 @@
 use core::cell::UnsafeCell;
 
 pub(crate) const PHY_PARAM_LEN: usize = 0x1fc;
-const PHY_INIT_DATA_LEN: usize = 0x80;
-const PHY_CALIBRATION_PAYLOAD_OFFSET: usize = 0x0c;
-const PHY_CALIBRATION_CHECKSUM_OFFSET: usize = PHY_CALIBRATION_PAYLOAD_OFFSET + PHY_PARAM_LEN;
-const PHY_CALIBRATION_PREFIX_LEN: usize = PHY_CALIBRATION_CHECKSUM_OFFSET + 4;
+pub(crate) const PHY_INIT_DATA_LEN: usize = 0x80;
+pub(crate) const PHY_CALIBRATION_PAYLOAD_OFFSET: usize = 0x0c;
+pub(crate) const PHY_CALIBRATION_CHECKSUM_OFFSET: usize =
+    PHY_CALIBRATION_PAYLOAD_OFFSET + PHY_PARAM_LEN;
+pub(crate) const PHY_CALIBRATION_PREFIX_LEN: usize = PHY_CALIBRATION_CHECKSUM_OFFSET + 4;
 const EFUSE_RD_MAC_SYS0_ADDRESS: usize = 0x2071_5050;
 const EFUSE_RD_MAC_SYS1_ADDRESS: usize = 0x2071_5054;
 const PHY_XTAL_FREQUENCY_REGISTER_ADDRESS: usize = 0x2010_f028;
@@ -99,7 +100,7 @@ fn apply_rom_function_overrides(
     }
 }
 
-fn apply_init_data(parameter: &mut [u8; PHY_PARAM_LEN], init: &[u8; PHY_INIT_DATA_LEN]) {
+pub(crate) fn apply_init_data(parameter: &mut [u8; PHY_PARAM_LEN], init: &[u8; PHY_INIT_DATA_LEN]) {
     parameter[0x4e] = init[0x00];
 
     let mut index = 0;
@@ -177,7 +178,7 @@ fn write_u32_le(bytes: &mut [u8; PHY_CALIBRATION_PREFIX_LEN], offset: usize, val
     bytes[offset + 3] = value[3];
 }
 
-fn calibration_record_check_or_write(
+pub(crate) fn calibration_record_check_or_write(
     calibration: &mut [u8; PHY_CALIBRATION_PREFIX_LEN],
     check: bool,
     version: u32,
@@ -265,7 +266,7 @@ pub(crate) fn apply_rc_calibration_result(parameter: &mut [u8; PHY_PARAM_LEN], r
     parameter[0xa4..0xa8].copy_from_slice(&flags.to_le_bytes());
 }
 
-const fn xtal_parameter_code(frequency_mhz: u32) -> u8 {
+pub(crate) const fn xtal_parameter_code(frequency_mhz: u32) -> u8 {
     match frequency_mhz {
         26 => 1,
         32 => 2,

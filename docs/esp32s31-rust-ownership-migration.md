@@ -1696,6 +1696,68 @@ completion rejection. The aggregate remains preparatory and dead-stripped
 from the qualified hardware image until the Rust cold-init executor replaces
 the live `register_chipv7_phy` parent.
 
+## Prepared explicit owner for `phy_param`
+
+The complete initial image of the remaining cold-PHY object is now recovered
+and represented by `phy_cold::PhyColdState`. The reference section is
+`libphy.a[phy_init.o]::.data.phy_param`: 508 bytes, four-byte alignment, and
+section SHA-256
+`d8b4dbeeedcfb2cbaa6a00d2a7c84bc8c9ad5bbf54a2ff6bc30dee7f3b46ed83`.
+The containing pinned archive has SHA-256
+`51497819736295c9b33d6775495dade4c6fb39db887edfe095608c670d9ae223`.
+Its complete initial state contains only these nonzero bytes:
+
+| offset | value | offset | value | offset | value |
+|---:|---:|---:|---:|---:|---:|
+| `0x002` | `0xbf` | `0x003` | `0x20` | `0x006` | `0x54` |
+| `0x00b` | `0x01` | `0x00e` | `0x60` | `0x00f` | `0x01` |
+| `0x012` | `0x1f` | `0x013` | `0x16` | `0x014` | `0x01` |
+| `0x015` | `0x40` | `0x016` | `0x02` | `0x018` | `0x50` |
+| `0x024` | `0x30` | `0x1ab` | `0x01` | `0x1af` | `0x01` |
+
+The type is deliberately neither `Copy` nor `Clone`: moving it transfers the
+one software owner of the radio parameter state. It applies the exact
+71-byte init-profile mapping, owns the RC-calibration mutation, supplies
+typed snapshots for filter-DCAP, crystal-duty and channel-frequency
+transitions, and receives all five parameter mutations produced by the
+completed `phy_rf_init` prefix. The retained 524-byte calibration record is
+a separate fixed-size `PhyCalibrationRecord`; backup, recovery, identity and
+checksum processing use only bounded local-memory traversals. No allocator,
+callback, MMIO, wait, panic edge, or hidden C state is involved.
+
+`PhyRfColdInit` composes that unique owner with
+`PhyRfInitPrefixTransition`. Its local step applies at most one bounded
+state-only completion. A hardware, timer, or observation action is returned
+unchanged to the outer executor and advances only when an identity-bound
+completion is supplied. It contains no future, waker, self-poll, retry loop,
+or implicit progress.
+
+The first target primitive for that outer executor is also explicit.
+`PhyColdI2cTransaction` separates command start from completion observation.
+A byte or masked read uses one external completion edge; a masked write is a
+read/modify/write requiring two independent edges. If the target finish leaf
+still reports `Busy`, the transaction remains in the same `Await*` state and
+returns `StillPending`. It does not spin, register a waker, or ask the
+executor to poll it again; only a later peripheral edge or an outer Rust
+deadline may cause another observation.
+
+This is not yet the live cold-init implementation. The remaining work is to
+map every nested `PhyRfInitPrefixAction` to exactly one finite MMIO
+transaction, PHY-I2C transaction, PBus edge, timer deadline, or readiness
+observation, and then port the larger `phy_bb_init` calibration suffix and
+the outer `register_chipv7_phy` sequencing. Only after that graph is complete
+will the HIL publish `PhyColdState` to the temporary ROM ABI and remove the
+vendor `phy_param` definition.
+
+The current verification baseline is intentionally unchanged. All 396 host
+tests pass. The target strict audit covers 6,407 functions with zero
+violations and reports runtime ownership debt of one explicit RX fallback,
+zero stateful/unproven runtime roots, and zero temporary MMIO roots. Strict
+runtime leaves reach zero mutable blob globals. The cold-PHY graph still
+reports exactly one live mutable blob symbol, `phy_param`, of 508 bytes,
+because the prepared owner is dead-stripped until activation. The generated
+application image remains 894,336 bytes.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
