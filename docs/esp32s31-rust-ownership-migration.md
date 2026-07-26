@@ -1897,3 +1897,46 @@ The ESF snapshot ended with zero of sixteen management slots claimed and zero
 rejected operations. It returned 18/18 TX and 15/15 RX owners, recorded zero
 allocation/reallocation/free calls, zero other-core stalls, and no `ppTask`
 entry.
+
+## Completed WPA2 hardware key-slot boundary
+
+The public `ic_set_key`, `ic_del_key`, and `wDev_Insert_KeyEntry` symbols are
+now Rust-owned. Their complete references are the pinned bodies
+`libpp.a[if_hwctrl.o]::ic_set_key` (68 bytes),
+`libpp.a[if_hwctrl.o]::ic_del_key` (8 bytes),
+`libpp.a[wdev.o]::wDev_Insert_KeyEntry` (142 bytes),
+`libpp.a[hal_crypto.o]::hal_crypto_clr_key_entry` (138 bytes), and
+`libpp.a[hal_crypto.o]::hal_crypto_enable` (144 bytes).
+
+The replacement preserves the evidenced finite operations: interface-specific
+crypto-control address selection, control-bit composition, the policy
+read/modify/write at `0x2010_4810`, hardware key programming through the
+already bounded `hal_crypto_set_key_entry` leaf, key-valid bitmap clearing,
+and ten ordered zero stores when a slot is removed. It contains no allocation,
+retry, wait, delay, task primitive, or vendor/ROM call other than the existing
+finite key-programming MMIO leaf.
+
+`StaticWpa2Keys` and the fixed vendor-slot tokens remain the sole typed Rust
+owners of key material and slot lifetime. The strict path deliberately does
+not mirror the legacy `if_ctrl` algorithm cache or the `wDevCtrl` teardown
+bitmaps: duplicating those implementation caches would introduce a second
+source of truth. Removal instead clears the hardware entry explicitly and
+returns the Rust-owned slot token.
+
+The qualified final ELF resolves `ic_del_key` and its replacement to
+`0x400d03b6`, `ic_set_key` to `0x400d03f8`, and
+`wDev_Insert_KeyEntry` to `0x400d043a`. Host coverage increased to 316
+sequential tests. Runtime ownership debt decreases from
+`1 fallback + 5 stateful/unproven` to
+`1 fallback + 2 stateful/unproven`; strict vendor roots decrease from six to
+three and reachable vendor functions from 16 to 10. The 6,407-function audit
+reports zero no-wait/no-heap violations, zero mutable blob globals reachable
+from strict leaves, and zero ROM-ABI state cells. No static storage was added:
+internal-SRAM strict storage remains 313,293 bytes and the CPU0 stack remains
+16,432 bytes.
+
+The hardware regression completed passive scan, open authentication,
+HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and HTTP 200.
+It returned 18/18 TX and 16/16 RX owners, recorded zero
+allocation/reallocation/free calls, zero other-core stalls, zero ESF
+management claims or rejects at shutdown, and no `ppTask` entry.
