@@ -245,18 +245,8 @@ phy_close_fe_bb_clk = wifi_strict_phy_close_fe_bb_clk;
 ASSERT(phy_close_fe_bb_clk == wifi_strict_phy_close_fe_bb_clk,
        "ESP32-S31 PHY FE/baseband clock Rust boundary is inactive");
 
-/* Complete post-initialization register update and both of its former
- * MMIO-only ROM/vendor leaves. */
-EXTERN(wifi_strict_phy_wifi_agc_sat_gain);
-phy_wifi_agc_sat_gain = wifi_strict_phy_wifi_agc_sat_gain;
-ASSERT(phy_wifi_agc_sat_gain == wifi_strict_phy_wifi_agc_sat_gain,
-       "ESP32-S31 PHY AGC saturation gain Rust boundary is inactive");
-
-EXTERN(wifi_strict_phy_set_ftm_en);
-phy_set_ftm_en = wifi_strict_phy_set_ftm_en;
-ASSERT(phy_set_ftm_en == wifi_strict_phy_set_ftm_en,
-       "ESP32-S31 PHY FTM enable Rust boundary is inactive");
-
+/* Complete post-initialization register update, with both former MMIO-only
+ * ROM/vendor leaves inlined. No other archive member calls those leaves. */
 EXTERN(wifi_strict_phy_reg_update_new);
 phy_reg_update_new = wifi_strict_phy_reg_update_new;
 ASSERT(phy_reg_update_new == wifi_strict_phy_reg_update_new,

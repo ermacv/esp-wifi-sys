@@ -305,18 +305,6 @@ unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
     (PHY_AGC_SAT_GAIN_HIGH_ADDRESS as *mut u32).write_volatile(value);
 }
 
-/// Write the recovered Wi-Fi AGC saturation gain pair.
-///
-/// Reference: the complete rev0 ROM `phy_wifi_agc_sat_gain` body at
-/// `0x2f827db0`, size `0x0c`. It writes its argument to `0x2010_7064` and
-/// `0x2010_7114` in that order and owns no RAM state.
-#[cfg(target_arch = "riscv32")]
-#[no_mangle]
-#[link_section = ".rwtext.wifi_strict.radio_hal"]
-pub unsafe extern "C" fn wifi_strict_phy_wifi_agc_sat_gain(value: u32) {
-    write_phy_wifi_agc_sat_gain(value);
-}
-
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_ftm_enable(enable: u32) {
@@ -324,24 +312,14 @@ unsafe fn write_phy_ftm_enable(enable: u32) {
     control.write_volatile(with_phy_ftm_enable(control.read_volatile(), enable));
 }
 
-/// Replace the recovered one-bit PHY FTM enable field.
-///
-/// Reference: the complete pinned `libphy.a[phy_reg.o]::phy_set_ftm_en`
-/// body, size `0x14`. Only bit zero of `0x2010_7d4c` is replaced.
-#[cfg(target_arch = "riscv32")]
-#[no_mangle]
-#[link_section = ".rwtext.wifi_strict.radio_hal"]
-pub unsafe extern "C" fn wifi_strict_phy_set_ftm_en(enable: u32) {
-    write_phy_ftm_enable(enable);
-}
-
 /// Apply the complete recovered post-initialization PHY register update.
 ///
 /// Reference: the complete pinned
 /// `libphy.a[phy_init.o]::phy_reg_update_new` body, size `0x70`, plus the
-/// complete `phy_wifi_agc_sat_gain` and `phy_set_ftm_en` leaves documented
-/// above. Every read/modify/write and the two saturation-gain writes retain
-/// vendor order, including the fresh second read of `0x2010_78c8`.
+/// complete rev0 ROM `phy_wifi_agc_sat_gain` body at `0x2f827db0`, size
+/// `0x0c`, and pinned `libphy.a[phy_reg.o]::phy_set_ftm_en`, size `0x14`.
+/// Every read/modify/write and the two saturation-gain writes retain vendor
+/// order, including the fresh second read of `0x2010_78c8`.
 ///
 /// This is a finite MMIO-only transaction: no callback, ROM/vendor call,
 /// allocation, wait, delay, loop, or hidden mutable state remains.
