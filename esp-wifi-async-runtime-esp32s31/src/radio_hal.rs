@@ -100,6 +100,10 @@ const PHY_FE_CONTROL_0894_ADDRESS: usize = 0x2010_0894;
 const PHY_FE_CONTROL_0C08_ADDRESS: usize = 0x2010_0c08;
 const PHY_FE_CONTROL_0C0C_ADDRESS: usize = 0x2010_0c0c;
 const PHY_FE_CONTROL_0C20_ADDRESS: usize = 0x2010_0c20;
+const PHY_FREQUENCY_CONTROL_ADDRESS: usize = 0x2010_001c;
+const PHY_FREQUENCY_PARAMETER_0_ADDRESS: usize = 0x2010_0024;
+const PHY_FREQUENCY_PARAMETER_1_ADDRESS: usize = 0x2010_0028;
+const PHY_FREQUENCY_MEMORY_DATA_ADDRESS: usize = 0x2010_002c;
 const PHY_TEMPERATURE_SENSOR_POWER_ADDRESS: usize = 0x2081_8000;
 const PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS: usize = 0x2081_8018;
 const PHY_TEMPERATURE_SENSOR_SYSTEM_CONTROL_ADDRESS: usize = 0x2071_0030;
@@ -412,6 +416,27 @@ const fn with_phy_front_end_update_second(value: u32) -> u32 {
 
 const fn with_phy_front_end_adc_update(value: u32) -> u32 {
     with_register_bits(value, 0x0000_0003)
+}
+
+const fn without_phy_frequency_reset_fields(value: u32) -> u32 {
+    value & 0x7ff7_ffff
+}
+
+const fn with_phy_frequency_module_enabled(value: u32) -> u32 {
+    value | 0x4000_0000
+}
+
+const fn with_phy_frequency_register_mode(value: u32, parameter_override: bool) -> u32 {
+    let (first, second) = if parameter_override {
+        (0_u32, 2_u32)
+    } else {
+        (2_u32, 4_u32)
+    };
+    (value & 0xc03f_ffff) | ((((second << 4) | first) << 22) & 0x3fc0_0000)
+}
+
+const fn with_phy_frequency_memory_address(value: u32, address: u16) -> u32 {
+    (value & 0xfff8_00ff) | ((address as u32 & 0x7ff) << 8)
 }
 
 const fn without_register_bits(value: u32, bits: u32) -> u32 {
@@ -1286,6 +1311,47 @@ pub(crate) unsafe fn configure_phy_front_end_update() {
     adc.write_volatile(with_phy_front_end_adc_update(adc.read_volatile()));
 }
 
+/// Apply complete rev0 ROM `phy_freq_reg_init(2, 4)` with its hidden
+/// `phy_param[0x193]` branch made explicit.
+///
+/// The body is five fresh finite MMIO stores. `parameter_override` selects the
+/// ROM's `(0, 2)` override instead of the call-site `(2, 4)` pair.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_frequency_registers(parameter_override: bool) {
+    let control = PHY_FREQUENCY_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(without_phy_frequency_reset_fields(
+        control.read_volatile(),
+    ));
+    control.write_volatile(with_phy_frequency_module_enabled(control.read_volatile()));
+    control.write_volatile(with_phy_frequency_register_mode(
+        control.read_volatile(),
+        parameter_override,
+    ));
+    (PHY_FREQUENCY_PARAMETER_0_ADDRESS as *mut u32).write_volatile(0x1980_0249);
+    (PHY_FREQUENCY_PARAMETER_1_ADDRESS as *mut u32).write_volatile(0x2582_4e58);
+}
+
+/// Apply complete rev0 ROM `phy_freq_i2c_mem_write`.
+///
+/// This leaf selects one eleven-bit frequency-memory address, writes its
+/// caller-owned data/mode word, then generates the exact bit-20 write pulse.
+/// It has no busy observation, loop, callback, or software-state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn write_phy_frequency_memory(address: u16, value: u32, mode: u8) {
+    let control = PHY_FREQUENCY_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_frequency_memory_address(
+        control.read_volatile(),
+        address,
+    ));
+    (PHY_FREQUENCY_MEMORY_DATA_ADDRESS as *mut u32)
+        .write_volatile((u32::from(mode) << 24) | value);
+    control.write_volatile(with_register_bits(control.read_volatile(), 0x0010_0000));
+    control.write_volatile(without_register_bits(
+        control.read_volatile(),
+        0x0010_0000,
+    ));
+}
+
 /// Apply complete vendor `phy_tsens_read_init` and its ROM tail leaf.
 ///
 /// The pinned 0x36-byte archive body ignores both ABI arguments, performs
@@ -1478,11 +1544,13 @@ mod tests {
         with_phy_tx_clock, with_phy_tx_gain_compensation_byte1,
         with_phy_tx_gain_compensation_byte2, without_phy_tx_gain_compensation_high_byte,
         without_phy_tx_gain_compensation_low_byte,
-        with_phy_front_end_adc_update, with_phy_front_end_update_first,
-        with_phy_front_end_update_second, with_register_bits, with_register_field,
-        with_restored_phy_rx_dco_control_field,
+        with_phy_frequency_memory_address, with_phy_frequency_module_enabled,
+        with_phy_frequency_register_mode, with_phy_front_end_adc_update,
+        with_phy_front_end_update_first, with_phy_front_end_update_second, with_register_bits,
+        with_register_field, with_restored_phy_rx_dco_control_field,
         with_tx_cca, with_wifi_mac_regdma_link, without_fe_bb_clock_enable,
         without_mac_tx_retention, without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse,
+        without_phy_frequency_reset_fields,
         without_phy_rx_dco_control_field, without_register_bits, without_tx_queue_enable,
         without_tx_queue_valid, PHY_IQ_EST_MEASUREMENT_BIT, PHY_IQ_EST_START_BIT,
         WIFI_MAC_ACTIVE_REGDMA_LINK,
@@ -1753,6 +1821,36 @@ mod tests {
         assert_eq!(first, 0x8300_4000);
         assert_eq!(second, 0x8700_4000);
         assert_eq!(with_phy_front_end_adc_update(0xa5a5_0100), 0xa5a5_0103);
+    }
+
+    #[test]
+    fn phy_frequency_register_init_preserves_both_exact_rom_modes() {
+        let initial = 0x9abc_def0;
+        assert_eq!(without_phy_frequency_reset_fields(initial), 0x1ab4_def0);
+        assert_eq!(
+            with_phy_frequency_module_enabled(0x1ab4_def0),
+            0x5ab4_def0
+        );
+        assert_eq!(
+            with_phy_frequency_register_mode(0xffff_ffff, false),
+            0xd0bf_ffff
+        );
+        assert_eq!(
+            with_phy_frequency_register_mode(0xffff_ffff, true),
+            0xc83f_ffff
+        );
+    }
+
+    #[test]
+    fn phy_frequency_memory_address_replaces_only_the_eleven_bit_field() {
+        assert_eq!(
+            with_phy_frequency_memory_address(0xa5f8_00a5, 0x712),
+            0xa5ff_12a5
+        );
+        assert_eq!(
+            with_phy_frequency_memory_address(0xffff_ffff, 0xffff),
+            0xffff_ffff
+        );
     }
 
     #[test]

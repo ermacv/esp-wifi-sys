@@ -1637,6 +1637,31 @@ front-end update completion edge. It remains dead-stripped and does not
 replace any part of the live parent until the final composite operation 26
 has an equivalent owned transition.
 
+Operation twenty-six is now decomposed from pinned
+`libphy.a[phy_hw_freq.o]` and the exact ROM ELF. Its parent calls
+`phy_freq_reg_init(2, 4)`, `phy_get_rf_freq_init(0x55, 0)`, and
+`phy_freq_i2c_data_write(1)`. The first child is a complete five-store Rust
+MMIO leaf. Its hidden `phy_param[0x193]` test is an explicit boolean input:
+false retains `(2, 4)`, while true selects the ROM override `(0, 2)`.
+
+The central 85-entry RF table no longer needs an implicit C buffer or a
+1,020-byte Rust SRAM mirror. `PhyFrequencyTableTransition` retains only the
+two measured PLL-cap endpoints, crystal selector, two crystal-duty bytes,
+the upper five bits of PHY-I2C register `0x63:6`, and current entry/word
+indices. It computes one exact three-word record for frequencies
+`0x960..=0x9b4` using the recovered signed `/ 64` interpolation, the pure
+RFPLL SDM arithmetic, and the unsigned boundary behavior of archive
+`phy_get_xtal_duty`. Each of the 255 hardware-memory writes is exposed as an
+identity-bound action.
+
+ROM `phy_freq_i2c_mem_write` is also a complete Rust MMIO leaf: it replaces
+the eleven-bit address at `0x2010001c`, writes the caller-owned mode/data word
+at `0x2010002c`, then produces the exact bit-20 write pulse. It has no wait or
+busy observation. The remaining part of operation 26 is now narrow and
+named: compose the three RFPLL calibration points around this table
+transition, then replace the final eleven-entry
+`phy_freq_i2c_data_write(1)` packing/publication graph.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
