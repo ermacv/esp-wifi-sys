@@ -121,6 +121,9 @@ const PHY_TX_POWER_TRACK_CONTROL_0_ADDRESS: usize = 0x2010_7454;
 const PHY_TX_POWER_TRACK_CONTROL_1_ADDRESS: usize = 0x2010_7458;
 const PHY_TX_POWER_TRACK_CONTROL_2_ADDRESS: usize = 0x2010_745c;
 const PHY_TX_POWER_TRACK_CONTROL_3_ADDRESS: usize = 0x2010_7460;
+const PHY_RF_RX_SATURATION_CONFIG_ADDRESS: usize = 0x2010_7068;
+const PHY_RF_RX_SATURATION_CONTROL_ADDRESS: usize = 0x2010_705c;
+const PHY_I2C_TX_RATE_CONTROL_ADDRESS: usize = 0x2010_448c;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -261,6 +264,48 @@ pub(crate) unsafe fn configure_phy_bb_tx_power_tracking(enabled: bool) {
         0x0000_7f80,
         0x0000_7300,
     );
+}
+
+/// Complete rev0 ROM `phy_rfrx_sat_rst`, size `0x42`.
+///
+/// `enabled=false` is the pre-check call and `enabled=true` is the
+/// post-gain-table call. Both retain the reference's repeated fresh reads.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_rf_rx_saturation(enabled: bool) {
+    (PHY_RF_RX_SATURATION_CONFIG_ADDRESS as *mut u32).write_volatile(0x0000_0404);
+    let control = PHY_RF_RX_SATURATION_CONTROL_ADDRESS as *mut u32;
+    if enabled {
+        control.write_volatile(control.read_volatile() | 0xd108_0000);
+        control.write_volatile((control.read_volatile() & 0xfff8_0000) | 0x0000_0800);
+    } else {
+        control.write_volatile(control.read_volatile() & 0x2ef7_ffff);
+        control.write_volatile((control.read_volatile() & 0xfff8_0000) | 0x0000_0400);
+    }
+}
+
+/// Complete rev0 ROM `phy_i2c_txrate_init`, size `0x38`.
+///
+/// The ROM tail dispatches through `g_phyFuns+0x30`. The pinned table target
+/// is complete archive leaf `phy_txgain_comp_pacfg_new(1)`, whose four
+/// ordered MMIO writes are reproduced directly below.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_i2c_tx_rate() {
+    replace_register_field(PHY_I2C_TX_RATE_CONTROL_ADDRESS, 0x03fc_0000, 0x0154_0000);
+    replace_register_field(PHY_I2C_TX_RATE_CONTROL_ADDRESS, 0x0000_0003, 0x0000_0002);
+
+    let compensation = PHY_TX_GAIN_COMPENSATION_CONTROL_ADDRESS as *mut u32;
+    compensation.write_volatile(without_phy_tx_gain_compensation_low_byte(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(with_phy_tx_gain_compensation_byte1(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(with_phy_tx_gain_compensation_byte2(
+        compensation.read_volatile(),
+    ));
+    compensation.write_volatile(without_phy_tx_gain_compensation_high_byte(
+        compensation.read_volatile(),
+    ));
 }
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
@@ -2080,6 +2125,35 @@ mod tests {
         assert_eq!(
             with_register_field(u32::MAX, 0x0000_7f80, 0x0000_7300),
             0xffff_f37f
+        );
+    }
+
+    #[test]
+    fn phy_rf_rx_saturation_masks_match_both_rom_branches() {
+        let initial = 0xa5a5_5a5a_u32;
+        assert_eq!(initial & 0x2ef7_ffff, 0x24a5_5a5a);
+        assert_eq!((initial & 0xfff8_0000) | 0x0000_0400, 0xa5a0_0400);
+        assert_eq!(initial | 0xd108_0000, 0xf5ad_5a5a);
+        assert_eq!((initial & 0xfff8_0000) | 0x0000_0800, 0xa5a0_0800);
+    }
+
+    #[test]
+    fn phy_i2c_tx_rate_removes_the_indirect_callback_with_exact_fields() {
+        assert_eq!(
+            with_register_field(0xa5a5_5a5a, 0x03fc_0000, 0x0154_0000),
+            0xa555_5a5a
+        );
+        assert_eq!(
+            with_register_field(0xa5a5_5a5a, 0x0000_0003, 0x0000_0002),
+            0xa5a5_5a5a
+        );
+        let first = without_phy_tx_gain_compensation_low_byte(0x1234_5678);
+        let second = with_phy_tx_gain_compensation_byte1(first);
+        let third = with_phy_tx_gain_compensation_byte2(second);
+        let fourth = without_phy_tx_gain_compensation_high_byte(third);
+        assert_eq!(
+            (first, second, third, fourth),
+            (0x1234_5600, 0x1234_fa00, 0x12ff_fa00, 0x00ff_fa00)
         );
     }
 

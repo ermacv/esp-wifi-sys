@@ -226,6 +226,21 @@ impl PhyBbBasebandMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyRfRxSaturationPhase {
+    PrepareCheck,
+    Finalize,
+}
+
+impl PhyRfRxSaturationPhase {
+    const fn enabled(self) -> bool {
+        match self {
+            Self::PrepareCheck => false,
+            Self::Finalize => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyBbMmioAction {
     EnableBasebandInitialization,
     SetBasebandMode { mode: PhyBbBasebandMode },
@@ -234,6 +249,8 @@ pub enum PhyBbMmioAction {
     EnableAgc,
     SetWifiEnabled { enabled: bool },
     ConfigureTxPowerTracking { enabled: bool },
+    ConfigureRfRxSaturation { phase: PhyRfRxSaturationPhase },
+    ConfigureI2cTxRate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -278,6 +295,10 @@ impl PhyBbMmioBinding {
             PhyBbMmioAction::ConfigureTxPowerTracking { enabled } => {
                 crate::radio_hal::configure_phy_bb_tx_power_tracking(enabled)
             }
+            PhyBbMmioAction::ConfigureRfRxSaturation { phase } => {
+                crate::radio_hal::configure_phy_rf_rx_saturation(phase.enabled())
+            }
+            PhyBbMmioAction::ConfigureI2cTxRate => crate::radio_hal::configure_phy_i2c_tx_rate(),
         }
         PhyBbMmioCompletion {
             action: self.action,
@@ -289,9 +310,9 @@ impl PhyBbMmioBinding {
 mod tests {
     use super::{
         phy_tx_cfr_control_word, PhyBbBasebandMode, PhyBbMmioAction, PhyBbMmioBinding,
-        PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion, PhyTxCfrEntry,
-        PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition, PhyTxCfrTransitionError,
-        PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
+        PhyRfRxSaturationPhase, PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion,
+        PhyTxCfrEntry, PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition,
+        PhyTxCfrTransitionError, PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
     };
 
     #[test]
@@ -431,6 +452,13 @@ mod tests {
             PhyBbMmioAction::EnableAgc,
             PhyBbMmioAction::SetWifiEnabled { enabled: false },
             PhyBbMmioAction::ConfigureTxPowerTracking { enabled: true },
+            PhyBbMmioAction::ConfigureRfRxSaturation {
+                phase: PhyRfRxSaturationPhase::PrepareCheck,
+            },
+            PhyBbMmioAction::ConfigureRfRxSaturation {
+                phase: PhyRfRxSaturationPhase::Finalize,
+            },
+            PhyBbMmioAction::ConfigureI2cTxRate,
         ] {
             assert_eq!(PhyBbMmioBinding::new(action).action(), action);
         }

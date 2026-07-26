@@ -1822,17 +1822,17 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 12 | `phy_tsens_temp_read()` | shares pending temperature transition |
 | 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
 | 14 | `phy_rx_table_init()` | RX table transition pending |
-| 15 | `phy_rfrx_sat_rst(0)` | reset transition pending |
+| 15 | `phy_rfrx_sat_rst(0)` | complete finite Rust MMIO |
 | 16 | `phy_check_rx_sat()` | sampled/deadline transition pending |
 | 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
-| 18 | `phy_rfrx_sat_rst(1)` | shares pending reset transition |
+| 18 | `phy_rfrx_sat_rst(1)` | complete finite Rust MMIO |
 | 19 | `phy_reg_init()` | composed finite register graph pending |
 | 20 | `phy_bb_agc_reg_update()` | complete finite Rust MMIO |
 | 21 | `phy_reg_update_new()` | existing complete finite Rust MMIO |
 | 22 | `phy_enable_agc()` | complete finite Rust MMIO |
 | 23 | `phy_chip_set_chan(11, 0)` | cold-state channel transition pending |
 | 24 | conditional `phy_wifi_enable_set(0)` | complete finite Rust MMIO |
-| 25 | `phy_i2c_txrate_init()` | MMIO plus `g_phyFuns` slot removal pending |
+| 25 | `phy_i2c_txrate_init()` | complete Rust MMIO; indirect slot removed |
 | 26 | tail `phy_bb_txpwr_track(1)` | complete finite Rust MMIO |
 
 `phy_set_tx_cfr_mem(32)` is now `PhyTxCfrTransition`. It reads the high byte
@@ -1851,12 +1851,18 @@ Rust register transactions as well. Their raw MMIO remains isolated in
 pure TX-CFR address transform. No unported child is represented by a generic
 vendor-call action.
 
+Both calls to complete ROM `phy_rfrx_sat_rst` are typed as prepare and
+finalize phases and retain the branch-specific fresh-read register order.
+Complete ROM `phy_i2c_txrate_init` is direct as well: Rust reproduces its two
+register-field writes and the full `phy_txgain_comp_pacfg_new(1)` tail rather
+than dispatching through `g_phyFuns+0x30`.
+
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
 an explicit lowering and the complete parent can reject unknown or
 out-of-order completions without a vendor escape.
 
-All 419 host tests pass. The target
+All 421 host tests pass. The target
 `riscv32imafc-unknown-none-elf` `strict-no-wait,hil-vendor-tx` configuration
 also compiles. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one
