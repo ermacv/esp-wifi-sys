@@ -323,9 +323,12 @@ unsafe fn write_phy_ftm_enable(enable: u32) {
 ///
 /// This is a finite MMIO-only transaction: no callback, ROM/vendor call,
 /// allocation, wait, delay, loop, or hidden mutable state remains.
+/// Its two evidenced callers are `register_chipv7_phy` and
+/// caller-task `phy_wakeup_init`; neither is an interrupt handler, so this
+/// cold/wakeup leaf intentionally remains flash-mapped instead of consuming
+/// the interrupt-only SRAM reserve.
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
-#[link_section = ".rwtext.wifi_strict.radio_hal"]
 pub unsafe extern "C" fn wifi_strict_phy_reg_update_new() {
     let agc_control = PHY_AGC_CONTROL_ADDRESS as *mut u32;
     agc_control.write_volatile(with_phy_agc_control(agc_control.read_volatile()));
