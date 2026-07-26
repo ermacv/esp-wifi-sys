@@ -12,6 +12,11 @@
 //! `phy_get_rc_dout` at `0x2f82_61ac`. The ELF is an analysis oracle and is
 //! not linked into the firmware.
 
+use crate::phy_frequency::{
+    PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion,
+    PhyChannelFrequencyInitControl, PhyChannelFrequencyInitFailure, PhyChannelFrequencyInitOutcome,
+    PhyChannelFrequencyInitRequest, PhyChannelFrequencyInitTransition,
+};
 use crate::phy_param::{saturate_phy_value, PHY_PARAM_LEN};
 use crate::phy_pbus::{
     PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusClearOutcome, PhyPbusClearTransition,
@@ -1621,13 +1626,15 @@ impl Default for Sar2InitTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForChannelFrequencyInitialization {
+    ChannelFrequencyInitialized {
         bbpll_register_snapshot: u8,
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
         sar2_reinitialized: bool,
         xtal_duty: XtalDutyCalibrationOutcome,
+        channel_frequency: PhyChannelFrequencyInitOutcome,
     },
+    ChannelFrequencyInitializationFailed(PhyChannelFrequencyInitFailure),
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -1673,6 +1680,8 @@ pub enum PhyRfInitPrefixAction {
     CaptureXtalDutyParameters,
     XtalDuty(XtalDutyCalibrationAction),
     ConfigureFrontEndRegisterUpdate,
+    CaptureChannelFrequencyControl,
+    ChannelFrequency(PhyChannelFrequencyInitAction),
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -1706,6 +1715,8 @@ pub enum PhyRfInitPrefixCompletion {
     XtalDutyParametersCaptured(XtalDutyCalibrationParameters),
     XtalDuty(XtalDutyCalibrationCompletion),
     FrontEndRegisterUpdateConfigured,
+    ChannelFrequencyControlCaptured(PhyChannelFrequencyInitControl),
+    ChannelFrequency(PhyChannelFrequencyInitCompletion),
     DelayElapsed,
 }
 
@@ -1800,12 +1811,30 @@ enum PhyRfInitPrefixStep {
     },
     XtalDuty {
         transition: XtalDutyCalibrationTransition,
+        xtal_parameters: XtalDutyCalibrationParameters,
         bbpll_register_snapshot: u8,
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
         sar2_reinitialized: bool,
     },
     FrontEndRegisterUpdate {
+        xtal_parameters: XtalDutyCalibrationParameters,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+        xtal_duty: XtalDutyCalibrationOutcome,
+    },
+    ChannelFrequencyControl {
+        xtal_parameters: XtalDutyCalibrationParameters,
+        bbpll_register_snapshot: u8,
+        parameter: PhyRfInitParameterSnapshot,
+        rfpll_lock_observed: bool,
+        sar2_reinitialized: bool,
+        xtal_duty: XtalDutyCalibrationOutcome,
+    },
+    ChannelFrequency {
+        transition: PhyChannelFrequencyInitTransition,
         bbpll_register_snapshot: u8,
         parameter: PhyRfInitParameterSnapshot,
         rfpll_lock_observed: bool,
@@ -1974,10 +2003,7 @@ impl PhyRfInitPrefixTransition {
             PhyRfInitPrefixStep::XtalDutyParameters { .. } => {
                 PhyRfInitPrefixAction::CaptureXtalDutyParameters
             }
-            PhyRfInitPrefixStep::XtalDuty {
-                transition,
-                ..
-            } => match transition.action() {
+            PhyRfInitPrefixStep::XtalDuty { transition, .. } => match transition.action() {
                 XtalDutyCalibrationAction::Complete(_) => {
                     PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate
                 }
@@ -1985,6 +2011,12 @@ impl PhyRfInitPrefixTransition {
             },
             PhyRfInitPrefixStep::FrontEndRegisterUpdate { .. } => {
                 PhyRfInitPrefixAction::ConfigureFrontEndRegisterUpdate
+            }
+            PhyRfInitPrefixStep::ChannelFrequencyControl { .. } => {
+                PhyRfInitPrefixAction::CaptureChannelFrequencyControl
+            }
+            PhyRfInitPrefixStep::ChannelFrequency { transition, .. } => {
+                PhyRfInitPrefixAction::ChannelFrequency(transition.action())
             }
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
@@ -2374,6 +2406,7 @@ impl PhyRfInitPrefixTransition {
                 PhyRfInitPrefixCompletion::XtalDutyParametersCaptured(xtal_parameters),
             ) => PhyRfInitPrefixStep::XtalDuty {
                 transition: XtalDutyCalibrationTransition::new(xtal_parameters),
+                xtal_parameters,
                 bbpll_register_snapshot,
                 parameter,
                 rfpll_lock_observed,
@@ -2382,6 +2415,7 @@ impl PhyRfInitPrefixTransition {
             (
                 PhyRfInitPrefixStep::XtalDuty {
                     mut transition,
+                    xtal_parameters,
                     bbpll_register_snapshot,
                     parameter,
                     rfpll_lock_observed,
@@ -2395,6 +2429,7 @@ impl PhyRfInitPrefixTransition {
                 match transition.action() {
                     XtalDutyCalibrationAction::Complete(xtal_duty) => {
                         PhyRfInitPrefixStep::FrontEndRegisterUpdate {
+                            xtal_parameters,
                             bbpll_register_snapshot,
                             parameter,
                             rfpll_lock_observed,
@@ -2404,6 +2439,7 @@ impl PhyRfInitPrefixTransition {
                     }
                     _ => PhyRfInitPrefixStep::XtalDuty {
                         transition,
+                        xtal_parameters,
                         bbpll_register_snapshot,
                         parameter,
                         rfpll_lock_observed,
@@ -2413,6 +2449,7 @@ impl PhyRfInitPrefixTransition {
             }
             (
                 PhyRfInitPrefixStep::FrontEndRegisterUpdate {
+                    xtal_parameters,
                     bbpll_register_snapshot,
                     parameter,
                     rfpll_lock_observed,
@@ -2420,15 +2457,84 @@ impl PhyRfInitPrefixTransition {
                     xtal_duty,
                 },
                 PhyRfInitPrefixCompletion::FrontEndRegisterUpdateConfigured,
-            ) => PhyRfInitPrefixStep::Complete(
-                PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
+            ) => PhyRfInitPrefixStep::ChannelFrequencyControl {
+                xtal_parameters,
+                bbpll_register_snapshot,
+                parameter,
+                rfpll_lock_observed,
+                sar2_reinitialized,
+                xtal_duty,
+            },
+            (
+                PhyRfInitPrefixStep::ChannelFrequencyControl {
+                    xtal_parameters,
                     bbpll_register_snapshot,
                     parameter,
                     rfpll_lock_observed,
                     sar2_reinitialized,
                     xtal_duty,
                 },
-            ),
+                PhyRfInitPrefixCompletion::ChannelFrequencyControlCaptured(control),
+            ) => PhyRfInitPrefixStep::ChannelFrequency {
+                transition: PhyChannelFrequencyInitTransition::new(
+                    PhyChannelFrequencyInitRequest {
+                        frequency_register_parameter_override: control
+                            .frequency_register_parameter_override,
+                        frequency_table_initialized: control.frequency_table_initialized,
+                        crystal_selector: xtal_parameters.rf_frequency_offset_base,
+                        middle_xtal_duty: xtal_duty.low_frequency.best_candidate,
+                        outer_xtal_duty: xtal_duty.high_frequency.best_candidate,
+                        front_end_parameter_bit: control.front_end_parameter_bit,
+                    },
+                ),
+                bbpll_register_snapshot,
+                parameter,
+                rfpll_lock_observed,
+                sar2_reinitialized,
+                xtal_duty,
+            },
+            (
+                PhyRfInitPrefixStep::ChannelFrequency {
+                    mut transition,
+                    bbpll_register_snapshot,
+                    parameter,
+                    rfpll_lock_observed,
+                    sar2_reinitialized,
+                    xtal_duty,
+                },
+                PhyRfInitPrefixCompletion::ChannelFrequency(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    PhyChannelFrequencyInitAction::Complete(channel_frequency) => {
+                        PhyRfInitPrefixStep::Complete(
+                            PhyRfInitPrefixOutcome::ChannelFrequencyInitialized {
+                                bbpll_register_snapshot,
+                                parameter,
+                                rfpll_lock_observed,
+                                sar2_reinitialized,
+                                xtal_duty,
+                                channel_frequency,
+                            },
+                        )
+                    }
+                    PhyChannelFrequencyInitAction::Failed(failure) => {
+                        PhyRfInitPrefixStep::Complete(
+                            PhyRfInitPrefixOutcome::ChannelFrequencyInitializationFailed(failure),
+                        )
+                    }
+                    _ => PhyRfInitPrefixStep::ChannelFrequency {
+                        transition,
+                        bbpll_register_snapshot,
+                        parameter,
+                        rfpll_lock_observed,
+                        sar2_reinitialized,
+                        xtal_duty,
+                    },
+                }
+            }
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
             }
@@ -2611,15 +2717,18 @@ mod tests {
         OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitParameterSnapshot,
         PhyRfInitPrefixAction, PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome,
         PhyRfInitPrefixStep, PhyRfInitPrefixTransition, PhyRfInitPrefixTransitionError,
-        RcCalibrationAction,
-        RcCalibrationCompletion, RcCalibrationSetAction, RcCalibrationSetCompletion,
-        RcCalibrationSetTransition, RcCalibrationTransition, RcCalibrationTransitionError,
-        RfpllChargePumpAction, RfpllChargePumpCompletion, RfpllChargePumpOutcome,
-        RfpllChargePumpTransition, Sar2InitAction, Sar2InitCompletion, Sar2InitTransition,
-        PHY_I2C_MASTER_COMMAND_COUNT,
+        RcCalibrationAction, RcCalibrationCompletion, RcCalibrationSetAction,
+        RcCalibrationSetCompletion, RcCalibrationSetTransition, RcCalibrationTransition,
+        RcCalibrationTransitionError, RfpllChargePumpAction, RfpllChargePumpCompletion,
+        RfpllChargePumpOutcome, RfpllChargePumpTransition, Sar2InitAction, Sar2InitCompletion,
+        Sar2InitTransition, PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_dc_iq::{
         PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
+    };
+    use crate::phy_frequency::{
+        PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion,
+        PhyChannelFrequencyInitControl, PhyFrequencyI2cAction, PhyFrequencyI2cCompletion,
     };
     use crate::phy_param::PHY_PARAM_LEN;
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
@@ -2825,10 +2934,7 @@ mod tests {
     ) -> XtalDutyPrepareCompletion {
         match action {
             XtalDutyPrepareAction::Rfpll(action) => {
-                XtalDutyPrepareCompletion::Rfpll(complete_rfpll(
-                    action,
-                    rfpll_cap_status_reads,
-                ))
+                XtalDutyPrepareCompletion::Rfpll(complete_rfpll(action, rfpll_cap_status_reads))
             }
             XtalDutyPrepareAction::ConfigureCalibrationTone {
                 enabled,
@@ -3027,13 +3133,70 @@ mod tests {
                     panic!("front-end update action without its owned step");
                 }
                 PhyRfInitPrefixAction::Complete(
-                    PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
-                        xtal_duty,
-                        ..
-                    },
+                    PhyRfInitPrefixOutcome::ChannelFrequencyInitialized { xtal_duty, .. },
                 ) => return xtal_duty,
                 action => panic!("unexpected RF-init crystal-duty action: {action:?}"),
             }
+        }
+    }
+
+    fn drive_warm_channel_frequency(transition: &mut PhyRfInitPrefixTransition) {
+        loop {
+            let completion = match transition.action() {
+                PhyRfInitPrefixAction::ChannelFrequency(
+                    PhyChannelFrequencyInitAction::ConfigureFrequencyRegisters {
+                        parameter_override,
+                    },
+                ) => PhyChannelFrequencyInitCompletion::FrequencyRegistersConfigured {
+                    parameter_override,
+                },
+                PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
+                    action,
+                )) => {
+                    let completion = match action {
+                        PhyFrequencyI2cAction::WriteMasked {
+                            address,
+                            high_bit,
+                            low_bit,
+                            ..
+                        } => PhyFrequencyI2cCompletion::MaskedWrite {
+                            address,
+                            high_bit,
+                            low_bit,
+                        },
+                        PhyFrequencyI2cAction::ReadByte { address } => {
+                            let value = if address == PhyI2cAddress::new(0x62, 0x0b).unwrap() {
+                                0x5a
+                            } else if address == PhyI2cAddress::new(0x63, 0).unwrap() {
+                                0x8f
+                            } else {
+                                0x10
+                            };
+                            PhyFrequencyI2cCompletion::ByteRead { address, value }
+                        }
+                        PhyFrequencyI2cAction::WriteMemory {
+                            descriptor_index,
+                            copy_index,
+                            address,
+                            ..
+                        } => PhyFrequencyI2cCompletion::MemoryWrite {
+                            descriptor_index,
+                            copy_index,
+                            address,
+                        },
+                        PhyFrequencyI2cAction::ConfigureNumberAddresses(image) => {
+                            PhyFrequencyI2cCompletion::NumberAddressesConfigured(image)
+                        }
+                        action => panic!("unexpected terminal frequency-I2C action: {action:?}"),
+                    };
+                    PhyChannelFrequencyInitCompletion::I2c(completion)
+                }
+                PhyRfInitPrefixAction::Complete(_) => return,
+                action => panic!("unexpected warm channel-frequency action: {action:?}"),
+            };
+            transition
+                .advance(PhyRfInitPrefixCompletion::ChannelFrequency(completion))
+                .unwrap();
         }
     }
 
@@ -4262,16 +4425,37 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(
-                PhyRfInitPrefixOutcome::ReadyForChannelFrequencyInitialization {
-                    bbpll_register_snapshot: 0xa3,
-                    parameter: final_parameter,
-                    rfpll_lock_observed: true,
-                    sar2_reinitialized: true,
-                    xtal_duty,
-                }
-            )
+            PhyRfInitPrefixAction::CaptureChannelFrequencyControl
         );
+        transition
+            .advance(PhyRfInitPrefixCompletion::ChannelFrequencyControlCaptured(
+                PhyChannelFrequencyInitControl {
+                    frequency_register_parameter_override: false,
+                    frequency_table_initialized: true,
+                    front_end_parameter_bit: false,
+                },
+            ))
+            .unwrap();
+        drive_warm_channel_frequency(&mut transition);
+        let PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ChannelFrequencyInitialized {
+            bbpll_register_snapshot,
+            parameter,
+            rfpll_lock_observed,
+            sar2_reinitialized,
+            xtal_duty: completed_xtal_duty,
+            channel_frequency,
+        }) = transition.action()
+        else {
+            panic!("RF init did not complete channel-frequency initialization");
+        };
+        assert_eq!(bbpll_register_snapshot, 0xa3);
+        assert_eq!(parameter, final_parameter);
+        assert!(rfpll_lock_observed);
+        assert!(sar2_reinitialized);
+        assert_eq!(completed_xtal_duty, xtal_duty);
+        assert!(channel_frequency.table_was_initialized);
+        assert!(channel_frequency.table_is_initialized);
+        assert_eq!(channel_frequency.calibration, None);
     }
 
     #[test]

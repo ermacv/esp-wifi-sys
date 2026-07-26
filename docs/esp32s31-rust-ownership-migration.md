@@ -1629,13 +1629,10 @@ It then returns. The ROM variant has an additional
 `phy_dac_scale_set(1)` tail-call which is not present in this pinned cold-init
 path and is therefore not invented in Rust.
 
-The serial runtime suite passes 375 tests. `phy_freq_reg_init()` belongs to
-`phy_wakeup_init` and operation twenty-six
+`phy_freq_reg_init()` belongs to `phy_wakeup_init` and operation twenty-six
 `phy_set_chan_freq_hw_init(2, 4)`, not the earlier crystal-duty point. The
-prefix now exposes `ReadyForChannelFrequencyInitialization` only after the
-front-end update completion edge. It remains dead-stripped and does not
-replace any part of the live parent until the final composite operation 26
-has an equivalent owned transition.
+prefix therefore enters the channel-frequency transition only after the
+front-end update completion edge.
 
 Operation twenty-six is now decomposed from pinned
 `libphy.a[phy_hw_freq.o]` and the exact ROM ELF. Its parent calls
@@ -1657,10 +1654,47 @@ identity-bound action.
 ROM `phy_freq_i2c_mem_write` is also a complete Rust MMIO leaf: it replaces
 the eleven-bit address at `0x2010001c`, writes the caller-owned mode/data word
 at `0x2010002c`, then produces the exact bit-20 write pulse. It has no wait or
-busy observation. The remaining part of operation 26 is now narrow and
-named: compose the three RFPLL calibration points around this table
-transition, then replace the final eleven-entry
-`phy_freq_i2c_data_write(1)` packing/publication graph.
+busy observation.
+
+The final `phy_freq_i2c_data_write(1)` graph is now Rust-owned too. Its exact
+eleven descriptors are generated on demand from three explicitly completed
+PHY-I2C snapshots and the former `phy_param[0x1af]` bit. Descriptor kind zero
+expands to three frequency-memory writes, kind one to one mode-seven write,
+and the remaining kinds to one mode-three write. Rust then packs the eleven
+derived number-addresses into the exact register image at
+`0x20100030..=0x2010003c`. The corresponding MMIO leaf is one finite
+read/modify/write plus three stores.
+
+`PhyChannelFrequencyInitTransition` now composes the entire pinned operation:
+the five-register setup, initial capacitor value, RFPLL points `0x985`,
+`0x960`, and `0x9a0`, the 85-entry table, and the final descriptor graph.
+Every RFPLL delay and observation remains an external completion. The two
+redundant vendor capacitor reads after the low and high RFPLL calls are not
+repeated: the child transition already owns those exact final values. The
+former `phy_param[0xa4] & 0x20` initialized flag is an explicit Rust-owned
+boolean. Its warm branch skips table calibration but still refreshes the
+descriptor graph, matching the archive parent.
+
+`PhyRfInitPrefixTransition` no longer terminates at
+`ReadyForChannelFrequencyInitialization`. It retains the captured crystal
+selector and passes the two owned crystal-duty calibration winners directly
+as the frequency table's middle and outer duty values. It requests only the
+three remaining explicit control fields: register-mode override, table
+initialized state, and front-end descriptor bit. Its success outcome now
+contains the complete channel-frequency result; an RFPLL deadline is a typed
+terminal failure.
+
+The exact analysis sources are
+`esp32s31_rev0_rom.elf` SHA-256
+`a52ad7513deb656a910a5740125f1cce2c7941f11ce57213b7b43aea93d5ab87`
+and `libphy.a` SHA-256
+`51497819736295c9b33d6775495dade4c6fb39db887edfe095608c670d9ae223`.
+They are analysis oracles only and are not linked into firmware. Host tests
+cover cold and warm aggregate paths, all 255 table publications, both dynamic
+tail descriptor kinds, exact number-address packing, and out-of-order
+completion rejection. The aggregate remains preparatory and dead-stripped
+from the qualified hardware image until the Rust cold-init executor replaces
+the live `register_chipv7_phy` parent.
 
 ## In-progress slice: `g_ic`
 

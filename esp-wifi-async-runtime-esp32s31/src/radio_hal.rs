@@ -104,6 +104,10 @@ const PHY_FREQUENCY_CONTROL_ADDRESS: usize = 0x2010_001c;
 const PHY_FREQUENCY_PARAMETER_0_ADDRESS: usize = 0x2010_0024;
 const PHY_FREQUENCY_PARAMETER_1_ADDRESS: usize = 0x2010_0028;
 const PHY_FREQUENCY_MEMORY_DATA_ADDRESS: usize = 0x2010_002c;
+const PHY_FREQUENCY_I2C_NUMBER_CONTROL_ADDRESS: usize = 0x2010_0030;
+const PHY_FREQUENCY_I2C_NUMBER_WORD_0_ADDRESS: usize = 0x2010_0034;
+const PHY_FREQUENCY_I2C_NUMBER_WORD_1_ADDRESS: usize = 0x2010_0038;
+const PHY_FREQUENCY_I2C_NUMBER_WORD_2_ADDRESS: usize = 0x2010_003c;
 const PHY_TEMPERATURE_SENSOR_POWER_ADDRESS: usize = 0x2081_8000;
 const PHY_TEMPERATURE_SENSOR_CONTROL_ADDRESS: usize = 0x2081_8018;
 const PHY_TEMPERATURE_SENSOR_SYSTEM_CONTROL_ADDRESS: usize = 0x2071_0030;
@@ -289,12 +293,7 @@ const fn with_restored_phy_rx_dco_control_field(value: u32, saved_field: u32) ->
     without_phy_rx_dco_control_field(value) | (saved_field & 0x00c0_0000)
 }
 
-const fn with_phy_tone_path(
-    value: u32,
-    enable: i32,
-    selector: i32,
-    step: i32,
-) -> u32 {
+const fn with_phy_tone_path(value: u32, enable: i32, selector: i32, step: i32) -> u32 {
     let encoded = (enable as u32).wrapping_shl(18)
         | ((selector >> 2) as u32)
         | ((step.wrapping_neg() as u32) & 0xff).wrapping_shl(10);
@@ -437,6 +436,10 @@ const fn with_phy_frequency_register_mode(value: u32, parameter_override: bool) 
 
 const fn with_phy_frequency_memory_address(value: u32, address: u16) -> u32 {
     (value & 0xfff8_00ff) | ((address as u32 & 0x7ff) << 8)
+}
+
+const fn with_phy_frequency_i2c_number_control(value: u32, control_field: u32) -> u32 {
+    (value & 0xfffc_00ff) | (control_field & 0x0003_ff00)
 }
 
 const fn without_register_bits(value: u32, bits: u32) -> u32 {
@@ -1007,11 +1010,7 @@ pub(crate) unsafe fn configure_phy_rx_clock(enabled: bool) {
 /// write is retained because the registers are hardware state. There is no
 /// callback, loop, wait, allocation, or software-global access.
 #[cfg(target_arch = "riscv32")]
-pub(crate) unsafe fn configure_phy_calibration_tone(
-    enabled: bool,
-    selector: u8,
-    step: u8,
-) {
+pub(crate) unsafe fn configure_phy_calibration_tone(enabled: bool, selector: u8, step: u8) {
     let compensation = PHY_TX_GAIN_COMPENSATION_CONTROL_ADDRESS as *mut u32;
     let compensation_aux = PHY_TX_GAIN_COMPENSATION_AUX_ADDRESS as *mut u32;
 
@@ -1024,10 +1023,7 @@ pub(crate) unsafe fn configure_phy_calibration_tone(
         selectors.read_volatile(),
         i32::from(selector),
     ));
-    selectors.write_volatile(with_phy_tone_path1_selector(
-        selectors.read_volatile(),
-        0,
-    ));
+    selectors.write_volatile(with_phy_tone_path1_selector(selectors.read_volatile(), 0));
 
     let path0 = PHY_TONE_PATH0_CONTROL_ADDRESS as *mut u32;
     path0.write_volatile(with_phy_tone_path(
@@ -1319,9 +1315,7 @@ pub(crate) unsafe fn configure_phy_front_end_update() {
 #[cfg(target_arch = "riscv32")]
 pub(crate) unsafe fn configure_phy_frequency_registers(parameter_override: bool) {
     let control = PHY_FREQUENCY_CONTROL_ADDRESS as *mut u32;
-    control.write_volatile(without_phy_frequency_reset_fields(
-        control.read_volatile(),
-    ));
+    control.write_volatile(without_phy_frequency_reset_fields(control.read_volatile()));
     control.write_volatile(with_phy_frequency_module_enabled(control.read_volatile()));
     control.write_volatile(with_phy_frequency_register_mode(
         control.read_volatile(),
@@ -1343,13 +1337,30 @@ pub(crate) unsafe fn write_phy_frequency_memory(address: u16, value: u32, mode: 
         control.read_volatile(),
         address,
     ));
-    (PHY_FREQUENCY_MEMORY_DATA_ADDRESS as *mut u32)
-        .write_volatile((u32::from(mode) << 24) | value);
+    (PHY_FREQUENCY_MEMORY_DATA_ADDRESS as *mut u32).write_volatile((u32::from(mode) << 24) | value);
     control.write_volatile(with_register_bits(control.read_volatile(), 0x0010_0000));
-    control.write_volatile(without_register_bits(
+    control.write_volatile(without_register_bits(control.read_volatile(), 0x0010_0000));
+}
+
+/// Publish the complete rev0 ROM `phy_freq_i2c_num_addr` register image.
+///
+/// `control_field` and `words` are prepared by the safe Rust transition from
+/// its eleven owned descriptor number-addresses. This finite leaf performs
+/// one read-modify-write and three stores; it has no wait, callback, or hidden
+/// software-state access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_frequency_i2c_number_addresses(
+    control_field: u32,
+    words: [u32; 3],
+) {
+    let control = PHY_FREQUENCY_I2C_NUMBER_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_frequency_i2c_number_control(
         control.read_volatile(),
-        0x0010_0000,
+        control_field,
     ));
+    (PHY_FREQUENCY_I2C_NUMBER_WORD_0_ADDRESS as *mut u32).write_volatile(words[0]);
+    (PHY_FREQUENCY_I2C_NUMBER_WORD_1_ADDRESS as *mut u32).write_volatile(words[1]);
+    (PHY_FREQUENCY_I2C_NUMBER_WORD_2_ADDRESS as *mut u32).write_volatile(words[2]);
 }
 
 /// Apply complete vendor `phy_tsens_read_init` and its ROM tail leaf.
@@ -1530,28 +1541,27 @@ mod tests {
         with_bbpll_calibration, with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_adc_rate_high, with_phy_adc_rate_low, with_phy_agc_control, with_phy_agc_window,
-        with_phy_fe_txrx_reset, with_phy_ftm_enable, with_phy_gain_memory_index,
-        with_phy_i2c_clock_selection_high, with_phy_i2c_clock_selection_low,
-        with_phy_i2c_master_register_enable, with_phy_i2c_master_register_mode,
-        with_phy_iq_est_config, with_phy_iq_est_control, with_phy_iq_est_enable,
-        with_phy_iq_est_mode, with_phy_pbus_debug_control, with_phy_pbus_debug_mode,
-        with_phy_pbus_force_test, with_phy_pbus_work_control, with_phy_pbus_work_mode,
-        with_phy_pbus_work_mode_pulse, with_phy_pbus_work_mode_pulse_setup,
-        with_phy_power_detector_aux_mode, with_phy_power_detector_high_field,
-        with_phy_power_detector_low_field, with_phy_rx_clock, with_phy_rx_comp_high,
-        with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low,
-        with_phy_tone_path, with_phy_tone_path0_selector, with_phy_tone_path1_selector,
-        with_phy_tx_clock, with_phy_tx_gain_compensation_byte1,
-        with_phy_tx_gain_compensation_byte2, without_phy_tx_gain_compensation_high_byte,
-        without_phy_tx_gain_compensation_low_byte,
+        with_phy_fe_txrx_reset, with_phy_frequency_i2c_number_control,
         with_phy_frequency_memory_address, with_phy_frequency_module_enabled,
         with_phy_frequency_register_mode, with_phy_front_end_adc_update,
-        with_phy_front_end_update_first, with_phy_front_end_update_second, with_register_bits,
-        with_register_field, with_restored_phy_rx_dco_control_field,
-        with_tx_cca, with_wifi_mac_regdma_link, without_fe_bb_clock_enable,
-        without_mac_tx_retention, without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse,
-        without_phy_frequency_reset_fields,
-        without_phy_rx_dco_control_field, without_register_bits, without_tx_queue_enable,
+        with_phy_front_end_update_first, with_phy_front_end_update_second, with_phy_ftm_enable,
+        with_phy_gain_memory_index, with_phy_i2c_clock_selection_high,
+        with_phy_i2c_clock_selection_low, with_phy_i2c_master_register_enable,
+        with_phy_i2c_master_register_mode, with_phy_iq_est_config, with_phy_iq_est_control,
+        with_phy_iq_est_enable, with_phy_iq_est_mode, with_phy_pbus_debug_control,
+        with_phy_pbus_debug_mode, with_phy_pbus_force_test, with_phy_pbus_work_control,
+        with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
+        with_phy_pbus_work_mode_pulse_setup, with_phy_power_detector_aux_mode,
+        with_phy_power_detector_high_field, with_phy_power_detector_low_field, with_phy_rx_clock,
+        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
+        with_phy_rx_control_low, with_phy_tone_path, with_phy_tone_path0_selector,
+        with_phy_tone_path1_selector, with_phy_tx_clock, with_phy_tx_gain_compensation_byte1,
+        with_phy_tx_gain_compensation_byte2, with_register_bits, with_register_field,
+        with_restored_phy_rx_dco_control_field, with_tx_cca, with_wifi_mac_regdma_link,
+        without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_fe_txrx_reset,
+        without_phy_frequency_reset_fields, without_phy_pbus_work_mode_pulse,
+        without_phy_rx_dco_control_field, without_phy_tx_gain_compensation_high_byte,
+        without_phy_tx_gain_compensation_low_byte, without_register_bits, without_tx_queue_enable,
         without_tx_queue_valid, PHY_IQ_EST_MEASUREMENT_BIT, PHY_IQ_EST_START_BIT,
         WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
@@ -1710,14 +1720,8 @@ mod tests {
         assert_eq!(with_phy_tone_path0_selector(u32::MAX, 0x80), 0xffff_fffc);
         assert_eq!(with_phy_tone_path1_selector(u32::MAX, 0), 0xffff_fff3);
 
-        assert_eq!(
-            with_phy_tone_path(0xa000_0000, 1, 0x80, 0),
-            0xa004_0020
-        );
-        assert_eq!(
-            with_phy_tone_path(0xa000_0000, 0, 0x80, 0x28),
-            0xa003_6020
-        );
+        assert_eq!(with_phy_tone_path(0xa000_0000, 1, 0x80, 0), 0xa004_0020);
+        assert_eq!(with_phy_tone_path(0xa000_0000, 0, 0x80, 0x28), 0xa003_6020);
         assert_eq!(with_phy_tone_path(0xbfff_ffff, 0, 0, 0), 0xb000_0000);
     }
 
@@ -1827,10 +1831,7 @@ mod tests {
     fn phy_frequency_register_init_preserves_both_exact_rom_modes() {
         let initial = 0x9abc_def0;
         assert_eq!(without_phy_frequency_reset_fields(initial), 0x1ab4_def0);
-        assert_eq!(
-            with_phy_frequency_module_enabled(0x1ab4_def0),
-            0x5ab4_def0
-        );
+        assert_eq!(with_phy_frequency_module_enabled(0x1ab4_def0), 0x5ab4_def0);
         assert_eq!(
             with_phy_frequency_register_mode(0xffff_ffff, false),
             0xd0bf_ffff
@@ -1849,6 +1850,18 @@ mod tests {
         );
         assert_eq!(
             with_phy_frequency_memory_address(0xffff_ffff, 0xffff),
+            0xffff_ffff
+        );
+    }
+
+    #[test]
+    fn phy_frequency_i2c_number_control_replaces_only_the_ten_bit_field() {
+        assert_eq!(
+            with_phy_frequency_i2c_number_control(0xa5fc_00a5, 0x0000_a400),
+            0xa5fc_a4a5
+        );
+        assert_eq!(
+            with_phy_frequency_i2c_number_control(0xffff_ffff, u32::MAX),
             0xffff_ffff
         );
     }
