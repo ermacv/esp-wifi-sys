@@ -1,7 +1,7 @@
 # ESP32-S31 linked state and interposition audit
 
 - final ELF: `wifi-sta`
-- ELF SHA-256: `9b313a45f316be9f155aa0c5ea4524554ae8131aedbf10a42116349eb85acfc5`
+- ELF SHA-256: `57cae1dfa864abe2d146cdfc66ef3892b2e06e8e26a86589615dee95f34f2737`
 - strict vendor roots: 1
 - Rust boundaries retaining vendor fallback: 1
 - stateful or not-yet-proven runtime roots: 0
@@ -186,113 +186,113 @@ Pinned vendor objects may still load these public C data names. The final link p
 | `.critical.bss.wifi_strict.critical_callbacks` | `0x2f067b50` | 16 | `internal SRAM` |
 | `.critical.bss.wifi_strict.tx_block_ack` | `0x2f067b60` | 48 | `internal SRAM` |
 | `.bss.esp_wifi_async_net80211` | `0x2f067b90` | 33 | `internal SRAM` |
-| `.critical.text.wifi_strict.lmac_release_txop_queue` | `0x400de8da` | 38 | `flash-mapped` |
-| `.critical.text.wifi_strict.lmac_request_txop_queue` | `0x400de900` | 90 | `flash-mapped` |
+| `.critical.text.wifi_strict.lmac_release_txop_queue` | `0x400de90e` | 38 | `flash-mapped` |
+| `.critical.text.wifi_strict.lmac_request_txop_queue` | `0x400de934` | 90 | `flash-mapped` |
 
 ## Final-link interposition
 
 | boundary | replacement | mode | `__real_*` target |
 |---|---:|---|---|
-| `calloc` | `0x400c078e` | GNU `--wrap` boundary | - |
-| `chm_return_home_channel` | `0x400c019c` | GNU `--wrap` boundary | - |
-| `chm_start_op` | `0x400c00e6` | GNU `--wrap` boundary | - |
+| `calloc` | `0x400c078a` | GNU `--wrap` boundary | - |
+| `chm_return_home_channel` | `0x400c0198` | GNU `--wrap` boundary | - |
+| `chm_start_op` | `0x400c00e2` | GNU `--wrap` boundary | - |
 | `cnx_add_to_blacklist` | `0x2f00552e` | retained replacement only | - |
 | `cnx_check_bssid_in_blacklist` | `0x2f00552a` | retained replacement only | - |
 | `cnx_clear_blacklist` | `0x2f005530` | retained replacement only | - |
-| `cnx_node_alloc` | `0x400cec04` | GNU `--wrap` boundary | - |
-| `cnx_node_search` | `0x400ced56` | retained replacement only | - |
+| `cnx_node_alloc` | `0x400cec00` | GNU `--wrap` boundary | - |
+| `cnx_node_search` | `0x400ced52` | retained replacement only | - |
 | `cnx_remove_from_blacklist` | `0x2f00552e` | retained replacement only | - |
-| `dbg_dump_rx_ppdu` | `0x400c1be6` | retained replacement only | - |
-| `dbg_dump_rx_sigb` | `0x400c1be8` | retained replacement only | - |
-| `dbg_read_tx_ppdu` | `0x400c1be8` | retained replacement only | - |
+| `dbg_dump_rx_ppdu` | `0x400c1be2` | retained replacement only | - |
+| `dbg_dump_rx_sigb` | `0x400c1be4` | retained replacement only | - |
+| `dbg_read_tx_ppdu` | `0x400c1be4` | retained replacement only | - |
 | `esf_buf_alloc` | `0x2f004518` | direct public alias | `0x2f800d1c` (ROM export) |
 | `esf_buf_recycle` | `0x2f00463e` | direct public alias | `0x2f800d24` (ROM export) |
-| `esp_test_rx_parse_mu` | `0x400c1be6` | direct public alias | `0x2f801178` (ROM export) |
-| `esp_test_rx_process_complete` | `0x400c1bf0` | direct public alias | `0x2f801158` (ROM export) |
-| `esp_test_tx_enab_statistics` | `0x400c1bec` | direct public alias | `0x2f801144` (ROM export) |
-| `esp_wifi_internal_reg_rxcb` | `0x400ced5e` | retained replacement only | - |
-| `esp_wifi_register_mgmt_frame_internal` | `0x400cedde` | retained replacement only | - |
-| `esp_wifi_set_config` | `0x400cee40` | retained replacement only | - |
-| `esp_wifi_set_country` | `0x400ceef8` | retained replacement only | - |
-| `esp_wifi_set_inactive_time` | `0x400cf138` | retained replacement only | - |
-| `esp_wifi_set_max_tx_power` | `0x400cf280` | retained replacement only | - |
-| `esp_wifi_set_mode` | `0x400cf31e` | retained replacement only | - |
-| `esp_wifi_set_promiscuous` | `0x400cf376` | retained replacement only | - |
-| `esp_wifi_set_protocols` | `0x400cf3ea` | retained replacement only | - |
-| `esp_wifi_set_ps` | `0x400cf6c4` | retained replacement only | - |
-| `esp_wifi_stop` | `0x400cf732` | retained replacement only | - |
-| `ets_delay_us` | `0x400c0a48` | direct public alias | `0x2f80003c` (ROM export) |
-| `free` | `0x400c09d8` | GNU `--wrap` boundary | - |
-| `hal_crypto_set_key_entry` | `0x400c12e6` | retained replacement only | - |
+| `esp_test_rx_parse_mu` | `0x400c1be2` | direct public alias | `0x2f801178` (ROM export) |
+| `esp_test_rx_process_complete` | `0x400c1bec` | direct public alias | `0x2f801158` (ROM export) |
+| `esp_test_tx_enab_statistics` | `0x400c1be8` | direct public alias | `0x2f801144` (ROM export) |
+| `esp_wifi_internal_reg_rxcb` | `0x400ced5a` | retained replacement only | - |
+| `esp_wifi_register_mgmt_frame_internal` | `0x400cedda` | retained replacement only | - |
+| `esp_wifi_set_config` | `0x400cee3c` | retained replacement only | - |
+| `esp_wifi_set_country` | `0x400ceef4` | retained replacement only | - |
+| `esp_wifi_set_inactive_time` | `0x400cf134` | retained replacement only | - |
+| `esp_wifi_set_max_tx_power` | `0x400cf27c` | retained replacement only | - |
+| `esp_wifi_set_mode` | `0x400cf31a` | retained replacement only | - |
+| `esp_wifi_set_promiscuous` | `0x400cf372` | retained replacement only | - |
+| `esp_wifi_set_protocols` | `0x400cf3e6` | retained replacement only | - |
+| `esp_wifi_set_ps` | `0x400cf6c0` | retained replacement only | - |
+| `esp_wifi_stop` | `0x400cf72e` | retained replacement only | - |
+| `ets_delay_us` | `0x400c0a44` | direct public alias | `0x2f80003c` (ROM export) |
+| `free` | `0x400c09d4` | GNU `--wrap` boundary | - |
+| `hal_crypto_set_key_entry` | `0x400c12e2` | retained replacement only | - |
 | `hal_mac_get_txq_complete` | `0x2f005340` | direct public alias | `0x2f800d44` (ROM export) |
-| `hal_mac_get_txq_state` | `0x400c0b3e` | direct public alias | `0x2f800d3c` (ROM export) |
-| `ic_get_next_tbtt` | `0x400c0e48` | retained replacement only | - |
-| `ieee80211_classify` | `0x400bfcf6` | GNU `--wrap` boundary | - |
-| `ieee80211_hostapd_beacon_txcb` | `0x400c0bb4` | GNU `--wrap` boundary | - |
-| `ieee80211_mgmt_output` | `0x400c0224` | GNU `--wrap` boundary | - |
-| `ieee80211_search_node` | `0x400cf774` | direct public alias | `0x2f800ca8` (ROM export) |
-| `ieee80211_set_tx_pti` | `0x400c043e` | direct public alias | `0x2f800cb8` (ROM export) |
-| `ieee80211_timer_process` | `0x400bff90` | GNU `--wrap` boundary | - |
-| `ieee80211_tx_mgt_cb` | `0x400c0d0c` | retained replacement only | - |
+| `hal_mac_get_txq_state` | `0x400c0b3a` | direct public alias | `0x2f800d3c` (ROM export) |
+| `ic_get_next_tbtt` | `0x400c0e44` | retained replacement only | - |
+| `ieee80211_classify` | `0x400bfcf2` | GNU `--wrap` boundary | - |
+| `ieee80211_hostapd_beacon_txcb` | `0x400c0bb0` | GNU `--wrap` boundary | - |
+| `ieee80211_mgmt_output` | `0x400c0220` | GNU `--wrap` boundary | - |
+| `ieee80211_search_node` | `0x400cf770` | direct public alias | `0x2f800ca8` (ROM export) |
+| `ieee80211_set_tx_pti` | `0x400c043a` | direct public alias | `0x2f800cb8` (ROM export) |
+| `ieee80211_timer_process` | `0x400bff8c` | GNU `--wrap` boundary | - |
+| `ieee80211_tx_mgt_cb` | `0x400c0d08` | retained replacement only | - |
 | `lmacTxDone` | `0x2f005492` | direct public alias | `0x2f800dec` (ROM export) |
-| `malloc` | `0x400c0638` | GNU `--wrap` boundary | - |
-| `misc_nvs_deinit` | `0x400cf87c` | retained replacement only | - |
-| `misc_nvs_init` | `0x400cf890` | retained replacement only | - |
-| `net80211_data_ptr_init` | `0x400cf8d6` | retained replacement only | - |
-| `os_sleep` | `0x400c0aca` | GNU `--wrap` boundary | - |
-| `pm_extend_tbtt_adaptive_attach` | `0x400cf998` | retained replacement only | - |
-| `pm_extend_tbtt_adaptive_deattach` | `0x400cf9f4` | retained replacement only | - |
-| `pm_funcs_deinit` | `0x400cfa2e` | retained replacement only | - |
-| `pm_funcs_init` | `0x400cfa3a` | retained replacement only | - |
-| `pm_on_beacon_rx` | `0x400c1c0a` | direct public alias | `0x2f800e98` (ROM export) |
+| `malloc` | `0x400c0634` | GNU `--wrap` boundary | - |
+| `misc_nvs_deinit` | `0x400cf878` | retained replacement only | - |
+| `misc_nvs_init` | `0x400cf88c` | retained replacement only | - |
+| `net80211_data_ptr_init` | `0x400cf8d2` | retained replacement only | - |
+| `os_sleep` | `0x400c0ac6` | GNU `--wrap` boundary | - |
+| `pm_extend_tbtt_adaptive_attach` | `0x400cf994` | retained replacement only | - |
+| `pm_extend_tbtt_adaptive_deattach` | `0x400cf9f0` | retained replacement only | - |
+| `pm_funcs_deinit` | `0x400cfa2a` | retained replacement only | - |
+| `pm_funcs_init` | `0x400cfa36` | retained replacement only | - |
+| `pm_on_beacon_rx` | `0x400c1c06` | direct public alias | `0x2f800e98` (ROM export) |
 | `pm_on_coex_schm_status_config` | `0x2f005854` | retained replacement only | - |
-| `pm_on_data_rx` | `0x400c1c0c` | direct public alias | `0x2f800e9c` (ROM export) |
-| `pm_on_data_tx` | `0x400c1c0e` | direct public alias | `0x2f800ea0` (ROM export) |
-| `pm_set_beacon_duration` | `0x400c1c10` | retained replacement only | - |
-| `pmksa_cache_deinit` | `0x400cfa72` | retained replacement only | - |
-| `pmksa_cache_init` | `0x400cfaa4` | retained replacement only | - |
+| `pm_on_data_rx` | `0x400c1c08` | direct public alias | `0x2f800e9c` (ROM export) |
+| `pm_on_data_tx` | `0x400c1c0a` | direct public alias | `0x2f800ea0` (ROM export) |
+| `pm_set_beacon_duration` | `0x400c1c0c` | retained replacement only | - |
+| `pmksa_cache_deinit` | `0x400cfa6e` | retained replacement only | - |
+| `pmksa_cache_init` | `0x400cfaa0` | retained replacement only | - |
 | `ppTxPkt` | `0x2f0088a6` | retained replacement only | - |
-| `pp_create_task` | `0x400cfbee` | retained replacement only | - |
-| `pp_delete_task` | `0x400cfc7c` | retained replacement only | - |
-| `pp_post` | `0x400bf964` | GNU `--wrap` boundary | - |
+| `pp_create_task` | `0x400cfbea` | retained replacement only | - |
+| `pp_delete_task` | `0x400cfc78` | retained replacement only | - |
+| `pp_post` | `0x400bf960` | GNU `--wrap` boundary | - |
 | `rcGetSched` | `0x2f0029ce` | retained replacement only | - |
-| `realloc` | `0x400c090e` | GNU `--wrap` boundary | - |
-| `sleep` | `0x400ba3da` | GNU `--wrap` boundary | - |
-| `sta_rx_cb` | `0x400ac704` | GNU `--wrap` boundary | - |
-| `trc_deinit` | `0x400cfd44` | retained replacement only | - |
-| `trc_init` | `0x400cfd8a` | retained replacement only | - |
-| `usleep` | `0x400ba436` | GNU `--wrap` boundary | - |
-| `vTaskDelay` | `0x400ba462` | GNU `--wrap` boundary | - |
+| `realloc` | `0x400c090a` | GNU `--wrap` boundary | - |
+| `sleep` | `0x400ba3e8` | GNU `--wrap` boundary | - |
+| `sta_rx_cb` | `0x400ac712` | GNU `--wrap` boundary | - |
+| `trc_deinit` | `0x400cfd40` | retained replacement only | - |
+| `trc_init` | `0x400cfd86` | retained replacement only | - |
+| `usleep` | `0x400ba444` | GNU `--wrap` boundary | - |
+| `vTaskDelay` | `0x400ba470` | GNU `--wrap` boundary | - |
 | `wDev_AppendRxBlocks` | `0x2f005874` | direct public alias | `0x2f8010c4` (ROM export) |
 | `wDev_IndicateCtrlFrame` | `0x2f005856` | GNU `--wrap` boundary | - |
-| `wDev_SnifferRxData` | `0x400c1c0e` | retained replacement only | - |
-| `wDev_ftm_set_t1t4` | `0x400c1c12` | retained replacement only | - |
-| `wDev_isNANPktInValidSlot` | `0x400c1c22` | GNU `--wrap` boundary | - |
-| `wDev_record_ftm_data` | `0x400c1bfa` | retained replacement only | - |
-| `wdev_csi_rx_process` | `0x400c1c0e` | retained replacement only | - |
-| `wdev_data_init` | `0x400cfeea` | retained replacement only | - |
-| `wifi_assert` | `0x400c1bf2` | retained replacement only | - |
-| `wifi_deinit_in_caller_task` | `0x400d00de` | retained replacement only | - |
-| `wifi_gpio_debug` | `0x400c1bea` | retained replacement only | - |
-| `wifi_init_in_caller_task` | `0x400d01c6` | retained replacement only | - |
-| `wifi_log` | `0x400c1c0e` | retained replacement only | - |
-| `wpa_ap_rx_eapol` | `0x400c12a4` | retained replacement only | - |
-| `wpa_sm_rx_eapol` | `0x400c1266` | retained replacement only | - |
+| `wDev_SnifferRxData` | `0x400c1c0a` | retained replacement only | - |
+| `wDev_ftm_set_t1t4` | `0x400c1c0e` | retained replacement only | - |
+| `wDev_isNANPktInValidSlot` | `0x400c1c1e` | GNU `--wrap` boundary | - |
+| `wDev_record_ftm_data` | `0x400c1bf6` | retained replacement only | - |
+| `wdev_csi_rx_process` | `0x400c1c0a` | retained replacement only | - |
+| `wdev_data_init` | `0x400cfee6` | retained replacement only | - |
+| `wifi_assert` | `0x400c1bee` | retained replacement only | - |
+| `wifi_deinit_in_caller_task` | `0x400d00da` | retained replacement only | - |
+| `wifi_gpio_debug` | `0x400c1be6` | retained replacement only | - |
+| `wifi_init_in_caller_task` | `0x400d01c2` | retained replacement only | - |
+| `wifi_log` | `0x400c1c0a` | retained replacement only | - |
+| `wpa_ap_rx_eapol` | `0x400c12a0` | retained replacement only | - |
+| `wpa_sm_rx_eapol` | `0x400c1262` | retained replacement only | - |
 | `wDev_DiscardFrame` | `0x2f0059d6` | direct public alias | `0x2f8010c8` (ROM export) |
 | `wDev_ProcessRxSucData` | `0x2f006074` | direct public alias | `0x2f8010f4` (ROM export) |
 | `ppRecycleRxPkt` | `0x2f004cb8` | direct public alias | `0x2f800f98` (ROM export) |
 | `esp_wifi_internal_free_rx_buffer` | `0x2f004e28` | direct public alias | - |
-| `esp_test_set_rx_error_occurs` | `0x400b6b70` | direct public alias | `0x2f801164` (ROM export) |
-| `rcUpdateTxDone` | `0x400c0ecc` | direct public alias | `0x2f80106c` (ROM export) |
-| `rcUpdateAckSnr` | `0x400c1db6` | direct public alias | `0x2f801064` (ROM export) |
-| `rcTxUpdatePer` | `0x400c1e06` | direct public alias | `0x2f801060` (ROM export) |
-| `trc_update_ifx_phy_mode` | `0x400d1ad4` | direct public alias | - |
-| `rcAttach` | `0x400d0fc0` | direct public alias | - |
-| `rcUpdatePhyMode` | `0x400d1026` | direct public alias | - |
-| `rc_get_default_sched` | `0x400d100a` | direct public alias | - |
-| `rc_get_G6M_sched` | `0x400d1018` | direct public alias | - |
-| `lmacRequestTxopQueue` | `0x400de900` | direct public alias | - |
-| `lmacReleaseTxopQueue` | `0x400de8da` | direct public alias | - |
+| `esp_test_set_rx_error_occurs` | `0x400b6b64` | direct public alias | `0x2f801164` (ROM export) |
+| `rcUpdateTxDone` | `0x400c0ec8` | direct public alias | `0x2f80106c` (ROM export) |
+| `rcUpdateAckSnr` | `0x400c1db2` | direct public alias | `0x2f801064` (ROM export) |
+| `rcTxUpdatePer` | `0x400c1e02` | direct public alias | `0x2f801060` (ROM export) |
+| `trc_update_ifx_phy_mode` | `0x400d1b08` | direct public alias | - |
+| `rcAttach` | `0x400d0ff4` | direct public alias | - |
+| `rcUpdatePhyMode` | `0x400d105a` | direct public alias | - |
+| `rc_get_default_sched` | `0x400d103e` | direct public alias | - |
+| `rc_get_G6M_sched` | `0x400d104c` | direct public alias | - |
+| `lmacRequestTxopQueue` | `0x400de934` | direct public alias | - |
+| `lmacReleaseTxopQueue` | `0x400de90e` | direct public alias | - |
 | `hal_get_tsf_time` | `0x2f008f24` | direct public alias | `0x2f82b9f8` (ROM export) |
 | `hal_mac_rx_get_last_dscr` | `0x2f008f64` | direct public alias | `0x2f8386a2` (ROM export) |
 | `hal_mac_tx_set_cca` | `0x2f008f9e` | direct public alias | - |
@@ -300,20 +300,21 @@ Pinned vendor objects may still load these public C data names. The final link p
 | `hal_mac_set_txq_invalid` | `0x2f008f84` | direct public alias | - |
 | `hal_mac_txq_disable` | `0x2f008fb6` | direct public alias | - |
 | `hal_mac_set_csi_cbw` | `0x2f008f82` | direct public alias | - |
-| `ic_set_mac` | `0x400d045e` | direct public alias | - |
-| `ic_set_rx_policy` | `0x400d04ae` | direct public alias | - |
-| `ic_set_rx_policy_ubssid_check` | `0x400d0540` | direct public alias | - |
-| `ieee80211_getmgtframe` | `0x400d0658` | direct public alias | - |
-| `ic_set_key` | `0x400d02fa` | direct public alias | - |
-| `ic_del_key` | `0x400d02b8` | direct public alias | - |
-| `wDev_Insert_KeyEntry` | `0x400d033c` | direct public alias | - |
-| `phy_set_rx_comp_new` | `0x2f009008` | direct public alias | - |
-| `phy_dc_mem_clr` | `0x2f008fec` | direct public alias | - |
-| `phy_set_tx_gain_mem_new` | `0x2f00902c` | direct public alias | - |
-| `ieee80211_post_hmac_tx` | `0x400d06d4` | direct public alias | `0x2f800cc0` (ROM export) |
-| `ieee80211_crypto_encap` | `0x400bfe7c` | direct public alias | `0x2f800cac` (ROM export) |
-| `ieee80211_align_eb` | `0x400d0578` | direct public alias | `0x2f800c7c` (ROM export) |
-| `ieee80211_set_tx_desc` | `0x400d07d0` | direct public alias | `0x2f800c98` (ROM export) |
+| `ic_set_mac` | `0x400d045a` | direct public alias | - |
+| `ic_set_rx_policy` | `0x400d04aa` | direct public alias | - |
+| `ic_set_rx_policy_ubssid_check` | `0x400d053c` | direct public alias | - |
+| `ieee80211_getmgtframe` | `0x400d0654` | direct public alias | - |
+| `ic_set_key` | `0x400d02f6` | direct public alias | - |
+| `ic_del_key` | `0x400d02b4` | direct public alias | - |
+| `wDev_Insert_KeyEntry` | `0x400d0338` | direct public alias | - |
+| `phy_set_rx_comp_new` | `0x2f009022` | direct public alias | - |
+| `phy_dc_mem_clr` | `0x2f009006` | direct public alias | - |
+| `phy_bbpll_cal` | `0x2f008fcc` | direct public alias | - |
+| `phy_set_tx_gain_mem_new` | `0x2f009046` | direct public alias | - |
+| `ieee80211_post_hmac_tx` | `0x400d06d0` | direct public alias | `0x2f800cc0` (ROM export) |
+| `ieee80211_crypto_encap` | `0x400bfe78` | direct public alias | `0x2f800cac` (ROM export) |
+| `ieee80211_align_eb` | `0x400d0574` | direct public alias | `0x2f800c7c` (ROM export) |
+| `ieee80211_set_tx_desc` | `0x400d07cc` | direct public alias | `0x2f800c98` (ROM export) |
 | `ppTxProtoProc` | `0x2f0029fc` | direct public alias | - |
 | `ppProcTxSecFrame` | `0x2f0029f4` | direct public alias | - |
 

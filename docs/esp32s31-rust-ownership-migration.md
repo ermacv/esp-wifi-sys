@@ -1250,6 +1250,71 @@ terminal. The complete 320-test suite passes serially. The target
 because the parent is not active, the new preparatory state machine is dead
 stripped and the qualified runtime/cold-state metrics do not change.
 
+The complete parent order is now recovered from pinned
+`libphy.a[phy_init.o]::phy_rf_init` rather than inferred from individual
+symbols. Its 26 operations are:
+
+1. `phy_open_fe_bb_clk`;
+2. `phy_bbpll_cal(1)`;
+3. `phy_bias_reg_set(1)`;
+4. `phy_open_i2c_xpd_new(1)`;
+5. `ets_delay_us(10)`;
+6. `phy_pbus_clear_reg`;
+7. `phy_i2c_clk_sel(8)`;
+8. `phy_i2c_bbpll_set(1)`;
+9. `phy_adc_rate_set(1)`;
+10. `phy_i2cmst_reg_init`;
+11. `phy_pwdet_reg_init`;
+12. `phy_fe_reg_init`;
+13. `phy_tsens_read_init(1, phy_param[0x16])`;
+14. `phy_tx_pwctrl_bg_init`;
+15. `phy_i2c_rc_cal_set(3, 1, 9)`;
+16. `phy_rc_cal_init`;
+17. `phy_filter_dcap_set`;
+18. `phy_i2c_readReg(0x62, 1, 0x0f)` into `phy_param[0x18e]`;
+19. `phy_i2c_init1`;
+20. `phy_rfpll_chgp_cal`;
+21. `phy_i2c_master_cmd_mem_init`;
+22. `phy_i2c_readReg_Mask(0x69, 0, 4, 3, 0)`;
+23. conditional `phy_i2c_sar2_init_code(0x578)`;
+24. `phy_xtal_duty_cal_init(0)`;
+25. `phy_fe_reg_update`;
+26. `phy_set_chan_freq_hw_init(2, 4)`.
+
+This sequence is the activation ledger for the Rust parent state machine.
+Finite MMIO operations can become direct actions; each delay becomes an
+executor timer deadline; each PHY-I2C command becomes a uniquely owned
+in-flight transaction completed by an external edge. The ledger prevents a
+partially ported child from being mistaken for removal of the synchronous
+vendor parent.
+
+The first two parent leaves are now active Rust code. Complete rev0 ROM ELF
+disassembly identifies `phy_open_fe_bb_clk` at `0x2f823ec0`, size `0x38`.
+Rust reproduces its exact finite transaction: write `0x1e7` to
+`0x2010_0400`, set bits 1:0 at `0x2010_0800`, write `0xffff_ffff` to
+`0x2010_7c80`, and set `0x0040_000f` at `0x2070_401c`. The function is cold
+only and remains flash-mapped.
+
+The complete `phy_bbpll_cal` body at `0x2f827dbc`, size `0x1c`, clears bits
+3:2 at `0x2010_f818`, then selects bit 2 for argument zero or bit 3
+otherwise. It is also called by runtime channel switching, so the Rust
+implementation is placed in internal SRAM. In the qualified final ELF,
+`phy_open_fe_bb_clk == wifi_strict_phy_open_fe_bb_clk == 0x400d0cac` and
+`phy_bbpll_cal == wifi_strict_phy_bbpll_cal == 0x2f008fcc`; their bodies are
+56 and 26 bytes respectively and contain no call, indirect branch, loop,
+allocation, delay, or hidden mutable-state access.
+
+The hardware image exercised both replacements through cold full
+calibration, a six-record passive scan, HT20/WMM association, WPA2 M1-M4,
+DHCP, gateway ping, DNS, TCP and HTTP 200. It returned all 18/18 TX and 15/15
+RX owners, recorded zero allocation/reallocation/free calls and zero
+other-core stalls, and never entered `ppTask`. The strict 6,407-function
+audit reports zero violations and unchanged runtime debt of one explicit RX
+fallback. The linked cold-PHY state remains exactly one blob symbol,
+`phy_param`, of 508 bytes; the next parent operation requiring an async child
+is `phy_bias_reg_set`, followed by the already modeled
+`OpenI2cXpdTransition`.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
