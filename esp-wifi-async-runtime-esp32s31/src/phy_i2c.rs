@@ -18,10 +18,15 @@ const PHY_I2C_HOST_CONFIG_ADDRESS: usize = 0x2010_f820;
 const PHY_I2C_READ_MASK_ADDRESS: usize = 0x2010_f81c;
 const PHY_I2C_COMMAND_BASE_ADDRESS: usize = 0x2010_f800;
 const PHY_I2C_MASTER_COMMAND_MEMORY_ADDRESS: usize = 0x2010_fc00;
+const MODEM_LPCON_CLK_CONF_ADDRESS: usize = 0x2070_4184;
+const MODEM_LPCON_I2C_MST_CLK_CONF_ADDRESS: usize = 0x2070_40f0;
+const MODEM_LPCON_I2C_MST_DATE_ADDRESS: usize = 0x2070_4208;
 const PHY_I2C_BUSY: u32 = 1 << 25;
 const PHY_I2C_READ: u32 = 1 << 30;
 const PHY_I2C_WRITE: u32 = 1 << 28 | 1 << 30;
 const PHY_I2C_MASTER_COMMAND_COUNT: usize = 45;
+const PHY_I2C_SDM_STABLE_VALUE: u8 = 0x5b;
+const PHY_I2C_SDM_DEADLINE_CYCLES: u32 = 9_999;
 
 const PHY_I2C_READ_MASKS: [u16; 13] = [
     0x0100, 0x0020, 0x0010, 0x0000, 0x0000, 0x0080, 0x0004, 0x0000, 0x0200, 0x0040, 0x0008, 0x0000,
@@ -315,6 +320,182 @@ pub unsafe fn try_finish_write(address: PhyI2cAddress) -> Result<(), PhyI2cError
     }
 }
 
+/// Execute the finite register prefix which precedes the vendor
+/// `ets_delay_us(100)` call in `phy_open_i2c_xpd_new(true)`.
+///
+/// This leaf deliberately stops before the delay. Unknown register-field
+/// meanings are not inferred: it reproduces the complete pinned
+/// `libphy.a[phy_reg.o]` load/mask/store sequence at offsets `0x2e..0x4e`.
+///
+/// Safety: the caller must exclusively own cold PHY initialization and the
+/// MODEM_LPCON register block.
+#[cfg(target_arch = "riscv32")]
+pub unsafe fn configure_open_i2c_pre_delay() {
+    let clock = MODEM_LPCON_CLK_CONF_ADDRESS as *mut u32;
+    clock.write_volatile(clock.read_volatile() & 0x0000_ffff);
+
+    let i2c_clock = MODEM_LPCON_I2C_MST_CLK_CONF_ADDRESS as *mut u32;
+    i2c_clock.write_volatile(i2c_clock.read_volatile() & 0xefff_ffff);
+}
+
+/// Execute the finite common register suffix of `phy_open_i2c_xpd_new`.
+///
+/// The bit-31 clear/set edge is preserved when bit 30 was initially clear;
+/// reducing the sequence to one final OR would lose an instruction-evidenced
+/// hardware transition. This function never delays, waits, loops or calls.
+///
+/// Safety: the caller must exclusively own cold PHY initialization and the
+/// MODEM_LPCON register block.
+#[cfg(target_arch = "riscv32")]
+pub unsafe fn configure_open_i2c_power_and_pulse() {
+    let clock = MODEM_LPCON_CLK_CONF_ADDRESS as *mut u32;
+    clock.write_volatile(clock.read_volatile() | 0xffff_0000);
+
+    let i2c_clock = MODEM_LPCON_I2C_MST_CLK_CONF_ADDRESS as *mut u32;
+    i2c_clock.write_volatile(i2c_clock.read_volatile() | 0x1000_0000);
+
+    let control = MODEM_LPCON_I2C_MST_DATE_ADDRESS as *mut u32;
+    if control.read_volatile() & (1 << 30) == 0 {
+        control.write_volatile(control.read_volatile() | (1 << 30));
+        control.write_volatile(control.read_volatile() & !(1 << 31));
+        control.write_volatile(control.read_volatile() | (1 << 31));
+    }
+    if control.read_volatile() & (1 << 31) == 0 {
+        control.write_volatile(control.read_volatile() | (1 << 31));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenI2cXpdOutcome {
+    Stable,
+    TimedOut,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenI2cXpdAction {
+    ConfigurePreDelay,
+    DelayMicros(u32),
+    ConfigurePowerAndPulse,
+    CheckSdmDeadline { maximum_cycles: u32 },
+    ReadSdmSample { address: PhyI2cAddress },
+    Complete(OpenI2cXpdOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenI2cXpdCompletion {
+    PreDelayConfigured,
+    DelayElapsed,
+    PowerAndPulseConfigured,
+    DeadlineObserved { expired: bool },
+    SdmSample(u8),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenI2cXpdTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenI2cXpdStep {
+    PreDelayConfiguration,
+    Delay,
+    PowerAndPulseConfiguration,
+    DeadlineCheck,
+    SdmSample,
+    Complete(OpenI2cXpdOutcome),
+}
+
+/// Event-driven replacement plan for `phy_open_i2c_xpd_new` and ROM
+/// `phy_wait_i2c_sdm_stable`.
+///
+/// The vendor path contains one synchronous 100-microsecond delay and then a
+/// cycle-counter/I2C polling loop. Here the delay, deadline observation and
+/// every I2C sample are explicit completions delivered by the outer async
+/// radio owner. A mismatching SDM value returns to `CheckSdmDeadline`; it does
+/// not self-wake or read again from `poll`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpenI2cXpdTransition {
+    step: OpenI2cXpdStep,
+    samples: u16,
+}
+
+impl OpenI2cXpdTransition {
+    pub const fn new(with_pre_delay: bool) -> Self {
+        Self {
+            step: if with_pre_delay {
+                OpenI2cXpdStep::PreDelayConfiguration
+            } else {
+                OpenI2cXpdStep::PowerAndPulseConfiguration
+            },
+            samples: 0,
+        }
+    }
+
+    pub const fn action(self) -> OpenI2cXpdAction {
+        const SDM_SAMPLE: PhyI2cAddress = PhyI2cAddress {
+            block: 0x63,
+            register: 0,
+        };
+
+        match self.step {
+            OpenI2cXpdStep::PreDelayConfiguration => OpenI2cXpdAction::ConfigurePreDelay,
+            OpenI2cXpdStep::Delay => OpenI2cXpdAction::DelayMicros(100),
+            OpenI2cXpdStep::PowerAndPulseConfiguration => OpenI2cXpdAction::ConfigurePowerAndPulse,
+            OpenI2cXpdStep::DeadlineCheck => OpenI2cXpdAction::CheckSdmDeadline {
+                maximum_cycles: PHY_I2C_SDM_DEADLINE_CYCLES,
+            },
+            OpenI2cXpdStep::SdmSample => OpenI2cXpdAction::ReadSdmSample {
+                address: SDM_SAMPLE,
+            },
+            OpenI2cXpdStep::Complete(outcome) => OpenI2cXpdAction::Complete(outcome),
+        }
+    }
+
+    pub const fn samples(self) -> u16 {
+        self.samples
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: OpenI2cXpdCompletion,
+    ) -> Result<(), OpenI2cXpdTransitionError> {
+        self.step = match (self.step, completion) {
+            (OpenI2cXpdStep::PreDelayConfiguration, OpenI2cXpdCompletion::PreDelayConfigured) => {
+                OpenI2cXpdStep::Delay
+            }
+            (OpenI2cXpdStep::Delay, OpenI2cXpdCompletion::DelayElapsed) => {
+                OpenI2cXpdStep::PowerAndPulseConfiguration
+            }
+            (
+                OpenI2cXpdStep::PowerAndPulseConfiguration,
+                OpenI2cXpdCompletion::PowerAndPulseConfigured,
+            ) => OpenI2cXpdStep::DeadlineCheck,
+            (
+                OpenI2cXpdStep::DeadlineCheck,
+                OpenI2cXpdCompletion::DeadlineObserved { expired: true },
+            ) => OpenI2cXpdStep::Complete(OpenI2cXpdOutcome::TimedOut),
+            (
+                OpenI2cXpdStep::DeadlineCheck,
+                OpenI2cXpdCompletion::DeadlineObserved { expired: false },
+            ) => OpenI2cXpdStep::SdmSample,
+            (OpenI2cXpdStep::SdmSample, OpenI2cXpdCompletion::SdmSample(value)) => {
+                self.samples = self.samples.saturating_add(1);
+                if value == PHY_I2C_SDM_STABLE_VALUE {
+                    OpenI2cXpdStep::Complete(OpenI2cXpdOutcome::Stable)
+                } else {
+                    OpenI2cXpdStep::DeadlineCheck
+                }
+            }
+            (OpenI2cXpdStep::Complete(_), _) => {
+                return Err(OpenI2cXpdTransitionError::AlreadyComplete);
+            }
+            _ => return Err(OpenI2cXpdTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RcCalibrationAction {
     WriteMasked {
@@ -470,9 +651,10 @@ impl Default for RcCalibrationTransition {
 mod tests {
     use super::{
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
-        read_result, with_phy_i2c_host_config, PhyI2cAddress, RcCalibrationAction,
-        RcCalibrationCompletion, RcCalibrationTransition, RcCalibrationTransitionError,
-        PHY_I2C_MASTER_COMMAND_COUNT,
+        read_result, with_phy_i2c_host_config, OpenI2cXpdAction, OpenI2cXpdCompletion,
+        OpenI2cXpdOutcome, OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress,
+        RcCalibrationAction, RcCalibrationCompletion, RcCalibrationTransition,
+        RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
 
@@ -620,5 +802,93 @@ mod tests {
             transition.advance(RcCalibrationCompletion::Applied),
             Err(RcCalibrationTransitionError::AlreadyComplete)
         );
+    }
+
+    #[test]
+    fn open_i2c_xpd_delayed_path_requires_explicit_async_completions() {
+        let mut transition = OpenI2cXpdTransition::new(true);
+        assert_eq!(transition.action(), OpenI2cXpdAction::ConfigurePreDelay);
+        assert_eq!(
+            transition.advance(OpenI2cXpdCompletion::DelayElapsed),
+            Err(OpenI2cXpdTransitionError::WrongCompletion)
+        );
+        transition
+            .advance(OpenI2cXpdCompletion::PreDelayConfigured)
+            .unwrap();
+        assert_eq!(transition.action(), OpenI2cXpdAction::DelayMicros(100));
+        transition
+            .advance(OpenI2cXpdCompletion::DelayElapsed)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            OpenI2cXpdAction::ConfigurePowerAndPulse
+        );
+        transition
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            OpenI2cXpdAction::CheckSdmDeadline {
+                maximum_cycles: 9_999
+            }
+        );
+    }
+
+    #[test]
+    fn open_i2c_xpd_samples_only_after_deadline_and_i2c_edges() {
+        let mut transition = OpenI2cXpdTransition::new(false);
+        transition
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .unwrap();
+        transition
+            .advance(OpenI2cXpdCompletion::DeadlineObserved { expired: false })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            OpenI2cXpdAction::ReadSdmSample {
+                address: PhyI2cAddress::new(0x63, 0).unwrap()
+            }
+        );
+
+        transition
+            .advance(OpenI2cXpdCompletion::SdmSample(0x42))
+            .unwrap();
+        assert_eq!(transition.samples(), 1);
+        assert!(matches!(
+            transition.action(),
+            OpenI2cXpdAction::CheckSdmDeadline { .. }
+        ));
+
+        transition
+            .advance(OpenI2cXpdCompletion::DeadlineObserved { expired: false })
+            .unwrap();
+        transition
+            .advance(OpenI2cXpdCompletion::SdmSample(0x5b))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::Stable)
+        );
+        assert_eq!(transition.samples(), 2);
+        assert_eq!(
+            transition.advance(OpenI2cXpdCompletion::SdmSample(0x5b)),
+            Err(OpenI2cXpdTransitionError::AlreadyComplete)
+        );
+    }
+
+    #[test]
+    fn open_i2c_xpd_deadline_is_a_terminal_outcome() {
+        let mut transition = OpenI2cXpdTransition::new(false);
+        transition
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .unwrap();
+        transition
+            .advance(OpenI2cXpdCompletion::DeadlineObserved { expired: true })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::TimedOut)
+        );
+        assert_eq!(transition.samples(), 0);
     }
 }
