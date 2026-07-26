@@ -70,6 +70,7 @@ pub mod osi;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod phy_channel;
 pub mod phy_i2c;
+pub mod phy_pbus;
 mod phy_param;
 pub mod policy;
 pub mod queue;

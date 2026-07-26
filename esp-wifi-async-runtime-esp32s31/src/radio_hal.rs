@@ -55,6 +55,21 @@ const PHY_AGC_WINDOW_ADDRESS: usize = 0x2010_7104;
 const PHY_RX_CONTROL_ADDRESS: usize = 0x2010_78c8;
 const PHY_FTM_CONTROL_ADDRESS: usize = 0x2010_7d4c;
 const PHY_AGC_SAT_GAIN_VALUE: u32 = 0x0818_212d;
+const PHY_PBUS_CONTROL_ADDRESS: usize = 0x2010_0884;
+const PHY_PBUS_MODE_ADDRESS: usize = 0x2010_088c;
+const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
+const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
+const PHY_PBUS_WORK_MODE_PULSE_ADDRESS: usize = 0x2010_702c;
+const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
+const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
+const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
+const PHY_PBUS_SETTLE_CONDITION_BIT: u32 = 1 << 1;
+const PHY_PBUS_WORK_MODE_PULSE_BIT: u32 = 1 << 23;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PhyPbusError {
+    Busy,
+}
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
@@ -174,6 +189,43 @@ const fn with_bbpll_calibration(value: u32, enable: u32) -> u32 {
     } else {
         value | 0x08
     }
+}
+
+const fn with_phy_pbus_debug_mode(value: u32) -> u32 {
+    value & !PHY_PBUS_FORCE_MODE_BIT
+}
+
+const fn with_phy_pbus_debug_control(value: u32) -> u32 {
+    value | 1
+}
+
+const fn with_phy_pbus_work_mode(value: u32) -> u32 {
+    value | PHY_PBUS_FORCE_MODE_BIT
+}
+
+const fn with_phy_pbus_work_control(value: u32) -> u32 {
+    value & !1
+}
+
+const fn with_phy_pbus_force_test(value: u32, selector: u8, path: u8, test_value: u16) -> u32 {
+    let command = ((test_value as u32) << 6) | ((selector as u32) << 2) | ((path as u32) << 15);
+    (value & 0xfffe_0001) | (command & 0x0001_fffc) | PHY_PBUS_TRANSACTION_BIT
+}
+
+const fn phy_pbus_is_busy(value: u32) -> bool {
+    value & PHY_PBUS_BUSY_BIT != 0
+}
+
+const fn with_phy_pbus_work_mode_pulse_setup(value: u32) -> u32 {
+    (value & 0x00ff_ffff) | 0x3200_0000
+}
+
+const fn with_phy_pbus_work_mode_pulse(value: u32) -> u32 {
+    value | PHY_PBUS_WORK_MODE_PULSE_BIT
+}
+
+const fn without_phy_pbus_work_mode_pulse(value: u32) -> u32 {
+    value & !PHY_PBUS_WORK_MODE_PULSE_BIT
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -599,6 +651,92 @@ pub unsafe extern "C" fn wifi_strict_phy_bbpll_cal(enable: u32) {
     control.write_volatile(with_bbpll_calibration(control.read_volatile(), enable));
 }
 
+/// Enter the exact debug-mode prefix of rev0 ROM `phy_pbus_clear_reg`.
+///
+/// The complete `phy_pbus_debugmode -> phy_pbus_force_mode(1)` path clears
+/// bit 26 at `0x2010_088c`, then sets bit zero at `0x2010_0884`. It contains
+/// no delay or readiness loop.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_pbus_debug_mode() {
+    let mode = PHY_PBUS_MODE_ADDRESS as *mut u32;
+    mode.write_volatile(with_phy_pbus_debug_mode(mode.read_volatile()));
+
+    let control = PHY_PBUS_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_pbus_debug_control(control.read_volatile()));
+}
+
+/// Publish one PBus force-test command after one fail-fast readiness sample.
+///
+/// The ROM leaf publishes the same encoded command and then busy-waits on bit
+/// 31 at `0x2010_0890`. Rust rejects an already busy owner before publication
+/// and leaves all post-command observation to
+/// [`try_finish_phy_pbus_force_test`].
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn try_start_phy_pbus_force_test(
+    transaction: crate::phy_pbus::PhyPbusForceTest,
+) -> Result<(), PhyPbusError> {
+    if phy_pbus_is_busy((PHY_PBUS_STATUS_ADDRESS as *const u32).read_volatile()) {
+        return Err(PhyPbusError::Busy);
+    }
+
+    let control = PHY_PBUS_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_pbus_force_test(
+        control.read_volatile(),
+        transaction.selector(),
+        transaction.path(),
+        transaction.value(),
+    ));
+    Ok(())
+}
+
+/// Observe one PBus command once after an external readiness/timer edge.
+///
+/// `Busy` is an incomplete or timeout result, never permission to spin or
+/// self-wake. A completed command clears the transaction bit exactly as the
+/// ROM leaf does after its loop.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn try_finish_phy_pbus_force_test() -> Result<(), PhyPbusError> {
+    if phy_pbus_is_busy((PHY_PBUS_STATUS_ADDRESS as *const u32).read_volatile()) {
+        return Err(PhyPbusError::Busy);
+    }
+
+    let control = PHY_PBUS_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(control.read_volatile() & !PHY_PBUS_TRANSACTION_BIT);
+    Ok(())
+}
+
+/// Enter PBus work mode and return the one sampled settle-condition bit.
+///
+/// The returned boolean selects the ROM's optional 1 us / pulse / 2 us tail;
+/// this leaf itself never delays or samples twice.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_pbus_work_mode() -> bool {
+    let control = PHY_PBUS_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_pbus_work_control(control.read_volatile()));
+
+    let mode = PHY_PBUS_MODE_ADDRESS as *mut u32;
+    mode.write_volatile(with_phy_pbus_work_mode(mode.read_volatile()));
+
+    (PHY_PBUS_SETTLE_CONDITION_ADDRESS as *const u32).read_volatile()
+        & PHY_PBUS_SETTLE_CONDITION_BIT
+        != 0
+}
+
+/// Apply the finite work-mode pulse setup after the async 1 us timer edge.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_pbus_work_mode_pulse() {
+    let pulse = PHY_PBUS_WORK_MODE_PULSE_ADDRESS as *mut u32;
+    pulse.write_volatile(with_phy_pbus_work_mode_pulse_setup(pulse.read_volatile()));
+    pulse.write_volatile(with_phy_pbus_work_mode_pulse(pulse.read_volatile()));
+}
+
+/// Clear the work-mode pulse bit after the async 2 us timer edge.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn clear_phy_pbus_work_mode_pulse() {
+    let pulse = PHY_PBUS_WORK_MODE_PULSE_ADDRESS as *mut u32;
+    pulse.write_volatile(without_phy_pbus_work_mode_pulse(pulse.read_volatile()));
+}
+
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
@@ -732,15 +870,17 @@ mod tests {
     use super::{
         encode_mac_address, encode_phy_gain_memory_words, join_rx_descriptor_address,
         mac_address_registers, mac_rx_address_policy_address, mac_rx_frame_policy_address,
-        mac_rx_management_policy_address, tsf_latch_mask, tx_baseband_gain_index,
+        mac_rx_management_policy_address, phy_pbus_is_busy, tsf_latch_mask, tx_baseband_gain_index,
         tx_queue_control_address, tx_queue_is_valid, with_bbpll_calibration,
         with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_agc_control, with_phy_agc_window, with_phy_ftm_enable, with_phy_gain_memory_index,
-        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
-        with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
-        without_fe_bb_clock_enable, without_mac_tx_retention, without_tx_queue_enable,
-        without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
+        with_phy_pbus_debug_control, with_phy_pbus_debug_mode, with_phy_pbus_force_test,
+        with_phy_pbus_work_control, with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
+        with_phy_pbus_work_mode_pulse_setup, with_phy_rx_comp_high, with_phy_rx_comp_low,
+        with_phy_rx_control_high, with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
+        without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_pbus_work_mode_pulse,
+        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -849,6 +989,23 @@ mod tests {
         assert_eq!(with_bbpll_calibration(0, 1), 0x08);
         assert_eq!(with_bbpll_calibration(u32::MAX, 0), 0xffff_fff7);
         assert_eq!(with_bbpll_calibration(u32::MAX, 7), 0xffff_fffb);
+    }
+
+    #[test]
+    fn phy_pbus_masks_and_command_encoding_match_complete_rom_leaves() {
+        assert_eq!(with_phy_pbus_debug_mode(u32::MAX), 0xfbff_ffff);
+        assert_eq!(with_phy_pbus_debug_control(0), 1);
+        assert_eq!(with_phy_pbus_work_control(u32::MAX), 0xffff_fffe);
+        assert_eq!(with_phy_pbus_work_mode(0), 0x0400_0000);
+
+        assert_eq!(with_phy_pbus_force_test(0, 4, 1, 0), 0x0000_8012);
+        assert_eq!(with_phy_pbus_force_test(u32::MAX, 3, 2, 0x100), 0xffff_400f);
+        assert!(!phy_pbus_is_busy(0x7fff_ffff));
+        assert!(phy_pbus_is_busy(0x8000_0000));
+
+        assert_eq!(with_phy_pbus_work_mode_pulse_setup(u32::MAX), 0x32ff_ffff);
+        assert_eq!(with_phy_pbus_work_mode_pulse(0), 0x0080_0000);
+        assert_eq!(without_phy_pbus_work_mode_pulse(u32::MAX), 0xff7f_ffff);
     }
 
     #[test]

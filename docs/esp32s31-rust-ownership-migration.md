@@ -1331,23 +1331,44 @@ instruction-proven argument invariance. The serial runtime suite now passes
 323 tests. This child remains intentionally dead-stripped until the parent
 `PhyRfInit` transition can own the whole sequence.
 
-The first five parent operations are now composed by
+The first six parent operations are now composed by
 `PhyRfInitPrefixTransition`. It exposes the active clock and BBPLL leaves as
 finite MMIO actions, delegates the two bias writes to `BiasRegTransition`,
 delegates the power-up, 100-microsecond timer and SDM deadline/read sequence
 to `OpenI2cXpdTransition`, and finally emits the separate
-`DelayMicros(10)` present in the parent body. No nested child completion is
-observable as an intermediate terminal state.
+`DelayMicros(10)` present in the parent body. It then delegates operation six
+to `PhyPbusClearTransition`. No nested child completion is observable as an
+intermediate terminal state.
 
-The prefix reaches `ReadyForPbusClear` only after every action has received
-its matching external completion. An SDM deadline instead terminates as
-`SdmTimedOut` and cannot run the post-I2C delay or the subsequent hardware
-steps. Out-of-order and post-terminal completions fail closed. Two
-composition tests cover the complete success order and timeout propagation;
-the serial runtime suite now passes 325 tests. The next boundary is operation
-six, `phy_pbus_clear_reg`; the prefix is still dead-stripped and does not
-replace any part of the live parent until the remaining 21 operations have
-equivalent owned actions.
+The complete rev0 ROM `phy_pbus_clear_reg` body at `0x2f824572`, size `0x90`,
+is not a finite no-wait leaf. It enters debug mode, performs twelve
+`phy_pbus_force_test` transactions in a fixed order, and returns through
+`phy_pbus_workmode`. Every force-test body publishes its encoded command at
+`0x2010_0884` and busy-waits on sign bit 31 at `0x2010_0890`. The work-mode
+tail samples bit one at `0x2010_9c18`; when set, it synchronously delays one
+microsecond, applies a two-write pulse at `0x2010_702c`, delays another two
+microseconds, and clears the pulse bit.
+
+Rust separates that graph into finite radio-HAL leaves and explicit
+ownership edges. `try_start_phy_pbus_force_test` takes one readiness sample
+before publication and fails fast if another transaction owns the block.
+`try_finish_phy_pbus_force_test` takes exactly one post-edge sample and either
+clears the command bit or returns `Busy`; it never loops or wakes itself.
+Debug/work-mode and pulse setup/clear are finite ordered MMIO operations.
+The one- and two-microsecond waits are distinct executor timer actions.
+
+`PhyPbusClearTransition` owns the exact twelve-command cursor. A completion
+must carry the current command identity; stale or reordered completions are
+rejected. A command still busy at its externally supplied deadline becomes
+the terminal `ForceTestTimedOut` outcome rather than another poll. Both
+conditional work-mode paths and both timer edges have host coverage.
+
+The prefix now reaches `ReadyForI2cClockSelection` only after PBus clear
+completes. SDM and PBus timeouts terminate separately and cannot run later
+hardware steps. The serial runtime suite passes 331 tests. The next boundary
+is operation seven, `phy_i2c_clk_sel(8)`; the prefix remains dead-stripped and
+does not replace any part of the live parent until the remaining 20
+operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 

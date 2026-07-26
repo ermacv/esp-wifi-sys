@@ -13,6 +13,10 @@
 //! not linked into the firmware.
 
 use crate::phy_param::{saturate_phy_value, PHY_PARAM_LEN};
+use crate::phy_pbus::{
+    PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusClearOutcome, PhyPbusClearTransition,
+    PhyPbusForceTest,
+};
 
 const PHY_I2C_HOST_CONFIG_ADDRESS: usize = 0x2010_f820;
 const PHY_I2C_READ_MASK_ADDRESS: usize = 0x2010_f81c;
@@ -567,8 +571,9 @@ impl OpenI2cXpdTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForPbusClear,
+    ReadyForI2cClockSelection,
     SdmTimedOut,
+    PbusForceTestTimedOut(PhyPbusForceTest),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -577,6 +582,7 @@ pub enum PhyRfInitPrefixAction {
     ConfigureBbpllCalibration { enabled: bool },
     Bias(BiasRegAction),
     OpenI2cXpd(OpenI2cXpdAction),
+    PbusClear(PhyPbusClearAction),
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -587,6 +593,7 @@ pub enum PhyRfInitPrefixCompletion {
     BbpllCalibrationConfigured,
     Bias(BiasRegCompletion),
     OpenI2cXpd(OpenI2cXpdCompletion),
+    PbusClear(PhyPbusClearCompletion),
     DelayElapsed,
 }
 
@@ -603,10 +610,11 @@ enum PhyRfInitPrefixStep {
     Bias(BiasRegTransition),
     OpenI2cXpd(OpenI2cXpdTransition),
     PostI2cDelay,
+    PbusClear(PhyPbusClearTransition),
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through five in the complete
+/// Event-driven composition of operations one through six in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -647,6 +655,19 @@ impl PhyRfInitPrefixTransition {
                 action => PhyRfInitPrefixAction::OpenI2cXpd(action),
             },
             PhyRfInitPrefixStep::PostI2cDelay => PhyRfInitPrefixAction::DelayMicros(10),
+            PhyRfInitPrefixStep::PbusClear(transition) => match transition.action() {
+                PhyPbusClearAction::Complete(PhyPbusClearOutcome::Cleared) => {
+                    PhyRfInitPrefixAction::Complete(
+                        PhyRfInitPrefixOutcome::ReadyForI2cClockSelection,
+                    )
+                }
+                PhyPbusClearAction::Complete(PhyPbusClearOutcome::ForceTestTimedOut(
+                    transaction,
+                )) => PhyRfInitPrefixAction::Complete(
+                    PhyRfInitPrefixOutcome::PbusForceTestTimedOut(transaction),
+                ),
+                action => PhyRfInitPrefixAction::PbusClear(action),
+            },
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
     }
@@ -694,7 +715,28 @@ impl PhyRfInitPrefixTransition {
                 }
             }
             (PhyRfInitPrefixStep::PostI2cDelay, PhyRfInitPrefixCompletion::DelayElapsed) => {
-                PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForPbusClear)
+                PhyRfInitPrefixStep::PbusClear(PhyPbusClearTransition::new())
+            }
+            (
+                PhyRfInitPrefixStep::PbusClear(mut transition),
+                PhyRfInitPrefixCompletion::PbusClear(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    PhyPbusClearAction::Complete(PhyPbusClearOutcome::Cleared) => {
+                        PhyRfInitPrefixStep::Complete(
+                            PhyRfInitPrefixOutcome::ReadyForI2cClockSelection,
+                        )
+                    }
+                    PhyPbusClearAction::Complete(PhyPbusClearOutcome::ForceTestTimedOut(
+                        transaction,
+                    )) => PhyRfInitPrefixStep::Complete(
+                        PhyRfInitPrefixOutcome::PbusForceTestTimedOut(transaction),
+                    ),
+                    _ => PhyRfInitPrefixStep::PbusClear(transition),
+                }
             }
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
@@ -874,6 +916,7 @@ mod tests {
         RcCalibrationTransition, RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
+    use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
 
     #[test]
     fn recovered_block_table_selects_exact_hosts_and_read_masks() {
@@ -1146,7 +1189,43 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForPbusClear)
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureDebugMode)
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::DebugModeConfigured,
+            ))
+            .unwrap();
+        for transaction in [
+            PhyPbusForceTest::new(4, 1, 0),
+            PhyPbusForceTest::new(4, 2, 0),
+            PhyPbusForceTest::new(5, 1, 0),
+            PhyPbusForceTest::new(5, 2, 0),
+            PhyPbusForceTest::new(0, 1, 0),
+            PhyPbusForceTest::new(0, 2, 0),
+            PhyPbusForceTest::new(1, 1, 0),
+            PhyPbusForceTest::new(1, 2, 0),
+            PhyPbusForceTest::new(2, 1, 0x100),
+            PhyPbusForceTest::new(3, 1, 0x100),
+            PhyPbusForceTest::new(2, 2, 0x100),
+            PhyPbusForceTest::new(3, 2, 0x100),
+        ] {
+            transition
+                .advance(PhyRfInitPrefixCompletion::PbusClear(
+                    PhyPbusClearCompletion::ForceTestCompleted(transaction),
+                ))
+                .unwrap();
+        }
+        transition
+            .advance(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::WorkModeConfigured {
+                    settle_required: false,
+                },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForI2cClockSelection)
         );
     }
 
