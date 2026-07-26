@@ -252,6 +252,13 @@ phy_reg_update_new = wifi_strict_phy_reg_update_new;
 ASSERT(phy_reg_update_new == wifi_strict_phy_reg_update_new,
        "ESP32-S31 PHY post-init register Rust boundary is inactive");
 
+/* Complete finite 45-word PHY-I2C command-RAM initialization. */
+EXTERN(wifi_strict_phy_i2c_master_cmd_mem_init);
+phy_i2c_master_cmd_mem_init = wifi_strict_phy_i2c_master_cmd_mem_init;
+ASSERT(phy_i2c_master_cmd_mem_init ==
+           wifi_strict_phy_i2c_master_cmd_mem_init,
+       "ESP32-S31 PHY I2C command-memory Rust boundary is inactive");
+
 /* Publish the ROM PHY ABI table and parameter pointer directly from Rust.
  * The replacement performs no call into phy_get_romfuncs/phy_param_addr and
  * retains the two untouched rev0 ROM callbacks only after validation. */

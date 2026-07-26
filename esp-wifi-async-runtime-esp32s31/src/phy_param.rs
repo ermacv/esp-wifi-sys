@@ -7,7 +7,7 @@
 //! `phy_init.o` functions have been replaced, the extern declaration can be
 //! changed to a Rust static without changing these transforms.
 
-const PHY_PARAM_LEN: usize = 0x1fc;
+pub(crate) const PHY_PARAM_LEN: usize = 0x1fc;
 const PHY_INIT_DATA_LEN: usize = 0x80;
 const PHY_CALIBRATION_PAYLOAD_OFFSET: usize = 0x0c;
 const PHY_CALIBRATION_CHECKSUM_OFFSET: usize = PHY_CALIBRATION_PAYLOAD_OFFSET + PHY_PARAM_LEN;
@@ -206,7 +206,7 @@ fn calibration_record_check_or_write(
     }
 }
 
-fn saturate_rc_value(value: i32, upper: u8, lower: u8) -> u8 {
+pub(crate) fn saturate_phy_value(value: i32, upper: u8, lower: u8) -> u8 {
     value.clamp(lower as i32, upper as i32) as u8
 }
 
@@ -234,7 +234,7 @@ pub(crate) fn apply_rc_calibration_result(parameter: &mut [u8; PHY_PARAM_LEN], r
     while index != PRIMARY_DIVISORS.len() {
         let divisor = PRIMARY_DIVISORS[index] as i32 * 10;
         let value = primary_numerator / divisor - 8;
-        parameter[0xe9 + index] = saturate_rc_value(value, UPPER_BOUNDS[index], 2);
+        parameter[0xe9 + index] = saturate_phy_value(value, UPPER_BOUNDS[index], 2);
         index += 1;
     }
 
@@ -243,7 +243,7 @@ pub(crate) fn apply_rc_calibration_result(parameter: &mut [u8; PHY_PARAM_LEN], r
     while index != AUXILIARY_DIVISORS.len() {
         let divisor = AUXILIARY_DIVISORS[index] as i32 * AUXILIARY_DIVISOR_SCALE;
         let value = auxiliary_numerator / divisor - 8;
-        parameter[0xed + index] = saturate_rc_value(value, UPPER_BOUNDS[2 + (index & 1)], 0);
+        parameter[0xed + index] = saturate_phy_value(value, UPPER_BOUNDS[2 + (index & 1)], 0);
         index += 1;
     }
 

@@ -12,12 +12,16 @@
 //! `phy_get_rc_dout` at `0x2f82_61ac`. The ELF is an analysis oracle and is
 //! not linked into the firmware.
 
+use crate::phy_param::{saturate_phy_value, PHY_PARAM_LEN};
+
 const PHY_I2C_HOST_CONFIG_ADDRESS: usize = 0x2010_f820;
 const PHY_I2C_READ_MASK_ADDRESS: usize = 0x2010_f81c;
 const PHY_I2C_COMMAND_BASE_ADDRESS: usize = 0x2010_f800;
+const PHY_I2C_MASTER_COMMAND_MEMORY_ADDRESS: usize = 0x2010_fc00;
 const PHY_I2C_BUSY: u32 = 1 << 25;
 const PHY_I2C_READ: u32 = 1 << 30;
 const PHY_I2C_WRITE: u32 = 1 << 28 | 1 << 30;
+const PHY_I2C_MASTER_COMMAND_COUNT: usize = 45;
 
 const PHY_I2C_READ_MASKS: [u16; 13] = [
     0x0100, 0x0020, 0x0010, 0x0000, 0x0000, 0x0080, 0x0004, 0x0000, 0x0200, 0x0040, 0x0008, 0x0000,
@@ -85,6 +89,107 @@ const fn command_is_busy(command: u32) -> bool {
 
 const fn read_result(command: u32) -> u8 {
     (command >> 16) as u8
+}
+
+const fn encode_master_command(block: u8, register: u8, value: u8) -> u32 {
+    block as u32 | ((register as u32) << 8) | ((value as u32) << 16)
+}
+
+// Complete command order recovered from
+// `libphy.a[phy_i2c.o]::phy_i2c_master_cmd_mem_init`. Values which depend on
+// the explicit PHY parameter image are replaced in `master_command`.
+const PHY_I2C_MASTER_TEMPLATE: [(u8, u8, u8); PHY_I2C_MASTER_COMMAND_COUNT] = [
+    (0x67, 0x02, 0x07),
+    (0x6b, 0x01, 0x01),
+    (0x6b, 0x02, 0x73),
+    (0x6b, 0x03, 0xba),
+    (0x6b, 0x04, 0x88),
+    (0x6b, 0x05, 0x01),
+    (0x6b, 0x06, 0x11),
+    (0x6b, 0x07, 0xfd),
+    (0x6b, 0x08, 0xbb),
+    (0x6b, 0x09, 0x02),
+    (0x6b, 0x0a, 0x08),
+    (0x6b, 0x0b, 0x04),
+    (0x6b, 0x0c, 0xa7),
+    (0x6b, 0x0d, 0x7a),
+    (0x6b, 0x0e, 0xf4),
+    (0x6b, 0x0f, 0x81),
+    (0x62, 0x00, 0x68),
+    (0x62, 0x04, 0xa8),
+    (0x62, 0x0b, 0x44),
+    (0x62, 0x0d, 0x0a),
+    (0x62, 0x0f, 0x00),
+    (0x62, 0x15, 0x08),
+    (0x66, 0x02, 0x70),
+    (0x67, 0x02, 0x27),
+    (0x67, 0x04, 0x00),
+    (0x67, 0x05, 0x00),
+    (0x67, 0x06, 0x00),
+    (0x67, 0x07, 0x00),
+    (0x67, 0x0c, 0x00),
+    (0x67, 0x0d, 0x00),
+    (0x67, 0x0e, 0x00),
+    (0x67, 0x0f, 0x00),
+    (0x67, 0x14, 0x00),
+    (0x67, 0x15, 0x00),
+    (0x67, 0x16, 0x00),
+    (0x67, 0x17, 0x00),
+    (0x67, 0x18, 0x00),
+    (0x67, 0x19, 0x00),
+    (0x67, 0x1c, 0x00),
+    (0x67, 0x1d, 0x00),
+    (0x67, 0x1e, 0x00),
+    (0x67, 0x1f, 0x00),
+    (0x63, 0x06, 0x00),
+    (0x6a, 0x00, 0xaf),
+    (0x6a, 0x01, 0x7f),
+];
+
+fn master_command(index: usize, parameter: &[u8; PHY_PARAM_LEN]) -> u32 {
+    let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
+    let value = match index {
+        20 => parameter[0x18e],
+        24 | 25 | 28 | 29 => parameter[0xe9],
+        26 | 27 | 30 | 31 => parameter[0xea],
+        32 | 33 => saturate_phy_value(parameter[0xed] as i32 + 6, 0x3c, 2),
+        34 => saturate_phy_value(parameter[0xed] as i32 - 2, 0x3c, 2),
+        35 => parameter[0xed],
+        36 | 37 => parameter[0xee].wrapping_add(2),
+        38 | 39 | 41 => parameter[0xf0],
+        40 => parameter[0xf0] | 0x40,
+        _ => fixed_value,
+    };
+    encode_master_command(block, register, value)
+}
+
+/// Reproduce the complete finite vendor initialization of the PHY-I2C master
+/// command RAM.
+///
+/// This is not an I2C transaction: it writes 45 encoded command words to
+/// `0x2010_fc00..=0x2010_fcb0`. The reference vendor body is
+/// `libphy.a[phy_i2c.o]::phy_i2c_master_cmd_mem_init`, size `0x5be`; its only
+/// two ROM callees are the finite encoder at `0x2f82_a81a` and one-store
+/// command-memory writer at `0x2f82_a824`.
+///
+/// Safety: this temporary C ABI boundary requires exclusive cold-PHY
+/// ownership. In particular, no other owner may mutate `phy_param` or command
+/// memory until the function returns.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_phy_i2c_master_cmd_mem_init() {
+    unsafe extern "C" {
+        static mut phy_param: [u8; PHY_PARAM_LEN];
+    }
+
+    let parameter = &*core::ptr::addr_of!(phy_param);
+    let mut index = 0;
+    while index != PHY_I2C_MASTER_COMMAND_COUNT {
+        let destination = (PHY_I2C_MASTER_COMMAND_MEMORY_ADDRESS
+            + index * core::mem::size_of::<u32>()) as *mut u32;
+        destination.write_volatile(master_command(index, parameter));
+        index += 1;
+    }
 }
 
 /// Publish one complete-register PHY-I2C read without waiting for completion.
@@ -320,10 +425,12 @@ impl Default for RcCalibrationTransition {
 #[cfg(test)]
 mod tests {
     use super::{
-        command_is_busy, command_register_address, encode_read, encode_write, read_result,
-        with_phy_i2c_host_config, PhyI2cAddress, RcCalibrationAction, RcCalibrationCompletion,
-        RcCalibrationTransition, RcCalibrationTransitionError,
+        command_is_busy, command_register_address, encode_read, encode_write, master_command,
+        read_result, with_phy_i2c_host_config, PhyI2cAddress, RcCalibrationAction,
+        RcCalibrationCompletion, RcCalibrationTransition, RcCalibrationTransitionError,
+        PHY_I2C_MASTER_COMMAND_COUNT,
     };
+    use crate::phy_param::PHY_PARAM_LEN;
 
     #[test]
     fn recovered_block_table_selects_exact_hosts_and_read_masks() {
@@ -362,6 +469,73 @@ mod tests {
         assert_eq!(read_result(0x403c_146b), 0x3c);
         assert_eq!(with_phy_i2c_host_config(0xffff_ffff), 0xffff_fa0f);
         assert_eq!(with_phy_i2c_host_config(0), 0x1a00);
+    }
+
+    #[test]
+    fn master_command_table_matches_complete_vendor_body() {
+        let mut parameter = [0_u8; PHY_PARAM_LEN];
+        parameter[0x18e] = 0x55;
+        parameter[0xe9] = 0x12;
+        parameter[0xea] = 0x34;
+        parameter[0xed] = 0x20;
+        parameter[0xee] = 0xfe;
+        parameter[0xf0] = 0x9a;
+
+        let expected = [
+            (0x67, 0x02, 0x07),
+            (0x6b, 0x01, 0x01),
+            (0x6b, 0x02, 0x73),
+            (0x6b, 0x03, 0xba),
+            (0x6b, 0x04, 0x88),
+            (0x6b, 0x05, 0x01),
+            (0x6b, 0x06, 0x11),
+            (0x6b, 0x07, 0xfd),
+            (0x6b, 0x08, 0xbb),
+            (0x6b, 0x09, 0x02),
+            (0x6b, 0x0a, 0x08),
+            (0x6b, 0x0b, 0x04),
+            (0x6b, 0x0c, 0xa7),
+            (0x6b, 0x0d, 0x7a),
+            (0x6b, 0x0e, 0xf4),
+            (0x6b, 0x0f, 0x81),
+            (0x62, 0x00, 0x68),
+            (0x62, 0x04, 0xa8),
+            (0x62, 0x0b, 0x44),
+            (0x62, 0x0d, 0x0a),
+            (0x62, 0x0f, 0x55),
+            (0x62, 0x15, 0x08),
+            (0x66, 0x02, 0x70),
+            (0x67, 0x02, 0x27),
+            (0x67, 0x04, 0x12),
+            (0x67, 0x05, 0x12),
+            (0x67, 0x06, 0x34),
+            (0x67, 0x07, 0x34),
+            (0x67, 0x0c, 0x12),
+            (0x67, 0x0d, 0x12),
+            (0x67, 0x0e, 0x34),
+            (0x67, 0x0f, 0x34),
+            (0x67, 0x14, 0x26),
+            (0x67, 0x15, 0x26),
+            (0x67, 0x16, 0x1e),
+            (0x67, 0x17, 0x20),
+            (0x67, 0x18, 0x00),
+            (0x67, 0x19, 0x00),
+            (0x67, 0x1c, 0x9a),
+            (0x67, 0x1d, 0x9a),
+            (0x67, 0x1e, 0xda),
+            (0x67, 0x1f, 0x9a),
+            (0x63, 0x06, 0x00),
+            (0x6a, 0x00, 0xaf),
+            (0x6a, 0x01, 0x7f),
+        ];
+        assert_eq!(expected.len(), PHY_I2C_MASTER_COMMAND_COUNT);
+        for (index, (block, register, value)) in expected.into_iter().enumerate() {
+            assert_eq!(
+                master_command(index, &parameter),
+                (block as u32) | ((register as u32) << 8) | ((value as u32) << 16),
+                "master command {index}"
+            );
+        }
     }
 
     #[test]
