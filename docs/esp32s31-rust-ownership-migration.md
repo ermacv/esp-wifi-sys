@@ -1857,12 +1857,30 @@ Complete ROM `phy_i2c_txrate_init` is direct as well: Rust reproduces its two
 register-field writes and the full `phy_txgain_comp_pacfg_new(1)` tail rather
 than dispatching through `g_phyFuns+0x30`.
 
+Two shared descendants needed by the pending RX-table graph are now complete
+typed Rust MMIO leaves. ROM `phy_write_gain_mem` writes the three caller-owned
+words to `0x2010_0848..=0x2010_0850`, then replaces the low 20 bits of
+`0x2010_0844` with the explicit entry index and write bit. ROM
+`phy_iq_corr_enable` is the finite two-register update at `0x2010_0438` and
+`0x2010_0c0c`. This does not yet mark either `phy_rx_table_init` or
+`phy_set_rx_gain_table` complete: their table generation and remaining
+descendants stay outside the lowering.
+
+The first six state-free descendants of pending `phy_reg_init` are also
+lowered independently: `phy_wifi_agc_sat_gain`, `phy_bb_wdg_cfg`,
+`phy_mac_enable_bb`, `phy_noise_floor_auto_set`, `phy_ant_init`, and
+`phy_bt_filter_reg`. Each recovered body is a fixed register sequence with no
+call, branch-dependent exit, ROM-owned RAM, or indirect dispatch. The composed
+parent remains pending because `phy_agc_reg_init`, `phy_bb_reg_init`,
+`phy_tx_paon_set`, `phy_rx_11b_opt`, and the power-detector child of
+`phy_tx_pwctrl_bg_init` have not yet all been lowered.
+
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
 an explicit lowering and the complete parent can reject unknown or
 out-of-order completions without a vendor escape.
 
-All 421 host tests pass. The target
+All 423 host tests pass. The target
 `riscv32imafc-unknown-none-elf` `strict-no-wait,hil-vendor-tx` configuration
 also compiles. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one

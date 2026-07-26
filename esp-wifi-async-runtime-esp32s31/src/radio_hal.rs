@@ -124,6 +124,17 @@ const PHY_TX_POWER_TRACK_CONTROL_3_ADDRESS: usize = 0x2010_7460;
 const PHY_RF_RX_SATURATION_CONFIG_ADDRESS: usize = 0x2010_7068;
 const PHY_RF_RX_SATURATION_CONTROL_ADDRESS: usize = 0x2010_705c;
 const PHY_I2C_TX_RATE_CONTROL_ADDRESS: usize = 0x2010_448c;
+const PHY_IQ_CORRECTION_CONTROL_ADDRESS: usize = 0x2010_0438;
+const PHY_IQ_CORRECTION_AUX_ADDRESS: usize = 0x2010_0c0c;
+const PHY_BB_WATCHDOG_CONTROL_ADDRESS: usize = 0x2010_7c3c;
+const PHY_BB_WATCHDOG_ENABLE_ADDRESS: usize = 0x2010_7c40;
+const PHY_BT_FILTER_CONTROL_ADDRESS: usize = 0x2010_0874;
+const PHY_NOISE_FLOOR_CONTROL_ADDRESS: usize = 0x2010_7018;
+const PHY_NOISE_FLOOR_ENABLE_0_ADDRESS: usize = 0x2010_7c44;
+const PHY_NOISE_FLOOR_ENABLE_1_ADDRESS: usize = 0x2010_7c50;
+const PHY_ANTENNA_CONTROL_0_ADDRESS: usize = 0x2010_711c;
+const PHY_ANTENNA_CONTROL_1_ADDRESS: usize = 0x2010_7030;
+const PHY_ANTENNA_CONTROL_2_ADDRESS: usize = 0x2010_7120;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -306,6 +317,77 @@ pub(crate) unsafe fn configure_phy_i2c_tx_rate() {
     compensation.write_volatile(without_phy_tx_gain_compensation_high_byte(
         compensation.read_volatile(),
     ));
+}
+
+/// Complete rev0 ROM `phy_write_gain_mem`, size `0x2a`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn program_phy_gain_memory_entry(entry: crate::phy_bb::PhyGainMemoryEntry) {
+    (PHY_GAIN_MEMORY_WORD0_ADDRESS as *mut u32).write_volatile(entry.word0);
+    (PHY_GAIN_MEMORY_WORD1_ADDRESS as *mut u32).write_volatile(entry.word1);
+    (PHY_GAIN_MEMORY_WORD2_ADDRESS as *mut u32).write_volatile(entry.word2);
+    let control = PHY_GAIN_MEMORY_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(crate::phy_bb::phy_gain_memory_control_word(
+        control.read_volatile(),
+        entry,
+    ));
+}
+
+/// Complete rev0 ROM `phy_iq_corr_enable`, size `0x24`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn enable_phy_iq_correction() {
+    set_register_bits(PHY_IQ_CORRECTION_CONTROL_ADDRESS, 0x6000_0000);
+    set_register_bits(PHY_IQ_CORRECTION_AUX_ADDRESS, 0x0000_6000);
+}
+
+/// Complete rev0 ROM `phy_wifi_agc_sat_gain`, size `0x0c`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn set_phy_wifi_agc_saturation_gain(value: u32) {
+    (PHY_AGC_SAT_GAIN_LOW_ADDRESS as *mut u32).write_volatile(value);
+    (PHY_AGC_SAT_GAIN_HIGH_ADDRESS as *mut u32).write_volatile(value);
+}
+
+/// Complete rev0 ROM `phy_bb_wdg_cfg`, size `0x2c`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_baseband_watchdog() {
+    let control = PHY_BB_WATCHDOG_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_baseband_watchdog(control.read_volatile()));
+    set_register_bits(PHY_BB_WATCHDOG_ENABLE_ADDRESS, 0x8000_0000);
+}
+
+/// Complete rev0 ROM `phy_mac_enable_bb`, size `0x2a`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn enable_phy_mac_baseband() {
+    set_register_bits(PHY_WIFI_ENABLE_ADDRESS, 0x1000_0000);
+    clear_register_bits(PHY_WIFI_ENABLE_ADDRESS, 0x0000_0002);
+    set_register_bits(PHY_WIFI_ENABLE_ADDRESS, 0x0000_0002);
+}
+
+/// Complete rev0 ROM `phy_noise_floor_auto_set`, size `0x36`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_noise_floor_auto() {
+    set_register_bits(PHY_NOISE_FLOOR_CONTROL_ADDRESS, 0x0080_0000);
+    set_register_bits(PHY_NOISE_FLOOR_CONTROL_ADDRESS, 0x1000_0000);
+    set_register_bits(PHY_NOISE_FLOOR_ENABLE_0_ADDRESS, 1);
+    set_register_bits(PHY_NOISE_FLOOR_ENABLE_1_ADDRESS, 1);
+}
+
+/// Complete rev0 ROM `phy_ant_init`, size `0x44`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_antenna() {
+    let control0 = PHY_ANTENNA_CONTROL_0_ADDRESS as *mut u32;
+    control0.write_volatile(with_phy_antenna_control0(control0.read_volatile()));
+    let control1 = PHY_ANTENNA_CONTROL_1_ADDRESS as *mut u32;
+    control1.write_volatile(with_phy_antenna_control1(control1.read_volatile()));
+    let control2 = PHY_ANTENNA_CONTROL_2_ADDRESS as *mut u32;
+    control2.write_volatile(with_phy_antenna_control2(control2.read_volatile()));
+}
+
+/// Complete rev0 ROM `phy_bt_filter_reg`, size `0x34`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_bt_filter() {
+    set_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0200_0000);
+    clear_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0040_0000);
+    clear_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0180_0000);
 }
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
@@ -697,6 +779,22 @@ const fn encode_phy_gain_memory_words(
 
 const fn with_phy_gain_memory_index(value: u32, index: u8) -> u32 {
     (value & 0xfff0_0000) | ((index as u32) << 11) | 0x0008_0000
+}
+
+const fn with_phy_baseband_watchdog(value: u32) -> u32 {
+    (value & 0xbfff_0000) | 0x4000_00aa
+}
+
+const fn with_phy_antenna_control0(value: u32) -> u32 {
+    value & 0xffff_e800
+}
+
+const fn with_phy_antenna_control1(value: u32) -> u32 {
+    (value & 0xfffc_07ff) | 0x0001_a000
+}
+
+const fn with_phy_antenna_control2(value: u32) -> u32 {
+    (value & 0x00ff_00ff) | 0x1e00_1e00
 }
 
 /// Read one of the two MAC TSF domains through the hardware latch.
@@ -1732,7 +1830,8 @@ mod tests {
         with_bbpll_calibration, with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_adc_rate_high, with_phy_adc_rate_low, with_phy_agc_control, with_phy_agc_window,
-        with_phy_fe_txrx_reset, with_phy_frequency_i2c_number_control,
+        with_phy_antenna_control0, with_phy_antenna_control1, with_phy_antenna_control2,
+        with_phy_baseband_watchdog, with_phy_fe_txrx_reset, with_phy_frequency_i2c_number_control,
         with_phy_frequency_memory_address, with_phy_frequency_module_enabled,
         with_phy_frequency_register_mode, with_phy_front_end_adc_update,
         with_phy_front_end_update_first, with_phy_front_end_update_second, with_phy_ftm_enable,
@@ -2155,6 +2254,15 @@ mod tests {
             (first, second, third, fourth),
             (0x1234_5600, 0x1234_fa00, 0x12ff_fa00, 0x00ff_fa00)
         );
+    }
+
+    #[test]
+    fn phy_reg_init_small_leaf_masks_match_the_rom_bodies() {
+        let initial = 0xa5a5_5a5a;
+        assert_eq!(with_phy_baseband_watchdog(initial), 0xe5a5_00aa);
+        assert_eq!(with_phy_antenna_control0(initial), 0xa5a5_4800);
+        assert_eq!(with_phy_antenna_control1(initial), 0xa5a5_a25a);
+        assert_eq!(with_phy_antenna_control2(initial), 0x1ea5_1e5a);
     }
 
     #[test]

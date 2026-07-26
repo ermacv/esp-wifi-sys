@@ -20,6 +20,25 @@ const PHY_TX_CFR_DATA_PREFIX_ENTRY_COUNT: u8 = 10;
 const PHY_TX_CFR_DATA_PREFIX_VALUE: u32 = 0x0000_0e13;
 const PHY_TX_CFR_INDEX_FIELD_MASK: u32 = 0x0007_f800;
 const PHY_TX_CFR_INDEX_FIELD_SHIFT: u8 = 11;
+const PHY_GAIN_MEMORY_CONTROL_RETAIN_MASK: u32 = 0xfff0_0000;
+const PHY_GAIN_MEMORY_WRITE_BIT: u32 = 0x0008_0000;
+const PHY_GAIN_MEMORY_INDEX_SHIFT: u8 = 11;
+
+/// Exact four-word input of complete ROM leaf `phy_write_gain_mem`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhyGainMemoryEntry {
+    pub word0: u32,
+    pub word1: u32,
+    pub word2: u32,
+    pub index: u8,
+}
+
+/// Reproduce the final control-register value of `phy_write_gain_mem`.
+pub const fn phy_gain_memory_control_word(current: u32, entry: PhyGainMemoryEntry) -> u32 {
+    (current & PHY_GAIN_MEMORY_CONTROL_RETAIN_MASK)
+        | ((entry.index as u32) << PHY_GAIN_MEMORY_INDEX_SHIFT)
+        | PHY_GAIN_MEMORY_WRITE_BIT
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PhyTxCfrEntry {
@@ -251,6 +270,14 @@ pub enum PhyBbMmioAction {
     ConfigureTxPowerTracking { enabled: bool },
     ConfigureRfRxSaturation { phase: PhyRfRxSaturationPhase },
     ConfigureI2cTxRate,
+    ProgramGainMemory(PhyGainMemoryEntry),
+    EnableIqCorrection,
+    SetWifiAgcSaturationGain { value: u32 },
+    ConfigureBasebandWatchdog,
+    EnableMacBaseband,
+    ConfigureNoiseFloorAuto,
+    ConfigureAntenna,
+    ConfigureBtFilter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -299,6 +326,22 @@ impl PhyBbMmioBinding {
                 crate::radio_hal::configure_phy_rf_rx_saturation(phase.enabled())
             }
             PhyBbMmioAction::ConfigureI2cTxRate => crate::radio_hal::configure_phy_i2c_tx_rate(),
+            PhyBbMmioAction::ProgramGainMemory(entry) => {
+                crate::radio_hal::program_phy_gain_memory_entry(entry)
+            }
+            PhyBbMmioAction::EnableIqCorrection => crate::radio_hal::enable_phy_iq_correction(),
+            PhyBbMmioAction::SetWifiAgcSaturationGain { value } => {
+                crate::radio_hal::set_phy_wifi_agc_saturation_gain(value)
+            }
+            PhyBbMmioAction::ConfigureBasebandWatchdog => {
+                crate::radio_hal::configure_phy_baseband_watchdog()
+            }
+            PhyBbMmioAction::EnableMacBaseband => crate::radio_hal::enable_phy_mac_baseband(),
+            PhyBbMmioAction::ConfigureNoiseFloorAuto => {
+                crate::radio_hal::configure_phy_noise_floor_auto()
+            }
+            PhyBbMmioAction::ConfigureAntenna => crate::radio_hal::configure_phy_antenna(),
+            PhyBbMmioAction::ConfigureBtFilter => crate::radio_hal::configure_phy_bt_filter(),
         }
         PhyBbMmioCompletion {
             action: self.action,
@@ -309,10 +352,11 @@ impl PhyBbMmioBinding {
 #[cfg(test)]
 mod tests {
     use super::{
-        phy_tx_cfr_control_word, PhyBbBasebandMode, PhyBbMmioAction, PhyBbMmioBinding,
-        PhyRfRxSaturationPhase, PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion,
-        PhyTxCfrEntry, PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition,
-        PhyTxCfrTransitionError, PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
+        phy_gain_memory_control_word, phy_tx_cfr_control_word, PhyBbBasebandMode, PhyBbMmioAction,
+        PhyBbMmioBinding, PhyGainMemoryEntry, PhyRfRxSaturationPhase, PhyTxCfrAction,
+        PhyTxCfrBindingError, PhyTxCfrCompletion, PhyTxCfrEntry, PhyTxCfrMmioBinding,
+        PhyTxCfrOutcome, PhyTxCfrTransition, PhyTxCfrTransitionError, PHY_TX_CFR_ENTRY_COUNT,
+        PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
     };
 
     #[test]
@@ -459,8 +503,37 @@ mod tests {
                 phase: PhyRfRxSaturationPhase::Finalize,
             },
             PhyBbMmioAction::ConfigureI2cTxRate,
+            PhyBbMmioAction::ProgramGainMemory(PhyGainMemoryEntry {
+                word0: 1,
+                word1: 2,
+                word2: 3,
+                index: 4,
+            }),
+            PhyBbMmioAction::EnableIqCorrection,
+            PhyBbMmioAction::SetWifiAgcSaturationGain { value: 0x0008_1825 },
+            PhyBbMmioAction::ConfigureBasebandWatchdog,
+            PhyBbMmioAction::EnableMacBaseband,
+            PhyBbMmioAction::ConfigureNoiseFloorAuto,
+            PhyBbMmioAction::ConfigureAntenna,
+            PhyBbMmioAction::ConfigureBtFilter,
         ] {
             assert_eq!(PhyBbMmioBinding::new(action).action(), action);
         }
+    }
+
+    #[test]
+    fn gain_memory_control_word_matches_the_complete_rom_leaf() {
+        assert_eq!(
+            phy_gain_memory_control_word(
+                0xabc5_4321,
+                PhyGainMemoryEntry {
+                    word0: 0x1111_1111,
+                    word1: 0x2222_2222,
+                    word2: 0x3333_3333,
+                    index: 0x12,
+                },
+            ),
+            0xabc8_9000
+        );
     }
 }
