@@ -7,6 +7,8 @@
 //! `phy_init.o` functions have been replaced, the extern declaration can be
 //! changed to a Rust static without changing these transforms.
 
+use core::cell::UnsafeCell;
+
 pub(crate) const PHY_PARAM_LEN: usize = 0x1fc;
 const PHY_INIT_DATA_LEN: usize = 0x80;
 const PHY_CALIBRATION_PAYLOAD_OFFSET: usize = 0x0c;
@@ -316,10 +318,24 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_exit_critical() {}
 /// Keep the word in internal SRAM: some PHY callbacks execute while cached
 /// flash is unavailable. The table itself is the rev0 ROM-ABI RAM object
 /// validated by [`wifi_strict_phy_get_romfunc_addr`].
+#[repr(transparent)]
+pub struct PhyRomFunctionTableBinding(UnsafeCell<u32>);
+
+// The field has no Rust mutation API and the one-owner cold-PHY path only
+// permits vendor readers. UnsafeCell is used solely to retain writable ELF
+// section flags so the initialized word is copied into internal SRAM.
+unsafe impl Sync for PhyRomFunctionTableBinding {}
+
+const _: () = {
+    assert!(core::mem::size_of::<PhyRomFunctionTableBinding>() == 4);
+    assert!(core::mem::align_of::<PhyRomFunctionTableBinding>() == 4);
+};
+
 #[cfg(target_arch = "riscv32")]
 #[no_mangle]
 #[link_section = ".critical.data.wifi_strict.phy_rom_function_table_binding"]
-pub static wifi_strict_phy_rom_function_table_binding: u32 = PHY_ROM_FUNCTION_TABLE_ADDRESS;
+pub static wifi_strict_phy_rom_function_table_binding: PhyRomFunctionTableBinding =
+    PhyRomFunctionTableBinding(UnsafeCell::new(PHY_ROM_FUNCTION_TABLE_ADDRESS));
 
 /// Publish the Rust PHY parameter object and typed rev0 ROM callback table.
 ///
