@@ -177,12 +177,12 @@ post-link operation.
 
 ## Current qualified baseline
 
-The 2026-07-25 primary ELF has no mutable blob global or ROM-ABI mutable
+The 2026-07-26 primary ELF has no mutable blob global or ROM-ABI mutable
 indirection cell reachable from a strict runtime leaf. The remaining direct
 cold PHY graph reaches two objects (`phy_param` and `g_phyFuns`) totalling 512
-bytes. Other linked mutable blob state totals 22,203 bytes.
+bytes. Other linked mutable blob state totals 22,212 bytes.
 
-Rust-owned strict sections total 311,501 bytes. The largest storage is in the
+Rust-owned strict sections total 312,441 bytes. The largest storage is in the
 RX path: the 59,008-byte runtime ESF pool, 56,320-byte cold ESF pool, and
 54,784-byte WDEV payload pool. These are not assumed redundant merely because
 their capacities are similar; their simultaneous lifetimes and transfer of
@@ -892,6 +892,35 @@ the same `phy_init.o` member have not yet all been ported. We deliberately do
 not patch or weaken the archive: ownership will switch only after the whole
 member can stop being extracted.
 
+The ROM ABI publication performed by `phy_get_romfunc_addr` is now Rust-owned
+as well. Its primary reference is the unstripped rev0 ROM ELF
+`esp32s31_rev0_rom.elf`, SHA-256
+`a52ad7513deb656a910a5740125f1cce2c7941f11ce57213b7b43aea93d5ab87`.
+That ELF proves that `phy_get_romfuncs` at `0x2f824a82` is only a load from
+the pointer cell at `0x2f07fc3c`, while `phy_param_addr` at `0x2f824a8c` is
+only a store to the parameter cell at `0x2f07fc40`. The cell selects the
+52-byte, 13-entry `g_phyFuns_instance` table at `0x2f07f944`.
+
+Rust models all 13 entries with a compile-time checked `repr(C)` layout,
+validates the table address and the two callbacks which the pinned vendor
+body intentionally preserves, publishes `phy_param` and `g_phyFuns`
+directly, and replaces the remaining 11 entries in the exact vendor store
+order. The preserved entries are `phy_txcal_debuge_mode_` at `0x2f8244fe`
+and `phy_get_tone_sar_dout_` at `0x2f8266da`. The two no-op I2C critical
+callbacks reproduce the pinned two-byte ROM/vendor leaves and reside in
+internal SRAM because ROM may call them while cached execution is
+unavailable. Final-ELF disassembly proves that public
+`phy_get_romfunc_addr` resolves to the Rust function at `0x400d1788`, whose
+body contains only bounded loads, validation branches, and stores: it has no
+call to either ROM accessor, no indirect call, allocation, wait, or loop.
+
+This moves control of the callback ABI to Rust but does not yet claim physical
+ownership of every byte. `phy_param` and the four-byte `g_phyFuns` pointer are
+still defined by `libphy.a[phy_init.o]`, and the callback table is a fixed
+rev0 ROM-ABI RAM object. Once every remaining live function from
+`phy_init.o` has been ported, that archive member can stop being extracted
+and Rust can define the two cold objects explicitly without binary patching.
+
 The migrated sequence passed the strict hardware workload: passive
 scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
 UDP datagrams and four HTTP transfers. All 4786 TX credits and 690 RX credits
@@ -914,6 +943,14 @@ ping, DNS, TCP and HTTP 200. It returned 18/18 TX and 15/15 RX owners with
 zero allocation operations, other-core stalls, or `ppTask` entries. Recovery
 has exact host coverage over all 508 bytes; a warm/no-calibration hardware
 cycle remains a separate qualification item.
+
+The subsequent Rust ROM-ABI-publication image repeated a cold full-calibration
+boot, passive scan, WPA2 association and four-way handshake, DHCP, gateway
+ping, DNS, TCP and HTTP 200. The callback table cell contained the expected
+`0x2f07f944`; post-link traffic returned all 18/18 TX and 15/15 RX owners
+with no rejection. Allocation, reallocation and free counters remained zero,
+`ppTask` was never entered, other-core stalls remained zero, and a further
+30-second interrupt-active run produced no trap or reset.
 
 ## In-progress slice: `g_ic`
 
