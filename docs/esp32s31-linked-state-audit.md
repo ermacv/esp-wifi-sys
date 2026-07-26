@@ -488,3 +488,11 @@ These are the exact direct stores recovered from the two separately audited cold
 | `eloop` | 36 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[eloop.c.obj]` | `eloop_insert_timeout_locked.isra.0`, `eloop_is_running` |
 | `s_sm_table` | 64 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[wpa_auth.c.obj]` | - |
 | `g_wpa_supp` | 144 | `internal SRAM` / `.bss` | `libwpa_supplicant.a[esp_common.c.obj]` | `esp_supplicant_common_deinit` |
+
+The nine schedule rows above describe the pinned vendor baseline. A
+byte-identical 852-byte Rust schedule bank now owns strict TX-PER and the
+default STA/AP/NAN selector, but the vendor rows cannot yet be removed from
+the linked-state inventory: `rcUpdatePhyMode` and `rcAttach` retain
+archive-local relocations. The audit must require disappearance of all nine
+vendor definitions once those two publishers are replaced; counting only the
+new Rust bank before then would hide a temporary 852-byte duplication.

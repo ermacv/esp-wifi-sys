@@ -8,7 +8,10 @@
 
 use core::ptr;
 
-use crate::rate_control::{RateControlRecord, RATE_CONTROL_RECORD_SIZE};
+use crate::{
+    rate_control::{RateControlRecord, RATE_CONTROL_RECORD_SIZE},
+    rate_schedule::{schedule_pointer, RateScheduleKind, RateScheduleRef},
+};
 
 const TRC_CONTEXT_SIZE: usize = RATE_CONTROL_RECORD_SIZE;
 const TRC_CONTEXT_COUNT: usize = 3;
@@ -36,11 +39,10 @@ static mut STATIC_TRC_CONTEXTS: [RateControlRecord; TRC_CONTEXT_COUNT] = [
 ];
 
 unsafe extern "C" {
+    static mut g_ic: u8;
     static mut g_per_conn_trc: u8;
     static trc_ctl: u8;
     static wDevCtrl: u8;
-    static rc11BSchedTbl: u8;
-    static rcP2P11GSchedTbl: u8;
 }
 
 /// Apply the finite receive-signal update from the pinned 0x66-byte
@@ -58,10 +60,7 @@ unsafe extern "C" {
 #[no_mangle]
 #[inline(never)]
 #[link_section = ".rwtext.wifi_strict.rx_proto"]
-pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(
-    rate_control: *mut u8,
-    rx_control: *mut u8,
-) {
+pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(rate_control: *mut u8, rx_control: *mut u8) {
     if rate_control.is_null() || rx_control.is_null() {
         return;
     }
@@ -108,10 +107,7 @@ pub unsafe extern "C" fn wifi_strict_rc_update_rx_done(
 #[no_mangle]
 #[inline(never)]
 #[link_section = ".rwtext.wifi_strict.rx_proto"]
-pub unsafe extern "C" fn wifi_strict_rc_get_trc(
-    route: u32,
-    receiver: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn wifi_strict_rc_get_trc(route: u32, receiver: *mut u8) -> *mut u8 {
     if route as usize >= TRC_ROUTE_COUNT || receiver.is_null() {
         return ptr::null_mut();
     }
@@ -175,9 +171,22 @@ pub(crate) unsafe fn owns_rate_control_record(candidate: *mut u8) -> bool {
 }
 
 unsafe fn initialize_context(context: *mut u8, identity: u8) {
-    let legacy = ptr::addr_of!(rc11BSchedTbl) as u32;
-    let primary = ptr::addr_of!(rc11BSchedTbl).add(0x24) as u32;
-    let p2p = ptr::addr_of!(rcP2P11GSchedTbl).add(0x54) as u32;
+    // These are the exact post-`trc_init` records recovered from the pinned
+    // archive: B[3] for current/fallback, P2P-G[7], and B[0] as the legacy
+    // table base.  The pointers are now projections of typed Rust references,
+    // not addresses of vendor-owned data symbols.
+    let legacy = schedule_pointer(RateScheduleRef {
+        kind: RateScheduleKind::Dot11B,
+        index: 0,
+    }) as u32;
+    let primary = schedule_pointer(RateScheduleRef {
+        kind: RateScheduleKind::Dot11B,
+        index: 3,
+    }) as u32;
+    let p2p = schedule_pointer(RateScheduleRef {
+        kind: RateScheduleKind::P2pDot11G,
+        index: 7,
+    }) as u32;
     context
         .add(PRIMARY_RATE_OFFSET)
         .cast::<u32>()
@@ -207,6 +216,94 @@ unsafe fn initialize_context(context: *mut u8, identity: u8) {
     context.add(IDENTITY_OFFSET).write(identity);
 }
 
+unsafe fn publish_schedule_set(
+    context: *mut u8,
+    primary: RateScheduleRef,
+    secondary: RateScheduleRef,
+    fallback: RateScheduleRef,
+    legacy: RateScheduleRef,
+) {
+    context
+        .add(PRIMARY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(primary));
+    context
+        .add(SECONDARY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(secondary));
+    context
+        .add(FALLBACK_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(fallback));
+    context
+        .add(LEGACY_RATE_OFFSET)
+        .cast::<*mut u8>()
+        .write_unaligned(schedule_pointer(legacy));
+}
+
+/// Replace the complete default-context schedule selector recovered from
+/// `libpp.a[trc.o]::trc_update_ifx_phy_mode`.
+///
+/// The vendor body selects only three finite layouts: LoRa records 1/0/1,
+/// dot11b record 3, or P2P-dot11g record 7.  This adapter preserves the
+/// interface-specific protocol-bit choice but publishes pointers exclusively
+/// into the Rust-owned schedule bank.
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_trc_update_ifx_phy_mode(interface: u32, phy_mode: u32) -> i32 {
+    let (table_index, p2p_enabled) = match interface {
+        0 => (
+            TRC_DEFAULT_INDEX,
+            ptr::addr_of!(g_ic).add(0x1e0).read() & (1 << 4) != 0,
+        ),
+        1 => (
+            TRC_DEFAULT_INDEX + 1,
+            ptr::addr_of!(g_ic).add(0x1e0).read() & (1 << 5) != 0,
+        ),
+        2 => (TRC_DEFAULT_INDEX + 2, false),
+        _ => return 0x102,
+    };
+    let context = table_slot(table_index).read();
+    if context.is_null() || !owns_rate_control_record(context) {
+        return ESP_ERR_WIFI_STATE;
+    }
+
+    if phy_mode == 6 {
+        publish_schedule_set(
+            context,
+            RateScheduleRef {
+                kind: RateScheduleKind::Lora,
+                index: 1,
+            },
+            RateScheduleRef {
+                kind: RateScheduleKind::Lora,
+                index: 0,
+            },
+            RateScheduleRef {
+                kind: RateScheduleKind::Lora,
+                index: 1,
+            },
+            RateScheduleRef {
+                kind: RateScheduleKind::Lora,
+                index: 0,
+            },
+        );
+    } else {
+        let selected = if p2p_enabled {
+            RateScheduleRef {
+                kind: RateScheduleKind::P2pDot11G,
+                index: 7,
+            }
+        } else {
+            RateScheduleRef {
+                kind: RateScheduleKind::Dot11B,
+                index: 3,
+            }
+        };
+        publish_schedule_set(context, selected, selected, selected, selected);
+    }
+    ESP_OK
+}
+
 /// Return whether all three default table cells own the fixed Rust contexts.
 ///
 /// # Safety
@@ -223,12 +320,8 @@ pub unsafe fn static_trc_contexts_bound() -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn __wrap_trc_init() -> i32 {
     if !table_slot(TRC_DEFAULT_INDEX).read_volatile().is_null()
-        || !table_slot(TRC_DEFAULT_INDEX + 1)
-            .read_volatile()
-            .is_null()
-        || !table_slot(TRC_DEFAULT_INDEX + 2)
-            .read_volatile()
-            .is_null()
+        || !table_slot(TRC_DEFAULT_INDEX + 1).read_volatile().is_null()
+        || !table_slot(TRC_DEFAULT_INDEX + 2).read_volatile().is_null()
     {
         return ESP_ERR_WIFI_STATE;
     }

@@ -14,8 +14,8 @@ use crate::{
     event::PpEvent,
     rate_control::{
         beamforming_report_rate, RateControlState, RateScheduleState, ScheduleSelection,
-        RATE_SCHEDULE_RECORD_SIZE,
     },
+    rate_schedule::{schedule_from_pointer, schedule_pointer, schedule_state},
 };
 
 #[cfg(all(target_arch = "riscv32", feature = "hil-vendor-tx"))]
@@ -57,9 +57,6 @@ const RATE_RETRY_STATE_1D_OFFSET: usize = 0x1d;
 const RATE_RETRY_STATE_1E_OFFSET: usize = 0x1e;
 const RATE_HE_FEATURE_8F_OFFSET: usize = 0x8f;
 const RATE_HE_FEATURE_90_OFFSET: usize = 0x90;
-const SCHEDULE_RETRY_LIMIT_OFFSET: usize = 0x01;
-const SCHEDULE_INDEX_OFFSET: usize = 0x0a;
-const SCHEDULE_ADAPTIVE_OFFSET: usize = 0x0b;
 const MAC_TIME_LOW_REGISTER: *const u32 = 0x2010_d800 as *const u32;
 const PHY_NOISE_FLOOR_REGISTER: *const u32 = 0x2010_708c as *const u32;
 const HE_BF_REPORT_RATE_REGISTER: *mut u32 = 0x2010_4464 as *mut u32;
@@ -225,15 +222,6 @@ unsafe extern "C" {
     static mut g_ic: u8;
     static mut g_osi_funcs_p: *const wifi_osi_funcs_t;
     static TmpSTAAPCloseAP: u8;
-    static BAROFDMSched: u8;
-    static BasicOFDMSched: u8;
-    static rc11AXSchedTbl: u8;
-    static rc11BSchedTbl: u8;
-    static rc11GSchedTbl: u8;
-    static rc11NSchedTbl: u8;
-    static rcLoRaSchedTbl: u8;
-    static rcP2P11GSchedTbl: u8;
-    static rcP2P11NSchedTbl: u8;
     #[link_name = "__esp_s31_beacon_send_start_flag"]
     static mut BEACON_SEND_START_FLAG: u8;
     #[link_name = "__esp_s31_beacon_timer"]
@@ -747,10 +735,7 @@ fn update_ack_snr_filter(mut state: [i8; 2], sample: i32) -> [i8; 2] {
 /// live rate-control record. No pointer escapes this function and the safe
 /// filter has no access to MMIO, blob globals, or ROM state.
 #[no_mangle]
-pub unsafe extern "C" fn wifi_strict_rc_update_ack_snr(
-    rate_control: *mut c_void,
-    ack_snr: i32,
-) {
+pub unsafe extern "C" fn wifi_strict_rc_update_ack_snr(rate_control: *mut c_void, ack_snr: i32) {
     let rate_control = rate_control.cast::<i8>();
     if rate_control.is_null() {
         return;
@@ -760,81 +745,6 @@ pub unsafe extern "C" fn wifi_strict_rc_update_ack_snr(
     let updated = update_ack_snr_filter(state, ack_snr);
     rate_control.write(updated[0]);
     rate_control.add(1).write(updated[1]);
-}
-
-#[derive(Clone, Copy)]
-struct ScheduleArena {
-    base: *const u8,
-    records: usize,
-}
-
-#[derive(Clone, Copy)]
-struct ValidatedSchedule {
-    pointer: *mut u8,
-    arena: ScheduleArena,
-    index: usize,
-}
-
-unsafe fn schedule_arenas() -> [ScheduleArena; 9] {
-    [
-        ScheduleArena {
-            base: ptr::addr_of!(BAROFDMSched),
-            records: 1,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(BasicOFDMSched),
-            records: 1,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rc11AXSchedTbl),
-            records: 16,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rc11BSchedTbl),
-            records: 6,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rc11GSchedTbl),
-            records: 13,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rc11NSchedTbl),
-            records: 14,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rcLoRaSchedTbl),
-            records: 2,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rcP2P11GSchedTbl),
-            records: 8,
-        },
-        ScheduleArena {
-            base: ptr::addr_of!(rcP2P11NSchedTbl),
-            records: 10,
-        },
-    ]
-}
-
-/// Validate a compatibility schedule pointer against every pinned immutable
-/// 12-byte schedule arena before reading it.
-unsafe fn validate_schedule(pointer: *mut u8) -> Option<ValidatedSchedule> {
-    let address = pointer as usize;
-    for arena in schedule_arenas() {
-        let base = arena.base as usize;
-        let bytes = arena.records.checked_mul(RATE_SCHEDULE_RECORD_SIZE)?;
-        let Some(offset) = address.checked_sub(base) else {
-            continue;
-        };
-        if offset < bytes && offset % RATE_SCHEDULE_RECORD_SIZE == 0 {
-            return Some(ValidatedSchedule {
-                pointer,
-                arena,
-                index: offset / RATE_SCHEDULE_RECORD_SIZE,
-            });
-        }
-    }
-    None
 }
 
 unsafe fn owns_rate_control_record(rate_control: *mut u8) -> bool {
@@ -874,13 +784,9 @@ unsafe fn set_bf_report_rate(mode: u8, rate: u16, dcm: bool, ersu: bool) {
 
     let register = HE_BF_REPORT_RATE_REGISTER;
     let old = register.read_volatile();
-    register.write_volatile(
-        (old & 0xf803_ffff) | ((u32::from(encoded) << 18) & 0x07fc_0000),
-    );
+    register.write_volatile((old & 0xf803_ffff) | ((u32::from(encoded) << 18) & 0x07fc_0000));
     let old = register.read_volatile();
-    register.write_volatile(
-        (old & 0xfffc_01ff) | ((u32::from(encoded) << 9) & 0x0003_fe00),
-    );
+    register.write_volatile((old & 0xfffc_01ff) | ((u32::from(encoded) << 9) & 0x0003_fe00));
     let old = register.read_volatile();
     register.write_volatile((old & !0x1ff) | (u32::from(encoded) & 0x1ff));
 }
@@ -904,16 +810,13 @@ unsafe fn set_ersu_ack_rate(enabled: bool) {
 ///
 /// All scalar mutation is performed by [`RateControlState`]. The adapter
 /// accepts only the fixed Rust default records or a currently claimed
-/// Rust-owned peer record, and it reads schedule bytes only after proving that
-/// the pointer names a record in one of the nine pinned schedule arenas.
+/// Rust-owned peer record, and it converts schedule pointers into typed
+/// [`crate::rate_schedule::RateScheduleRef`] values before policy runs.
 /// Unlike `rcClearCurSched`, it does not write the shared vendor
 /// `schedule[11]`: the only remaining reader was the excluded stateful
 /// `rcUpdateRate`, so that mutable bit is now eliminated from strict runtime.
 #[no_mangle]
-pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(
-    rate_control: *mut c_void,
-    retries: u32,
-) {
+pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(rate_control: *mut c_void, retries: u32) {
     let rate_control = rate_control.cast::<u8>();
     if rate_control.is_null() || !owns_rate_control_record(rate_control) {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
@@ -924,7 +827,16 @@ pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(
         .add(RATE_CURRENT_SCHEDULE_OFFSET)
         .cast::<*mut u8>()
         .read_unaligned();
-    let Some(current) = validate_schedule(current_pointer) else {
+    let Some(current_reference) = schedule_from_pointer(current_pointer) else {
+        STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+        return;
+    };
+    let current = schedule_state(current_reference);
+    let legacy_pointer = rate_control
+        .add(RATE_LEGACY_SCHEDULE_OFFSET)
+        .cast::<*mut u8>()
+        .read_unaligned();
+    let Some(legacy_schedule) = schedule_from_pointer(legacy_pointer) else {
         STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
         return;
     };
@@ -949,14 +861,13 @@ pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(
             .read_unaligned(),
         retry_state_1d: rate_control.add(RATE_RETRY_STATE_1D_OFFSET).read(),
         retry_state_1e: rate_control.add(RATE_RETRY_STATE_1E_OFFSET).read(),
-        maximum_schedule_index: rate_control
-            .add(RATE_MAXIMUM_SCHEDULE_INDEX_OFFSET)
-            .read(),
+        maximum_schedule_index: rate_control.add(RATE_MAXIMUM_SCHEDULE_INDEX_OFFSET).read(),
         current_schedule: RateScheduleState {
-            retry_limit: current.pointer.add(SCHEDULE_RETRY_LIMIT_OFFSET).read(),
-            index: current.pointer.add(SCHEDULE_INDEX_OFFSET).read(),
-            adaptive: current.pointer.add(SCHEDULE_ADAPTIVE_OFFSET).read(),
+            reference: current_reference,
+            retry_limit: current.retry_limit,
+            adaptive: current.adaptive,
         },
+        legacy_schedule,
     };
     let update = state.update_tx_per(retries);
 
@@ -991,40 +902,18 @@ pub unsafe extern "C" fn wifi_strict_rc_update_tx_per(
         .add(RATE_RETRY_STATE_1E_OFFSET)
         .write(state.retry_state_1e);
 
-    let next_pointer = match update.schedule {
+    let selected = match update.schedule {
         ScheduleSelection::Unchanged => return,
-        ScheduleSelection::AdvanceCurrentByOne => {
-            let next_index = current.index + 1;
-            if next_index >= current.arena.records {
-                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
-                return;
-            }
-            current.arena.base.add(next_index * RATE_SCHEDULE_RECORD_SIZE) as *mut u8
-        }
-        ScheduleSelection::LegacyIndex(index) => {
-            let legacy_pointer = rate_control
-                .add(RATE_LEGACY_SCHEDULE_OFFSET)
-                .cast::<*mut u8>()
-                .read_unaligned();
-            let Some(legacy) = validate_schedule(legacy_pointer) else {
-                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
-                return;
-            };
-            let Some(index) = legacy.index.checked_add(usize::from(index)) else {
-                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
-                return;
-            };
-            if index >= legacy.arena.records {
-                STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
-                return;
-            }
-            legacy.arena.base.add(index * RATE_SCHEDULE_RECORD_SIZE) as *mut u8
+        ScheduleSelection::Selected(schedule) => schedule,
+        ScheduleSelection::Invalid => {
+            STRICT_CALLBACK_FAILED.store(true, Ordering::Release);
+            return;
         }
     };
     rate_control
         .add(RATE_CURRENT_SCHEDULE_OFFSET)
         .cast::<*mut u8>()
-        .write_unaligned(next_pointer);
+        .write_unaligned(schedule_pointer(selected));
 
     rate_control
         .add(RATE_LAST_MAC_TIME_OFFSET)
@@ -1746,8 +1635,7 @@ unsafe fn commit_lmac_tx_done(state: &mut TxDoneState) -> Result<(), TxDoneError
             .read()
             <= 2
         {
-            crate::tx_queue::release_txop_queue(resume_event)
-                .map_err(TxDoneError::TxopQueue)?;
+            crate::tx_queue::release_txop_queue(resume_event).map_err(TxDoneError::TxopQueue)?;
         }
         if pp_post(u32::from(resume_event), ptr::null_mut()) != 0 {
             return Err(TxDoneError::InternalQueueFull);

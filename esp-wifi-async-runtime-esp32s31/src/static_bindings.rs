@@ -70,8 +70,7 @@ impl StaticVendorBindingError {
 }
 
 /// Evidence that all 43 ROM ABI cells refer to their qualified fixed backing
-/// objects. Forty-two remain pinned archive storage; TXOP availability is
-/// Rust-owned.
+/// objects. TXOP availability and the four rate-schedule cells are Rust-owned.
 pub struct StaticVendorBindings {
     _private: (),
 }
@@ -111,6 +110,7 @@ macro_rules! fixed_bindings {
                     ptr::addr_of_mut!($wdev_backing).cast::<u8>(),
                 );
             )+
+            write_rust_rate_schedule_bindings();
             write_rust_txop_queue_status_binding();
         }
 
@@ -134,6 +134,7 @@ macro_rules! fixed_bindings {
                     });
                 }
             )+
+            validate_rust_rate_schedule_bindings()?;
             validate_rust_txop_queue_status_binding()?;
             Ok(StaticVendorBindings { _private: () })
         }
@@ -141,7 +142,53 @@ macro_rules! fixed_bindings {
 }
 
 unsafe extern "C" {
+    static mut rcLoRaSchedTbl_ptr: *mut u8;
+    static mut rc11NSchedTbl_ptr: *mut u8;
+    static mut rc11BSchedTbl_ptr: *mut u8;
+    static mut BasicOFDMSched_ptr: *mut u8;
     static mut g_txop_queue_status_ptr: *mut u8;
+}
+
+unsafe fn write_rust_rate_schedule_bindings() {
+    ptr::addr_of_mut!(rcLoRaSchedTbl_ptr).write_volatile(crate::rate_schedule::lora_abi_ptr());
+    ptr::addr_of_mut!(rc11NSchedTbl_ptr).write_volatile(crate::rate_schedule::dot11n_abi_ptr());
+    ptr::addr_of_mut!(rc11BSchedTbl_ptr).write_volatile(crate::rate_schedule::dot11b_abi_ptr());
+    ptr::addr_of_mut!(BasicOFDMSched_ptr)
+        .write_volatile(crate::rate_schedule::basic_ofdm_abi_ptr());
+}
+
+unsafe fn validate_rust_rate_schedule_binding(
+    cell: *const *mut u8,
+    expected: *mut u8,
+    binding: StaticVendorBinding,
+) -> Result<(), StaticVendorBindingError> {
+    if cell.read_volatile() != expected {
+        return Err(StaticVendorBindingError { binding });
+    }
+    Ok(())
+}
+
+unsafe fn validate_rust_rate_schedule_bindings() -> Result<(), StaticVendorBindingError> {
+    validate_rust_rate_schedule_binding(
+        ptr::addr_of!(rcLoRaSchedTbl_ptr),
+        crate::rate_schedule::lora_abi_ptr(),
+        StaticVendorBinding::LoraRateSchedule,
+    )?;
+    validate_rust_rate_schedule_binding(
+        ptr::addr_of!(rc11NSchedTbl_ptr),
+        crate::rate_schedule::dot11n_abi_ptr(),
+        StaticVendorBinding::Dot11nRateSchedule,
+    )?;
+    validate_rust_rate_schedule_binding(
+        ptr::addr_of!(rc11BSchedTbl_ptr),
+        crate::rate_schedule::dot11b_abi_ptr(),
+        StaticVendorBinding::Dot11bRateSchedule,
+    )?;
+    validate_rust_rate_schedule_binding(
+        ptr::addr_of!(BasicOFDMSched_ptr),
+        crate::rate_schedule::basic_ofdm_abi_ptr(),
+        StaticVendorBinding::BasicOfdmRateSchedule,
+    )
 }
 
 unsafe fn write_rust_txop_queue_status_binding() {
@@ -189,10 +236,6 @@ fixed_bindings! {
         Fragment: s_fragment_ptr => s_fragment,
         InterfaceControl: if_ctrl_ptr => if_ctrl,
         ApNoLongRange: ap_no_lr_ptr => ap_no_lr,
-        LoraRateSchedule: rcLoRaSchedTbl_ptr => rcLoRaSchedTbl,
-        Dot11nRateSchedule: rc11NSchedTbl_ptr => rc11NSchedTbl,
-        Dot11bRateSchedule: rc11BSchedTbl_ptr => rc11BSchedTbl,
-        BasicOfdmRateSchedule: BasicOFDMSched_ptr => BasicOFDMSched,
         TrcControl: trc_ctl_ptr => trc_ctl,
         PowerManagementConfig: g_pm_cfg_ptr => g_pm_cfg,
         PowerManagement: g_pm_ptr => g_pm,
@@ -227,9 +270,8 @@ fixed_bindings! {
 pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticVendorBindingError> {
     net80211_data_ptr_init();
     let _ = wdev_data_init();
-    // The vendor publisher selects its private three-byte object. Replace that
-    // one binding immediately: TXOP allocation is now Rust-owned in every
-    // profile that uses this audited boundary.
+    // Replace the five bindings whose backing storage has moved to Rust.
+    write_rust_rate_schedule_bindings();
     write_rust_txop_queue_status_binding();
     validate_static_vendor_bindings()
 }
@@ -238,8 +280,8 @@ pub unsafe fn bind_static_vendor_state() -> Result<StaticVendorBindings, StaticV
 ///
 /// Unlike the vendor net80211 leaf, this has no hidden one-shot guard: the
 /// stores are idempotent and serialized ownership is an explicit caller
-/// precondition. The TXOP cell deliberately selects the Rust-owned three-byte
-/// state rather than the private archive object. It performs no calls,
+/// precondition. The rate-schedule and TXOP cells deliberately select
+/// Rust-owned state rather than private archive objects. It performs no calls,
 /// allocation, waiting, or hardware access.
 ///
 /// # Safety

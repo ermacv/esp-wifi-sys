@@ -123,10 +123,7 @@ pub const WRAPPED_VENDOR_BOUNDARIES: &[&str] = &[
 pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("pm_on_data_rx", "__wrap_pm_on_data_rx"),
     ("wDev_AppendRxBlocks", "__wrap_wDev_AppendRxBlocks"),
-    (
-        "wDev_DiscardFrame",
-        "wifi_strict_wdev_discard_frame",
-    ),
+    ("wDev_DiscardFrame", "wifi_strict_wdev_discard_frame"),
     (
         "wDev_ProcessRxSucData",
         "wifi_strict_wdev_process_rx_success_data",
@@ -141,13 +138,11 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wifi_strict_esp_test_set_rx_error_occurs",
     ),
     ("rcUpdateTxDone", "wifi_strict_rc_update_tx_done"),
+    ("rcUpdateAckSnr", "wifi_strict_rc_update_ack_snr"),
+    ("rcTxUpdatePer", "wifi_strict_rc_update_tx_per"),
     (
-        "rcUpdateAckSnr",
-        "wifi_strict_rc_update_ack_snr",
-    ),
-    (
-        "rcTxUpdatePer",
-        "wifi_strict_rc_update_tx_per",
+        "trc_update_ifx_phy_mode",
+        "wifi_strict_trc_update_ifx_phy_mode",
     ),
     (
         "lmacRequestTxopQueue",
@@ -163,26 +158,14 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "wifi_strict_hal_mac_rx_get_last_dscr",
     ),
     ("hal_mac_tx_set_cca", "wifi_strict_hal_mac_tx_set_cca"),
-    (
-        "hal_mac_is_txq_valid",
-        "wifi_strict_hal_mac_is_txq_valid",
-    ),
+    ("hal_mac_is_txq_valid", "wifi_strict_hal_mac_is_txq_valid"),
     (
         "hal_mac_set_txq_invalid",
         "wifi_strict_hal_mac_set_txq_invalid",
     ),
-    (
-        "hal_mac_txq_disable",
-        "wifi_strict_hal_mac_txq_disable",
-    ),
-    (
-        "hal_mac_set_csi_cbw",
-        "wifi_strict_hal_mac_set_csi_cbw",
-    ),
-    (
-        "phy_set_rx_comp_new",
-        "wifi_strict_phy_set_rx_comp_new",
-    ),
+    ("hal_mac_txq_disable", "wifi_strict_hal_mac_txq_disable"),
+    ("hal_mac_set_csi_cbw", "wifi_strict_hal_mac_set_csi_cbw"),
+    ("phy_set_rx_comp_new", "wifi_strict_phy_set_rx_comp_new"),
     ("phy_dc_mem_clr", "wifi_strict_phy_dc_mem_clr"),
     (
         "phy_set_tx_gain_mem_new",

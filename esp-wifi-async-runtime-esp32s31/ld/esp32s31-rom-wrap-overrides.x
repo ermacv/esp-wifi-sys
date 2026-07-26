@@ -294,6 +294,14 @@ rcTxUpdatePer = wifi_strict_rc_update_tx_per;
 ASSERT(rcTxUpdatePer == wifi_strict_rc_update_tx_per,
        "ESP32-S31 rcTxUpdatePer Rust boundary is inactive");
 
+/* The default STA/AP/NAN schedule selector used archive-local table anchors.
+ * Route it through typed Rust schedule references so no default context can
+ * republish a vendor schedule pointer after trc_init. */
+EXTERN(wifi_strict_trc_update_ifx_phy_mode);
+trc_update_ifx_phy_mode = wifi_strict_trc_update_ifx_phy_mode;
+ASSERT(trc_update_ifx_phy_mode == wifi_strict_trc_update_ifx_phy_mode,
+       "ESP32-S31 TRC PHY-mode Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 

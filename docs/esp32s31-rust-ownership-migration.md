@@ -585,6 +585,31 @@ completed. An 8 MiB device-to-host TCP transfer completed at approximately
 5,946/5,946, the 32-credit pool reached its full qualified high-water mark, and
 all invalid/full/contended/credit/peer rejection counters remained zero.
 
+### Rust-owned schedule-bank checkpoint
+
+The nine 12-byte schedule arenas are now represented by one exact 852-byte
+Rust bank containing 71 typed `RateScheduleRef` records. Its initial bytes were
+recovered from the pinned `libpp.a[trc.o]`; the sole `rcAttach` mutation,
+writing each arena-local index to byte `0x0a`, is materialized at compile time.
+Host tests enumerate all 71 references, prove pointer round trips and check the
+recovered boundary records.
+
+`RateControlState` now carries the current and legacy schedule references as
+values. `wifi_strict_rc_update_tx_per` converts both ABI pointers at entry and
+publishes a pointer only after the safe transition has selected another valid
+reference. It no longer enumerates or reads the nine vendor globals. The
+three fixed default contexts and four ROM ABI schedule cells likewise publish
+only addresses derived from the Rust bank.
+
+The complete default-interface `trc_update_ifx_phy_mode` selector is also
+Rust-owned. It preserves the recovered LoRa `[1, 0, 1, 0]`, dot11b record 3,
+and P2P-dot11g record 7 layouts while rejecting an absent or foreign default
+context. The larger per-peer `rcUpdatePhyMode` transition still contains
+archive-local schedule references and is the remaining blocker to removing
+the original 852-byte arenas from the final ELF. Until that function and
+`rcAttach` are interposed, this checkpoint is deliberately not counted as an
+SRAM reduction or complete peer rate-control ownership.
+
 ## Completed runtime slice: TXOP queue ownership
 
 The pinned `libpp.a[lmac.o]` implementation uses a three-byte availability

@@ -76,6 +76,7 @@ pub mod queue;
 pub mod radio;
 mod radio_hal;
 mod rate_control;
+mod rate_schedule;
 pub mod runtime;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod rx;

@@ -7,8 +7,9 @@
 //! safe value operations rather than mutations performed by ROM through an
 //! untyped pointer.
 
+use crate::rate_schedule::RateScheduleRef;
+
 pub(crate) const RATE_CONTROL_RECORD_SIZE: usize = 0x98;
-pub(crate) const RATE_SCHEDULE_RECORD_SIZE: usize = 12;
 
 /// Stable backing for one temporary vendor-compatible rate-control record.
 ///
@@ -34,8 +35,8 @@ impl RateControlRecord {
 /// state used by TX completion is owned here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RateScheduleState {
+    pub reference: RateScheduleRef,
     pub retry_limit: u8,
-    pub index: u8,
     pub adaptive: u8,
 }
 
@@ -51,13 +52,14 @@ pub(crate) struct RateControlState {
     pub retry_state_1e: u8,
     pub maximum_schedule_index: u8,
     pub current_schedule: RateScheduleState,
+    pub legacy_schedule: RateScheduleRef,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ScheduleSelection {
     Unchanged,
-    AdvanceCurrentByOne,
-    LegacyIndex(u8),
+    Selected(RateScheduleRef),
+    Invalid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,11 +114,15 @@ impl RateControlState {
         self.retry_state_1e = 0;
         self.retry_pressure = 0;
 
-        let next_index = u16::from(self.current_schedule.index) + 1;
-        let schedule = if u16::from(self.maximum_schedule_index) < next_index {
-            ScheduleSelection::LegacyIndex(self.maximum_schedule_index)
+        let next_index = u16::from(self.current_schedule.reference.index) + 1;
+        let selected = if u16::from(self.maximum_schedule_index) < next_index {
+            self.legacy_schedule.offset(self.maximum_schedule_index)
         } else {
-            ScheduleSelection::AdvanceCurrentByOne
+            self.current_schedule.reference.advance()
+        };
+        let schedule = match selected {
+            Some(schedule) => ScheduleSelection::Selected(schedule),
+            None => ScheduleSelection::Invalid,
         };
         TxPerUpdate { schedule }
     }
@@ -169,6 +175,7 @@ pub(crate) const fn beamforming_report_rate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rate_schedule::{RateScheduleKind, RateScheduleRef};
 
     fn state() -> RateControlState {
         RateControlState {
@@ -181,10 +188,11 @@ mod tests {
             retry_state_1e: 3,
             maximum_schedule_index: 5,
             current_schedule: RateScheduleState {
+                reference: RateScheduleRef::new(RateScheduleKind::Dot11N, 2).unwrap(),
                 retry_limit: 7,
-                index: 2,
                 adaptive: 1,
             },
+            legacy_schedule: RateScheduleRef::new(RateScheduleKind::Dot11B, 0).unwrap(),
         }
     }
 
@@ -226,7 +234,10 @@ mod tests {
         let mut value = state();
         value.retry_pressure = 6;
         let update = value.update_tx_per(5);
-        assert_eq!(update.schedule, ScheduleSelection::AdvanceCurrentByOne);
+        assert_eq!(
+            update.schedule,
+            ScheduleSelection::Selected(RateScheduleRef::new(RateScheduleKind::Dot11N, 3).unwrap())
+        );
         assert_eq!(value.retry_pressure, 0);
         assert_eq!(value.weighted_retries, 0);
         assert_eq!(value.transmissions, 0);
@@ -242,11 +253,22 @@ mod tests {
         let mut value = state();
         value.retry_pressure = 6;
         value.maximum_schedule_index = 2;
-        value.current_schedule.index = 2;
+        value.current_schedule.reference =
+            RateScheduleRef::new(RateScheduleKind::Dot11N, 2).unwrap();
         assert_eq!(
             value.update_tx_per(5).schedule,
-            ScheduleSelection::LegacyIndex(2)
+            ScheduleSelection::Selected(RateScheduleRef::new(RateScheduleKind::Dot11B, 2).unwrap())
         );
+    }
+
+    #[test]
+    fn invalid_schedule_transition_is_explicit() {
+        let mut value = state();
+        value.retry_pressure = 6;
+        value.maximum_schedule_index = 6;
+        value.current_schedule.reference =
+            RateScheduleRef::new(RateScheduleKind::Dot11N, 13).unwrap();
+        assert_eq!(value.update_tx_per(5).schedule, ScheduleSelection::Invalid);
     }
 
     #[test]
