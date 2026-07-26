@@ -1038,7 +1038,7 @@ as PHY qualification evidence. The strict final-ELF graph still reports
 zero violations and unchanged debt of `1 fallback + 9 stateful/unproven +
 0 temporary MMIO`.
 
-## In progress: non-blocking PHY-I2C and RC calibration
+## Completed PHY-I2C command RAM leaf and in-progress async RF init
 
 The next cold-PHY boundary is deliberately wider than
 `libphy.a[phy_init.o]::phy_rc_cal_init`. That vendor wrapper merely supplies
@@ -1077,12 +1077,67 @@ timeout error, never permission to self-wake and poll again. The arithmetic
 half of `phy_rc_cal` now mutates an explicit fixed-size Rust parameter image
 and is host-tested on both sides of the ROM result-45 threshold.
 
-This slice is not yet interposed into the final firmware. The current cold
-boot still executes the vendor/ROM `phy_rf_init` path. Activation must happen
-at the complete async RF-init boundary so the adjacent synchronous
-`ets_delay_us(10)`, masked read/modify/write transactions, and all remaining
-calibration leaves are accounted for together. Consequently no HIL behavior
-or vendor-debt reduction is claimed for this preparatory step.
+One independent cold leaf from that frontier is now active:
+`libphy.a[phy_i2c.o]::phy_i2c_master_cmd_mem_init`. Its complete `0x5be`-byte
+reference body does not start an I2C transaction. It encodes exactly 45
+three-byte commands, substitutes 19 values derived from the fixed
+`phy_param` image, and writes the words to
+`0x2010_fc00..=0x2010_fcb0`. Its only ROM callees are the pure
+`phy_encode_i2c_master` at `0x2f82a81a`, size `0x0a`, and the one-store
+`phy_i2c_master_fill` at `0x2f82a824`, size `0x0e`.
+
+Rust now owns the full command template, the exact parameter substitutions,
+the recovered saturation arithmetic, and the 45 finite volatile stores. The
+active loop uses a monotonically increasing cursor over the sorted dynamic
+indices rather than a `match` jump table. Both unchecked table reads are
+locally preceded by the same explicit `cursor != 19` proof; this is narrowly
+scoped target-adapter `unsafe`, not protocol-state ownership.
+
+In the credentialed HIL ELF,
+`phy_i2c_master_cmd_mem_init == wifi_strict_phy_i2c_master_cmd_mem_init ==
+0x400d120c`. The Rust body is `0x10a` bytes. Final-ELF disassembly contains no
+`jal`, `jalr`, `jr`, panic edge, allocation, delay, hardware-dependent exit,
+or loop other than the statically bounded 45-command traversal. The two ROM
+helpers remain absolute reference exports and are not called. The
+non-credential primary image is 892,624 bytes and still passes the complete
+6,407-function strict audit with zero violations.
+
+Hardware qualification exercised this replacement during a cold
+full-calibration boot. Passive scan observed the target AP, then open
+authentication, HT20 association, the Rust WPA2 four-way handshake, DHCP,
+gateway ping, DNS, TCP and HTTP 200 all completed. The post-link snapshot
+reported zero allocations, reallocations, frees and failures; all 19 TX and
+16 RX owners returned to their static pools, `ppTask` was never entered, and
+no other-core stall occurred.
+
+The parent `libphy.a[phy_init.o]::phy_rf_init` remains the correct activation
+boundary for the actual asynchronous calibration runtime. Its complete
+`0x122`-byte body sequences 26 direct operations. Inspection of every
+reachable calibration leaf found more synchronous behavior than the RC
+wrapper alone exposes:
+
+- `phy_open_i2c_xpd_new`, size `0xac`, performs a 100-microsecond ROM delay
+  and then enters `phy_wait_i2c_sdm_stable`;
+- ROM `phy_wait_i2c_sdm_stable` at `0x2f823e76`, size `0x4a`, repeatedly
+  compares the cycle counter and PHY-I2C result against `0x5b` until success
+  or timeout;
+- ROM `phy_rfpll_chgp_cal` at `0x2f825cd4`, size `0xf4`, can perform up to
+  100 iterations, each containing a 20-microsecond delay and a masked
+  PHY-I2C read;
+- `phy_xtal_duty_cal`, size `0x392`, contains a delay and several bounded
+  measurement/calibration loops;
+- `phy_get_rc_dout` contains its already identified 100-microsecond delay and
+  completion read.
+
+Therefore these functions will not be interposed one at a time while leaving
+their synchronous parent active. The next slice is an explicit Rust
+`PhyRfInit` state machine: every command publication transfers ownership to
+one in-flight token, every time interval is an async Rust timer edge, and
+every completion is observed once after a hardware/timer wake. A deadline
+failure terminates the calibration transition; it never becomes a
+self-waking poll loop. Until that parent is active, cold boot still executes
+the remaining vendor/ROM `phy_rf_init` sequence and the strict ownership debt
+does not decrease merely because its command-RAM child is already Rust-owned.
 
 ## In-progress slice: `g_ic`
 
