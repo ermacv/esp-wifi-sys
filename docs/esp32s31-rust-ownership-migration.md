@@ -1219,6 +1219,37 @@ self-waking poll loop. Until that parent is active, cold boot still executes
 the remaining vendor/ROM `phy_rf_init` sequence and the strict ownership debt
 does not decrease merely because its command-RAM child is already Rust-owned.
 
+The first child transition of that parent is now modeled but deliberately not
+activated. Complete disassembly of
+`libphy.a[phy_reg.o]::phy_open_i2c_xpd_new` establishes two paths. A nonzero
+argument clears the upper halfword at `0x2070_4184`, clears bit 28 at
+`0x2070_40f0`, and then delays for 100 microseconds. Both paths subsequently
+set those fields, preserve the instruction-evidenced bit-31 clear/set pulse
+when bit 30 of `0x2070_4208` was initially clear, ensure bit 31 is set, and
+tail-call ROM `phy_wait_i2c_sdm_stable`.
+
+The complete ROM wait body at `0x2f823e76` records the cycle counter at
+`0x2010_d800`, uses an inclusive `9,999`-cycle bound, and repeatedly reads
+PHY-I2C block `0x63`, register zero until the result is `0x5b` or the bound is
+exceeded. Rust now separates this into:
+
+- two finite, no-call MMIO adapters for the pre-delay and common register
+  sequences;
+- an optional `DelayMicros(100)` action completed only by the async timer;
+- a `CheckSdmDeadline { maximum_cycles: 9_999 }` action;
+- one non-blocking PHY-I2C read action per SDM sample;
+- explicit `Stable` and `TimedOut` terminal outcomes.
+
+A mismatching sample returns to the deadline-check state only after that
+sample's I2C completion edge. The transition contains no future and has no
+waker, so it cannot schedule or poll itself. Three host tests cover the
+delayed and immediate paths, reject completions delivered out of order, prove
+that every retry crosses both deadline and I2C edges, and prove timeout is
+terminal. The complete 320-test suite passes serially. The target
+`wifi-primary` build and both strict final-ELF audits also pass unchanged;
+because the parent is not active, the new preparatory state machine is dead
+stripped and the qualified runtime/cold-state metrics do not change.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
