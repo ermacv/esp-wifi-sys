@@ -1534,17 +1534,29 @@ path two; its electrical meaning is deliberately left unnamed until evidence
 identifies it. `phy_set_txclk_en` and `phy_set_rxclk_en` are now exact Rust
 MMIO leaves for bits 17:16 and 15:14 respectively at `0x2010_0890`.
 
-This is not yet a claim that operation twenty-four is blob-free. Its typed
-`PrepareHardware` and `RestoreHardware` actions are composition boundaries,
-not permission to call the synchronous vendor parent. The remaining
-decomposition is RFPLL frequency programming, tone setup (including the
-`g_phyFuns + 0x30` callback), RX-DCO calibration, IQ-estimator completion and
-PBus restore. The ROM ELF proves that RX-DCO contains a bounded twelve-step
-measurement loop and synchronous delays, while IQ-estimator enable contains a
-hardware-dependent readiness loop and writes `phy_param_rom + 0x1ac`; both
-must become separate timer/interrupt-driven Rust transitions.
+Operation twenty-four no longer has aggregate `PrepareHardware` or
+`RestoreHardware` completions. `XtalDutyPrepareTransition` exposes RF
+frequency programming, tone setup, both clock gates, PBus debug mode, all ten
+pre-search PBus commands, the RX-DCO child boundary, and exact save/clear/
+restore ownership of bits 23:22 at `0x2010_0434`. The PBus list includes the
+seven commands from ROM `phy_pbus_xpd_rx_on` followed by the three direct
+commands in `phy_xtal_duty_cal`; every completion is bound to the exact
+transaction. `XtalDutyRestoreTransition` exposes tone stop, both clock gates,
+all three `phy_pbus_xpd_rx_off` commands and the conditional work-mode tail.
+That tail can progress through its one- and two-microsecond states only from
+identity-bound external timer completions. A PBus timeout is a typed terminal
+failure, never a retry or poll.
 
-The serial runtime suite passes 353 tests. `phy_freq_reg_init()` belongs to
+This is still not a claim that operation twenty-four is blob-free. The
+remaining named child decomposition is RFPLL frequency programming, tone
+setup (including the `g_phyFuns + 0x30` callback), RX-DCO calibration, and
+the IQ-estimator used for signal-power measurements. The ROM ELF proves that
+RX-DCO contains a bounded twelve-step measurement loop and synchronous
+delays, while IQ-estimator enable contains a hardware-dependent readiness
+loop and writes `phy_param_rom + 0x1ac`; both must become separate
+timer/interrupt-driven Rust transitions.
+
+The serial runtime suite passes 355 tests. `phy_freq_reg_init()` belongs to
 `phy_wakeup_init` and `phy_set_chan_freq_hw_init`, not this point in the cold
 path. The prefix remains dead-stripped and does not replace any part of the
 live parent until the remaining two parent operations and every operation-24

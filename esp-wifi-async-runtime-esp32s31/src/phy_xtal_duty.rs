@@ -4,7 +4,10 @@
 //! `0x392`. The pinned cold caller always passes `debug = 0`, so both vendor
 //! `phy_printf` branches are dead and are intentionally absent here.
 
-use crate::phy_i2c::PhyI2cAddress;
+use crate::{
+    phy_i2c::PhyI2cAddress,
+    phy_pbus::PhyPbusForceTest,
+};
 
 const FIRST_CANDIDATE: u8 = 0x20;
 const LAST_CANDIDATE: u8 = 0x3e;
@@ -357,6 +360,533 @@ pub struct XtalDutyCalibrationParameters {
     pub pbus_rx_path_value: u8,
 }
 
+const RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
+const RX_DCO_CONTROL_FIELD_MASK: u32 = 0x00c0_0000;
+const RX_DCO_CONFIGURATION: [u32; 2] = [0x0100_0100; 2];
+
+const fn prepare_pbus_transaction(index: u8, pbus_rx_path_value: u8) -> PhyPbusForceTest {
+    match index {
+        0 => PhyPbusForceTest::new(4, 1, 0),
+        1 => PhyPbusForceTest::new(4, 2, 1),
+        2 => PhyPbusForceTest::new(5, 1, 0),
+        3 => PhyPbusForceTest::new(0, 1, 0x40),
+        4 => PhyPbusForceTest::new(0, 2, pbus_rx_path_value as u16),
+        5 => PhyPbusForceTest::new(1, 1, 0x189),
+        6 => PhyPbusForceTest::new(1, 2, 0xf0),
+        7 => PhyPbusForceTest::new(0, 1, 0x43),
+        8 => PhyPbusForceTest::new(1, 1, 0x38),
+        _ => PhyPbusForceTest::new(1, 1, 0x189),
+    }
+}
+
+const fn restore_pbus_transaction(index: u8) -> PhyPbusForceTest {
+    match index {
+        0 => PhyPbusForceTest::new(0, 1, 0),
+        1 => PhyPbusForceTest::new(1, 1, 0),
+        _ => PhyPbusForceTest::new(1, 2, 0),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XtalDutyRxDcoRequest {
+    /// First argument observed at the pinned call site.
+    pub control: u16,
+    /// Two caller-owned words initialized before entering RX-DCO calibration.
+    pub configuration: [u32; 2],
+    /// Third argument observed at the pinned call site.
+    pub measurement_limit: u8,
+}
+
+impl XtalDutyRxDcoRequest {
+    const VALUE: Self = Self {
+        control: 0x0fa0,
+        configuration: RX_DCO_CONFIGURATION,
+        measurement_limit: 10,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XtalDutyRxDcoOutcome {
+    /// Final values of the two caller-owned calibration words.
+    pub configuration: [u32; 2],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyHardwareFailure {
+    PbusForceTestTimedOut(PhyPbusForceTest),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyPrepareAction {
+    /// Temporary boundary for `phy_set_rf_freq_offset`. Its three observed
+    /// inputs are explicit; the synchronous vendor parent is not permitted.
+    ProgramRfFrequency {
+        rf_frequency_offset_base: u8,
+        frequency_code: u16,
+        mode: u8,
+    },
+    /// Temporary boundary for `phy_start_tx_tone_step_new(1, 0x80, 0, 0, 0, 0)`.
+    ConfigureCalibrationTone {
+        enabled: bool,
+        selector: u8,
+        step: u8,
+    },
+    ConfigureRxClock {
+        enabled: bool,
+    },
+    ConfigureTxClock {
+        enabled: bool,
+    },
+    ConfigurePbusDebugMode,
+    ForcePbus(PhyPbusForceTest),
+    /// Read the register once, preserve bits 23:22 in Rust, and clear them in
+    /// the same serialized radio-owner operation.
+    MaskRxDcoControl {
+        address: usize,
+        clear_mask: u32,
+    },
+    /// Temporary child boundary. RX-DCO itself is decomposed separately
+    /// because its pinned body contains timer-bearing measurements.
+    CalibrateRxDco(XtalDutyRxDcoRequest),
+    RestoreRxDcoControl {
+        address: usize,
+        field_mask: u32,
+        saved_field: u32,
+    },
+    Complete(XtalDutyRxDcoOutcome),
+    Failed(XtalDutyHardwareFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyPrepareCompletion {
+    RfFrequencyProgrammed {
+        rf_frequency_offset_base: u8,
+        frequency_code: u16,
+        mode: u8,
+    },
+    CalibrationToneConfigured {
+        enabled: bool,
+        selector: u8,
+        step: u8,
+    },
+    RxClockConfigured {
+        enabled: bool,
+    },
+    TxClockConfigured {
+        enabled: bool,
+    },
+    PbusDebugModeConfigured,
+    PbusForceCompleted(PhyPbusForceTest),
+    PbusForceTimedOut(PhyPbusForceTest),
+    RxDcoControlMasked {
+        address: usize,
+        saved_field: u32,
+    },
+    RxDcoCalibrated {
+        request: XtalDutyRxDcoRequest,
+        outcome: XtalDutyRxDcoOutcome,
+    },
+    RxDcoControlRestored {
+        address: usize,
+        saved_field: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyPrepareTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XtalDutyPrepareStep {
+    ProgramRfFrequency,
+    StartTone,
+    EnableRxClock,
+    EnableTxClock,
+    PbusDebugMode,
+    PbusForce(u8),
+    MaskRxDcoControl,
+    CalibrateRxDco {
+        saved_field: u32,
+    },
+    RestoreRxDcoControl {
+        saved_field: u32,
+        outcome: XtalDutyRxDcoOutcome,
+    },
+    Complete(XtalDutyRxDcoOutcome),
+    Failed(XtalDutyHardwareFailure),
+}
+
+/// Exact finite preparation order before the crystal-duty candidate search.
+///
+/// PBus commands are individual externally completed operations. Nothing in
+/// this transition retries a busy register, polls, delays, allocates, or
+/// invokes a callback. RFPLL, tone and RX-DCO remain named child boundaries
+/// until their own register/timer transitions are complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XtalDutyPrepareTransition {
+    frequency_code: u16,
+    parameter: XtalDutyCalibrationParameters,
+    step: XtalDutyPrepareStep,
+}
+
+impl XtalDutyPrepareTransition {
+    pub const fn new(
+        frequency_code: u16,
+        parameter: XtalDutyCalibrationParameters,
+    ) -> Self {
+        Self {
+            frequency_code,
+            parameter,
+            step: XtalDutyPrepareStep::ProgramRfFrequency,
+        }
+    }
+
+    pub const fn action(self) -> XtalDutyPrepareAction {
+        match self.step {
+            XtalDutyPrepareStep::ProgramRfFrequency => {
+                XtalDutyPrepareAction::ProgramRfFrequency {
+                    rf_frequency_offset_base: self.parameter.rf_frequency_offset_base,
+                    frequency_code: self.frequency_code.wrapping_sub(5),
+                    mode: 0,
+                }
+            }
+            XtalDutyPrepareStep::StartTone => {
+                XtalDutyPrepareAction::ConfigureCalibrationTone {
+                    enabled: true,
+                    selector: 0x80,
+                    step: 0,
+                }
+            }
+            XtalDutyPrepareStep::EnableRxClock => {
+                XtalDutyPrepareAction::ConfigureRxClock { enabled: true }
+            }
+            XtalDutyPrepareStep::EnableTxClock => {
+                XtalDutyPrepareAction::ConfigureTxClock { enabled: true }
+            }
+            XtalDutyPrepareStep::PbusDebugMode => {
+                XtalDutyPrepareAction::ConfigurePbusDebugMode
+            }
+            XtalDutyPrepareStep::PbusForce(index) => XtalDutyPrepareAction::ForcePbus(
+                prepare_pbus_transaction(index, self.parameter.pbus_rx_path_value),
+            ),
+            XtalDutyPrepareStep::MaskRxDcoControl => {
+                XtalDutyPrepareAction::MaskRxDcoControl {
+                    address: RX_DCO_CONTROL_ADDRESS,
+                    clear_mask: RX_DCO_CONTROL_FIELD_MASK,
+                }
+            }
+            XtalDutyPrepareStep::CalibrateRxDco { .. } => {
+                XtalDutyPrepareAction::CalibrateRxDco(XtalDutyRxDcoRequest::VALUE)
+            }
+            XtalDutyPrepareStep::RestoreRxDcoControl { saved_field, .. } => {
+                XtalDutyPrepareAction::RestoreRxDcoControl {
+                    address: RX_DCO_CONTROL_ADDRESS,
+                    field_mask: RX_DCO_CONTROL_FIELD_MASK,
+                    saved_field,
+                }
+            }
+            XtalDutyPrepareStep::Complete(outcome) => {
+                XtalDutyPrepareAction::Complete(outcome)
+            }
+            XtalDutyPrepareStep::Failed(failure) => XtalDutyPrepareAction::Failed(failure),
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: XtalDutyPrepareCompletion,
+    ) -> Result<(), XtalDutyPrepareTransitionError> {
+        self.step = match (self.step, completion) {
+            (
+                XtalDutyPrepareStep::ProgramRfFrequency,
+                XtalDutyPrepareCompletion::RfFrequencyProgrammed {
+                    rf_frequency_offset_base,
+                    frequency_code,
+                    mode: 0,
+                },
+            ) if rf_frequency_offset_base == self.parameter.rf_frequency_offset_base
+                && frequency_code == self.frequency_code.wrapping_sub(5) =>
+            {
+                XtalDutyPrepareStep::StartTone
+            }
+            (
+                XtalDutyPrepareStep::StartTone,
+                XtalDutyPrepareCompletion::CalibrationToneConfigured {
+                    enabled: true,
+                    selector: 0x80,
+                    step: 0,
+                },
+            ) => XtalDutyPrepareStep::EnableRxClock,
+            (
+                XtalDutyPrepareStep::EnableRxClock,
+                XtalDutyPrepareCompletion::RxClockConfigured { enabled: true },
+            ) => XtalDutyPrepareStep::EnableTxClock,
+            (
+                XtalDutyPrepareStep::EnableTxClock,
+                XtalDutyPrepareCompletion::TxClockConfigured { enabled: true },
+            ) => XtalDutyPrepareStep::PbusDebugMode,
+            (
+                XtalDutyPrepareStep::PbusDebugMode,
+                XtalDutyPrepareCompletion::PbusDebugModeConfigured,
+            ) => XtalDutyPrepareStep::PbusForce(0),
+            (
+                XtalDutyPrepareStep::PbusForce(index),
+                XtalDutyPrepareCompletion::PbusForceCompleted(transaction),
+            ) if transaction
+                == prepare_pbus_transaction(index, self.parameter.pbus_rx_path_value) =>
+            {
+                if index == 9 {
+                    XtalDutyPrepareStep::MaskRxDcoControl
+                } else {
+                    XtalDutyPrepareStep::PbusForce(index + 1)
+                }
+            }
+            (
+                XtalDutyPrepareStep::PbusForce(index),
+                XtalDutyPrepareCompletion::PbusForceTimedOut(transaction),
+            ) if transaction
+                == prepare_pbus_transaction(index, self.parameter.pbus_rx_path_value) =>
+            {
+                XtalDutyPrepareStep::Failed(XtalDutyHardwareFailure::PbusForceTestTimedOut(
+                    transaction,
+                ))
+            }
+            (
+                XtalDutyPrepareStep::MaskRxDcoControl,
+                XtalDutyPrepareCompletion::RxDcoControlMasked {
+                    address: RX_DCO_CONTROL_ADDRESS,
+                    saved_field,
+                },
+            ) if saved_field & !RX_DCO_CONTROL_FIELD_MASK == 0 => {
+                XtalDutyPrepareStep::CalibrateRxDco { saved_field }
+            }
+            (
+                XtalDutyPrepareStep::CalibrateRxDco { saved_field },
+                XtalDutyPrepareCompletion::RxDcoCalibrated {
+                    request: XtalDutyRxDcoRequest::VALUE,
+                    outcome,
+                },
+            ) => XtalDutyPrepareStep::RestoreRxDcoControl {
+                saved_field,
+                outcome,
+            },
+            (
+                XtalDutyPrepareStep::RestoreRxDcoControl {
+                    saved_field,
+                    outcome,
+                },
+                XtalDutyPrepareCompletion::RxDcoControlRestored {
+                    address: RX_DCO_CONTROL_ADDRESS,
+                    saved_field: completed_field,
+                },
+            ) if saved_field == completed_field => XtalDutyPrepareStep::Complete(outcome),
+            (XtalDutyPrepareStep::Complete(_), _) | (XtalDutyPrepareStep::Failed(_), _) => {
+                return Err(XtalDutyPrepareTransitionError::AlreadyComplete);
+            }
+            _ => return Err(XtalDutyPrepareTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyRestoreAction {
+    /// Temporary boundary for `phy_start_tx_tone_step_new(0, 0x80, 0x28, 0, 0, 0)`.
+    ConfigureCalibrationTone {
+        enabled: bool,
+        selector: u8,
+        step: u8,
+    },
+    ConfigureRxClock {
+        enabled: bool,
+    },
+    ConfigureTxClock {
+        enabled: bool,
+    },
+    ForcePbus(PhyPbusForceTest),
+    ConfigurePbusWorkMode,
+    DelayMicros(u32),
+    ConfigurePbusWorkModePulse,
+    ClearPbusWorkModePulse,
+    Complete,
+    Failed(XtalDutyHardwareFailure),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyRestoreCompletion {
+    CalibrationToneConfigured {
+        enabled: bool,
+        selector: u8,
+        step: u8,
+    },
+    RxClockConfigured {
+        enabled: bool,
+    },
+    TxClockConfigured {
+        enabled: bool,
+    },
+    PbusForceCompleted(PhyPbusForceTest),
+    PbusForceTimedOut(PhyPbusForceTest),
+    PbusWorkModeConfigured {
+        settle_required: bool,
+    },
+    DelayElapsed {
+        micros: u32,
+    },
+    PbusWorkModePulseConfigured,
+    PbusWorkModePulseCleared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XtalDutyRestoreTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XtalDutyRestoreStep {
+    StopTone,
+    DisableRxClock,
+    DisableTxClock,
+    PbusForce(u8),
+    WorkMode,
+    SettleDelay,
+    WorkModePulse,
+    PulseDelay,
+    ClearWorkModePulse,
+    Complete,
+    Failed(XtalDutyHardwareFailure),
+}
+
+/// Exact finite restoration tail of one crystal-duty pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct XtalDutyRestoreTransition {
+    step: XtalDutyRestoreStep,
+}
+
+impl XtalDutyRestoreTransition {
+    pub const fn new() -> Self {
+        Self {
+            step: XtalDutyRestoreStep::StopTone,
+        }
+    }
+
+    pub const fn action(self) -> XtalDutyRestoreAction {
+        match self.step {
+            XtalDutyRestoreStep::StopTone => {
+                XtalDutyRestoreAction::ConfigureCalibrationTone {
+                    enabled: false,
+                    selector: 0x80,
+                    step: 0x28,
+                }
+            }
+            XtalDutyRestoreStep::DisableRxClock => {
+                XtalDutyRestoreAction::ConfigureRxClock { enabled: false }
+            }
+            XtalDutyRestoreStep::DisableTxClock => {
+                XtalDutyRestoreAction::ConfigureTxClock { enabled: false }
+            }
+            XtalDutyRestoreStep::PbusForce(index) => {
+                XtalDutyRestoreAction::ForcePbus(restore_pbus_transaction(index))
+            }
+            XtalDutyRestoreStep::WorkMode => XtalDutyRestoreAction::ConfigurePbusWorkMode,
+            XtalDutyRestoreStep::SettleDelay => XtalDutyRestoreAction::DelayMicros(1),
+            XtalDutyRestoreStep::WorkModePulse => {
+                XtalDutyRestoreAction::ConfigurePbusWorkModePulse
+            }
+            XtalDutyRestoreStep::PulseDelay => XtalDutyRestoreAction::DelayMicros(2),
+            XtalDutyRestoreStep::ClearWorkModePulse => {
+                XtalDutyRestoreAction::ClearPbusWorkModePulse
+            }
+            XtalDutyRestoreStep::Complete => XtalDutyRestoreAction::Complete,
+            XtalDutyRestoreStep::Failed(failure) => XtalDutyRestoreAction::Failed(failure),
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: XtalDutyRestoreCompletion,
+    ) -> Result<(), XtalDutyRestoreTransitionError> {
+        self.step = match (self.step, completion) {
+            (
+                XtalDutyRestoreStep::StopTone,
+                XtalDutyRestoreCompletion::CalibrationToneConfigured {
+                    enabled: false,
+                    selector: 0x80,
+                    step: 0x28,
+                },
+            ) => XtalDutyRestoreStep::DisableRxClock,
+            (
+                XtalDutyRestoreStep::DisableRxClock,
+                XtalDutyRestoreCompletion::RxClockConfigured { enabled: false },
+            ) => XtalDutyRestoreStep::DisableTxClock,
+            (
+                XtalDutyRestoreStep::DisableTxClock,
+                XtalDutyRestoreCompletion::TxClockConfigured { enabled: false },
+            ) => XtalDutyRestoreStep::PbusForce(0),
+            (
+                XtalDutyRestoreStep::PbusForce(index),
+                XtalDutyRestoreCompletion::PbusForceCompleted(transaction),
+            ) if transaction == restore_pbus_transaction(index) => {
+                if index == 2 {
+                    XtalDutyRestoreStep::WorkMode
+                } else {
+                    XtalDutyRestoreStep::PbusForce(index + 1)
+                }
+            }
+            (
+                XtalDutyRestoreStep::PbusForce(index),
+                XtalDutyRestoreCompletion::PbusForceTimedOut(transaction),
+            ) if transaction == restore_pbus_transaction(index) => {
+                XtalDutyRestoreStep::Failed(XtalDutyHardwareFailure::PbusForceTestTimedOut(
+                    transaction,
+                ))
+            }
+            (
+                XtalDutyRestoreStep::WorkMode,
+                XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                    settle_required: false,
+                },
+            ) => XtalDutyRestoreStep::Complete,
+            (
+                XtalDutyRestoreStep::WorkMode,
+                XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                    settle_required: true,
+                },
+            ) => XtalDutyRestoreStep::SettleDelay,
+            (
+                XtalDutyRestoreStep::SettleDelay,
+                XtalDutyRestoreCompletion::DelayElapsed { micros: 1 },
+            ) => XtalDutyRestoreStep::WorkModePulse,
+            (
+                XtalDutyRestoreStep::WorkModePulse,
+                XtalDutyRestoreCompletion::PbusWorkModePulseConfigured,
+            ) => XtalDutyRestoreStep::PulseDelay,
+            (
+                XtalDutyRestoreStep::PulseDelay,
+                XtalDutyRestoreCompletion::DelayElapsed { micros: 2 },
+            ) => XtalDutyRestoreStep::ClearWorkModePulse,
+            (
+                XtalDutyRestoreStep::ClearWorkModePulse,
+                XtalDutyRestoreCompletion::PbusWorkModePulseCleared,
+            ) => XtalDutyRestoreStep::Complete,
+            (XtalDutyRestoreStep::Complete, _) | (XtalDutyRestoreStep::Failed(_), _) => {
+                return Err(XtalDutyRestoreTransitionError::AlreadyComplete);
+            }
+            _ => return Err(XtalDutyRestoreTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+impl Default for XtalDutyRestoreTransition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct XtalDutyPassOutcome {
     pub frequency_code: u16,
@@ -376,24 +906,9 @@ pub enum XtalDutyPassAction {
         address: PhyI2cAddress,
         value: u8,
     },
-    /// Hardware preparation recovered from the finite pre-search portion of
-    /// `phy_xtal_duty_cal`.
-    ///
-    /// This action is intentionally explicit and not a vendor-call permit.
-    /// Its adapter must be decomposed into Rust MMIO/PBus/RX-DCO transitions.
-    PrepareHardware {
-        frequency_code: u16,
-        rf_frequency_offset_base: u8,
-        pbus_rx_path_value: u8,
-    },
+    Prepare(XtalDutyPrepareAction),
     Search(XtalDutySearchAction),
-    /// Restore tone, RX/TX clocks, PBus RX power and work mode.
-    ///
-    /// As with `PrepareHardware`, completion means a Rust-owned transition
-    /// finished; it must never call the synchronous vendor parent.
-    RestoreHardware {
-        frequency_code: u16,
-    },
+    Restore(XtalDutyRestoreAction),
     Complete(XtalDutyPassOutcome),
 }
 
@@ -405,15 +920,9 @@ pub enum XtalDutyPassCompletion {
     ByteWrite {
         address: PhyI2cAddress,
     },
-    HardwarePrepared {
-        frequency_code: u16,
-        rf_frequency_offset_base: u8,
-        pbus_rx_path_value: u8,
-    },
+    Prepare(XtalDutyPrepareCompletion),
     Search(XtalDutySearchCompletion),
-    HardwareRestored {
-        frequency_code: u16,
-    },
+    Restore(XtalDutyRestoreCompletion),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -426,10 +935,13 @@ pub enum XtalDutyPassTransitionError {
 enum XtalDutyPassStep {
     DisablePath,
     WriteInitialDuty,
-    PrepareHardware,
+    Prepare(XtalDutyPrepareTransition),
     Search(XtalDutySearchTransition),
     RestoreInitialDuty(XtalDutySearchOutcome),
-    RestoreHardware(XtalDutySearchOutcome),
+    Restore {
+        transition: XtalDutyRestoreTransition,
+        search: XtalDutySearchOutcome,
+    },
     Complete(XtalDutyPassOutcome),
 }
 
@@ -470,19 +982,17 @@ impl XtalDutyPassTransition {
                 address: Self::DUTY_ADDRESS,
                 value: self.initial_duty,
             },
-            XtalDutyPassStep::PrepareHardware => XtalDutyPassAction::PrepareHardware {
-                frequency_code: self.frequency_code,
-                rf_frequency_offset_base: self.parameter.rf_frequency_offset_base,
-                pbus_rx_path_value: self.parameter.pbus_rx_path_value,
-            },
+            XtalDutyPassStep::Prepare(transition) => {
+                XtalDutyPassAction::Prepare(transition.action())
+            }
             XtalDutyPassStep::Search(transition) => XtalDutyPassAction::Search(transition.action()),
             XtalDutyPassStep::RestoreInitialDuty(_) => XtalDutyPassAction::WriteByte {
                 address: Self::DUTY_ADDRESS,
                 value: self.initial_duty,
             },
-            XtalDutyPassStep::RestoreHardware(_) => XtalDutyPassAction::RestoreHardware {
-                frequency_code: self.frequency_code,
-            },
+            XtalDutyPassStep::Restore { transition, .. } => {
+                XtalDutyPassAction::Restore(transition.action())
+            }
             XtalDutyPassStep::Complete(outcome) => XtalDutyPassAction::Complete(outcome),
         }
     }
@@ -500,19 +1010,22 @@ impl XtalDutyPassTransition {
                 (
                     XtalDutyPassStep::WriteInitialDuty,
                     XtalDutyPassCompletion::ByteWrite { address },
-                ) if address == Self::DUTY_ADDRESS => XtalDutyPassStep::PrepareHardware,
+                ) if address == Self::DUTY_ADDRESS => XtalDutyPassStep::Prepare(
+                    XtalDutyPrepareTransition::new(self.frequency_code, self.parameter),
+                ),
                 (
-                    XtalDutyPassStep::PrepareHardware,
-                    XtalDutyPassCompletion::HardwarePrepared {
-                        frequency_code,
-                        rf_frequency_offset_base,
-                        pbus_rx_path_value,
-                    },
-                ) if frequency_code == self.frequency_code
-                    && rf_frequency_offset_base == self.parameter.rf_frequency_offset_base
-                    && pbus_rx_path_value == self.parameter.pbus_rx_path_value =>
-                {
-                    XtalDutyPassStep::Search(XtalDutySearchTransition::new())
+                    XtalDutyPassStep::Prepare(mut transition),
+                    XtalDutyPassCompletion::Prepare(completion),
+                ) => {
+                    transition
+                        .advance(completion)
+                        .map_err(|_| XtalDutyPassTransitionError::WrongCompletion)?;
+                    match transition.action() {
+                        XtalDutyPrepareAction::Complete(_) => {
+                            XtalDutyPassStep::Search(XtalDutySearchTransition::new())
+                        }
+                        _ => XtalDutyPassStep::Prepare(transition),
+                    }
                 }
                 (
                     XtalDutyPassStep::Search(mut transition),
@@ -531,16 +1044,30 @@ impl XtalDutyPassTransition {
                 (
                     XtalDutyPassStep::RestoreInitialDuty(outcome),
                     XtalDutyPassCompletion::ByteWrite { address },
-                ) if address == Self::DUTY_ADDRESS => XtalDutyPassStep::RestoreHardware(outcome),
+                ) if address == Self::DUTY_ADDRESS => XtalDutyPassStep::Restore {
+                    transition: XtalDutyRestoreTransition::new(),
+                    search: outcome,
+                },
                 (
-                    XtalDutyPassStep::RestoreHardware(outcome),
-                    XtalDutyPassCompletion::HardwareRestored { frequency_code },
-                ) if frequency_code == self.frequency_code => {
-                    XtalDutyPassStep::Complete(XtalDutyPassOutcome {
-                        frequency_code: self.frequency_code,
-                        best_candidate: outcome.best_candidate,
-                        best_filtered_power: outcome.best_filtered_power,
-                    })
+                    XtalDutyPassStep::Restore {
+                        mut transition,
+                        search,
+                    },
+                    XtalDutyPassCompletion::Restore(completion),
+                ) => {
+                    transition
+                        .advance(completion)
+                        .map_err(|_| XtalDutyPassTransitionError::WrongCompletion)?;
+                    match transition.action() {
+                        XtalDutyRestoreAction::Complete => {
+                            XtalDutyPassStep::Complete(XtalDutyPassOutcome {
+                                frequency_code: self.frequency_code,
+                                best_candidate: search.best_candidate,
+                                best_filtered_power: search.best_filtered_power,
+                            })
+                        }
+                        _ => XtalDutyPassStep::Restore { transition, search },
+                    }
                 }
                 (XtalDutyPassStep::Complete(_), _) => {
                     return Err(XtalDutyPassTransitionError::AlreadyComplete);
@@ -730,10 +1257,100 @@ mod tests {
         PhyI2cAddress, XtalDutyCalibrationAction, XtalDutyCalibrationCompletion,
         XtalDutyCalibrationOutcome, XtalDutyCalibrationParameters, XtalDutyCalibrationTransition,
         XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPassOutcome, XtalDutyPassTransition,
-        XtalDutyPassTransitionError, XtalDutySampleKind, XtalDutySearchAction,
-        XtalDutySearchCompletion, XtalDutySearchOutcome, XtalDutySearchTransition,
-        XtalDutySearchTransitionError,
+        XtalDutyHardwareFailure, XtalDutyPassTransitionError, XtalDutyPrepareAction,
+        XtalDutyPrepareCompletion, XtalDutyPrepareTransition, XtalDutyRestoreAction,
+        XtalDutyRestoreCompletion, XtalDutyRestoreTransition, XtalDutyRxDcoOutcome,
+        XtalDutySampleKind, XtalDutySearchAction, XtalDutySearchCompletion,
+        XtalDutySearchOutcome, XtalDutySearchTransition, XtalDutySearchTransitionError,
     };
+    use crate::phy_pbus::PhyPbusForceTest;
+
+    fn complete_prepare_action(action: XtalDutyPrepareAction) -> XtalDutyPrepareCompletion {
+        match action {
+            XtalDutyPrepareAction::ProgramRfFrequency {
+                rf_frequency_offset_base,
+                frequency_code,
+                mode,
+            } => XtalDutyPrepareCompletion::RfFrequencyProgrammed {
+                rf_frequency_offset_base,
+                frequency_code,
+                mode,
+            },
+            XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            } => XtalDutyPrepareCompletion::CalibrationToneConfigured {
+                enabled,
+                selector,
+                step,
+            },
+            XtalDutyPrepareAction::ConfigureRxClock { enabled } => {
+                XtalDutyPrepareCompletion::RxClockConfigured { enabled }
+            }
+            XtalDutyPrepareAction::ConfigureTxClock { enabled } => {
+                XtalDutyPrepareCompletion::TxClockConfigured { enabled }
+            }
+            XtalDutyPrepareAction::ConfigurePbusDebugMode => {
+                XtalDutyPrepareCompletion::PbusDebugModeConfigured
+            }
+            XtalDutyPrepareAction::ForcePbus(transaction) => {
+                XtalDutyPrepareCompletion::PbusForceCompleted(transaction)
+            }
+            XtalDutyPrepareAction::MaskRxDcoControl { address, .. } => {
+                XtalDutyPrepareCompletion::RxDcoControlMasked {
+                    address,
+                    saved_field: 0x0080_0000,
+                }
+            }
+            XtalDutyPrepareAction::CalibrateRxDco(request) => {
+                XtalDutyPrepareCompletion::RxDcoCalibrated {
+                    request,
+                    outcome: XtalDutyRxDcoOutcome {
+                        configuration: [0x0100_0101, 0x0100_0102],
+                    },
+                }
+            }
+            XtalDutyPrepareAction::RestoreRxDcoControl {
+                address,
+                saved_field,
+                ..
+            } => XtalDutyPrepareCompletion::RxDcoControlRestored {
+                address,
+                saved_field,
+            },
+            action => panic!("unexpected terminal preparation action: {action:?}"),
+        }
+    }
+
+    fn complete_restore_action(action: XtalDutyRestoreAction) -> XtalDutyRestoreCompletion {
+        match action {
+            XtalDutyRestoreAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            } => XtalDutyRestoreCompletion::CalibrationToneConfigured {
+                enabled,
+                selector,
+                step,
+            },
+            XtalDutyRestoreAction::ConfigureRxClock { enabled } => {
+                XtalDutyRestoreCompletion::RxClockConfigured { enabled }
+            }
+            XtalDutyRestoreAction::ConfigureTxClock { enabled } => {
+                XtalDutyRestoreCompletion::TxClockConfigured { enabled }
+            }
+            XtalDutyRestoreAction::ForcePbus(transaction) => {
+                XtalDutyRestoreCompletion::PbusForceCompleted(transaction)
+            }
+            XtalDutyRestoreAction::ConfigurePbusWorkMode => {
+                XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                    settle_required: false,
+                }
+            }
+            action => panic!("unexpected restoration action: {action:?}"),
+        }
+    }
 
     fn drive_pass(
         transition: &mut XtalDutyCalibrationTransition,
@@ -768,21 +1385,19 @@ mod tests {
                         ))
                         .unwrap();
                 }
-                XtalDutyCalibrationAction::Pass(XtalDutyPassAction::PrepareHardware {
-                    frequency_code,
-                    rf_frequency_offset_base,
-                    pbus_rx_path_value,
-                }) => {
-                    assert_eq!(frequency_code, expected_frequency_code);
-                    assert_eq!(rf_frequency_offset_base, 0x31);
-                    assert_eq!(pbus_rx_path_value, 0x42);
+                XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Prepare(action)) => {
+                    if let XtalDutyPrepareAction::ProgramRfFrequency {
+                        rf_frequency_offset_base,
+                        frequency_code,
+                        mode: 0,
+                    } = action
+                    {
+                        assert_eq!(frequency_code, expected_frequency_code - 5);
+                        assert_eq!(rf_frequency_offset_base, 0x31);
+                    }
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
-                            XtalDutyPassCompletion::HardwarePrepared {
-                                frequency_code,
-                                rf_frequency_offset_base,
-                                pbus_rx_path_value,
-                            },
+                            XtalDutyPassCompletion::Prepare(complete_prepare_action(action)),
                         ))
                         .unwrap();
                 }
@@ -829,15 +1444,17 @@ mod tests {
                         ))
                         .unwrap();
                 }
-                XtalDutyCalibrationAction::Pass(XtalDutyPassAction::RestoreHardware {
-                    frequency_code,
-                }) => {
+                XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Restore(action)) => {
+                    let pass_complete =
+                        matches!(action, XtalDutyRestoreAction::ConfigurePbusWorkMode);
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
-                            XtalDutyPassCompletion::HardwareRestored { frequency_code },
+                            XtalDutyPassCompletion::Restore(complete_restore_action(action)),
                         ))
                         .unwrap();
-                    break;
+                    if pass_complete {
+                        break;
+                    }
                 }
                 action => panic!("unexpected pass action: {action:?}"),
             }
@@ -960,6 +1577,204 @@ mod tests {
     }
 
     #[test]
+    fn preparation_exposes_all_ten_pbus_commands_and_owned_rx_dco_field() {
+        let parameter = XtalDutyCalibrationParameters {
+            rf_frequency_offset_base: 0x31,
+            pbus_rx_path_value: 0x42,
+        };
+        let mut transition = XtalDutyPrepareTransition::new(0x988, parameter);
+
+        for expected in [
+            XtalDutyPrepareAction::ProgramRfFrequency {
+                rf_frequency_offset_base: 0x31,
+                frequency_code: 0x983,
+                mode: 0,
+            },
+            XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled: true,
+                selector: 0x80,
+                step: 0,
+            },
+            XtalDutyPrepareAction::ConfigureRxClock { enabled: true },
+            XtalDutyPrepareAction::ConfigureTxClock { enabled: true },
+            XtalDutyPrepareAction::ConfigurePbusDebugMode,
+        ] {
+            assert_eq!(transition.action(), expected);
+            transition
+                .advance(complete_prepare_action(expected))
+                .unwrap();
+        }
+
+        let expected_pbus = [
+            PhyPbusForceTest::new(4, 1, 0),
+            PhyPbusForceTest::new(4, 2, 1),
+            PhyPbusForceTest::new(5, 1, 0),
+            PhyPbusForceTest::new(0, 1, 0x40),
+            PhyPbusForceTest::new(0, 2, 0x42),
+            PhyPbusForceTest::new(1, 1, 0x189),
+            PhyPbusForceTest::new(1, 2, 0xf0),
+            PhyPbusForceTest::new(0, 1, 0x43),
+            PhyPbusForceTest::new(1, 1, 0x38),
+            PhyPbusForceTest::new(1, 1, 0x189),
+        ];
+        for transaction in expected_pbus {
+            assert_eq!(
+                transition.action(),
+                XtalDutyPrepareAction::ForcePbus(transaction)
+            );
+            transition
+                .advance(XtalDutyPrepareCompletion::PbusForceCompleted(
+                    transaction,
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(
+            transition.action(),
+            XtalDutyPrepareAction::MaskRxDcoControl {
+                address: 0x2010_0434,
+                clear_mask: 0x00c0_0000,
+            }
+        );
+        transition
+            .advance(XtalDutyPrepareCompletion::RxDcoControlMasked {
+                address: 0x2010_0434,
+                saved_field: 0x0080_0000,
+            })
+            .unwrap();
+        let XtalDutyPrepareAction::CalibrateRxDco(request) = transition.action() else {
+            panic!("expected the RX-DCO child transition");
+        };
+        assert_eq!(request.control, 0x0fa0);
+        assert_eq!(request.configuration, [0x0100_0100; 2]);
+        assert_eq!(request.measurement_limit, 10);
+        let outcome = XtalDutyRxDcoOutcome {
+            configuration: [0x1122_3344, 0x5566_7788],
+        };
+        transition
+            .advance(XtalDutyPrepareCompletion::RxDcoCalibrated {
+                request,
+                outcome,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyPrepareAction::RestoreRxDcoControl {
+                address: 0x2010_0434,
+                field_mask: 0x00c0_0000,
+                saved_field: 0x0080_0000,
+            }
+        );
+        transition
+            .advance(XtalDutyPrepareCompletion::RxDcoControlRestored {
+                address: 0x2010_0434,
+                saved_field: 0x0080_0000,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyPrepareAction::Complete(outcome)
+        );
+    }
+
+    #[test]
+    fn restoration_requires_external_pbus_and_timer_completions() {
+        let mut transition = XtalDutyRestoreTransition::new();
+        for expected in [
+            XtalDutyRestoreAction::ConfigureCalibrationTone {
+                enabled: false,
+                selector: 0x80,
+                step: 0x28,
+            },
+            XtalDutyRestoreAction::ConfigureRxClock { enabled: false },
+            XtalDutyRestoreAction::ConfigureTxClock { enabled: false },
+        ] {
+            assert_eq!(transition.action(), expected);
+            transition
+                .advance(complete_restore_action(expected))
+                .unwrap();
+        }
+
+        for transaction in [
+            PhyPbusForceTest::new(0, 1, 0),
+            PhyPbusForceTest::new(1, 1, 0),
+            PhyPbusForceTest::new(1, 2, 0),
+        ] {
+            assert_eq!(
+                transition.action(),
+                XtalDutyRestoreAction::ForcePbus(transaction)
+            );
+            transition
+                .advance(XtalDutyRestoreCompletion::PbusForceCompleted(
+                    transaction,
+                ))
+                .unwrap();
+        }
+
+        assert_eq!(
+            transition.action(),
+            XtalDutyRestoreAction::ConfigurePbusWorkMode
+        );
+        transition
+            .advance(XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                settle_required: true,
+            })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyRestoreAction::DelayMicros(1)
+        );
+        assert!(transition
+            .advance(XtalDutyRestoreCompletion::DelayElapsed { micros: 2 })
+            .is_err());
+        transition
+            .advance(XtalDutyRestoreCompletion::DelayElapsed { micros: 1 })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyRestoreAction::ConfigurePbusWorkModePulse
+        );
+        transition
+            .advance(XtalDutyRestoreCompletion::PbusWorkModePulseConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyRestoreAction::DelayMicros(2)
+        );
+        transition
+            .advance(XtalDutyRestoreCompletion::DelayElapsed { micros: 2 })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            XtalDutyRestoreAction::ClearPbusWorkModePulse
+        );
+        transition
+            .advance(XtalDutyRestoreCompletion::PbusWorkModePulseCleared)
+            .unwrap();
+        assert_eq!(transition.action(), XtalDutyRestoreAction::Complete);
+
+        let mut timed_out = XtalDutyRestoreTransition::new();
+        for _ in 0..3 {
+            let action = timed_out.action();
+            timed_out
+                .advance(complete_restore_action(action))
+                .unwrap();
+        }
+        let XtalDutyRestoreAction::ForcePbus(transaction) = timed_out.action() else {
+            panic!("expected first restore PBus command");
+        };
+        timed_out
+            .advance(XtalDutyRestoreCompletion::PbusForceTimedOut(transaction))
+            .unwrap();
+        assert_eq!(
+            timed_out.action(),
+            XtalDutyRestoreAction::Failed(
+                XtalDutyHardwareFailure::PbusForceTestTimedOut(transaction)
+            )
+        );
+    }
+
+    #[test]
     fn pass_rejects_wrong_address_and_stale_parameter_completion() {
         let parameter = XtalDutyCalibrationParameters {
             rf_frequency_offset_base: 0x31,
@@ -986,20 +1801,21 @@ mod tests {
             .advance(XtalDutyPassCompletion::ByteWrite { address })
             .unwrap();
         assert_eq!(
-            transition.advance(XtalDutyPassCompletion::HardwarePrepared {
-                frequency_code: 0x988,
+            transition.advance(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RfFrequencyProgrammed {
+                frequency_code: 0x983,
                 rf_frequency_offset_base: 0x31,
-                pbus_rx_path_value: 0x41,
-            }),
+                mode: 1,
+            })),
             Err(XtalDutyPassTransitionError::WrongCompletion)
         );
         assert_eq!(
             transition.action(),
-            XtalDutyPassAction::PrepareHardware {
-                frequency_code: 0x988,
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ProgramRfFrequency {
+                frequency_code: 0x983,
                 rf_frequency_offset_base: 0x31,
-                pbus_rx_path_value: 0x42,
-            }
+                mode: 0,
+            })
         );
     }
 

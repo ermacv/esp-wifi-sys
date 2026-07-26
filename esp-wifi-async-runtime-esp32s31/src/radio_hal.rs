@@ -59,6 +59,7 @@ const PHY_PBUS_CONTROL_ADDRESS: usize = 0x2010_0884;
 const PHY_PBUS_MODE_ADDRESS: usize = 0x2010_088c;
 const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
 const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
+const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
 const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
 const PHY_PBUS_WORK_MODE_PULSE_ADDRESS: usize = 0x2010_702c;
 const PHY_I2C_CLOCK_SELECTION_0_ADDRESS: usize = 0x2010_f824;
@@ -248,6 +249,14 @@ const fn with_phy_tx_clock(value: u32, enabled: bool) -> u32 {
 
 const fn with_phy_rx_clock(value: u32, enabled: bool) -> u32 {
     (value & !0x0000_c000) | if enabled { 0x0000_c000 } else { 0 }
+}
+
+const fn without_phy_rx_dco_control_field(value: u32) -> u32 {
+    value & !0x00c0_0000
+}
+
+const fn with_restored_phy_rx_dco_control_field(value: u32, saved_field: u32) -> u32 {
+    without_phy_rx_dco_control_field(value) | (saved_field & 0x00c0_0000)
 }
 
 const fn with_phy_pbus_work_mode_pulse_setup(value: u32) -> u32 {
@@ -851,6 +860,33 @@ pub(crate) unsafe fn configure_phy_rx_clock(enabled: bool) {
     control.write_volatile(with_phy_rx_clock(control.read_volatile(), enabled));
 }
 
+/// Save and clear bits 23:22 around crystal-duty RX-DCO calibration.
+///
+/// Reference: pinned `libphy.a[phy_rx_cal.o]::phy_xtal_duty_cal` offsets
+/// `0x3c..0xfc`. The returned value contains only the two owned field bits;
+/// the leaf performs one finite read/modify/write and owns no software state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn mask_phy_rx_dco_control_field() -> u32 {
+    let control = PHY_RX_DCO_CONTROL_ADDRESS as *mut u32;
+    let previous = control.read_volatile();
+    control.write_volatile(without_phy_rx_dco_control_field(previous));
+    previous & 0x00c0_0000
+}
+
+/// Restore the saved bits 23:22 without replacing concurrently unrelated
+/// register fields.
+///
+/// Reference: pinned `phy_xtal_duty_cal` offsets `0x114..0x126`. There is no
+/// loop, wait, allocation, callback, or mutable software state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn restore_phy_rx_dco_control_field(saved_field: u32) {
+    let control = PHY_RX_DCO_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_restored_phy_rx_dco_control_field(
+        control.read_volatile(),
+        saved_field,
+    ));
+}
+
 /// Apply the complete rev0 ROM `phy_i2c_clk_sel` register transform.
 ///
 /// The pinned body at `0x2f82_9f1c`, size `0x68`, updates the high field and
@@ -1169,10 +1205,10 @@ mod tests {
         with_phy_power_detector_high_field, with_phy_power_detector_low_field, with_phy_rx_clock,
         with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
         with_phy_rx_control_low, with_phy_tx_clock, with_register_bits, with_register_field,
-        with_tx_cca, with_wifi_mac_regdma_link, without_fe_bb_clock_enable,
-        without_mac_tx_retention, without_phy_fe_txrx_reset, without_phy_pbus_work_mode_pulse,
-        without_register_bits, without_tx_queue_enable, without_tx_queue_valid,
-        WIFI_MAC_ACTIVE_REGDMA_LINK,
+        with_restored_phy_rx_dco_control_field, with_tx_cca, with_wifi_mac_regdma_link,
+        without_fe_bb_clock_enable, without_mac_tx_retention, without_phy_fe_txrx_reset,
+        without_phy_pbus_work_mode_pulse, without_phy_rx_dco_control_field, without_register_bits,
+        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -1298,6 +1334,18 @@ mod tests {
         assert_eq!(with_phy_pbus_work_mode_pulse_setup(u32::MAX), 0x32ff_ffff);
         assert_eq!(with_phy_pbus_work_mode_pulse(0), 0x0080_0000);
         assert_eq!(without_phy_pbus_work_mode_pulse(u32::MAX), 0xff7f_ffff);
+        assert_eq!(
+            without_phy_rx_dco_control_field(0x12ff_5678),
+            0x123f_5678
+        );
+        assert_eq!(
+            with_restored_phy_rx_dco_control_field(0xffff_ffff, 0x0040_0000),
+            0xff7f_ffff
+        );
+        assert_eq!(
+            with_restored_phy_rx_dco_control_field(0x1234_5678, 0xffff_ffff),
+            0x12f4_5678
+        );
     }
 
     #[test]

@@ -2603,8 +2603,97 @@ mod tests {
     use crate::phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationOutcome,
         XtalDutyCalibrationParameters, XtalDutyPassAction, XtalDutyPassCompletion,
-        XtalDutyPassOutcome, XtalDutySearchAction, XtalDutySearchCompletion,
+        XtalDutyPassOutcome, XtalDutyPrepareAction, XtalDutyPrepareCompletion,
+        XtalDutyRestoreAction, XtalDutyRestoreCompletion, XtalDutyRxDcoOutcome,
+        XtalDutySearchAction, XtalDutySearchCompletion,
     };
+
+    fn complete_xtal_prepare(action: XtalDutyPrepareAction) -> XtalDutyPrepareCompletion {
+        match action {
+            XtalDutyPrepareAction::ProgramRfFrequency {
+                rf_frequency_offset_base,
+                frequency_code,
+                mode,
+            } => XtalDutyPrepareCompletion::RfFrequencyProgrammed {
+                rf_frequency_offset_base,
+                frequency_code,
+                mode,
+            },
+            XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            } => XtalDutyPrepareCompletion::CalibrationToneConfigured {
+                enabled,
+                selector,
+                step,
+            },
+            XtalDutyPrepareAction::ConfigureRxClock { enabled } => {
+                XtalDutyPrepareCompletion::RxClockConfigured { enabled }
+            }
+            XtalDutyPrepareAction::ConfigureTxClock { enabled } => {
+                XtalDutyPrepareCompletion::TxClockConfigured { enabled }
+            }
+            XtalDutyPrepareAction::ConfigurePbusDebugMode => {
+                XtalDutyPrepareCompletion::PbusDebugModeConfigured
+            }
+            XtalDutyPrepareAction::ForcePbus(transaction) => {
+                XtalDutyPrepareCompletion::PbusForceCompleted(transaction)
+            }
+            XtalDutyPrepareAction::MaskRxDcoControl { address, .. } => {
+                XtalDutyPrepareCompletion::RxDcoControlMasked {
+                    address,
+                    saved_field: 0x0040_0000,
+                }
+            }
+            XtalDutyPrepareAction::CalibrateRxDco(request) => {
+                XtalDutyPrepareCompletion::RxDcoCalibrated {
+                    request,
+                    outcome: XtalDutyRxDcoOutcome {
+                        configuration: request.configuration,
+                    },
+                }
+            }
+            XtalDutyPrepareAction::RestoreRxDcoControl {
+                address,
+                saved_field,
+                ..
+            } => XtalDutyPrepareCompletion::RxDcoControlRestored {
+                address,
+                saved_field,
+            },
+            action => panic!("unexpected terminal preparation action: {action:?}"),
+        }
+    }
+
+    fn complete_xtal_restore(action: XtalDutyRestoreAction) -> XtalDutyRestoreCompletion {
+        match action {
+            XtalDutyRestoreAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            } => XtalDutyRestoreCompletion::CalibrationToneConfigured {
+                enabled,
+                selector,
+                step,
+            },
+            XtalDutyRestoreAction::ConfigureRxClock { enabled } => {
+                XtalDutyRestoreCompletion::RxClockConfigured { enabled }
+            }
+            XtalDutyRestoreAction::ConfigureTxClock { enabled } => {
+                XtalDutyRestoreCompletion::TxClockConfigured { enabled }
+            }
+            XtalDutyRestoreAction::ForcePbus(transaction) => {
+                XtalDutyRestoreCompletion::PbusForceCompleted(transaction)
+            }
+            XtalDutyRestoreAction::ConfigurePbusWorkMode => {
+                XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                    settle_required: false,
+                }
+            }
+            action => panic!("unexpected restoration action: {action:?}"),
+        }
+    }
 
     fn drive_rf_init_xtal_duty(
         transition: &mut PhyRfInitPrefixTransition,
@@ -2662,23 +2751,12 @@ mod tests {
                         .unwrap();
                 }
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
-                    XtalDutyPassAction::PrepareHardware {
-                        frequency_code,
-                        rf_frequency_offset_base,
-                        pbus_rx_path_value,
-                    },
+                    XtalDutyPassAction::Prepare(action),
                 )) => {
-                    assert!(frequency_code == 0x988 || frequency_code == 0x9b0);
-                    assert_eq!(rf_frequency_offset_base, 0x31);
-                    assert_eq!(pbus_rx_path_value, 0x42);
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(
-                                XtalDutyPassCompletion::HardwarePrepared {
-                                    frequency_code,
-                                    rf_frequency_offset_base,
-                                    pbus_rx_path_value,
-                                },
+                                XtalDutyPassCompletion::Prepare(complete_xtal_prepare(action)),
                             ),
                         ))
                         .unwrap();
@@ -2727,12 +2805,12 @@ mod tests {
                         .unwrap();
                 }
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
-                    XtalDutyPassAction::RestoreHardware { frequency_code },
+                    XtalDutyPassAction::Restore(action),
                 )) => {
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(
-                                XtalDutyPassCompletion::HardwareRestored { frequency_code },
+                                XtalDutyPassCompletion::Restore(complete_xtal_restore(action)),
                             ),
                         ))
                         .unwrap();
