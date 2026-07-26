@@ -977,6 +977,26 @@ and remained stable for a further 15 seconds. The strict audit still reports
 zero violations and unchanged debt of `1 fallback + 9 stateful/unproven +
 0 temporary MMIO`.
 
+Two adjacent cold clock leaves are now Rust-owned. The complete pinned
+`phy_get_xtal_freq` body previously called `rtc_clk_xtal_freq_get`, but both
+ESP-IDF and the S31 HAL define the chip's crystal as fixed at 40 MHz. Rust
+therefore writes the evidenced zero profile code to `phy_param[0x4f]` and
+replaces bits 5:0 of `0x2010_f028` with 39 directly; there is no remaining
+clock-query call or implicit state source. The complete
+`phy_close_fe_bb_clk` body is reproduced as its exact three-register
+transaction: zero `0x2010_0400`, clear bits 1:0 of `0x2010_0800`, then zero
+`0x2010_7c80`. Unknown field meanings are deliberately not guessed.
+
+Final-ELF disassembly places both functions in internal SRAM at
+`0x2f00919c` and `0x2f008fca`. The crystal function is 26 bytes and the clock
+close function is 32 bytes; neither contains a call, loop, wait, allocation,
+or non-evidenced state access. `register_chipv7_phy` calls the former and
+`phy_xpd_rf_new` tail-calls the latter directly. A cold full-calibration HIL
+then completed scan, WPA2, DHCP, ping, DNS, TCP and HTTP 200, returned all
+18/18 TX and 15/15 RX owners, preserved zero allocation and other-core-stall
+counters, never entered `ppTask`, and ran for a further 10 seconds without a
+trap or reset.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
