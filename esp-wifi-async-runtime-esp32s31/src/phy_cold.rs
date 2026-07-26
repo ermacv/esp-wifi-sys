@@ -35,8 +35,13 @@ use crate::{
         xtal_parameter_code, PHY_CALIBRATION_PAYLOAD_OFFSET, PHY_CALIBRATION_PREFIX_LEN,
         PHY_INIT_DATA_LEN, PHY_PARAM_LEN,
     },
-    phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion},
-    phy_xtal_duty::XtalDutyCalibrationParameters,
+    phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest},
+    phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion},
+    phy_xtal_duty::{
+        XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationParameters,
+        XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPrepareAction,
+        XtalDutyPrepareCompletion, XtalDutyRestoreAction, XtalDutyRestoreCompletion,
+    },
 };
 
 pub const PHY_COLD_PARAMETER_LEN: usize = PHY_PARAM_LEN;
@@ -1146,6 +1151,8 @@ impl PhyColdTimerBinding {
 pub enum PhyColdExternalBinding {
     I2c(PhyColdI2cBinding),
     Mmio(PhyColdMmioBinding),
+    Observation(PhyColdObservationBinding),
+    Pbus(PhyColdPbusBinding),
     Timer(PhyColdTimerBinding),
 }
 
@@ -1157,10 +1164,328 @@ impl PhyColdExternalBinding {
         if let Ok(binding) = PhyColdMmioBinding::new(action) {
             return Ok(Self::Mmio(binding));
         }
+        if let Ok(binding) = PhyColdPbusBinding::new(action) {
+            return Ok(Self::Pbus(binding));
+        }
+        if let Ok(binding) = PhyColdObservationBinding::new(action) {
+            return Ok(Self::Observation(binding));
+        }
         if let Ok(binding) = PhyColdTimerBinding::new(action) {
             return Ok(Self::Timer(binding));
         }
         Err(PhyColdLoweringError::UnsupportedAction)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdObservationRequest {
+    ConfigurePbusWorkMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdObservationResult {
+    PbusWorkMode { settle_required: bool },
+}
+
+/// One finite MMIO operation whose sampled value is part of the completion.
+///
+/// This is separate from [`PhyColdMmioBinding`] so a dynamic register sample
+/// cannot be fabricated by constructing a fixed completion. Consuming the
+/// binding returns the observation to exactly the parent action that requested
+/// it.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PhyColdObservationBinding {
+    outer_action: PhyRfInitPrefixAction,
+    request: PhyColdObservationRequest,
+}
+
+impl PhyColdObservationBinding {
+    pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        let request = match outer_action {
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkMode)
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkMode),
+            )) => PhyColdObservationRequest::ConfigurePbusWorkMode,
+            _ => return Err(PhyColdLoweringError::UnsupportedAction),
+        };
+        Ok(Self {
+            outer_action,
+            request,
+        })
+    }
+
+    pub const fn outer_action(&self) -> PhyRfInitPrefixAction {
+        self.outer_action
+    }
+
+    pub const fn request(&self) -> PhyColdObservationRequest {
+        self.request
+    }
+
+    pub fn into_completion(
+        self,
+        result: PhyColdObservationResult,
+    ) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        match (self.outer_action, result) {
+            (
+                PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkMode),
+                PhyColdObservationResult::PbusWorkMode { settle_required },
+            ) => Ok(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::WorkModeConfigured { settle_required },
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkMode),
+                )),
+                PhyColdObservationResult::PbusWorkMode { settle_required },
+            ) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusWorkModeConfigured { settle_required },
+                )),
+            )),
+            _ => Err(PhyColdLoweringError::UnexpectedOutcome),
+        }
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn execute_target(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        match self.request {
+            PhyColdObservationRequest::ConfigurePbusWorkMode => {
+                let settle_required = crate::radio_hal::configure_phy_pbus_work_mode();
+                self.into_completion(PhyColdObservationResult::PbusWorkMode { settle_required })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdPbusAction {
+    Start(PhyPbusForceTest),
+    AwaitCompletionEdge(PhyPbusForceTest),
+    Complete(PhyPbusForceTest),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdPbusObservation {
+    StillPending,
+    EdgeConsumed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdPbusHardwareResult {
+    Busy,
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyColdPbusError {
+    BusyAtStart,
+    WrongEdge,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PhyColdPbusPhase {
+    Start,
+    AwaitCompletionEdge,
+    Complete,
+}
+
+/// One uniquely owned PBus command and its independently delivered edge.
+///
+/// `Busy` after an observation preserves `AwaitCompletionEdge`; the binding
+/// does not retry, poll, or arrange another wake. An outer deadline may
+/// instead consume the binding through [`into_timeout_completion`].
+#[derive(Debug, Eq, PartialEq)]
+pub struct PhyColdPbusBinding {
+    outer_action: PhyRfInitPrefixAction,
+    transaction: PhyPbusForceTest,
+    phase: PhyColdPbusPhase,
+}
+
+impl PhyColdPbusBinding {
+    pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
+        let transaction = match outer_action {
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ForceTest(transaction)) => {
+                transaction
+            }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ForcePbus(transaction)),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::ForcePbus(transaction),
+                )),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ForcePbus(transaction)),
+            )) => transaction,
+            _ => return Err(PhyColdLoweringError::UnsupportedAction),
+        };
+        Ok(Self {
+            outer_action,
+            transaction,
+            phase: PhyColdPbusPhase::Start,
+        })
+    }
+
+    pub const fn outer_action(&self) -> PhyRfInitPrefixAction {
+        self.outer_action
+    }
+
+    pub const fn action(&self) -> PhyColdPbusAction {
+        match self.phase {
+            PhyColdPbusPhase::Start => PhyColdPbusAction::Start(self.transaction),
+            PhyColdPbusPhase::AwaitCompletionEdge => {
+                PhyColdPbusAction::AwaitCompletionEdge(self.transaction)
+            }
+            PhyColdPbusPhase::Complete => PhyColdPbusAction::Complete(self.transaction),
+        }
+    }
+
+    pub fn started(&mut self) -> Result<(), PhyColdPbusError> {
+        match self.phase {
+            PhyColdPbusPhase::Start => {
+                self.phase = PhyColdPbusPhase::AwaitCompletionEdge;
+                Ok(())
+            }
+            PhyColdPbusPhase::AwaitCompletionEdge => Err(PhyColdPbusError::WrongEdge),
+            PhyColdPbusPhase::Complete => Err(PhyColdPbusError::AlreadyComplete),
+        }
+    }
+
+    pub fn observe_result(
+        &mut self,
+        result: PhyColdPbusHardwareResult,
+    ) -> Result<PhyColdPbusObservation, PhyColdPbusError> {
+        match self.phase {
+            PhyColdPbusPhase::AwaitCompletionEdge
+                if result == PhyColdPbusHardwareResult::Completed =>
+            {
+                self.phase = PhyColdPbusPhase::Complete;
+                Ok(PhyColdPbusObservation::EdgeConsumed)
+            }
+            PhyColdPbusPhase::AwaitCompletionEdge => Ok(PhyColdPbusObservation::StillPending),
+            PhyColdPbusPhase::Start => Err(PhyColdPbusError::WrongEdge),
+            PhyColdPbusPhase::Complete => Err(PhyColdPbusError::AlreadyComplete),
+        }
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn start_target(&mut self) -> Result<(), PhyColdPbusError> {
+        if self.phase != PhyColdPbusPhase::Start {
+            return Err(if self.phase == PhyColdPbusPhase::Complete {
+                PhyColdPbusError::AlreadyComplete
+            } else {
+                PhyColdPbusError::WrongEdge
+            });
+        }
+        crate::radio_hal::try_start_phy_pbus_force_test(self.transaction)
+            .map_err(|crate::radio_hal::PhyPbusError::Busy| PhyColdPbusError::BusyAtStart)?;
+        self.started()
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    pub unsafe fn observe_target_edge(
+        &mut self,
+    ) -> Result<PhyColdPbusObservation, PhyColdPbusError> {
+        if self.phase != PhyColdPbusPhase::AwaitCompletionEdge {
+            return Err(if self.phase == PhyColdPbusPhase::Complete {
+                PhyColdPbusError::AlreadyComplete
+            } else {
+                PhyColdPbusError::WrongEdge
+            });
+        }
+        match crate::radio_hal::try_finish_phy_pbus_force_test() {
+            Ok(()) => self.observe_result(PhyColdPbusHardwareResult::Completed),
+            Err(crate::radio_hal::PhyPbusError::Busy) => {
+                self.observe_result(PhyColdPbusHardwareResult::Busy)
+            }
+        }
+    }
+
+    pub fn into_completion(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        if self.phase != PhyColdPbusPhase::Complete {
+            return Err(PhyColdLoweringError::IncompleteTransaction);
+        }
+        match self.outer_action {
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ForceTest(transaction))
+                if transaction == self.transaction =>
+            {
+                Ok(PhyRfInitPrefixCompletion::PbusClear(
+                    PhyPbusClearCompletion::ForceTestCompleted(transaction),
+                ))
+            }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ForcePbus(transaction)),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::PbusForceCompleted(transaction),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::ForcePbus(transaction),
+                )),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::PbusForceCompleted(
+                        transaction,
+                    )),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ForcePbus(transaction)),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusForceCompleted(transaction),
+                )),
+            )),
+            _ => Err(PhyColdLoweringError::UnexpectedOutcome),
+        }
+    }
+
+    pub fn into_timeout_completion(
+        self,
+    ) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        if self.phase != PhyColdPbusPhase::AwaitCompletionEdge {
+            return Err(PhyColdLoweringError::IncompleteTransaction);
+        }
+        match self.outer_action {
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ForceTest(transaction))
+                if transaction == self.transaction =>
+            {
+                Ok(PhyRfInitPrefixCompletion::PbusClear(
+                    PhyPbusClearCompletion::ForceTestTimedOut(transaction),
+                ))
+            }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ForcePbus(transaction)),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::PbusForceTimedOut(transaction),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::ForcePbus(transaction),
+                )),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::PbusForceTimedOut(
+                        transaction,
+                    )),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ForcePbus(transaction)),
+            )) if transaction == self.transaction => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusForceTimedOut(transaction),
+                )),
+            )),
+            _ => Err(PhyColdLoweringError::UnexpectedOutcome),
+        }
     }
 }
 
@@ -1290,13 +1615,22 @@ mod tests {
     use super::{
         initial_parameter_image, PhyCalibrationRecord, PhyColdExternalBinding, PhyColdI2cAction,
         PhyColdI2cBinding, PhyColdI2cObservation, PhyColdI2cOutcome, PhyColdI2cRequest,
-        PhyColdI2cTransaction, PhyColdLoweringError, PhyColdMmioBinding, PhyColdState,
-        PhyColdTimerBinding, PHY_COLD_PARAMETER_LEN,
+        PhyColdI2cTransaction, PhyColdLoweringError, PhyColdMmioBinding, PhyColdObservationBinding,
+        PhyColdObservationRequest, PhyColdObservationResult, PhyColdPbusAction, PhyColdPbusBinding,
+        PhyColdPbusHardwareResult, PhyColdPbusObservation, PhyColdState, PhyColdTimerBinding,
+        PHY_COLD_PARAMETER_LEN,
     };
     use crate::phy_frequency::{PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion};
     use crate::phy_i2c::{
         BiasRegAction, BiasRegCompletion, PhyI2cAddress, PhyI2cError, PhyRfInitPrefixAction,
         PhyRfInitPrefixCompletion, RcCalibrationAction, RcCalibrationCompletion,
+    };
+    use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
+    use crate::phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion};
+    use crate::phy_xtal_duty::{
+        XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyPassAction,
+        XtalDutyPassCompletion, XtalDutyPrepareAction, XtalDutyPrepareCompletion,
+        XtalDutyRestoreAction, XtalDutyRestoreCompletion,
     };
 
     #[test]
@@ -1601,6 +1935,147 @@ mod tests {
     }
 
     #[test]
+    fn pbus_busy_result_preserves_one_owned_awaiting_edge() {
+        let transaction = PhyPbusForceTest::new(4, 1, 0);
+        let outer_action =
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ForceTest(transaction));
+        let mut binding = PhyColdPbusBinding::new(outer_action).unwrap();
+        assert_eq!(binding.action(), PhyColdPbusAction::Start(transaction));
+
+        binding.started().unwrap();
+        let awaiting = PhyColdPbusAction::AwaitCompletionEdge(transaction);
+        assert_eq!(binding.action(), awaiting);
+        assert_eq!(
+            binding.observe_result(PhyColdPbusHardwareResult::Busy),
+            Ok(PhyColdPbusObservation::StillPending)
+        );
+        assert_eq!(binding.action(), awaiting);
+
+        assert_eq!(
+            binding.observe_result(PhyColdPbusHardwareResult::Completed),
+            Ok(PhyColdPbusObservation::EdgeConsumed)
+        );
+        assert_eq!(binding.action(), PhyColdPbusAction::Complete(transaction));
+        assert_eq!(
+            binding.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::ForceTestCompleted(transaction)
+            ))
+        );
+    }
+
+    #[test]
+    fn pbus_timeout_consumes_the_exact_awaiting_transaction() {
+        let transaction = PhyPbusForceTest::new(3, 2, 0x100);
+        let outer_action =
+            PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ForceTest(transaction));
+        let mut binding = PhyColdPbusBinding::new(outer_action).unwrap();
+        binding.started().unwrap();
+        assert_eq!(
+            binding.into_timeout_completion(),
+            Ok(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::ForceTestTimedOut(transaction)
+            ))
+        );
+    }
+
+    #[test]
+    fn nested_xtal_pbus_edges_return_to_the_exact_parent_transition() {
+        let prepare_transaction = PhyPbusForceTest::new(0, 2, 0x42);
+        let prepare_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ForcePbus(prepare_transaction)),
+        ));
+        let mut prepare = PhyColdPbusBinding::new(prepare_action).unwrap();
+        prepare.started().unwrap();
+        prepare
+            .observe_result(PhyColdPbusHardwareResult::Completed)
+            .unwrap();
+        assert_eq!(
+            prepare.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::PbusForceCompleted(prepare_transaction)
+                ))
+            ))
+        );
+
+        let rx_dco_transaction = PhyPbusForceTest::new(3, 1, 0x1ff);
+        let rx_dco_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::ForcePbus(
+                rx_dco_transaction,
+            ))),
+        ));
+        let mut rx_dco = PhyColdPbusBinding::new(rx_dco_action).unwrap();
+        rx_dco.started().unwrap();
+        assert_eq!(
+            rx_dco.into_timeout_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::PbusForceTimedOut(
+                        rx_dco_transaction
+                    ))
+                ))
+            ))
+        );
+
+        let restore_transaction = PhyPbusForceTest::new(1, 2, 0);
+        let restore_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ForcePbus(restore_transaction)),
+        ));
+        let mut restore = PhyColdPbusBinding::new(restore_action).unwrap();
+        restore.started().unwrap();
+        restore
+            .observe_result(PhyColdPbusHardwareResult::Completed)
+            .unwrap();
+        assert_eq!(
+            restore.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusForceCompleted(restore_transaction)
+                ))
+            ))
+        );
+    }
+
+    #[test]
+    fn sampled_pbus_work_mode_is_bound_to_its_exact_parent() {
+        let clear_action = PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkMode);
+        let clear = PhyColdObservationBinding::new(clear_action).unwrap();
+        assert_eq!(clear.outer_action(), clear_action);
+        assert_eq!(
+            clear.request(),
+            PhyColdObservationRequest::ConfigurePbusWorkMode
+        );
+        assert_eq!(
+            clear.into_completion(PhyColdObservationResult::PbusWorkMode {
+                settle_required: true,
+            }),
+            Ok(PhyRfInitPrefixCompletion::PbusClear(
+                PhyPbusClearCompletion::WorkModeConfigured {
+                    settle_required: true
+                }
+            ))
+        );
+
+        let restore_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkMode),
+        ));
+        let restore = PhyColdObservationBinding::new(restore_action).unwrap();
+        assert_eq!(
+            restore.into_completion(PhyColdObservationResult::PbusWorkMode {
+                settle_required: false,
+            }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusWorkModeConfigured {
+                        settle_required: false
+                    }
+                ))
+            ))
+        );
+    }
+
+    #[test]
     fn external_lowering_has_no_vendor_or_synchronous_fallback_variant() {
         assert!(matches!(
             PhyColdExternalBinding::lower(PhyRfInitPrefixAction::DelayMicros(10)),
@@ -1615,6 +2090,19 @@ mod tests {
         assert!(matches!(
             PhyColdExternalBinding::lower(PhyRfInitPrefixAction::ReadParameter18e { address }),
             Ok(PhyColdExternalBinding::I2c(_))
+        ));
+        let transaction = PhyPbusForceTest::new(4, 1, 0);
+        assert!(matches!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::PbusClear(
+                PhyPbusClearAction::ForceTest(transaction)
+            )),
+            Ok(PhyColdExternalBinding::Pbus(_))
+        ));
+        assert!(matches!(
+            PhyColdExternalBinding::lower(PhyRfInitPrefixAction::PbusClear(
+                PhyPbusClearAction::ConfigureWorkMode
+            )),
+            Ok(PhyColdExternalBinding::Observation(_))
         ));
         assert_eq!(
             PhyColdExternalBinding::lower(PhyRfInitPrefixAction::CaptureFilterDcapParameters),

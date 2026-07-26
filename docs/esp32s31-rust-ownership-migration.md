@@ -1742,11 +1742,12 @@ executor to poll it again; only a later peripheral edge or an outer Rust
 deadline may cause another observation.
 
 The first executor lowering layer is now concrete rather than only a target
-adapter sketch. `PhyColdExternalBinding` admits exactly three owned operation
-kinds: PHY-I2C, finite MMIO, and Rust timer. It has no vendor callback,
-synchronous fallback, or generic function-pointer variant. Both the binding
-and its in-flight PHY-I2C transaction deliberately are neither `Copy` nor
-`Clone`; producing the transition completion consumes the identity token.
+adapter sketch. `PhyColdExternalBinding` admits exactly five owned operation
+kinds: PHY-I2C, finite MMIO, sampled MMIO, PBus command, and Rust timer. It
+has no vendor callback, synchronous fallback, or generic function-pointer
+variant. The bindings and their in-flight PHY-I2C/PBus transactions
+deliberately are neither `Copy` nor `Clone`; producing the transition
+completion consumes the identity token.
 
 The current lowering covers the direct `phy_rf_init` MMIO operations, command
 memory initialization, bias/filter/init writes, RC and charge-pump I2C
@@ -1755,9 +1756,16 @@ I2C/MMIO/memory actions. A masked write retains its outer field identity while
 using two distinct read and write completion edges. Direct delays in the
 outer, open-I2C, PBus-clear, RC, and charge-pump transitions are represented
 by `PhyColdTimerBinding`; expiry is supplied only by the outer Rust executor.
-PBus force/readiness observations and the nested RFPLL, DC/IQ, RX-DCO,
-crystal-duty, signal-power and frequency-table calibration actions are still
-rejected by this lowering layer and remain the next explicit coverage ledger.
+`PhyColdPbusBinding` now covers every force transaction in PBus clear, XTAL
+prepare, nested RX-DCO, and XTAL restore. A `Busy` observation preserves the
+single awaiting token without polling or arranging a wake; a later
+peripheral edge or Rust deadline consumes it as an exact completed or timed
+out parent completion. `PhyColdObservationBinding` separately owns the
+finite work-mode writes and their one sampled settle-condition bit for both
+PBus clear and XTAL restore. The open-I2C cycle deadline, nested RFPLL and
+DC/IQ readiness observations, and remaining nested I2C/MMIO/timer actions
+are still rejected by this lowering layer and remain the next explicit
+coverage ledger.
 
 This is not yet the live cold-init implementation. The remaining work is to
 map every nested `PhyRfInitPrefixAction` to exactly one finite MMIO
@@ -1767,10 +1775,10 @@ the outer `register_chipv7_phy` sequencing. Only after that graph is complete
 will the HIL publish `PhyColdState` to the temporary ROM ABI and remove the
 vendor `phy_param` definition.
 
-The current verification baseline is intentionally unchanged. All 403 host
-tests pass. The target strict audit covers 6,407 functions with zero
-violations and reports runtime ownership debt of one explicit RX fallback,
-zero stateful/unproven runtime roots, and zero temporary MMIO roots. Strict
+All 407 host tests pass. The last qualified target strict audit covers 6,407
+functions with zero violations and reports runtime ownership debt of one
+explicit RX fallback, zero stateful/unproven runtime roots, and zero
+temporary MMIO roots. Strict
 runtime leaves reach zero mutable blob globals. The cold-PHY graph still
 reports exactly one live mutable blob symbol, `phy_param`, of 508 bytes,
 because the prepared owner is dead-stripped until activation. The generated
