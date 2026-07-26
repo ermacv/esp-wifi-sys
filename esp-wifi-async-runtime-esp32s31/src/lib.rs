@@ -79,6 +79,7 @@ pub mod phy_pbus;
 mod phy_param;
 pub mod phy_rfpll;
 pub mod phy_rx_dco;
+pub mod phy_rx_saturation;
 pub mod phy_xtal_duty;
 pub mod policy;
 pub mod queue;

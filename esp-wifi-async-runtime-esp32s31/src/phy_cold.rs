@@ -165,6 +165,36 @@ impl PhyColdState {
         parameters
     }
 
+    /// Capture the sole owned parameter input consumed by `phy_check_rx_sat`.
+    pub const fn rx_saturation_parameter_002(&self) -> u8 {
+        self.parameter[0x002]
+    }
+
+    /// Commit the sole software-state effect of a completed
+    /// `phy_check_rx_sat` measurement.
+    ///
+    /// The pinned body only sets `phy_param[0x1ae]` when at least one of the
+    /// 100 samples reports activity. A zero result does not clear an existing
+    /// value. Failed PBus or capture operations must be handled by the parent
+    /// and never receive permission to mutate the owned parameter image.
+    pub fn apply_rx_saturation_outcome(
+        &mut self,
+        outcome: crate::phy_rx_saturation::PhyRxSaturationOutcome,
+    ) -> Result<(), crate::phy_rx_saturation::PhyRxSaturationOutcome> {
+        match outcome {
+            crate::phy_rx_saturation::PhyRxSaturationOutcome::Measured {
+                saturated_samples,
+                ..
+            } => {
+                if saturated_samples != 0 {
+                    self.parameter[0x1ae] = 1;
+                }
+                Ok(())
+            }
+            failure => Err(failure),
+        }
+    }
+
     /// Apply the exact 71-byte mapping from the 128-byte S31 init profile.
     pub fn apply_init_profile(&mut self, init: &[u8; PHY_INIT_DATA_LEN]) {
         apply_init_data(&mut self.parameter, init);
@@ -2625,6 +2655,44 @@ mod tests {
         );
         assert_eq!(state.parameter_image()[0x120], 0x4f);
         assert_eq!(state.parameter_image()[0x121], 0x4e);
+    }
+
+    #[test]
+    fn rx_saturation_commit_is_owned_and_preserves_the_one_way_flag() {
+        use crate::phy_rx_saturation::PhyRxSaturationOutcome;
+
+        let mut state = PhyColdState::new();
+        assert_eq!(state.rx_saturation_parameter_002(), 0xbf);
+        assert_eq!(state.parameter_image()[0x1ae], 0);
+
+        state
+            .apply_rx_saturation_outcome(PhyRxSaturationOutcome::Measured {
+                saturated_samples: 1,
+                samples: 100,
+            })
+            .unwrap();
+        assert_eq!(state.parameter_image()[0x1ae], 1);
+
+        state
+            .apply_rx_saturation_outcome(PhyRxSaturationOutcome::Measured {
+                saturated_samples: 0,
+                samples: 100,
+            })
+            .unwrap();
+        assert_eq!(state.parameter_image()[0x1ae], 1);
+    }
+
+    #[test]
+    fn failed_rx_saturation_capture_cannot_mutate_owned_state() {
+        use crate::phy_rx_saturation::PhyRxSaturationOutcome;
+
+        let mut state = PhyColdState::new();
+        let before = *state.parameter_image();
+        assert_eq!(
+            state.apply_rx_saturation_outcome(PhyRxSaturationOutcome::CaptureTimedOut),
+            Err(PhyRxSaturationOutcome::CaptureTimedOut)
+        );
+        assert_eq!(state.parameter_image(), &before);
     }
 
     #[test]

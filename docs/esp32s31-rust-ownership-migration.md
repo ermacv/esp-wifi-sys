@@ -1823,7 +1823,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
 | 14 | `phy_rx_table_init()` | complete Rust-owned state plus finite MMIO |
 | 15 | `phy_rfrx_sat_rst(0)` | complete finite Rust MMIO |
-| 16 | `phy_check_rx_sat()` | sampled/deadline transition pending |
+| 16 | `phy_check_rx_sat()` | Rust-owned async transition complete; target capture binding pending |
 | 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
 | 18 | `phy_rfrx_sat_rst(1)` | complete finite Rust MMIO |
 | 19 | `phy_reg_init()` | complete composed finite Rust MMIO |
@@ -1883,6 +1883,25 @@ The target action derives and publishes exactly 79 typed gain-memory entries,
 then runs the recovered `phy_reg_init`, AGC-update and AGC-enable suffix. No
 raw parameter pointer, ROM call, polling exit, allocation, or hidden global
 mutation remains in this child.
+
+`phy_check_rx_sat` is now represented by a caller-driven Rust transition.
+The recovered archive body enters PBus debug mode, publishes eleven exact
+PBus commands, blocks for five microseconds, then polls
+`0x2010_08d0[21:20]` exactly 100 times. The replacement exposes the delay as
+an async timer completion and requests one externally completed 100-sample
+capture window instead of reproducing the CPU loop. It always requests PBus
+work-mode restoration before returning success or failure. The unique
+`PhyColdState` captures the only input, former `phy_param[0x002]`, and owns
+the only persistent effect: a nonzero sample count sets byte `0x1ae` to one;
+a zero result never clears it and failed operations cannot mutate it.
+
+No dedicated completion interrupt for `0x2010_08d0[21:20]` is visible in
+the available S31 PAC/SVD or ROM symbols. Therefore the target capture
+binding remains deliberately unimplemented: it must eventually use an
+interrupt-, DMA-, or timer-sampler-driven producer and deliver one completion
+to the transition. Executor-side register polling, a delay loop, or a fake
+completion is not an acceptable binding, and the outer cold-init transition
+must not activate this child until such a provider exists.
 
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
