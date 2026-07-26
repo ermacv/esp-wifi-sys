@@ -1331,6 +1331,24 @@ instruction-proven argument invariance. The serial runtime suite now passes
 323 tests. This child remains intentionally dead-stripped until the parent
 `PhyRfInit` transition can own the whole sequence.
 
+The first five parent operations are now composed by
+`PhyRfInitPrefixTransition`. It exposes the active clock and BBPLL leaves as
+finite MMIO actions, delegates the two bias writes to `BiasRegTransition`,
+delegates the power-up, 100-microsecond timer and SDM deadline/read sequence
+to `OpenI2cXpdTransition`, and finally emits the separate
+`DelayMicros(10)` present in the parent body. No nested child completion is
+observable as an intermediate terminal state.
+
+The prefix reaches `ReadyForPbusClear` only after every action has received
+its matching external completion. An SDM deadline instead terminates as
+`SdmTimedOut` and cannot run the post-I2C delay or the subsequent hardware
+steps. Out-of-order and post-terminal completions fail closed. Two
+composition tests cover the complete success order and timeout propagation;
+the serial runtime suite now passes 325 tests. The next boundary is operation
+six, `phy_pbus_clear_reg`; the prefix is still dead-stripped and does not
+replace any part of the live parent until the remaining 21 operations have
+equivalent owned actions.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF

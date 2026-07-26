@@ -566,6 +566,152 @@ impl OpenI2cXpdTransition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyRfInitPrefixOutcome {
+    ReadyForPbusClear,
+    SdmTimedOut,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyRfInitPrefixAction {
+    ConfigureFeBbClock,
+    ConfigureBbpllCalibration { enabled: bool },
+    Bias(BiasRegAction),
+    OpenI2cXpd(OpenI2cXpdAction),
+    DelayMicros(u32),
+    Complete(PhyRfInitPrefixOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyRfInitPrefixCompletion {
+    FeBbClockConfigured,
+    BbpllCalibrationConfigured,
+    Bias(BiasRegCompletion),
+    OpenI2cXpd(OpenI2cXpdCompletion),
+    DelayElapsed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PhyRfInitPrefixTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PhyRfInitPrefixStep {
+    FeBbClock,
+    BbpllCalibration,
+    Bias(BiasRegTransition),
+    OpenI2cXpd(OpenI2cXpdTransition),
+    PostI2cDelay,
+    Complete(PhyRfInitPrefixOutcome),
+}
+
+/// Event-driven composition of operations one through five in the complete
+/// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
+///
+/// The two MMIO leaves are finite actions. Both bias writes and every SDM
+/// sample require an external PHY-I2C completion. The 100- and 10-microsecond
+/// intervals are separate executor timer edges. No transition is caused by
+/// polling this value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhyRfInitPrefixTransition {
+    step: PhyRfInitPrefixStep,
+}
+
+impl PhyRfInitPrefixTransition {
+    pub const fn new() -> Self {
+        Self {
+            step: PhyRfInitPrefixStep::FeBbClock,
+        }
+    }
+
+    pub const fn action(self) -> PhyRfInitPrefixAction {
+        match self.step {
+            PhyRfInitPrefixStep::FeBbClock => PhyRfInitPrefixAction::ConfigureFeBbClock,
+            PhyRfInitPrefixStep::BbpllCalibration => {
+                PhyRfInitPrefixAction::ConfigureBbpllCalibration { enabled: true }
+            }
+            PhyRfInitPrefixStep::Bias(transition) => match transition.action() {
+                BiasRegAction::Complete => {
+                    PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay)
+                }
+                action => PhyRfInitPrefixAction::Bias(action),
+            },
+            PhyRfInitPrefixStep::OpenI2cXpd(transition) => match transition.action() {
+                OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::Stable) => {
+                    PhyRfInitPrefixAction::DelayMicros(10)
+                }
+                OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::TimedOut) => {
+                    PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::SdmTimedOut)
+                }
+                action => PhyRfInitPrefixAction::OpenI2cXpd(action),
+            },
+            PhyRfInitPrefixStep::PostI2cDelay => PhyRfInitPrefixAction::DelayMicros(10),
+            PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
+        }
+    }
+
+    pub fn advance(
+        &mut self,
+        completion: PhyRfInitPrefixCompletion,
+    ) -> Result<(), PhyRfInitPrefixTransitionError> {
+        self.step = match (self.step, completion) {
+            (PhyRfInitPrefixStep::FeBbClock, PhyRfInitPrefixCompletion::FeBbClockConfigured) => {
+                PhyRfInitPrefixStep::BbpllCalibration
+            }
+            (
+                PhyRfInitPrefixStep::BbpllCalibration,
+                PhyRfInitPrefixCompletion::BbpllCalibrationConfigured,
+            ) => PhyRfInitPrefixStep::Bias(BiasRegTransition::new(true)),
+            (
+                PhyRfInitPrefixStep::Bias(mut transition),
+                PhyRfInitPrefixCompletion::Bias(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                if transition.action() == BiasRegAction::Complete {
+                    PhyRfInitPrefixStep::OpenI2cXpd(OpenI2cXpdTransition::new(true))
+                } else {
+                    PhyRfInitPrefixStep::Bias(transition)
+                }
+            }
+            (
+                PhyRfInitPrefixStep::OpenI2cXpd(mut transition),
+                PhyRfInitPrefixCompletion::OpenI2cXpd(completion),
+            ) => {
+                transition
+                    .advance(completion)
+                    .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
+                match transition.action() {
+                    OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::Stable) => {
+                        PhyRfInitPrefixStep::PostI2cDelay
+                    }
+                    OpenI2cXpdAction::Complete(OpenI2cXpdOutcome::TimedOut) => {
+                        PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::SdmTimedOut)
+                    }
+                    _ => PhyRfInitPrefixStep::OpenI2cXpd(transition),
+                }
+            }
+            (PhyRfInitPrefixStep::PostI2cDelay, PhyRfInitPrefixCompletion::DelayElapsed) => {
+                PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForPbusClear)
+            }
+            (PhyRfInitPrefixStep::Complete(_), _) => {
+                return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
+            }
+            _ => return Err(PhyRfInitPrefixTransitionError::WrongCompletion),
+        };
+        Ok(())
+    }
+}
+
+impl Default for PhyRfInitPrefixTransition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RcCalibrationAction {
     WriteMasked {
         address: PhyI2cAddress,
@@ -722,9 +868,10 @@ mod tests {
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
         read_result, with_phy_i2c_host_config, BiasRegAction, BiasRegCompletion, BiasRegTransition,
         BiasRegTransitionError, OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome,
-        OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress, RcCalibrationAction,
-        RcCalibrationCompletion, RcCalibrationTransition, RcCalibrationTransitionError,
-        PHY_I2C_MASTER_COMMAND_COUNT,
+        OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress, PhyRfInitPrefixAction,
+        PhyRfInitPrefixCompletion, PhyRfInitPrefixOutcome, PhyRfInitPrefixTransition,
+        PhyRfInitPrefixTransitionError, RcCalibrationAction, RcCalibrationCompletion,
+        RcCalibrationTransition, RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
 
@@ -914,6 +1061,144 @@ mod tests {
     #[test]
     fn bias_register_argument_is_instruction_proven_unused() {
         assert_eq!(BiasRegTransition::new(false), BiasRegTransition::new(true));
+    }
+
+    #[test]
+    fn rf_init_prefix_composes_mmio_i2c_and_timer_edges_in_vendor_order() {
+        let bias_zero = PhyI2cAddress::new(0x6a, 0).unwrap();
+        let bias_one = PhyI2cAddress::new(0x6a, 1).unwrap();
+        let mut transition = PhyRfInitPrefixTransition::new();
+
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::ConfigureFeBbClock
+        );
+        assert_eq!(
+            transition.advance(PhyRfInitPrefixCompletion::BbpllCalibrationConfigured),
+            Err(PhyRfInitPrefixTransitionError::WrongCompletion)
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::FeBbClockConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::ConfigureBbpllCalibration { enabled: true }
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::BbpllCalibrationConfigured)
+            .unwrap();
+
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Bias(BiasRegAction::Write {
+                address: bias_zero,
+                value: 0xaf
+            })
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::Bias(
+                BiasRegCompletion::WriteCompleted { address: bias_zero },
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::Bias(
+                BiasRegCompletion::WriteCompleted { address: bias_one },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay)
+        );
+
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PreDelayConfigured,
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::DelayMicros(100))
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DelayElapsed,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PowerAndPulseConfigured,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DeadlineObserved { expired: false },
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::SdmSample(0x5b),
+            ))
+            .unwrap();
+
+        assert_eq!(transition.action(), PhyRfInitPrefixAction::DelayMicros(10));
+        transition
+            .advance(PhyRfInitPrefixCompletion::DelayElapsed)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForPbusClear)
+        );
+    }
+
+    #[test]
+    fn rf_init_prefix_propagates_sdm_timeout_without_running_post_delay() {
+        let bias_zero = PhyI2cAddress::new(0x6a, 0).unwrap();
+        let bias_one = PhyI2cAddress::new(0x6a, 1).unwrap();
+        let mut transition = PhyRfInitPrefixTransition::new();
+        transition
+            .advance(PhyRfInitPrefixCompletion::FeBbClockConfigured)
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::BbpllCalibrationConfigured)
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::Bias(
+                BiasRegCompletion::WriteCompleted { address: bias_zero },
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::Bias(
+                BiasRegCompletion::WriteCompleted { address: bias_one },
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PreDelayConfigured,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DelayElapsed,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PowerAndPulseConfigured,
+            ))
+            .unwrap();
+        transition
+            .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DeadlineObserved { expired: true },
+            ))
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::SdmTimedOut)
+        );
+        assert_eq!(
+            transition.advance(PhyRfInitPrefixCompletion::DelayElapsed),
+            Err(PhyRfInitPrefixTransitionError::AlreadyComplete)
+        );
     }
 
     #[test]
