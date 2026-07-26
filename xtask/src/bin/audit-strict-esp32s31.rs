@@ -41,6 +41,7 @@ const REPLACED_VENDOR_ROOTS: &[&str] = &[
     "ic_set_mac",
     "ic_set_rx_policy",
     "ic_set_rx_policy_ubssid_check",
+    "ieee80211_getmgtframe",
     "phy_set_rx_comp_new",
     "phy_dc_mem_clr",
     "phy_set_tx_gain_mem_new",

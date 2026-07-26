@@ -254,6 +254,25 @@ const fn is_management_kind(kind: u32) -> bool {
     matches!(kind, 2..=4)
 }
 
+const fn management_frame_allocation(header: u32, body: u32) -> Option<(u32, u32)> {
+    let total = match header.checked_add(body) {
+        Some(total) => total,
+        None => return None,
+    };
+    let rounded = match total.checked_add(3) {
+        Some(total) => total & !3,
+        None => return None,
+    };
+    let kind = if rounded <= 64 {
+        3
+    } else if rounded <= 256 {
+        2
+    } else {
+        4
+    };
+    Some((kind, rounded))
+}
+
 #[cfg_attr(target_arch = "riscv32", link_section = ".rwtext.wifi_strict.esf")]
 #[inline(always)]
 unsafe fn descriptor(kind: u32) -> *mut u8 {
@@ -1139,6 +1158,63 @@ pub unsafe extern "C" fn __wrap_esf_buf_alloc(
     frame.unwrap_or(ptr::null_mut())
 }
 
+/// Allocate and expose a bounded management-frame body from the Rust ESF pool.
+///
+/// Reference: the complete pinned
+/// `libnet80211.a[ieee80211_ets.o]::ieee80211_getmgtframe` body, size `0x5c`.
+/// It rounds `header + body` to four bytes, selects ESF kind 3 up to 64 bytes,
+/// kind 2 up to 256 bytes and kind 4 above that, then exposes
+/// `descriptor.data + header` while storing the unrounded body length at ESF
+/// offset `0x16`.
+///
+/// This replacement calls the already interposed allocation-free ESF
+/// boundary. In strict/prearmed operation the returned object has one
+/// Rust-owned management-slot token; before prearm the ESF boundary may still
+/// delegate to the cold vendor allocator. There is no wait, delay, retry loop,
+/// heap call, or second ownership ledger here.
+///
+/// # Safety
+///
+/// `body_out` must be valid for one pointer write. A successful returned ESF
+/// object must be recycled exactly once through the matching ESF boundary.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_ieee80211_getmgtframe(
+    body_out: *mut *mut u8,
+    header_length: u32,
+    body_length: u32,
+) -> *mut u8 {
+    if body_out.is_null() || body_length > u16::MAX as u32 {
+        return ptr::null_mut();
+    }
+    let Some((kind, allocation_length)) = management_frame_allocation(header_length, body_length)
+    else {
+        return ptr::null_mut();
+    };
+    let frame = __wrap_esf_buf_alloc(ptr::null(), kind, allocation_length);
+    if frame.is_null() {
+        return ptr::null_mut();
+    }
+
+    let buffer_descriptor = frame.add(0x04).cast::<*mut u8>().read();
+    if buffer_descriptor.is_null() {
+        __wrap_esf_buf_recycle(frame.cast());
+        return ptr::null_mut();
+    }
+    let data = buffer_descriptor.add(0x04).cast::<*mut u8>().read();
+    if data.is_null() {
+        __wrap_esf_buf_recycle(frame.cast());
+        return ptr::null_mut();
+    }
+
+    body_out.write(data.add(header_length as usize));
+    frame
+        .add(ESF_LENGTH_OFFSET)
+        .cast::<u16>()
+        .write(body_length as u16);
+    frame
+}
+
 /// Final-link replacement for vendor ESF recycling.
 ///
 /// # Safety
@@ -1340,3 +1416,28 @@ const _: () = assert!(
     LARGE_RX_SLOT_CAPACITY + AGGREGATE_RX_SLOT_CAPACITY
         == crate::rx_ampdu::RX_REORDER_SLOT_ID_CAPACITY
 );
+
+#[cfg(test)]
+mod tests {
+    use super::management_frame_allocation;
+
+    #[test]
+    fn management_frame_size_classes_match_the_pinned_allocator_wrapper() {
+        assert_eq!(management_frame_allocation(0, 0), Some((3, 0)));
+        assert_eq!(management_frame_allocation(24, 40), Some((3, 64)));
+        assert_eq!(management_frame_allocation(24, 41), Some((2, 68)));
+        assert_eq!(management_frame_allocation(24, 232), Some((2, 256)));
+        assert_eq!(management_frame_allocation(24, 233), Some((4, 260)));
+        assert_eq!(management_frame_allocation(1, 1), Some((3, 4)));
+    }
+
+    #[test]
+    fn management_frame_rounding_rejects_u32_overflow() {
+        assert_eq!(management_frame_allocation(u32::MAX, 1), None);
+        assert_eq!(management_frame_allocation(u32::MAX - 2, 0), None);
+        assert_eq!(
+            management_frame_allocation(u32::MAX - 3, 0),
+            Some((4, u32::MAX - 3))
+        );
+    }
+}

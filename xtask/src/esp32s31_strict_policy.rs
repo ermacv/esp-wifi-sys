@@ -6,7 +6,6 @@ pub const ROOTS: &[&str] = &[
     "wDev_ProcessRxSucData",
     "ic_set_current_channel",
     "ic_mac_init",
-    "ieee80211_getmgtframe",
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
@@ -24,7 +23,6 @@ pub const RUST_BOUNDARIES_WITH_VENDOR_FALLBACK: &[&str] = &["wDev_ProcessRxSucDa
 pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[
     "ic_set_current_channel",
     "ic_mac_init",
-    "ieee80211_getmgtframe",
     "ic_del_key",
     "ic_set_key",
     "wDev_Insert_KeyEntry",
@@ -172,6 +170,7 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
         "ic_set_rx_policy_ubssid_check",
         "wifi_strict_ic_set_rx_policy_ubssid_check",
     ),
+    ("ieee80211_getmgtframe", "wifi_strict_ieee80211_getmgtframe"),
     ("phy_set_rx_comp_new", "wifi_strict_phy_set_rx_comp_new"),
     ("phy_dc_mem_clr", "wifi_strict_phy_dc_mem_clr"),
     (

@@ -194,6 +194,13 @@ ASSERT(ic_set_rx_policy_ubssid_check ==
            wifi_strict_ic_set_rx_policy_ubssid_check,
        "ESP32-S31 ic_set_rx_policy_ubssid_check Rust boundary is inactive");
 
+/* Management-frame allocation is one bounded size-class selection over the
+ * already Rust-owned ESF management pool. */
+EXTERN(wifi_strict_ieee80211_getmgtframe);
+ieee80211_getmgtframe = wifi_strict_ieee80211_getmgtframe;
+ASSERT(ieee80211_getmgtframe == wifi_strict_ieee80211_getmgtframe,
+       "ESP32-S31 ieee80211_getmgtframe Rust boundary is inactive");
+
 /* Complete finite PHY-register leaves recovered from libphy.a[phy_reg.o].
  * Keep the exact read/modify/write order, but make Rust the only linked
  * runtime owner; neither vendor body contains a call or hidden state access. */
