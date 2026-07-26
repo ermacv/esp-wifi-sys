@@ -179,10 +179,12 @@ post-link operation.
 
 The 2026-07-26 primary ELF has no mutable blob global or ROM-ABI mutable
 indirection cell reachable from a strict runtime leaf. The remaining direct
-cold PHY graph reaches two objects (`phy_param` and `g_phyFuns`) totalling 512
-bytes. Other linked mutable blob state totals 22,212 bytes.
+cold PHY graph reaches one blob-owned object, `phy_param` (508 bytes).
+`g_phyFuns` is now a final-link alias to a four-byte Rust-owned binding in
+internal SRAM and is audited separately rather than counted as blob state.
+Other linked mutable blob state totals 21,356 bytes.
 
-Rust-owned strict sections total 312,441 bytes. The largest storage is in the
+Rust-owned strict sections total 313,297 bytes. The largest storage is in the
 RX path: the 59,008-byte runtime ESF pool, 56,320-byte cold ESF pool, and
 54,784-byte WDEV payload pool. These are not assumed redundant merely because
 their capacities are similar; their simultaneous lifetimes and transfer of
@@ -913,12 +915,12 @@ populates the object.
 The audit now resolves member-local RISC-V data relocations such as
 `.LANCHOR0` back to their unique global symbol and filters referrers against
 the final ELF. In the direct cold call graph rooted at
-`register_chipv7_phy`, only two mutable blob objects remain: `phy_param`
-(508 bytes) and `g_phyFuns` (4 bytes). The direct cold referrers are narrowed
-to `register_chipv7_phy` and `phy_get_romfunc_addr`; indirect callbacks
-published to ROM remain a separately stated limitation. This makes those two
+`register_chipv7_phy`, only one mutable blob object remains: `phy_param`
+(508 bytes). Its direct cold referrers are narrowed to
+`register_chipv7_phy` and `phy_get_romfunc_addr`; indirect callbacks
+published to ROM remain a separately stated limitation. This makes those
 functions the next concrete cold-PHY ownership frontier instead of treating
-all 35 linked PHY helpers as equally live during initialization.
+all linked PHY helpers as equally live during initialization.
 
 The first cold-PHY parameter-transfer group is now interposed in Rust.
 `register_chipv7_phy_init_param` copies exactly 71 bytes from the 128-byte
@@ -936,10 +938,10 @@ Final-ELF disassembly proves that `register_chipv7_phy` calls the uniquely
 named Rust init and calibration-transfer boundaries. The transfer loops
 currently lower to the stateless ROM `memcpy` leaf; this is an admissible
 temporary input/output helper, not a ROM state owner, and is simple enough to
-replace when the remaining cold object is removed. `phy_param` and
-`g_phyFuns` still remain vendor-defined because the other live functions from
-the same `phy_init.o` member have not yet all been ported. We deliberately do
-not patch or weaken the archive: ownership will switch only after the whole
+replace when the remaining cold object is removed. `phy_param` remains
+vendor-defined because the other live functions from the same `phy_init.o`
+member have not yet all been ported. We deliberately do not patch or weaken
+the archive: the remaining object will switch ownership only after the whole
 member can stop being extracted.
 
 The ROM ABI publication performed by `phy_get_romfunc_addr` is now Rust-owned
@@ -953,23 +955,41 @@ only a store to the parameter cell at `0x2f07fc40`. The cell selects the
 
 Rust models all 13 entries with a compile-time checked `repr(C)` layout,
 validates the table address and the two callbacks which the pinned vendor
-body intentionally preserves, publishes `phy_param` and `g_phyFuns`
-directly, and replaces the remaining 11 entries in the exact vendor store
-order. The preserved entries are `phy_txcal_debuge_mode_` at `0x2f8244fe`
-and `phy_get_tone_sar_dout_` at `0x2f8266da`. The two no-op I2C critical
+body intentionally preserves, publishes `phy_param`, and replaces the
+remaining 11 entries in the exact vendor store order. The preserved entries
+are `phy_txcal_debuge_mode_` at `0x2f8244fe` and
+`phy_get_tone_sar_dout_` at `0x2f8266da`. The two no-op I2C critical
 callbacks reproduce the pinned two-byte ROM/vendor leaves and reside in
 internal SRAM because ROM may call them while cached execution is
 unavailable. Final-ELF disassembly proves that public
-`phy_get_romfunc_addr` resolves to the Rust function at `0x400d1788`, whose
-body contains only bounded loads, validation branches, and stores: it has no
-call to either ROM accessor, no indirect call, allocation, wait, or loop.
+`phy_get_romfunc_addr` resolves to Rust code whose body contains only bounded
+loads, validation branches, and stores: it has no call to either ROM
+accessor, no indirect call, allocation, wait, or loop.
 
-This moves control of the callback ABI to Rust but does not yet claim physical
-ownership of every byte. `phy_param` and the four-byte `g_phyFuns` pointer are
-still defined by `libphy.a[phy_init.o]`, and the callback table is a fixed
-rev0 ROM-ABI RAM object. Once every remaining live function from
+The four-byte `g_phyFuns` storage is now physically Rust-owned without
+patching the archive. The linker publishes the C name as an exact alias of
+`wifi_strict_phy_rom_function_table_binding`, whose initialized value is the
+fixed rev0 table address `0x2f07f944`. The binding uses `UnsafeCell<u32>` only
+to retain writable ELF section flags required by the C ABI; Rust exposes no
+runtime mutation API. `phy_change_channel` no longer reads the alias at
+runtime and instead uses the compile-time fixed table address.
+
+The final-link state auditor refuses to classify this as a transfer merely by
+name. It proves that both names have the same nonzero address, that the Rust
+backing is exactly four bytes, mutable, present in a real ELF section, and
+placed in internal SRAM. Only then is `g_phyFuns` excluded from the
+blob-owned inventory. The ten still-linked vendor readers are
+`phy_bt_set_tx_gain_new`, `phy_bt_tx_pwctrl_init`, `phy_cal_param_track`,
+`phy_chip_set_chan`, `phy_start_tx_tone_step_new`, `phy_tx_cap_init`,
+`phy_tx_gain_print`, `phy_tx_pwctrl_init`, `phy_txdc_cal_pwdet_new`, and
+`phy_wifi_set_tx_gain_new`; they now load the Rust-owned ABI binding. The
+fixed 52-byte callback table itself remains a rev0 ROM-ABI RAM object and is
+temporary debt until those readers and all ROM callbacks have moved.
+
+This removes `g_phyFuns` from hidden C state but does not yet claim physical
+ownership of `phy_param`. Once every remaining live function from
 `phy_init.o` has been ported, that archive member can stop being extracted
-and Rust can define the two cold objects explicitly without binary patching.
+and Rust can define the final 508-byte cold object explicitly.
 
 The migrated sequence passed the strict hardware workload: passive
 scan, WPA2 association, four-way handshake, DHCP, ping, DNS, TCP/HTTP, 4096
@@ -1001,6 +1021,16 @@ ping, DNS, TCP and HTTP 200. The callback table cell contained the expected
 with no rejection. Allocation, reallocation and free counters remained zero,
 `ppTask` was never entered, other-core stalls remained zero, and a further
 30-second interrupt-active run produced no trap or reset.
+
+The subsequent Rust-owned `g_phyFuns` binding image repeated cold
+full-calibration, passive scan of seven BSS records, WPA2 association and the
+four-way handshake, DHCP, gateway ping, DNS, TCP and HTTP 200. Post-link data
+returned all 19/19 TX and 16/16 RX owners. Allocation, reallocation and free
+counters remained zero, `ppTask` was never entered, and other-core stalls
+remained zero. The qualified final ELF reports one cold PHY blob symbol /
+508 bytes, 175 other linked blob symbols / 21,356 bytes, and 84 Rust strict
+sections / 313,297 bytes. Its CPU0 stack span remains 16,432 bytes, exactly
+the same as the preceding non-stress profile.
 
 The bounded calibration-record check/write transform is now Rust-owned too.
 The complete pinned `phy_init.o::phy_rfcal_data_check_new` body and the rev0
