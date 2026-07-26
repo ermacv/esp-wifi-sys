@@ -45,7 +45,6 @@ unsafe extern "C" {
     fn chm_return_home_channel();
     fn __real_chm_return_home_channel();
     fn hal_mac_set_csi_cbw(cbw: u32);
-    fn ic_mac_init() -> i32;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -425,7 +424,7 @@ unsafe extern "C" fn mac_idle_settled(_argument: *mut c_void) {
 
     crate::phy_channel::program_channel(frequency_mhz, cbw);
     hal_mac_set_csi_cbw(u32::from(cbw));
-    let _ = ic_mac_init();
+    crate::radio_hal::restart_mac_without_power_save();
 
     let set_current = (&*RESOURCES.channels.get()).set_current(channel);
     if set_current.is_err() {

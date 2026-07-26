@@ -20,12 +20,17 @@ const MAC_RX_ADDRESS_POLICY_STRIDE: usize = 8;
 const MAC_RX_FRAME_POLICY_BASE_ADDRESS: usize = 0x2010_40d8;
 const MAC_RX_MANAGEMENT_POLICY_BASE_ADDRESS: usize = 0x2010_4060;
 const MAC_RX_MANAGEMENT_POLICY_STRIDE: usize = 8;
+const MAC_CONTROL_ADDRESS: usize = 0x2010_4cac;
+const WIFI_MAC_REGDMA_CONTROL_ADDRESS: usize = 0x2010_d83c;
 const MAC_ADDRESS_VALID_BIT: u32 = 1 << 16;
 const MAC_RX_MODE_MASK: u32 = (1 << 10) | (1 << 4);
 const MAC_RX_CONTROL_POLICY_BIT: u32 = 1 << 6;
 const MAC_RX_CONTROL_ADDRESS_BIT: u32 = 1 << 31;
 const MAC_RX_MANAGEMENT_POLICY_BIT: u32 = 1 << 16;
 const MAC_RX_UNIQUE_BSSID_BITS: u32 = (1 << 8) | (1 << 1);
+const MAC_NO_RETENTION_CLEAR_BITS: u32 = 0x00ff_1000;
+const WIFI_MAC_REGDMA_LINK_MASK: u32 = 0x001e_0000;
+const WIFI_MAC_ACTIVE_REGDMA_LINK: u32 = 4;
 const MAC_INTERFACE_COUNT: u32 = 4;
 const MAC_RX_POLICY_QUEUE_COUNT: u32 = 3;
 const PHY_RX_COMP_LOW_ADDRESS: usize = 0x2010_702c;
@@ -130,6 +135,14 @@ const fn with_mac_rx_unique_bssid_policy(value: u32, enabled: u32) -> u32 {
     } else {
         value | MAC_RX_UNIQUE_BSSID_BITS
     }
+}
+
+const fn without_mac_tx_retention(value: u32) -> u32 {
+    value & !MAC_NO_RETENTION_CLEAR_BITS
+}
+
+const fn with_wifi_mac_regdma_link(value: u32, link: u32) -> u32 {
+    (value & !WIFI_MAC_REGDMA_LINK_MASK) | ((link << 17) & WIFI_MAC_REGDMA_LINK_MASK)
 }
 
 const fn with_tx_cca(value: u32, cca: u32) -> u32 {
@@ -448,6 +461,38 @@ pub unsafe extern "C" fn wifi_strict_hal_mac_txq_disable(queue: u8) {
 #[link_section = ".rwtext.wifi_strict.radio_hal"]
 pub unsafe extern "C" fn wifi_strict_hal_mac_set_csi_cbw(_cbw: u32) {}
 
+/// Restart the MAC for the strict `WIFI_PS_NONE` profile.
+///
+/// The complete pinned chain is
+/// `libpp.a[if_hwctrl.o]::ic_mac_init` (40 bytes),
+/// `libpp.a[hal_mac.o]::hal_mac_init` (48 bytes), and
+/// `libpp.a[hal_pwr.o]::pwr_hal_select_wifimac_regdma_link` (32 bytes).
+/// With power save disabled, `pm_get_tx_blocks_retention_mask` returns all
+/// ones, so the first read/modify/write clears `0x00ff_1000` at
+/// `0x2010_4cac`. The second selects evidenced REGDMA link four in bits
+/// 20:17 of `0x2010_d83c`.
+///
+/// The vendor tail also writes one to
+/// `g_wifimac_regdma_link_selected`. That byte is a cache for the vendor PM
+/// getters; every strict PM hook is disabled under the read-back-verified
+/// `WIFI_PS_NONE` invariant, so publishing it would retain hidden C state
+/// without a strict consumer.
+///
+/// This finite leaf contains no call, loop, wait, allocation, or non-MMIO
+/// state. The surrounding Rust channel state machine owns serialization.
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+pub(crate) unsafe fn restart_mac_without_power_save() {
+    let mac_control = MAC_CONTROL_ADDRESS as *mut u32;
+    mac_control.write_volatile(without_mac_tx_retention(mac_control.read_volatile()));
+
+    let regdma_control = WIFI_MAC_REGDMA_CONTROL_ADDRESS as *mut u32;
+    regdma_control.write_volatile(with_wifi_mac_regdma_link(
+        regdma_control.read_volatile(),
+        WIFI_MAC_ACTIVE_REGDMA_LINK,
+    ));
+}
+
 /// Program the two recovered PHY RX compensation fields.
 ///
 /// Reference: pinned `libphy.a[phy_reg.o]::phy_set_rx_comp_new`, size `0x28`.
@@ -641,7 +686,8 @@ mod tests {
         with_mac_rx_unique_bssid_policy, with_phy_agc_control, with_phy_agc_window,
         with_phy_ftm_enable, with_phy_gain_memory_index, with_phy_rx_comp_high,
         with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low, with_tx_cca,
-        without_fe_bb_clock_enable, without_tx_queue_enable, without_tx_queue_valid,
+        with_wifi_mac_regdma_link, without_fe_bb_clock_enable, without_mac_tx_retention,
+        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -712,6 +758,28 @@ mod tests {
         assert_eq!(with_mac_rx_management_policy(0, 1), 0x0001_0000);
         assert_eq!(with_mac_rx_unique_bssid_policy(u32::MAX, 0), 0xffff_fefd);
         assert_eq!(with_mac_rx_unique_bssid_policy(0, 1), 0x0000_0102);
+    }
+
+    #[test]
+    fn no_power_save_mac_restart_matches_the_complete_pinned_chain() {
+        assert_eq!(without_mac_tx_retention(u32::MAX), 0xff00_efff);
+        assert_eq!(
+            without_mac_tx_retention(0x12ff_3456),
+            0x1200_2456
+        );
+
+        assert_eq!(
+            with_wifi_mac_regdma_link(0, WIFI_MAC_ACTIVE_REGDMA_LINK),
+            0x0008_0000
+        );
+        assert_eq!(
+            with_wifi_mac_regdma_link(u32::MAX, WIFI_MAC_ACTIVE_REGDMA_LINK),
+            0xffe9_ffff
+        );
+        assert_eq!(
+            with_wifi_mac_regdma_link(0x1234_5678, 0),
+            0x1220_5678
+        );
     }
 
     #[test]

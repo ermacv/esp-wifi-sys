@@ -2,10 +2,7 @@
 // auditors. Keep this policy in one place: the control-flow proof and the
 // linked-state inventory must classify the same vendor graph.
 
-pub const ROOTS: &[&str] = &[
-    "wDev_ProcessRxSucData",
-    "ic_mac_init",
-];
+pub const ROOTS: &[&str] = &["wDev_ProcessRxSucData"];
 
 // Ownership-completion classification for every current runtime root.
 //
@@ -16,7 +13,7 @@ pub const ROOTS: &[&str] = &[
 // Keep these three sets a disjoint, exhaustive partition of ROOTS.
 pub const RUST_BOUNDARIES_WITH_VENDOR_FALLBACK: &[&str] = &["wDev_ProcessRxSucData"];
 
-pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &["ic_mac_init"];
+pub const STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS: &[&str] = &[];
 
 pub const TEMPORARY_EVIDENCED_MMIO_ROOTS: &[&str] = &[];
 
