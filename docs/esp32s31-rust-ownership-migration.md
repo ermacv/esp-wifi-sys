@@ -1940,3 +1940,40 @@ HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and HTTP 200.
 It returned 18/18 TX and 16/16 RX owners, recorded zero
 allocation/reallocation/free calls, zero other-core stalls, zero ESF
 management claims or rejects at shutdown, and no `ppTask` entry.
+
+## Completed current-channel ownership boundary
+
+The strict channel switch no longer calls `ic_set_current_channel`. The
+complete pinned references prove that this is a legacy cache publication, not
+a hardware operation:
+
+- `libpp.a[if_hwctrl.o]::ic_set_current_channel` is a 12-byte null check and
+  tail call;
+- `libpp.a[wdev.o]::wDev_SetCurChannel` is a 26-byte copy of the two selector
+  bytes to `wDevCtrl[0x2c..=0x2d]`.
+
+The Rust channel state already separates the requested selector from the
+physically active selector. `channel_switch::State::channel` owns the request
+while a transition is in progress; `ChannelState::current` is published only
+after the asynchronous MAC-stop edge, PHY programming, CSI bandwidth update,
+and MAC restart complete. No strict-runtime reader consumes the two legacy
+`wDevCtrl` bytes. Preserving that C cache would therefore create a second,
+prematurely published source of truth rather than retain useful behavior.
+
+The vendor symbols remain linked for pre-handoff `wl_chm` compatibility, but
+are unreachable from the strict runtime graph. No replacement ABI, new
+global, allocation, wait, delay, polling loop, or unsafe state alias was
+introduced. Runtime ownership debt decreases from
+`1 fallback + 2 stateful/unproven` to
+`1 fallback + 1 stateful/unproven`; strict vendor roots decrease from three
+to two and reachable vendor functions from 10 to 8. The 6,407-function audit
+reports zero no-wait/no-heap violations and zero mutable blob globals or
+ROM-ABI state cells reached by strict leaves. Internal-SRAM strict storage
+remains 313,293 bytes and the CPU0 stack remains 16,432 bytes.
+
+Hardware verification exercised the semantic part of the change rather than
+only startup: a six-record passive scan changed channels through the Rust
+state machine, then open authentication, HT20/WMM association, WPA2 M1-M4,
+DHCP, gateway ping, DNS and HTTP 200 completed. It returned 18/18 TX and
+15/15 RX owners with zero allocation/reallocation/free calls, zero
+other-core stalls, no ESF rejection, and no `ppTask` entry.
