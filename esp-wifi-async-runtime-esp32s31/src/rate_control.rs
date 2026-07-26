@@ -301,6 +301,7 @@ const fn ht_metric_index(metric: i32) -> u8 {
 /// The result contains values only. The target adapter separately validates
 /// record provenance and projects these fields into the temporary 0x98-byte
 /// ABI record.
+#[inline(never)]
 pub(crate) fn select_phy_mode(input: PhyModeSelectionInput) -> PhyModeSelection {
     let highest = highest_rate_index(
         input.phy_type,

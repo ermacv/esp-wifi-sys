@@ -236,6 +236,7 @@ fn arena_base(kind: RateScheduleKind) -> *mut u8 {
     }
 }
 
+#[inline(never)]
 pub(crate) fn schedule_pointer(schedule: RateScheduleRef) -> *mut u8 {
     arena_base(schedule.kind).wrapping_add(usize::from(schedule.index) * RATE_SCHEDULE_RECORD_SIZE)
 }
