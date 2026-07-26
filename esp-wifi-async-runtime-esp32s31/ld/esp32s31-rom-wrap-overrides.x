@@ -289,6 +289,18 @@ phy_close_fe_bb_clk = wifi_strict_phy_close_fe_bb_clk;
 ASSERT(phy_close_fe_bb_clk == wifi_strict_phy_close_fe_bb_clk,
        "ESP32-S31 PHY FE/baseband clock Rust boundary is inactive");
 
+/* Complete four-register FE/baseband clock-open transaction. */
+EXTERN(wifi_strict_phy_open_fe_bb_clk);
+phy_open_fe_bb_clk = wifi_strict_phy_open_fe_bb_clk;
+ASSERT(phy_open_fe_bb_clk == wifi_strict_phy_open_fe_bb_clk,
+       "ESP32-S31 PHY FE/baseband clock-open Rust boundary is inactive");
+
+/* Complete two-branch BBPLL calibration-control register transaction. */
+EXTERN(wifi_strict_phy_bbpll_cal);
+phy_bbpll_cal = wifi_strict_phy_bbpll_cal;
+ASSERT(phy_bbpll_cal == wifi_strict_phy_bbpll_cal,
+       "ESP32-S31 PHY BBPLL calibration Rust boundary is inactive");
+
 /* Complete post-initialization register update, with both former MMIO-only
  * ROM/vendor leaves inlined. No other archive member calls those leaves. */
 EXTERN(wifi_strict_phy_reg_update_new);

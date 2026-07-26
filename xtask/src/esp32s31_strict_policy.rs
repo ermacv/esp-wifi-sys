@@ -163,6 +163,7 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("wDev_Insert_KeyEntry", "wifi_strict_wdev_insert_key_entry"),
     ("phy_set_rx_comp_new", "wifi_strict_phy_set_rx_comp_new"),
     ("phy_dc_mem_clr", "wifi_strict_phy_dc_mem_clr"),
+    ("phy_bbpll_cal", "wifi_strict_phy_bbpll_cal"),
     (
         "phy_set_tx_gain_mem_new",
         "wifi_strict_phy_set_tx_gain_mem_new",

@@ -46,6 +46,8 @@ const PHY_GAIN_MEMORY_MAX_ENTRIES: u32 = 32;
 const PHY_FE_CLOCK_GATE_ADDRESS: usize = 0x2010_0400;
 const PHY_FE_BB_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0800;
 const PHY_BB_CLOCK_GATE_ADDRESS: usize = 0x2010_7c80;
+const PHY_BBPLL_CAL_CONTROL_ADDRESS: usize = 0x2010_f818;
+const MODEM_LPCON_CLOCK_CONF_ADDRESS: usize = 0x2070_401c;
 const PHY_AGC_CONTROL_ADDRESS: usize = 0x2010_705c;
 const PHY_AGC_SAT_GAIN_LOW_ADDRESS: usize = 0x2010_7064;
 const PHY_AGC_SAT_GAIN_HIGH_ADDRESS: usize = 0x2010_7114;
@@ -163,6 +165,15 @@ const fn without_tx_queue_enable(value: u32) -> u32 {
 
 const fn without_fe_bb_clock_enable(value: u32) -> u32 {
     value & !0x3
+}
+
+const fn with_bbpll_calibration(value: u32, enable: u32) -> u32 {
+    let value = value & !0x0c;
+    if enable == 0 {
+        value | 0x04
+    } else {
+        value | 0x08
+    }
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -547,6 +558,47 @@ pub unsafe extern "C" fn wifi_strict_phy_close_fe_bb_clk() {
     (PHY_BB_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(0);
 }
 
+/// Open the recovered front-end and baseband clock gates.
+///
+/// Reference: complete rev0 ROM `phy_open_fe_bb_clk` body at `0x2f82_3ec0`,
+/// size `0x38`. The four writes retain their exact order and the two
+/// read/modify/write operations use fresh volatile reads. Unknown MODEM_LPCON
+/// bit meanings are not inferred beyond the ROM function name.
+///
+/// This cold-init leaf has no call, branch, loop, wait, allocation, callback,
+/// or non-MMIO state access.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+pub unsafe extern "C" fn wifi_strict_phy_open_fe_bb_clk() {
+    (PHY_FE_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(0x1e7);
+
+    let control = PHY_FE_BB_CLOCK_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(control.read_volatile() | 0x3);
+
+    (PHY_BB_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(u32::MAX);
+
+    let modem_clock = MODEM_LPCON_CLOCK_CONF_ADDRESS as *mut u32;
+    modem_clock.write_volatile(modem_clock.read_volatile() | 0x0040_000f);
+}
+
+/// Select the recovered baseband-PLL calibration control state.
+///
+/// Reference: complete rev0 ROM `phy_bbpll_cal` body at `0x2f82_7dbc`, size
+/// `0x1c`. Both branches clear bits 3:2 of `0x2010_f818`; zero selects bit 2
+/// and every nonzero argument selects bit 3. The exact field meaning remains
+/// opaque until register documentation or differential evidence names it.
+///
+/// This leaf is used by both cold initialization and strict channel changes,
+/// so it remains in internal SRAM and contains no call, loop, wait,
+/// allocation, callback, or hidden state access.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_bbpll_cal(enable: u32) {
+    let control = PHY_BBPLL_CAL_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_bbpll_calibration(control.read_volatile(), enable));
+}
+
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
@@ -681,13 +733,14 @@ mod tests {
         encode_mac_address, encode_phy_gain_memory_words, join_rx_descriptor_address,
         mac_address_registers, mac_rx_address_policy_address, mac_rx_frame_policy_address,
         mac_rx_management_policy_address, tsf_latch_mask, tx_baseband_gain_index,
-        tx_queue_control_address, tx_queue_is_valid, with_mac_rx_control_address_policy,
-        with_mac_rx_control_policy, with_mac_rx_management_policy, with_mac_rx_mode,
-        with_mac_rx_unique_bssid_policy, with_phy_agc_control, with_phy_agc_window,
-        with_phy_ftm_enable, with_phy_gain_memory_index, with_phy_rx_comp_high,
-        with_phy_rx_comp_low, with_phy_rx_control_high, with_phy_rx_control_low, with_tx_cca,
-        with_wifi_mac_regdma_link, without_fe_bb_clock_enable, without_mac_tx_retention,
-        without_tx_queue_enable, without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
+        tx_queue_control_address, tx_queue_is_valid, with_bbpll_calibration,
+        with_mac_rx_control_address_policy, with_mac_rx_control_policy,
+        with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
+        with_phy_agc_control, with_phy_agc_window, with_phy_ftm_enable, with_phy_gain_memory_index,
+        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
+        with_phy_rx_control_low, with_tx_cca, with_wifi_mac_regdma_link,
+        without_fe_bb_clock_enable, without_mac_tx_retention, without_tx_queue_enable,
+        without_tx_queue_valid, WIFI_MAC_ACTIVE_REGDMA_LINK,
     };
 
     #[test]
@@ -763,10 +816,7 @@ mod tests {
     #[test]
     fn no_power_save_mac_restart_matches_the_complete_pinned_chain() {
         assert_eq!(without_mac_tx_retention(u32::MAX), 0xff00_efff);
-        assert_eq!(
-            without_mac_tx_retention(0x12ff_3456),
-            0x1200_2456
-        );
+        assert_eq!(without_mac_tx_retention(0x12ff_3456), 0x1200_2456);
 
         assert_eq!(
             with_wifi_mac_regdma_link(0, WIFI_MAC_ACTIVE_REGDMA_LINK),
@@ -776,10 +826,7 @@ mod tests {
             with_wifi_mac_regdma_link(u32::MAX, WIFI_MAC_ACTIVE_REGDMA_LINK),
             0xffe9_ffff
         );
-        assert_eq!(
-            with_wifi_mac_regdma_link(0x1234_5678, 0),
-            0x1220_5678
-        );
+        assert_eq!(with_wifi_mac_regdma_link(0x1234_5678, 0), 0x1220_5678);
     }
 
     #[test]
@@ -794,6 +841,14 @@ mod tests {
     fn phy_fe_bb_clock_mask_matches_the_pinned_leaf() {
         assert_eq!(without_fe_bb_clock_enable(u32::MAX), 0xffff_fffc);
         assert_eq!(without_fe_bb_clock_enable(0x1234_567b), 0x1234_5678);
+    }
+
+    #[test]
+    fn phy_bbpll_calibration_mask_matches_both_rom_branches() {
+        assert_eq!(with_bbpll_calibration(0, 0), 0x04);
+        assert_eq!(with_bbpll_calibration(0, 1), 0x08);
+        assert_eq!(with_bbpll_calibration(u32::MAX, 0), 0xffff_fff7);
+        assert_eq!(with_bbpll_calibration(u32::MAX, 7), 0xffff_fffb);
     }
 
     #[test]
