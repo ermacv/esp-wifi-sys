@@ -1756,7 +1756,7 @@ zero stateful/unproven runtime roots, and zero temporary MMIO roots. Strict
 runtime leaves reach zero mutable blob globals. The cold-PHY graph still
 reports exactly one live mutable blob symbol, `phy_param`, of 508 bytes,
 because the prepared owner is dead-stripped until activation. The generated
-application image remains 894,336 bytes.
+application image from the published dependency chain is 894,352 bytes.
 
 ## In-progress slice: `g_ic`
 
