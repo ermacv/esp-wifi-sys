@@ -1038,6 +1038,52 @@ as PHY qualification evidence. The strict final-ELF graph still reports
 zero violations and unchanged debt of `1 fallback + 9 stateful/unproven +
 0 temporary MMIO`.
 
+## In progress: non-blocking PHY-I2C and RC calibration
+
+The next cold-PHY boundary is deliberately wider than
+`libphy.a[phy_init.o]::phy_rc_cal_init`. That vendor wrapper merely supplies
+fixed tables to ROM `phy_rc_cal`; interposing the wrapper alone would retain
+both the hidden `phy_param` mutation and the synchronous PHY-I2C/delay
+implementation.
+
+The unstripped rev0 ROM ELF identified the complete relevant bodies:
+
+- `phy_get_data_sat` at `0x2f826024`, size `0x10`;
+- `phy_get_rc_dout` at `0x2f8261ac`, size `0x96`;
+- `phy_rc_cal` at `0x2f826242`, size `0x108`;
+- `phy_chip_i2c_readReg_org` at `0x2f829ffa`, size `0x38`;
+- `phy_chip_i2c_readReg` at `0x2f82a032`, size `0x50`;
+- `phy_chip_i2c_writeReg` at `0x2f82a30e`, size `0x6a`.
+
+The ROM read leaf publishes a command and then repeatedly reads busy bit 25.
+The write leaf repeatedly reads that bit both before and after publication.
+`phy_get_rc_dout` performs four masked writes, a synchronous
+`ets_delay_us(100)`, one masked read, and two cleanup writes. These cycles and
+the delay are not admissible in the strict async runtime.
+
+The preparatory Rust module therefore owns only stateless command encoding,
+single-observation start/finish leaves, and a finite RC-calibration transition
+plan. It models the 13 recovered block read masks, the `0x0647` host-selection
+bitmap, command registers `0x2010f800/0x2010f804`, read-mask register
+`0x2010f81c`, host configuration at `0x2010f820`, and busy bit 25. A read
+start adds a deliberate fail-fast pre-command busy check which is absent from
+the ROM read body; it prevents an owner-contract violation from overwriting
+an active transaction.
+
+The transition plan exposes the 100-microsecond interval as an async timer
+edge. A completion observer is called once only after an independently
+delivered hardware or timer edge; a still-busy result is an incomplete or
+timeout error, never permission to self-wake and poll again. The arithmetic
+half of `phy_rc_cal` now mutates an explicit fixed-size Rust parameter image
+and is host-tested on both sides of the ROM result-45 threshold.
+
+This slice is not yet interposed into the final firmware. The current cold
+boot still executes the vendor/ROM `phy_rf_init` path. Activation must happen
+at the complete async RF-init boundary so the adjacent synchronous
+`ets_delay_us(10)`, masked read/modify/write transactions, and all remaining
+calibration leaves are accounted for together. Consequently no HIL behavior
+or vendor-debt reduction is claimed for this preparatory step.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
