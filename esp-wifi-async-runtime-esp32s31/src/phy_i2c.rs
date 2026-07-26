@@ -220,7 +220,10 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_master_cmd_mem_init() {
         let value = if dynamic_cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len()
             && PHY_I2C_MASTER_DYNAMIC_INDICES[dynamic_cursor] == index
         {
-            let value = dynamic_values[dynamic_cursor];
+            // The preceding comparison proves `dynamic_cursor < 19`. Keep
+            // this explicit so the final cold-init leaf cannot retain even
+            // an unreachable panic call (and therefore no indirect `jalr`).
+            let value = *dynamic_values.get_unchecked(dynamic_cursor);
             dynamic_cursor += 1;
             value
         } else {
