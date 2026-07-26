@@ -470,15 +470,13 @@ on mutable blob bytes:
    into the recycler are Rust-owned as a non-duplicable token as well; the
    remaining target is the aggregate frame-indication/dispatch body rather
    than this list transition.
-   Move the 22 `g_per_conn_trc` publications and the three route bitmaps out of
-   the ROM ABI table before claiming complete rate-control ownership.
-   `rcUpdateAckSnr` and `rcTxUpdatePer` are no longer part of this debt: their
-   complete scalar transforms, counter rescaling, schedule-lowering decision,
-   noise-floor conversion and HE beamforming-rate MMIO are Rust-owned.
-   The published rate-control records are now validated Rust storage. The
-   remaining rate-control ownership debt is the initialization of peer
-   records and the immutable contents/pointers of the vendor schedule arenas;
-   migrate those together rather than copying another opaque pointer graph.
+   The 22 peer records, three route bitmaps, all schedule selection and all
+   nine schedule arenas are now Rust-owned. `rcUpdateAckSnr`,
+   `rcTxUpdatePer`, `rcUpdatePhyMode`, `rcAttach`, both public schedule getters
+   and the default-interface selector no longer contribute rate-control
+   ownership debt. Keep extending the typed `RateControlState` only when a
+   newly admitted PHY mode exposes a state transition not covered by the
+   current STA/AP qualification.
 2. Use the separate Radio/Network ownership counts and existing high-water
    marks to overlay or remove only storage whose
    lifetimes are proven disjoint. Do not reduce the 32-entry TX pool without a
@@ -601,14 +599,41 @@ reference. It no longer enumerates or reads the nine vendor globals. The
 three fixed default contexts and four ROM ABI schedule cells likewise publish
 only addresses derived from the Rust bank.
 
-The complete default-interface `trc_update_ifx_phy_mode` selector is also
-Rust-owned. It preserves the recovered LoRa `[1, 0, 1, 0]`, dot11b record 3,
-and P2P-dot11g record 7 layouts while rejecting an absent or foreign default
-context. The larger per-peer `rcUpdatePhyMode` transition still contains
-archive-local schedule references and is the remaining blocker to removing
-the original 852-byte arenas from the final ELF. Until that function and
-`rcAttach` are interposed, this checkpoint is deliberately not counted as an
-SRAM reduction or complete peer rate-control ownership.
+The complete default-interface `trc_update_ifx_phy_mode` selector and the
+per-peer `rcUpdatePhyMode` transition are Rust-owned. They preserve the
+recovered LoRa `[1, 0, 1, 0]`, dot11b record 3, P2P-dot11g record 7 and the
+remaining HT/HE mode-to-schedule mappings while rejecting absent, foreign or
+unclaimed records. `rcAttach` now initializes the Rust schedule bank and
+records without calling the archive body; both public schedule getters return
+only validated Rust-bank addresses.
+
+The qualified final ELF therefore contains the one 852-byte Rust schedule bank
+and none of the nine vendor schedule definitions. Four obsolete ROM-ABI
+schedule cells are not live, fixed cold-init bindings decrease from 43 to 39,
+and linked mutable blob state outside the strict runtime graph decreases by
+nine symbols and 852 bytes, from 185/22,212 to 176/21,360. Internal sparse
+schedule-kind tags also avoid a 160-byte SRAM pointer jump table. The
+recursive final-ELF cold-init audit proves that `__wrap_trc_init` reaches
+exactly the three fixed context initializers and their Rust schedule
+publications, without a cycle or hidden memory access at the arena-base leaf.
+
+On ESP32-S31 hardware the heap-free image completed passive scan, association,
+WPA2 M1-M4, DHCP, ping, DNS and HTTP without entering `ppTask`. Allocation,
+reallocation and free counts remained zero, other-core stalls remained zero,
+and all TX/RX queues balanced without rejection. A default UDP receive run
+accepted 27,162,000 bytes in 10.268 seconds (about 21.2 Mbit/s). The
+`idf-iperf` queue profile accepted 30,126,600 bytes in 10.256 seconds (about
+23.5 Mbit/s); the sender emitted 83.9 Mbit/s. The application observed one
+peer RX BlockAck request but intentionally declined it, so this measurement is
+a non-AMPDU RX baseline rather than a rate-control ceiling.
+
+The qualified default image leaves 16,432 bytes for the CPU0 stack, only
+48 bytes above the 16 KiB gate. Enabling the smaller RX-BlockAck profile
+currently leaves 15,840 bytes (544 bytes short); the 40-descriptor/48-buffer
+saturation profile overflows SRAM by 14,016 bytes. Reducing or overlaying
+fixed RX storage is therefore the next prerequisite for a qualified aggregate
+throughput measurement. These link-time failures do not indicate a
+rate-control regression.
 
 ## Completed runtime slice: TXOP queue ownership
 
