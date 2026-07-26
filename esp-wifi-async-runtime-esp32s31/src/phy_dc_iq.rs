@@ -35,7 +35,7 @@ pub struct PhyDcIqAccumulatorSnapshot {
 pub struct PhyDcIqReadinessSnapshot {
     /// Bit 16 of `0x2010_047c`.
     pub ready: bool,
-    /// Whether bits 21:20 of `0x2010_18d0` are nonzero.
+    /// Whether bits 21:20 of `0x2010_08d0` are nonzero.
     pub activity: bool,
 }
 

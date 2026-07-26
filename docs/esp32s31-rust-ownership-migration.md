@@ -1569,7 +1569,7 @@ The RX-DCO `phy_dc_iq_est` child is now fully decomposed as
 `0x2f82_6542`. Rust owns the setup writes at `0x2010_044c` and
 `0x2010_0450`, both one-microsecond timer boundaries, the single-sample
 readiness observation at `0x2010_047c`, activity observation at
-`0x2010_18d0`, all three signed accumulators, the exact fixed-table power
+`0x2010_08d0`, all three signed accumulators, the exact fixed-table power
 conversion, and the ordered disable tail.
 
 The ROM readiness spin is not reproduced. Each false readiness observation
