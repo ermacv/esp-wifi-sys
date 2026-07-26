@@ -1433,6 +1433,21 @@ pub(crate) unsafe fn read_phy_temperature_code() -> u32 {
         & crate::phy_temperature::PHY_TEMPERATURE_CODE_MASK
 }
 
+/// Apply complete ROM `phy_nrx_freq_set` for one nonzero D-code frequency.
+///
+/// The two source reads are retained because the high byte is hardware state.
+/// The caller only issues the four recovered nonzero frequency codes.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_nrx_frequency(frequency_code: u8) {
+    debug_assert!(frequency_code != 0);
+    let control = crate::phy_dcode::PHY_NRX_FREQUENCY_CONTROL_ADDRESS as *mut u32;
+    let shift = control.read_volatile() >> 24;
+    let numerator = 0x50_u32.wrapping_shl(shift);
+    let previous = control.read_volatile();
+    let quotient = numerator / u32::from(frequency_code);
+    control.write_volatile((previous & 0xff00_0000) | (quotient & 0x000f_ffff));
+}
+
 /// Sample the free-running counter used by the ROM SDM-stability deadline.
 ///
 /// Complete rev0 ROM `phy_wait_i2c_sdm_stable` at `0x2f82_3e76` samples

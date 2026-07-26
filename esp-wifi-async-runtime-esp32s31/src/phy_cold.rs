@@ -212,6 +212,18 @@ impl PhyColdState {
         self.parameter[0x16] = outcome.sensor_index;
     }
 
+    pub const fn dcode_parameters(&self) -> crate::phy_dcode::PhyDcodeParameters {
+        crate::phy_dcode::PhyDcodeParameters {
+            crystal_selector: self.parameter[0x4f],
+        }
+    }
+
+    /// Commit the eight D-code samples formerly written to
+    /// `phy_param[0x1a1..=0x1a8]`.
+    pub fn apply_dcode_outcome(&mut self, outcome: crate::phy_dcode::PhyDcodeOutcome) {
+        self.parameter[0x1a1..=0x1a8].copy_from_slice(&outcome.codes);
+    }
+
     /// Commit the sole software-state effect of a completed
     /// `phy_check_rx_sat` measurement.
     ///
@@ -2772,6 +2784,24 @@ mod tests {
                 assert_eq!(state.parameter_image()[index], before[index]);
             }
         }
+    }
+
+    #[test]
+    fn dcode_parameters_and_results_have_one_explicit_owner() {
+        let mut state = PhyColdState::new();
+        assert_eq!(
+            state.dcode_parameters(),
+            crate::phy_dcode::PhyDcodeParameters {
+                crystal_selector: state.parameter_image()[0x4f],
+            }
+        );
+        state.apply_dcode_outcome(crate::phy_dcode::PhyDcodeOutcome {
+            codes: [1, 2, 3, 4, 5, 6, 7, 8],
+        });
+        assert_eq!(
+            &state.parameter_image()[0x1a1..=0x1a8],
+            &[1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]

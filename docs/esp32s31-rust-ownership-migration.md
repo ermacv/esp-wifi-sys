@@ -253,8 +253,8 @@ frontier and simultaneously releases `TxRxCxt`, `wDevCtrl`,
 `g_wifi_menuconfig`, `g_lmac_cnt`, `wifi_sta_rx_probe_req`, `g_osi_funcs_p`,
 and `pTxRx` from the runtime ownership graph.
 
-Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 11
-unique child roots with 3,130 bytes of direct reference bodies:
+Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 10
+unique child roots with 3,002 bytes of direct reference bodies:
 
 | child root | reference bytes | source | current decision |
 |---|---:|---|---|
@@ -263,7 +263,6 @@ unique child roots with 3,130 bytes of direct reference bodies:
 | `phy_tx_cap_init` | 230 | archive | port calibration transition |
 | `phy_tx_pwctrl_init` | 154 | archive | port calibration transition |
 | `phy_txdc_cal_pwdet_init` | 520 | archive | port calibration transition |
-| `phy_dcode_cal_init` | 128 | ROM | port calibration transition |
 | `phy_txiq_cal_init` | 332 | archive | port calibration transition |
 | `phy_bt_tx_gain_init` | 90 | archive | retain as conditional shared/coex evidence until omission is proved |
 | `phy_rxiq_cal_init` | 408 | archive | port calibration transition |
@@ -290,9 +289,17 @@ committed only by `PhyColdState`; `g_phyFuns` and the global `phy_param`
 pointer are absent. The ROM default for an unknown DAC reads beyond the
 attribute object, so Rust turns that corrupt state into a typed failure.
 
+`phy_dcode_cal_init` is complete as a Rust-owned nested calibration
+transition. The recovered four-byte ROM table is the explicit sequence
+`[115, 116, 117, 118]`. Each entry runs the existing async RFPLL transition,
+one finite NRX register transform, four identity-bound CKGEN PHY-I2C writes
+and two six-bit PHY-I2C reads. The eight results are returned as an owned
+value and committed only to `PhyColdState[0x1a1..=0x1a8]`; no ROM parameter
+pointer is published.
+
 `phy_check_rx_sat` is also no longer in that code backlog: its Rust transition
 and owned `phy_param` mutation are complete. Its target-side 100-sample capture
-producer remains a separate hardware binding. After the 11 roots, the work is
+producer remains a separate hardware binding. After the 10 roots, the work is
 to compose `phy_bb_init` (362 bytes of reference parent), port the remaining
 outer `register_chipv7_phy` sequencing (486 bytes), and activate the complete
 graph without publishing `phy_param` or `g_phyFuns`.
@@ -1915,7 +1922,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 4 | `phy_tsens_temp_read()` | complete Rust-owned PHY-I2C/MMIO transition |
 | 5 | `phy_tx_pwctrl_init(0)` | calibration transition pending |
 | 6 | `phy_txdc_cal_pwdet_init(1, 0, 0)` | calibration transition pending |
-| 7 | `phy_dcode_cal_init()` | calibration transition pending |
+| 7 | `phy_dcode_cal_init()` | complete nested RFPLL/I2C transition |
 | 8 | `phy_txiq_cal_init()` | calibration transition pending |
 | 9 | `phy_set_tx_cfr_mem(32)` | complete Rust-owned transition |
 | 10 | `phy_bt_tx_gain_init()` | calibration transition pending |
