@@ -218,7 +218,7 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_master_cmd_mem_init() {
     while index != PHY_I2C_MASTER_COMMAND_COUNT {
         let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
         let value = if dynamic_cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len()
-            && PHY_I2C_MASTER_DYNAMIC_INDICES[dynamic_cursor] == index
+            && *PHY_I2C_MASTER_DYNAMIC_INDICES.get_unchecked(dynamic_cursor) == index
         {
             // The preceding comparison proves `dynamic_cursor < 19`. Keep
             // this explicit so the final cold-init leaf cannot retain even
