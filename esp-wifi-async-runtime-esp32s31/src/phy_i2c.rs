@@ -571,7 +571,7 @@ impl OpenI2cXpdTransition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyRfInitPrefixOutcome {
-    ReadyForI2cClockSelection,
+    ReadyForFeTxRxReset,
     SdmTimedOut,
     PbusForceTestTimedOut(PhyPbusForceTest),
 }
@@ -583,6 +583,7 @@ pub enum PhyRfInitPrefixAction {
     Bias(BiasRegAction),
     OpenI2cXpd(OpenI2cXpdAction),
     PbusClear(PhyPbusClearAction),
+    ConfigureI2cClockSelection { selection: u32 },
     DelayMicros(u32),
     Complete(PhyRfInitPrefixOutcome),
 }
@@ -594,6 +595,7 @@ pub enum PhyRfInitPrefixCompletion {
     Bias(BiasRegCompletion),
     OpenI2cXpd(OpenI2cXpdCompletion),
     PbusClear(PhyPbusClearCompletion),
+    I2cClockSelectionConfigured,
     DelayElapsed,
 }
 
@@ -611,10 +613,11 @@ enum PhyRfInitPrefixStep {
     OpenI2cXpd(OpenI2cXpdTransition),
     PostI2cDelay,
     PbusClear(PhyPbusClearTransition),
+    I2cClockSelection,
     Complete(PhyRfInitPrefixOutcome),
 }
 
-/// Event-driven composition of operations one through six in the complete
+/// Event-driven composition of operations one through seven in the complete
 /// pinned `libphy.a[phy_init.o]::phy_rf_init` body.
 ///
 /// The two MMIO leaves are finite actions. Both bias writes and every SDM
@@ -657,9 +660,7 @@ impl PhyRfInitPrefixTransition {
             PhyRfInitPrefixStep::PostI2cDelay => PhyRfInitPrefixAction::DelayMicros(10),
             PhyRfInitPrefixStep::PbusClear(transition) => match transition.action() {
                 PhyPbusClearAction::Complete(PhyPbusClearOutcome::Cleared) => {
-                    PhyRfInitPrefixAction::Complete(
-                        PhyRfInitPrefixOutcome::ReadyForI2cClockSelection,
-                    )
+                    PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection: 8 }
                 }
                 PhyPbusClearAction::Complete(PhyPbusClearOutcome::ForceTestTimedOut(
                     transaction,
@@ -668,6 +669,9 @@ impl PhyRfInitPrefixTransition {
                 ),
                 action => PhyRfInitPrefixAction::PbusClear(action),
             },
+            PhyRfInitPrefixStep::I2cClockSelection => {
+                PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection: 8 }
+            }
             PhyRfInitPrefixStep::Complete(outcome) => PhyRfInitPrefixAction::Complete(outcome),
         }
     }
@@ -726,9 +730,7 @@ impl PhyRfInitPrefixTransition {
                     .map_err(|_| PhyRfInitPrefixTransitionError::WrongCompletion)?;
                 match transition.action() {
                     PhyPbusClearAction::Complete(PhyPbusClearOutcome::Cleared) => {
-                        PhyRfInitPrefixStep::Complete(
-                            PhyRfInitPrefixOutcome::ReadyForI2cClockSelection,
-                        )
+                        PhyRfInitPrefixStep::I2cClockSelection
                     }
                     PhyPbusClearAction::Complete(PhyPbusClearOutcome::ForceTestTimedOut(
                         transaction,
@@ -738,6 +740,10 @@ impl PhyRfInitPrefixTransition {
                     _ => PhyRfInitPrefixStep::PbusClear(transition),
                 }
             }
+            (
+                PhyRfInitPrefixStep::I2cClockSelection,
+                PhyRfInitPrefixCompletion::I2cClockSelectionConfigured,
+            ) => PhyRfInitPrefixStep::Complete(PhyRfInitPrefixOutcome::ReadyForFeTxRxReset),
             (PhyRfInitPrefixStep::Complete(_), _) => {
                 return Err(PhyRfInitPrefixTransitionError::AlreadyComplete);
             }
@@ -1225,7 +1231,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             transition.action(),
-            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForI2cClockSelection)
+            PhyRfInitPrefixAction::ConfigureI2cClockSelection { selection: 8 }
+        );
+        transition
+            .advance(PhyRfInitPrefixCompletion::I2cClockSelectionConfigured)
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            PhyRfInitPrefixAction::Complete(PhyRfInitPrefixOutcome::ReadyForFeTxRxReset)
         );
     }
 

@@ -60,6 +60,9 @@ const PHY_PBUS_MODE_ADDRESS: usize = 0x2010_088c;
 const PHY_PBUS_STATUS_ADDRESS: usize = 0x2010_0890;
 const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
 const PHY_PBUS_WORK_MODE_PULSE_ADDRESS: usize = 0x2010_702c;
+const PHY_I2C_CLOCK_SELECTION_0_ADDRESS: usize = 0x2010_f824;
+const PHY_I2C_CLOCK_SELECTION_1_ADDRESS: usize = 0x2010_f828;
+const PHY_I2C_CLOCK_SELECTION_2_ADDRESS: usize = 0x2010_f82c;
 const PHY_PBUS_FORCE_MODE_BIT: u32 = 1 << 26;
 const PHY_PBUS_TRANSACTION_BIT: u32 = 1 << 1;
 const PHY_PBUS_BUSY_BIT: u32 = 1 << 31;
@@ -226,6 +229,14 @@ const fn with_phy_pbus_work_mode_pulse(value: u32) -> u32 {
 
 const fn without_phy_pbus_work_mode_pulse(value: u32) -> u32 {
     value & !PHY_PBUS_WORK_MODE_PULSE_BIT
+}
+
+const fn with_phy_i2c_clock_selection_high(value: u32, selection: u32) -> u32 {
+    (value & !0x0000_07c0) | ((selection << 4) & 0x0000_07c0)
+}
+
+const fn with_phy_i2c_clock_selection_low(value: u32, selection: u32) -> u32 {
+    (value & !0x0000_003f) | ((selection >> 1) & 0x0000_003f)
 }
 
 const fn with_phy_agc_control(value: u32) -> u32 {
@@ -737,6 +748,32 @@ pub(crate) unsafe fn clear_phy_pbus_work_mode_pulse() {
     pulse.write_volatile(without_phy_pbus_work_mode_pulse(pulse.read_volatile()));
 }
 
+/// Apply the complete rev0 ROM `phy_i2c_clk_sel` register transform.
+///
+/// The pinned body at `0x2f82_9f1c`, size `0x68`, updates the high field and
+/// then the low field separately in each of three consecutive registers.
+/// Keeping the six writes preserves the observed intermediate hardware
+/// states; this leaf contains no wait, branch, call, or mutable software
+/// state.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_i2c_clock_selection(selection: u32) {
+    unsafe fn configure_register(address: usize, selection: u32) {
+        let register = address as *mut u32;
+        register.write_volatile(with_phy_i2c_clock_selection_high(
+            register.read_volatile(),
+            selection,
+        ));
+        register.write_volatile(with_phy_i2c_clock_selection_low(
+            register.read_volatile(),
+            selection,
+        ));
+    }
+
+    configure_register(PHY_I2C_CLOCK_SELECTION_0_ADDRESS, selection);
+    configure_register(PHY_I2C_CLOCK_SELECTION_1_ADDRESS, selection);
+    configure_register(PHY_I2C_CLOCK_SELECTION_2_ADDRESS, selection);
+}
+
 #[cfg(target_arch = "riscv32")]
 #[inline(always)]
 unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
@@ -875,6 +912,7 @@ mod tests {
         with_mac_rx_control_address_policy, with_mac_rx_control_policy,
         with_mac_rx_management_policy, with_mac_rx_mode, with_mac_rx_unique_bssid_policy,
         with_phy_agc_control, with_phy_agc_window, with_phy_ftm_enable, with_phy_gain_memory_index,
+        with_phy_i2c_clock_selection_high, with_phy_i2c_clock_selection_low,
         with_phy_pbus_debug_control, with_phy_pbus_debug_mode, with_phy_pbus_force_test,
         with_phy_pbus_work_control, with_phy_pbus_work_mode, with_phy_pbus_work_mode_pulse,
         with_phy_pbus_work_mode_pulse_setup, with_phy_rx_comp_high, with_phy_rx_comp_low,
@@ -1006,6 +1044,17 @@ mod tests {
         assert_eq!(with_phy_pbus_work_mode_pulse_setup(u32::MAX), 0x32ff_ffff);
         assert_eq!(with_phy_pbus_work_mode_pulse(0), 0x0080_0000);
         assert_eq!(without_phy_pbus_work_mode_pulse(u32::MAX), 0xff7f_ffff);
+    }
+
+    #[test]
+    fn phy_i2c_clock_selection_matches_all_rom_field_transforms() {
+        assert_eq!(with_phy_i2c_clock_selection_high(0, 8), 0x0000_0080);
+        assert_eq!(
+            with_phy_i2c_clock_selection_low(with_phy_i2c_clock_selection_high(0, 8), 8,),
+            0x0000_0084
+        );
+        assert_eq!(with_phy_i2c_clock_selection_high(u32::MAX, 8), 0xffff_f8bf);
+        assert_eq!(with_phy_i2c_clock_selection_low(u32::MAX, 8), 0xffff_ffc4);
     }
 
     #[test]

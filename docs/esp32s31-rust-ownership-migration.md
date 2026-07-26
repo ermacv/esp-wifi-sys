@@ -1363,12 +1363,24 @@ rejected. A command still busy at its externally supplied deadline becomes
 the terminal `ForceTestTimedOut` outcome rather than another poll. Both
 conditional work-mode paths and both timer edges have host coverage.
 
-The prefix now reaches `ReadyForI2cClockSelection` only after PBus clear
-completes. SDM and PBus timeouts terminate separately and cannot run later
-hardware steps. The serial runtime suite passes 331 tests. The next boundary
-is operation seven, `phy_i2c_clk_sel(8)`; the prefix remains dead-stripped and
-does not replace any part of the live parent until the remaining 20
-operations have equivalent owned actions.
+The complete rev0 ROM `phy_i2c_clk_sel` body at `0x2f829f1c`, size `0x68`,
+is a finite MMIO leaf. It performs two ordered read/modify/write operations
+on each of `0x2010f824`, `0x2010f828`, and `0x2010f82c`. The first preserves
+all bits outside mask `0x7c0` and publishes `(selection << 4) & 0x7c0`; the
+second preserves all bits outside mask `0x3f` and publishes
+`(selection >> 1) & 0x3f`. The parent supplies selection `8`, producing
+field contributions `0x80` and `0x04`. There is no call, branch, delay, loop,
+or mutable software state in the leaf.
+
+Rust preserves the six-write ordering in
+`configure_phy_i2c_clock_selection`; the parent exposes it as the finite
+`ConfigureI2cClockSelection { selection: 8 }` action. The prefix now reaches
+`ReadyForFeTxRxReset` only after both PBus clear and the matching clock
+selection completion. SDM and PBus timeouts terminate separately and cannot
+run later hardware steps. The serial runtime suite passes 332 tests. The next
+boundary is operation eight, `phy_fe_txrx_reset(1)`; the prefix remains
+dead-stripped and does not replace any part of the live parent until the
+remaining 19 operations have equivalent owned actions.
 
 ## In-progress slice: `g_ic`
 
