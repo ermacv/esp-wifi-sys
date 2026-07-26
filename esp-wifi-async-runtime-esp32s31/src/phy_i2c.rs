@@ -146,20 +146,49 @@ const PHY_I2C_MASTER_TEMPLATE: [(u8, u8, u8); PHY_I2C_MASTER_COMMAND_COUNT] = [
     (0x6a, 0x01, 0x7f),
 ];
 
+const PHY_I2C_MASTER_DYNAMIC_INDICES: [usize; 19] = [
+    20, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+];
+
+fn master_dynamic_values(parameter: &[u8; PHY_PARAM_LEN]) -> [u8; 19] {
+    let high_filter = saturate_phy_value(parameter[0xed] as i32 + 6, 0x3c, 2);
+    let low_filter = saturate_phy_value(parameter[0xed] as i32 - 2, 0x3c, 2);
+    let auxiliary = parameter[0xee].wrapping_add(2);
+    [
+        parameter[0x18e],
+        parameter[0xe9],
+        parameter[0xe9],
+        parameter[0xea],
+        parameter[0xea],
+        parameter[0xe9],
+        parameter[0xe9],
+        parameter[0xea],
+        parameter[0xea],
+        high_filter,
+        high_filter,
+        low_filter,
+        parameter[0xed],
+        auxiliary,
+        auxiliary,
+        parameter[0xf0],
+        parameter[0xf0],
+        parameter[0xf0] | 0x40,
+        parameter[0xf0],
+    ]
+}
+
 fn master_command(index: usize, parameter: &[u8; PHY_PARAM_LEN]) -> u32 {
     let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
-    let value = match index {
-        20 => parameter[0x18e],
-        24 | 25 | 28 | 29 => parameter[0xe9],
-        26 | 27 | 30 | 31 => parameter[0xea],
-        32 | 33 => saturate_phy_value(parameter[0xed] as i32 + 6, 0x3c, 2),
-        34 => saturate_phy_value(parameter[0xed] as i32 - 2, 0x3c, 2),
-        35 => parameter[0xed],
-        36 | 37 => parameter[0xee].wrapping_add(2),
-        38 | 39 | 41 => parameter[0xf0],
-        40 => parameter[0xf0] | 0x40,
-        _ => fixed_value,
-    };
+    let dynamic_values = master_dynamic_values(parameter);
+    let mut cursor = 0;
+    let mut value = fixed_value;
+    while cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len() {
+        if PHY_I2C_MASTER_DYNAMIC_INDICES[cursor] == index {
+            value = dynamic_values[cursor];
+            break;
+        }
+        cursor += 1;
+    }
     encode_master_command(block, register, value)
 }
 
@@ -183,11 +212,23 @@ pub unsafe extern "C" fn wifi_strict_phy_i2c_master_cmd_mem_init() {
     }
 
     let parameter = &*core::ptr::addr_of!(phy_param);
+    let dynamic_values = master_dynamic_values(parameter);
     let mut index = 0;
+    let mut dynamic_cursor = 0;
     while index != PHY_I2C_MASTER_COMMAND_COUNT {
+        let (block, register, fixed_value) = PHY_I2C_MASTER_TEMPLATE[index];
+        let value = if dynamic_cursor != PHY_I2C_MASTER_DYNAMIC_INDICES.len()
+            && PHY_I2C_MASTER_DYNAMIC_INDICES[dynamic_cursor] == index
+        {
+            let value = dynamic_values[dynamic_cursor];
+            dynamic_cursor += 1;
+            value
+        } else {
+            fixed_value
+        };
         let destination = (PHY_I2C_MASTER_COMMAND_MEMORY_ADDRESS
             + index * core::mem::size_of::<u32>()) as *mut u32;
-        destination.write_volatile(master_command(index, parameter));
+        destination.write_volatile(encode_master_command(block, register, value));
         index += 1;
     }
 }
