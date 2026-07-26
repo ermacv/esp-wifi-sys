@@ -13,15 +13,18 @@ pub(crate) const RATE_SCHEDULE_RECORD_SIZE: usize = 12;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum RateScheduleKind {
-    BarOfdm,
-    BasicOfdm,
-    Dot11Ax,
-    Dot11B,
-    Dot11G,
-    Dot11N,
-    Lora,
-    P2pDot11G,
-    P2pDot11N,
+    // Deliberately sparse internal tags keep LLVM from materializing a
+    // nine-pointer jump table in internal SRAM.  These values never cross the
+    // compatibility ABI: vendor-facing code receives only arena pointers.
+    BarOfdm = 0x03,
+    BasicOfdm = 0x19,
+    Dot11Ax = 0x2f,
+    Dot11B = 0x44,
+    Dot11G = 0x62,
+    Dot11N = 0x83,
+    Lora = 0xa1,
+    P2pDot11G = 0xc8,
+    P2pDot11N = 0xf1,
 }
 
 const RATE_SCHEDULE_KINDS: [RateScheduleKind; 9] = [
