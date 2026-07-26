@@ -1311,9 +1311,25 @@ RX owners, recorded zero allocation/reallocation/free calls and zero
 other-core stalls, and never entered `ppTask`. The strict 6,407-function
 audit reports zero violations and unchanged runtime debt of one explicit RX
 fallback. The linked cold-PHY state remains exactly one blob symbol,
-`phy_param`, of 508 bytes; the next parent operation requiring an async child
-is `phy_bias_reg_set`, followed by the already modeled
-`OpenI2cXpdTransition`.
+`phy_param`, of 508 bytes.
+
+The third parent operation is now modeled as an event-driven child too.
+Complete `libphy.a[phy_i2c.o]::phy_bias_reg_set` disassembly proves that its
+48-byte body ignores its argument and makes exactly two synchronous
+`phy_i2c_writeReg` calls: block `0x6a`, register zero, value `0xaf`, followed
+by block `0x6a`, register one, value `0x7f`. Both select PHY-I2C host one
+under the recovered block table.
+
+`BiasRegTransition` preserves those two commands and their order, but each
+write advances only when the outer radio owner returns a completion carrying
+the expected address. An out-of-order or duplicate completion fails closed.
+It has no MMIO of its own, future, waker, timer, allocation, callback, or
+hidden state; the executor will drive each action through the existing
+single-command `try_start_write`/`try_finish_write` adapter. Host tests prove
+the exact values, ordered completion contract, terminal state, and
+instruction-proven argument invariance. The serial runtime suite now passes
+323 tests. This child remains intentionally dead-stripped until the parent
+`PhyRfInit` transition can own the whole sequence.
 
 ## In-progress slice: `g_ic`
 

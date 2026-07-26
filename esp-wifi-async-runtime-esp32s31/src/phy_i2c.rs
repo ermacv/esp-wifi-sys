@@ -320,6 +320,75 @@ pub unsafe fn try_finish_write(address: PhyI2cAddress) -> Result<(), PhyI2cError
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BiasRegAction {
+    Write { address: PhyI2cAddress, value: u8 },
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BiasRegCompletion {
+    WriteCompleted { address: PhyI2cAddress },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BiasRegTransitionError {
+    WrongCompletion,
+    AlreadyComplete,
+}
+
+/// Event-driven replacement plan for
+/// `libphy.a[phy_i2c.o]::phy_bias_reg_set`.
+///
+/// The complete 48-byte vendor body ignores its argument and performs two
+/// synchronous `phy_i2c_writeReg` calls. This transition retains the exact
+/// `(block, register, value)` order but requires a separate completion edge
+/// for each write. It owns no timer, waker, allocation, or hidden state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BiasRegTransition {
+    step: u8,
+}
+
+impl BiasRegTransition {
+    pub const fn new(_requested_state: bool) -> Self {
+        Self { step: 0 }
+    }
+
+    pub const fn action(self) -> BiasRegAction {
+        match self.step {
+            0 => BiasRegAction::Write {
+                address: PhyI2cAddress {
+                    block: 0x6a,
+                    register: 0,
+                },
+                value: 0xaf,
+            },
+            1 => BiasRegAction::Write {
+                address: PhyI2cAddress {
+                    block: 0x6a,
+                    register: 1,
+                },
+                value: 0x7f,
+            },
+            _ => BiasRegAction::Complete,
+        }
+    }
+
+    pub fn advance(&mut self, completion: BiasRegCompletion) -> Result<(), BiasRegTransitionError> {
+        let BiasRegCompletion::WriteCompleted { address } = completion;
+        match self.action() {
+            BiasRegAction::Write {
+                address: expected, ..
+            } if address == expected => {
+                self.step += 1;
+                Ok(())
+            }
+            BiasRegAction::Write { .. } => Err(BiasRegTransitionError::WrongCompletion),
+            BiasRegAction::Complete => Err(BiasRegTransitionError::AlreadyComplete),
+        }
+    }
+}
+
 /// Execute the finite register prefix which precedes the vendor
 /// `ets_delay_us(100)` call in `phy_open_i2c_xpd_new(true)`.
 ///
@@ -651,10 +720,11 @@ impl Default for RcCalibrationTransition {
 mod tests {
     use super::{
         command_is_busy, command_register_address, encode_read, encode_write, master_command,
-        read_result, with_phy_i2c_host_config, OpenI2cXpdAction, OpenI2cXpdCompletion,
-        OpenI2cXpdOutcome, OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress,
-        RcCalibrationAction, RcCalibrationCompletion, RcCalibrationTransition,
-        RcCalibrationTransitionError, PHY_I2C_MASTER_COMMAND_COUNT,
+        read_result, with_phy_i2c_host_config, BiasRegAction, BiasRegCompletion, BiasRegTransition,
+        BiasRegTransitionError, OpenI2cXpdAction, OpenI2cXpdCompletion, OpenI2cXpdOutcome,
+        OpenI2cXpdTransition, OpenI2cXpdTransitionError, PhyI2cAddress, RcCalibrationAction,
+        RcCalibrationCompletion, RcCalibrationTransition, RcCalibrationTransitionError,
+        PHY_I2C_MASTER_COMMAND_COUNT,
     };
     use crate::phy_param::PHY_PARAM_LEN;
 
@@ -802,6 +872,48 @@ mod tests {
             transition.advance(RcCalibrationCompletion::Applied),
             Err(RcCalibrationTransitionError::AlreadyComplete)
         );
+    }
+
+    #[test]
+    fn bias_register_plan_requires_two_ordered_i2c_completions() {
+        let first = PhyI2cAddress::new(0x6a, 0).unwrap();
+        let second = PhyI2cAddress::new(0x6a, 1).unwrap();
+        let mut transition = BiasRegTransition::new(true);
+
+        assert_eq!(
+            transition.action(),
+            BiasRegAction::Write {
+                address: first,
+                value: 0xaf
+            }
+        );
+        assert_eq!(
+            transition.advance(BiasRegCompletion::WriteCompleted { address: second }),
+            Err(BiasRegTransitionError::WrongCompletion)
+        );
+        transition
+            .advance(BiasRegCompletion::WriteCompleted { address: first })
+            .unwrap();
+        assert_eq!(
+            transition.action(),
+            BiasRegAction::Write {
+                address: second,
+                value: 0x7f
+            }
+        );
+        transition
+            .advance(BiasRegCompletion::WriteCompleted { address: second })
+            .unwrap();
+        assert_eq!(transition.action(), BiasRegAction::Complete);
+        assert_eq!(
+            transition.advance(BiasRegCompletion::WriteCompleted { address: second }),
+            Err(BiasRegTransitionError::AlreadyComplete)
+        );
+    }
+
+    #[test]
+    fn bias_register_argument_is_instruction_proven_unused() {
+        assert_eq!(BiasRegTransition::new(false), BiasRegTransition::new(true));
     }
 
     #[test]
