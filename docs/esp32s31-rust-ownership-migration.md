@@ -952,6 +952,31 @@ with no rejection. Allocation, reallocation and free counters remained zero,
 `ppTask` was never entered, other-core stalls remained zero, and a further
 30-second interrupt-active run produced no trap or reset.
 
+The bounded calibration-record check/write transform is now Rust-owned too.
+The complete pinned `phy_init.o::phy_rfcal_data_check_new` body and the rev0
+ROM ELF leaves `phy_set_mac_data`, `phy_get_mac_addr`, and
+`phy_byte_to_word` establish the exact contract: refresh the four-byte RF
+calibration version and eight-byte identity prefix, sum 130 little-endian
+words over bytes `0..520`, and either write or compare the one's-complement
+checksum at `0x208..0x20c`. The identity permutation comes from the public
+`EFUSE_RD_MAC_SYS0/1` registers at `0x20715050` and `0x20715054`; the third
+ABI argument is instruction-proven unused. Rust exposes only a fixed
+524-byte view, uses wrapping arithmetic and compile-time loop bounds, and
+traps a null record before MMIO or dereference.
+
+In the qualified final ELF, both the validation and full-calibration branches
+inside `register_chipv7_phy` call the Rust boundary at `0x400d1836`. Its
+release body contains direct eFuse loads, bounded byte loads/stores and one
+fixed 130-iteration loop, with no `jal`, `jalr`, allocation, wait, callback,
+or access to hidden mutable state. The three former ROM helpers remain only
+as absolute exports and are not called by this path. The cold hardware run
+completed full calibration, passive scan, WPA2, DHCP, gateway ping, DNS,
+TCP and HTTP 200; it returned 18/18 TX and 15/15 RX owners, kept all
+allocation counters and other-core stalls at zero, never entered `ppTask`,
+and remained stable for a further 15 seconds. The strict audit still reports
+zero violations and unchanged debt of `1 fallback + 9 stateful/unproven +
+0 temporary MMIO`.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
