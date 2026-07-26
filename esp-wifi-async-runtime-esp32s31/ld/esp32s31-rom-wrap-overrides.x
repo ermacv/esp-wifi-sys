@@ -174,6 +174,26 @@ hal_mac_set_csi_cbw = wifi_strict_hal_mac_set_csi_cbw;
 ASSERT(hal_mac_set_csi_cbw == wifi_strict_hal_mac_set_csi_cbw,
        "ESP32-S31 hal_mac_set_csi_cbw Rust boundary is inactive");
 
+/* Complete finite MAC address and RX-policy leaves recovered from
+ * libpp.a[if_hwctrl.o] and libpp.a[hal_mac.o]. All retained state is MMIO;
+ * no vendor object, call, loop, wait, delay, or allocation remains. */
+EXTERN(wifi_strict_ic_set_mac);
+ic_set_mac = wifi_strict_ic_set_mac;
+ASSERT(ic_set_mac == wifi_strict_ic_set_mac,
+       "ESP32-S31 ic_set_mac Rust boundary is inactive");
+
+EXTERN(wifi_strict_ic_set_rx_policy);
+ic_set_rx_policy = wifi_strict_ic_set_rx_policy;
+ASSERT(ic_set_rx_policy == wifi_strict_ic_set_rx_policy,
+       "ESP32-S31 ic_set_rx_policy Rust boundary is inactive");
+
+EXTERN(wifi_strict_ic_set_rx_policy_ubssid_check);
+ic_set_rx_policy_ubssid_check =
+    wifi_strict_ic_set_rx_policy_ubssid_check;
+ASSERT(ic_set_rx_policy_ubssid_check ==
+           wifi_strict_ic_set_rx_policy_ubssid_check,
+       "ESP32-S31 ic_set_rx_policy_ubssid_check Rust boundary is inactive");
+
 /* Complete finite PHY-register leaves recovered from libphy.a[phy_reg.o].
  * Keep the exact read/modify/write order, but make Rust the only linked
  * runtime owner; neither vendor body contains a call or hidden state access. */
