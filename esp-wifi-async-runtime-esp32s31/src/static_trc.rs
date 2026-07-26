@@ -225,21 +225,11 @@ pub extern "C" fn wifi_strict_lora_rate_to_schedule_index(rate: u32) -> u32 {
 
 fn rate_index_callback(map: RateIndexMap) -> usize {
     match map {
-        RateIndexMap::Dot11B => {
-            wifi_strict_rc11b_rate_to_schedule_index as *const () as usize
-        }
-        RateIndexMap::Dot11G => {
-            wifi_strict_rc11g_rate_to_schedule_index as *const () as usize
-        }
-        RateIndexMap::Dot11N => {
-            wifi_strict_rc11n_rate_to_schedule_index as *const () as usize
-        }
-        RateIndexMap::Dot11Ax => {
-            wifi_strict_rc11ax_rate_to_schedule_index as *const () as usize
-        }
-        RateIndexMap::Lora => {
-            wifi_strict_lora_rate_to_schedule_index as *const () as usize
-        }
+        RateIndexMap::Dot11B => wifi_strict_rc11b_rate_to_schedule_index as *const () as usize,
+        RateIndexMap::Dot11G => wifi_strict_rc11g_rate_to_schedule_index as *const () as usize,
+        RateIndexMap::Dot11N => wifi_strict_rc11n_rate_to_schedule_index as *const () as usize,
+        RateIndexMap::Dot11Ax => wifi_strict_rc11ax_rate_to_schedule_index as *const () as usize,
+        RateIndexMap::Lora => wifi_strict_lora_rate_to_schedule_index as *const () as usize,
     }
 }
 
@@ -327,6 +317,24 @@ pub unsafe extern "C" fn wifi_strict_rc_attach() {
     controls.add(8).cast::<u32>().write_unaligned(0);
     controls.add(12).cast::<u32>().write_unaligned(0);
     controls.add(20).cast::<u32>().write_unaligned(0);
+}
+
+/// Return the vendor ABI's default B[3] schedule from Rust-owned storage.
+#[no_mangle]
+pub extern "C" fn wifi_strict_rc_get_default_schedule() -> *mut u8 {
+    schedule_pointer(RateScheduleRef {
+        kind: RateScheduleKind::Dot11B,
+        index: 3,
+    })
+}
+
+/// Return the vendor ABI's 6-Mbit OFDM schedule (G[7]) from Rust storage.
+#[no_mangle]
+pub extern "C" fn wifi_strict_rc_get_g6m_schedule() -> *mut u8 {
+    schedule_pointer(RateScheduleRef {
+        kind: RateScheduleKind::Dot11G,
+        index: 7,
+    })
 }
 
 unsafe fn clear_current_schedule_state(context: *mut u8) {

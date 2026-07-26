@@ -318,6 +318,19 @@ rcUpdatePhyMode = wifi_strict_rc_update_phy_mode;
 ASSERT(rcUpdatePhyMode == wifi_strict_rc_update_phy_mode,
        "ESP32-S31 rcUpdatePhyMode Rust boundary is inactive");
 
+/* Two public ten-byte leaves still returned archive-local B[3] and G[7]
+ * addresses after rcUpdatePhyMode moved. Bind them to the same Rust bank so
+ * no duplicate schedule section remains live. */
+EXTERN(wifi_strict_rc_get_default_schedule);
+rc_get_default_sched = wifi_strict_rc_get_default_schedule;
+ASSERT(rc_get_default_sched == wifi_strict_rc_get_default_schedule,
+       "ESP32-S31 default rate schedule Rust boundary is inactive");
+
+EXTERN(wifi_strict_rc_get_g6m_schedule);
+rc_get_G6M_sched = wifi_strict_rc_get_g6m_schedule;
+ASSERT(rc_get_G6M_sched == wifi_strict_rc_get_g6m_schedule,
+       "ESP32-S31 G6M rate schedule Rust boundary is inactive");
+
 __real_pm_on_beacon_rx = 0x2f800e98;
 pm_on_beacon_rx = __wrap_pm_on_beacon_rx;
 

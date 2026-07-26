@@ -48,10 +48,7 @@ const ROM_ABI_BACKINGS: &[(&str, &str)] = &[
     ("trc_ctl_ptr", "trc_ctl"),
     ("g_pm_cfg_ptr", "g_pm_cfg"),
     ("g_pm_ptr", "g_pm"),
-    (
-        "g_txop_queue_status_ptr",
-        "wifi_strict_txop_queue_status",
-    ),
+    ("g_txop_queue_status_ptr", "wifi_strict_txop_queue_status"),
     ("g_pm_cnt_ptr", "g_pm_cnt"),
     ("g_pp_timer_info_ptr", "g_pp_timer_info"),
     ("g_rts_threshold_bytes_ptr", "g_rts_threshold_bytes"),
@@ -657,7 +654,9 @@ fn build_report(library_dir: &Path, elf: &Path, enforce_primary_baseline: bool) 
 ///
 /// Reducing any upper bound is allowed. Runtime mutable blob state and ROM
 /// indirection cells are exact zero invariants: reintroducing either would
-/// silently undo the Rust ownership handoff.
+/// silently undo the Rust ownership handoff. Blob-to-Rust ownership transfers
+/// are measured by their combined static footprint, so a byte may change owner
+/// without weakening the no-growth invariant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct StateMetrics {
     vendor_roots: usize,
@@ -741,10 +740,22 @@ fn enforce_primary_state_baseline(actual: StateMetrics) -> Result<()> {
             ),
         ),
         (
-            actual.strict_static_bytes > baseline.strict_static_bytes,
+            actual
+                .strict_static_bytes
+                .saturating_add(actual.linked_other_mutable_blob_bytes)
+                > baseline
+                    .strict_static_bytes
+                    .saturating_add(baseline.linked_other_mutable_blob_bytes),
             format!(
-                "Rust strict static storage {} > {} bytes",
-                actual.strict_static_bytes, baseline.strict_static_bytes
+                "combined Rust/blob static storage {} > {} bytes (Rust {}, blob {})",
+                actual
+                    .strict_static_bytes
+                    .saturating_add(actual.linked_other_mutable_blob_bytes),
+                baseline
+                    .strict_static_bytes
+                    .saturating_add(baseline.linked_other_mutable_blob_bytes),
+                actual.strict_static_bytes,
+                actual.linked_other_mutable_blob_bytes,
             ),
         ),
     ]
@@ -1232,9 +1243,9 @@ mod tests {
         definition_name, enforce_primary_state_baseline, linked_code_referrers, local_data_aliases,
         parse_archive_relocations, parse_archive_symbol, parse_posix_symbols, parse_sections,
         placement, reachable_vendor_functions, target_placement, ArchiveInventory, StateMetrics,
-        Symbol,
-        PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS, ROOTS, RUST_BOUNDARIES_WITH_VENDOR_FALLBACK,
-        STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS, TEMPORARY_EVIDENCED_MMIO_ROOTS,
+        Symbol, PRIMARY_STATE_BASELINE, ROM_ABI_BACKINGS, ROOTS,
+        RUST_BOUNDARIES_WITH_VENDOR_FALLBACK, STATEFUL_OR_UNPROVEN_RUNTIME_ROOTS,
+        TEMPORARY_EVIDENCED_MMIO_ROOTS,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1284,6 +1295,16 @@ mod tests {
             strict_static_bytes: 250_000,
         })
         .unwrap();
+
+        // An exact ownership transfer is not a memory regression: the same
+        // bytes moved from opaque blob data into an explicit Rust section.
+        enforce_primary_state_baseline(StateMetrics {
+            linked_other_mutable_blob_bytes: PRIMARY_STATE_BASELINE.linked_other_mutable_blob_bytes
+                - 852,
+            strict_static_bytes: PRIMARY_STATE_BASELINE.strict_static_bytes + 852,
+            ..PRIMARY_STATE_BASELINE
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1296,6 +1317,21 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("expected exact zero"));
+    }
+
+    #[test]
+    fn primary_state_baseline_rejects_net_static_growth_during_transfer() {
+        let error = enforce_primary_state_baseline(StateMetrics {
+            linked_other_mutable_blob_bytes: PRIMARY_STATE_BASELINE.linked_other_mutable_blob_bytes
+                - 851,
+            strict_static_bytes: PRIMARY_STATE_BASELINE.strict_static_bytes + 852,
+            ..PRIMARY_STATE_BASELINE
+        })
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("combined Rust/blob static storage"));
     }
 
     #[test]

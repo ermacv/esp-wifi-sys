@@ -147,6 +147,11 @@ pub const REQUIRED_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("rcAttach", "wifi_strict_rc_attach"),
     ("rcUpdatePhyMode", "wifi_strict_rc_update_phy_mode"),
     (
+        "rc_get_default_sched",
+        "wifi_strict_rc_get_default_schedule",
+    ),
+    ("rc_get_G6M_sched", "wifi_strict_rc_get_g6m_schedule"),
+    (
         "lmacRequestTxopQueue",
         "wifi_strict_lmac_request_txop_queue",
     ),
