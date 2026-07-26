@@ -63,9 +63,11 @@ const PHY_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0890;
 const PHY_RX_DCO_CONTROL_ADDRESS: usize = 0x2010_0434;
 const PHY_TONE_PATH0_CONTROL_ADDRESS: usize = 0x2010_041c;
 const PHY_TONE_PATH1_CONTROL_ADDRESS: usize = 0x2010_0420;
+const PHY_TONE_STOP_CONTROL_ADDRESS: usize = 0x2010_040c;
 const PHY_TONE_SELECTOR_CONTROL_ADDRESS: usize = 0x2010_0428;
 const PHY_TX_GAIN_COMPENSATION_CONTROL_ADDRESS: usize = 0x2010_0410;
 const PHY_TX_GAIN_COMPENSATION_AUX_ADDRESS: usize = 0x2010_0414;
+const PHY_DAC_SCALE_CONTROL_ADDRESS: usize = 0x2010_0c04;
 const PHY_IQ_EST_CONFIG_ADDRESS: usize = 0x2010_044c;
 const PHY_IQ_EST_CONTROL_ADDRESS: usize = 0x2010_0450;
 const PHY_SIGNAL_POWER_SUM_I_ADDRESS: usize = 0x2010_0454;
@@ -1888,6 +1890,99 @@ pub(crate) unsafe fn configure_phy_tx_power_control_background() {
         0x0000_0004,
     );
     set_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0001_0000);
+}
+
+/// Enable the power-detector/SAR path used by TX calibration.
+///
+/// Reference: complete rev0 ROM `phy_en_pwdet` at `0x2f82_63da`, including
+/// `phy_pwdet_sar2_init`. The auxiliary field is left in mode four here; the
+/// caller performs the later mode-two write from `phy_txcal_debuge_mode_` as
+/// a separately ordered action. This leaf is finite and contains no poll,
+/// delay, callback, allocation, or software-global access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_power_detector_enabled() {
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0004);
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0002);
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0008);
+    set_register_bits(PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS, 0x0000_3000);
+    clear_register_bits(PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS, 0x0000_0200);
+    (PHY_POWER_DETECTOR_TABLE_2_ADDRESS as *mut u32).write_volatile(0x0000_016a);
+    replace_register_field(
+        PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS,
+        0x0000_0007,
+        0x0000_0004,
+    );
+}
+
+/// Select the final auxiliary calibration mode from `phy_txcal_debuge_mode_`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_power_detector_calibration_mode() {
+    replace_register_field(
+        PHY_POWER_DETECTOR_AUX_CONTROL_ADDRESS,
+        0x0000_0007,
+        0x0000_0002,
+    );
+}
+
+/// Publish one of the exact `0`, `0x5555`, or `0xaaaa` PWDET reference words.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn write_phy_power_detector_reference_control(value: u16) {
+    (PHY_POWER_DETECTOR_TABLE_2_ADDRESS as *mut u32).write_volatile(u32::from(value));
+}
+
+/// Arm one PWDET tone sample before the async one-microsecond timer edge.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn arm_phy_power_detector_tone() {
+    set_register_bits(PHY_TONE_PATH0_CONTROL_ADDRESS, 0x0004_0000);
+}
+
+/// Publish the two fresh-read SAR trigger writes after the first timer edge.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn trigger_phy_power_detector_sar() {
+    clear_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0001);
+    set_register_bits(PHY_POWER_DETECTOR_CONTROL_ADDRESS, 0x0000_0001);
+}
+
+/// Clear the temporary tone-arm bit selected by former `phy_param[0x1aa]`.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn clear_phy_power_detector_tone_arm() {
+    clear_register_bits(PHY_TONE_PATH0_CONTROL_ADDRESS, 0x0004_0000);
+}
+
+/// Read one PWDET readiness sample. Repetition and deadline ownership belong
+/// to the Rust transition/executor, never to this leaf.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_power_detector_ready_status() -> u32 {
+    (PHY_POWER_DETECTOR_SAR_CONTROL_ADDRESS as *const u32).read_volatile()
+}
+
+/// Read the first PWDET SAR word. The caller extracts the evidenced upper
+/// 13-bit sample and never aliases the four-word ROM stack buffer.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_power_detector_sar_word() -> u32 {
+    (0x2010_081c as *const u32).read_volatile()
+}
+
+/// Stop the calibration tone exactly as `phy_stop_tx_tone(1)`.
+///
+/// This includes the two fresh-read `phy_dac_scale_set(1)` field writes. It
+/// is an unconditional cleanup leaf with no wait, branch, callback, or
+/// software-global access.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn stop_phy_power_detector_tone() {
+    clear_register_bits(PHY_TONE_PATH0_CONTROL_ADDRESS, 0x0004_0000);
+    clear_register_bits(PHY_TONE_PATH1_CONTROL_ADDRESS, 0x0004_0000);
+    set_register_bits(PHY_TONE_STOP_CONTROL_ADDRESS, 0x0000_0003);
+    replace_register_field(
+        PHY_DAC_SCALE_CONTROL_ADDRESS,
+        0x00ff_0000,
+        0x00ff_0000,
+    );
+    replace_register_field(
+        PHY_DAC_SCALE_CONTROL_ADDRESS,
+        0x0000_ff00,
+        0x0000_ff00,
+    );
 }
 
 #[cfg(target_arch = "riscv32")]

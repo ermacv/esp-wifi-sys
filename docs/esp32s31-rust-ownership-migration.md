@@ -256,13 +256,12 @@ frontier and simultaneously releases `TxRxCxt`, `wDevCtrl`,
 `g_wifi_menuconfig`, `g_lmac_cnt`, `wifi_sta_rx_probe_req`, `g_osi_funcs_p`,
 and `pTxRx` from the runtime ownership graph.
 
-Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 10
-unique child roots with 3,002 bytes of direct reference bodies:
+Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is
+nine unique child roots with 2,926 bytes of direct reference bodies:
 
 | child root | reference bytes | source | current decision |
 |---|---:|---|---|
 | `phy_txdc_cal_init` | 272 | archive | port calibration transition |
-| `phy_pwdet_code_cal` | 76 | ROM | port calibration transition |
 | `phy_tx_cap_init` | 230 | archive | port calibration transition |
 | `phy_tx_pwctrl_init` | 154 | archive | port calibration transition |
 | `phy_txdc_cal_pwdet_init` | 520 | archive | port calibration transition |
@@ -272,7 +271,7 @@ unique child roots with 3,002 bytes of direct reference bodies:
 | `phy_set_rx_gain_table` | 650 | archive | port RX gain transition |
 | `phy_chip_set_chan` | 270 | archive | port cold channel transition |
 
-For the current Wi-Fi-only AP/STA target, nine roots / 2,912 direct reference
+For the current Wi-Fi-only AP/STA target, eight roots / 2,836 direct reference
 bytes are mandatory. The remaining 90-byte `phy_bt_tx_gain_init` root is not
 on the immediate Wi-Fi implementation path; it is retained only as
 BT/coexistence evidence until a later coex profile proves whether the shared
@@ -1939,7 +1938,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | order | pinned child and arguments | current Rust status |
 |---:|---|---|
 | 1 | `phy_txdc_cal_init(&phy_param[0xa8], 15, 0, 0)` | calibration transition pending |
-| 2 | `phy_pwdet_code_cal()` | calibration transition pending |
+| 2 | `phy_pwdet_code_cal()` | complete Rust-owned PBus/timer/SAR transition |
 | 3 | `phy_tx_cap_init()` | calibration transition pending |
 | 4 | `phy_tsens_temp_read()` | complete Rust-owned PHY-I2C/MMIO transition |
 | 5 | `phy_tx_pwctrl_init(0)` | calibration transition pending |
@@ -2033,12 +2032,37 @@ state machine issues at most 100 such samples. The executor may yield or arm
 an async timer between samples. Hardware-dependent open loops elsewhere must
 likewise gain a finite count or deadline before activation.
 
+`phy_pwdet_code_cal` is now a Rust-owned transition as well. The 76-byte root,
+118-byte `phy_pwdet_ref_code` child, power conversion graph, debug/work-mode
+wrappers and fixed PBus helpers have been reduced to explicit inputs,
+identity-bound actions and two signed outputs. The entry path publishes 15
+exact PBus transactions, the exit path publishes seven, and all one- and
+two-microsecond delays are external Rust async timer edges. Four SAR samples
+replace the ROM stack buffer; each sample is extracted from
+`0x2010_081c[29:17]`, and the exact unsigned threshold plus
+`phy_linear_to_db` arithmetic is pure Rust.
+
+The readiness condition `0x2010_080c[16:14] == 7` is intentionally still
+polled. No interrupt source for this field has been proved, so deleting the
+poll would invent a hardware contract. The replacement performs one volatile
+read per non-cloneable `PhyPwdetReadyBinding`; a false sample returns to the
+same state and only an outer executor may schedule another sample. That
+executor also owns a finite async deadline. Deadline expiry runs the full
+tone-stop, TX-clock-disable and PBus work-mode restoration path before
+reporting failure.
+
+Former parameter inputs at `0x002`, `0x012`, `0x0a8..=0x0af`, `0x1aa` and
+`0x01a..=0x01d` are captured by `PhyColdState::pwdet_parameters`. Only a
+successful outcome may update the two reference codes and set bit 24 of the
+word at `0x0a4` (byte `0x0a7` bit zero). The ROM `phy_param` pointer and
+`g_phyFuns` callback table are absent from this child.
+
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
 an explicit lowering and the complete parent can reject unknown or
 out-of-order completions without a vendor escape.
 
-All 430 host tests pass. The target
+All 456 host tests pass. The target
 `riscv32imafc-unknown-none-elf` `strict-no-wait,hil-vendor-tx` configuration
 also compiles. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one

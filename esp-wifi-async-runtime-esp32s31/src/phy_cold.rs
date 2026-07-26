@@ -224,6 +224,48 @@ impl PhyColdState {
         self.parameter[0x1a1..=0x1a8].copy_from_slice(&outcome.codes);
     }
 
+    /// Capture every field consumed by ROM `phy_pwdet_code_cal` and its
+    /// complete child graph.
+    ///
+    /// Bit 24 of the little-endian word at offset `0x0a4` is byte `0x0a7`
+    /// bit zero. The two DCO paths and two signed reference values are copied
+    /// into typed values, so the transition never receives a raw parameter
+    /// pointer or aliases this owner while calibration is active.
+    pub fn pwdet_parameters(&self) -> crate::phy_pwdet::PhyPwdetParameters {
+        crate::phy_pwdet::PhyPwdetParameters {
+            already_calibrated: self.parameter[0x0a7] & 1 != 0,
+            pbus_tx_path_value: self.parameter[0x012],
+            pbus_rx_path_value: self.parameter[0x002],
+            dco: [
+                u16::from_le_bytes([self.parameter[0x0a8], self.parameter[0x0a9]]),
+                u16::from_le_bytes([self.parameter[0x0aa], self.parameter[0x0ab]]),
+                u16::from_le_bytes([self.parameter[0x0ac], self.parameter[0x0ad]]),
+                u16::from_le_bytes([self.parameter[0x0ae], self.parameter[0x0af]]),
+            ],
+            clear_tone_after_ready: self.parameter[0x1aa] != 0,
+            reference_codes: [
+                i16::from_le_bytes([self.parameter[0x01a], self.parameter[0x01b]]),
+                i16::from_le_bytes([self.parameter[0x01c], self.parameter[0x01d]]),
+            ],
+        }
+    }
+
+    /// Commit the only persistent effects of successful PWDET calibration.
+    ///
+    /// Failed transitions do not produce an outcome and therefore cannot
+    /// publish partial reference codes or mark the owner calibrated.
+    pub fn apply_pwdet_outcome(&mut self, outcome: crate::phy_pwdet::PhyPwdetOutcome) {
+        let reference_0 = outcome.reference_codes[0].to_le_bytes();
+        let reference_1 = outcome.reference_codes[1].to_le_bytes();
+        self.parameter[0x01a] = reference_0[0];
+        self.parameter[0x01b] = reference_0[1];
+        self.parameter[0x01c] = reference_1[0];
+        self.parameter[0x01d] = reference_1[1];
+        if outcome.calibrated {
+            self.parameter[0x0a7] |= 1;
+        }
+    }
+
     /// Commit the sole software-state effect of a completed
     /// `phy_check_rx_sat` measurement.
     ///
@@ -2802,6 +2844,43 @@ mod tests {
             &state.parameter_image()[0x1a1..=0x1a8],
             &[1, 2, 3, 4, 5, 6, 7, 8]
         );
+    }
+
+    #[test]
+    fn pwdet_parameters_and_commit_replace_the_global_parameter_pointer() {
+        let mut image = initial_parameter_image();
+        image[0x0a7] = 1;
+        image[0x0a8..0x0aa].copy_from_slice(&0x0102_u16.to_le_bytes());
+        image[0x0aa..0x0ac].copy_from_slice(&0x0304_u16.to_le_bytes());
+        image[0x0ac..0x0ae].copy_from_slice(&0x0506_u16.to_le_bytes());
+        image[0x0ae..0x0b0].copy_from_slice(&0x0708_u16.to_le_bytes());
+        image[0x01a..0x01c].copy_from_slice(&(-19_i16).to_le_bytes());
+        image[0x01c..0x01e].copy_from_slice(&(37_i16).to_le_bytes());
+        image[0x1aa] = 1;
+        let mut state = PhyColdState::from_parameter_image(image);
+
+        assert_eq!(
+            state.pwdet_parameters(),
+            crate::phy_pwdet::PhyPwdetParameters {
+                already_calibrated: true,
+                pbus_tx_path_value: 0x1f,
+                pbus_rx_path_value: 0xbf,
+                dco: [0x0102, 0x0304, 0x0506, 0x0708],
+                clear_tone_after_ready: true,
+                reference_codes: [-19, 37],
+            }
+        );
+
+        state.apply_pwdet_outcome(crate::phy_pwdet::PhyPwdetOutcome {
+            reference_codes: [-101, 202],
+            calibrated: true,
+            measurement_performed: true,
+        });
+        assert_eq!(
+            &state.parameter_image()[0x01a..0x01e],
+            &[0x9b, 0xff, 0xca, 0x00]
+        );
+        assert_eq!(state.parameter_image()[0x0a7] & 1, 1);
     }
 
     #[test]

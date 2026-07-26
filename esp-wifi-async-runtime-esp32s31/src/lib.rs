@@ -80,6 +80,7 @@ pub mod phy_i2c;
 pub mod phy_pbus;
 pub mod phy_pbus_memory;
 mod phy_param;
+pub mod phy_pwdet;
 pub mod phy_rfpll;
 pub mod phy_rx_dco;
 pub mod phy_rx_saturation;
