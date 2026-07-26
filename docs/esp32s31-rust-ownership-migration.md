@@ -997,6 +997,47 @@ then completed scan, WPA2, DHCP, ping, DNS, TCP and HTTP 200, returned all
 counters, never entered `ppTask`, and ran for a further 10 seconds without a
 trap or reset.
 
+The complete post-initialization register update is now Rust-owned as well.
+The reference is the pinned `libphy.a[phy_init.o]::phy_reg_update_new` body
+plus the complete rev0 ROM `phy_wifi_agc_sat_gain` body at `0x2f827db0` and
+the pinned `libphy.a[phy_reg.o]::phy_set_ftm_en` body. Rust preserves their
+instruction-proven ordering: set bit 26 at `0x2010_705c`; write
+`0x0818_212d` to `0x2010_7064` and `0x2010_7114`; replace bits 8:0 at
+`0x2010_7104` with `0x1c0`; perform the two separately read
+read/modify/write transactions on `0x2010_78c8`; and set bit 0 at
+`0x2010_7d4c`. Names describe the vendor symbol or the observed operation;
+unknown register-field semantics are not inferred.
+
+The two private leaves are incorporated into the Rust parent rather than
+published as additional interposition symbols because archive relocation
+inspection found no other caller. In the qualified final ELF,
+`phy_reg_update_new == wifi_strict_phy_reg_update_new == 0x400d17cc`; the
+body is 98 bytes and contains only finite MMIO loads/stores and `ret`, with
+no `jal`, `jalr`, loop, allocation, or wait. Both
+`register_chipv7_phy` and the caller-task `phy_wakeup_init` resolve their
+calls to that address. The function remains flash-mapped: call-graph
+inspection shows only cold initialization and the normal
+`esp-phy::increase_ref_count` wakeup path, not an interrupt context.
+
+An initial attempt to place this 98-byte caller-task leaf in the
+interrupt-only SRAM section was rejected by the existing post-link memory
+gate because it left 16,304 bytes for the CPU0 stack instead of the required
+16,384. Moving only this proven caller-task leaf back to flash restored the
+stack reserve without weakening the gate or moving any ISR handler/data out
+of SRAM.
+
+The identical qualified image completed a cold full-calibration boot,
+passive scan, WPA2 four-way handshake, DHCP, gateway ping, DNS, TCP and HTTP
+200. It returned all 19/19 TX and 16/16 RX owners, negotiated a 32-frame
+TX ADDBA window, retained zero allocation operations and other-core stalls,
+never entered `ppTask`, and remained stable for a further 10 seconds. A
+preceding reset of the same image observed one failed M4 TX completion after
+successful calibration, scan, association and M3 verification; this
+intermittent TX-completion event remains tracked separately and is not hidden
+as PHY qualification evidence. The strict final-ELF graph still reports
+zero violations and unchanged debt of `1 fallback + 9 stateful/unproven +
+0 temporary MMIO`.
+
 ## In-progress slice: `g_ic`
 
 The linked-state audit reports the complete 788-byte `g_ic` object because ELF
