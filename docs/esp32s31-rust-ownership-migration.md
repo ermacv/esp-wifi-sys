@@ -253,28 +253,46 @@ frontier and simultaneously releases `TxRxCxt`, `wDevCtrl`,
 `g_wifi_menuconfig`, `g_lmac_cnt`, `wifi_sta_rx_probe_req`, `g_osi_funcs_p`,
 and `pTxRx` from the runtime ownership graph.
 
-Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 13
-unique child roots with 3,564 bytes of direct reference bodies:
+Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 11
+unique child roots with 3,130 bytes of direct reference bodies:
 
 | child root | reference bytes | source | current decision |
 |---|---:|---|---|
 | `phy_txdc_cal_init` | 272 | archive | port calibration transition |
 | `phy_pwdet_code_cal` | 76 | ROM | port calibration transition |
 | `phy_tx_cap_init` | 230 | archive | port calibration transition |
-| `phy_tsens_temp_read` | 50 | ROM | expose temperature completion |
 | `phy_tx_pwctrl_init` | 154 | archive | port calibration transition |
 | `phy_txdc_cal_pwdet_init` | 520 | archive | port calibration transition |
 | `phy_dcode_cal_init` | 128 | ROM | port calibration transition |
 | `phy_txiq_cal_init` | 332 | archive | port calibration transition |
 | `phy_bt_tx_gain_init` | 90 | archive | retain as conditional shared/coex evidence until omission is proved |
-| `phy_set_pbus_mem` | 384 | ROM | port finite PBus table |
 | `phy_rxiq_cal_init` | 408 | archive | port calibration transition |
 | `phy_set_rx_gain_table` | 650 | archive | port RX gain transition |
 | `phy_chip_set_chan` | 270 | archive | port cold channel transition |
 
-`phy_check_rx_sat` is no longer in that code backlog: its Rust transition and
-owned `phy_param` mutation are complete. Its target-side 100-sample capture
-producer remains a separate hardware binding. After the 13 roots, the work is
+`phy_set_pbus_mem` is no longer in that code backlog. Its complete 384-byte
+ROM parent, 362-byte `phy_write_pbus_mem` child and 50-byte
+`phy_save_pbus_reg` child are represented by one Rust-owned transition. The
+ROM stack construction and four `memcpy` calls became twelve constant tables;
+the only varying inputs are explicit former parameter bytes `0x002` and
+`0x014`. Sixty separately completed publications reproduce the exact table,
+control-field and address sequence. Six fixed final MMIO reads are returned
+to `PhyColdState`, which alone commits them to former parameter offsets
+`0x030..=0x047`. The ROM global pointer cell is not part of the port.
+
+`phy_tsens_temp_read` is no longer in that code backlog either. Its 50-byte
+indirect-call wrapper is deleted rather than copied. Rust owns the required
+94-byte local measurement graph as three explicit operations: one PHY-I2C DAC
+read, one `0x2081_8000` code sample, and a conditional PHY-I2C range write.
+The complete five-entry 30-byte sensor attribute table and ROM integer
+conversion are constant Rust data/code. The result and sensor index are
+committed only by `PhyColdState`; `g_phyFuns` and the global `phy_param`
+pointer are absent. The ROM default for an unknown DAC reads beyond the
+attribute object, so Rust turns that corrupt state into a typed failure.
+
+`phy_check_rx_sat` is also no longer in that code backlog: its Rust transition
+and owned `phy_param` mutation are complete. Its target-side 100-sample capture
+producer remains a separate hardware binding. After the 11 roots, the work is
 to compose `phy_bb_init` (362 bytes of reference parent), port the remaining
 outer `register_chipv7_phy` sequencing (486 bytes), and activate the complete
 graph without publishing `phy_param` or `g_phyFuns`.
@@ -1894,15 +1912,15 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 1 | `phy_txdc_cal_init(&phy_param[0xa8], 15, 0, 0)` | calibration transition pending |
 | 2 | `phy_pwdet_code_cal()` | calibration transition pending |
 | 3 | `phy_tx_cap_init()` | calibration transition pending |
-| 4 | `phy_tsens_temp_read()` | temperature transition pending |
+| 4 | `phy_tsens_temp_read()` | complete Rust-owned PHY-I2C/MMIO transition |
 | 5 | `phy_tx_pwctrl_init(0)` | calibration transition pending |
 | 6 | `phy_txdc_cal_pwdet_init(1, 0, 0)` | calibration transition pending |
 | 7 | `phy_dcode_cal_init()` | calibration transition pending |
 | 8 | `phy_txiq_cal_init()` | calibration transition pending |
 | 9 | `phy_set_tx_cfr_mem(32)` | complete Rust-owned transition |
 | 10 | `phy_bt_tx_gain_init()` | calibration transition pending |
-| 11 | `phy_set_pbus_mem()` | finite table transition pending |
-| 12 | `phy_tsens_temp_read()` | shares pending temperature transition |
+| 11 | `phy_set_pbus_mem()` | complete Rust-owned 60-entry transition plus six-word state commit |
+| 12 | `phy_tsens_temp_read()` | reuses complete temperature transition |
 | 13 | `phy_rxiq_cal_init(0, &phy_param[0xa4], 0)` | calibration transition pending |
 | 14 | `phy_rx_table_init()` | complete Rust-owned state plus finite MMIO |
 | 15 | `phy_rfrx_sat_rst(0)` | complete finite Rust MMIO |

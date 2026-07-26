@@ -170,6 +170,48 @@ impl PhyColdState {
         self.parameter[0x002]
     }
 
+    /// Capture the only two parameter bytes used to construct the twelve
+    /// PBus-memory tables.
+    pub const fn pbus_memory_parameters(
+        &self,
+    ) -> crate::phy_pbus_memory::PhyPbusMemoryParameters {
+        crate::phy_pbus_memory::PhyPbusMemoryParameters {
+            parameter_002: self.parameter[0x002],
+            parameter_014: self.parameter[0x014],
+        }
+    }
+
+    /// Commit the six words formerly written by ROM `phy_save_pbus_reg`
+    /// through the global `phy_param` pointer.
+    pub fn apply_pbus_memory_outcome(
+        &mut self,
+        outcome: crate::phy_pbus_memory::PhyPbusMemoryOutcome,
+    ) {
+        let mut word = 0;
+        while word != outcome.saved_registers.len() {
+            let bytes = outcome.saved_registers[word].to_le_bytes();
+            let offset = 0x30 + word * 4;
+            self.parameter[offset] = bytes[0];
+            self.parameter[offset + 1] = bytes[1];
+            self.parameter[offset + 2] = bytes[2];
+            self.parameter[offset + 3] = bytes[3];
+            word += 1;
+        }
+    }
+
+    /// Commit the two persistent effects of a completed temperature sample:
+    /// the signed result at bytes `0x000..=0x001` and the sensor-range index
+    /// at byte `0x016`.
+    pub fn apply_temperature_outcome(
+        &mut self,
+        outcome: crate::phy_temperature::PhyTemperatureOutcome,
+    ) {
+        let bytes = outcome.temperature.to_le_bytes();
+        self.parameter[0] = bytes[0];
+        self.parameter[1] = bytes[1];
+        self.parameter[0x16] = outcome.sensor_index;
+    }
+
     /// Commit the sole software-state effect of a completed
     /// `phy_check_rx_sat` measurement.
     ///
@@ -2680,6 +2722,56 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state.parameter_image()[0x1ae], 1);
+    }
+
+    #[test]
+    fn pbus_memory_inputs_and_saved_registers_are_explicit_owned_state() {
+        use crate::phy_pbus_memory::{PhyPbusMemoryOutcome, PhyPbusMemoryParameters};
+
+        let mut state = PhyColdState::new();
+        assert_eq!(
+            state.pbus_memory_parameters(),
+            PhyPbusMemoryParameters {
+                parameter_002: 0xbf,
+                parameter_014: 1,
+            }
+        );
+
+        state.apply_pbus_memory_outcome(PhyPbusMemoryOutcome {
+            saved_registers: [
+                0x0302_0100,
+                0x0706_0504,
+                0x0b0a_0908,
+                0x0f0e_0d0c,
+                0x1312_1110,
+                0x1716_1514,
+            ],
+        });
+        assert_eq!(
+            &state.parameter_image()[0x30..0x48],
+            &[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            ]
+        );
+    }
+
+    #[test]
+    fn temperature_result_mutates_only_the_explicit_owned_bytes() {
+        let mut state = PhyColdState::new();
+        let before = *state.parameter_image();
+        state.apply_temperature_outcome(crate::phy_temperature::PhyTemperatureOutcome {
+            temperature: -37,
+            sensor_index: 3,
+            next_dac: 11,
+        });
+        assert_eq!(&state.parameter_image()[0..2], &(-37_i16).to_le_bytes());
+        assert_eq!(state.parameter_image()[0x16], 3);
+        for index in 0..PHY_COLD_PARAMETER_LEN {
+            if index != 0 && index != 1 && index != 0x16 {
+                assert_eq!(state.parameter_image()[index], before[index]);
+            }
+        }
     }
 
     #[test]

@@ -72,10 +72,12 @@ pub mod phy_cold;
 pub mod phy_dc_iq;
 pub mod phy_frequency;
 pub mod phy_signal_power;
+pub mod phy_temperature;
 #[cfg(all(target_arch = "riscv32", feature = "strict-no-wait"))]
 mod phy_channel;
 pub mod phy_i2c;
 pub mod phy_pbus;
+pub mod phy_pbus_memory;
 mod phy_param;
 pub mod phy_rfpll;
 pub mod phy_rx_dco;
