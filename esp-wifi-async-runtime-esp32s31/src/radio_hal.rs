@@ -25,6 +25,13 @@ const PHY_GAIN_MEMORY_MAX_ENTRIES: u32 = 32;
 const PHY_FE_CLOCK_GATE_ADDRESS: usize = 0x2010_0400;
 const PHY_FE_BB_CLOCK_CONTROL_ADDRESS: usize = 0x2010_0800;
 const PHY_BB_CLOCK_GATE_ADDRESS: usize = 0x2010_7c80;
+const PHY_AGC_CONTROL_ADDRESS: usize = 0x2010_705c;
+const PHY_AGC_SAT_GAIN_LOW_ADDRESS: usize = 0x2010_7064;
+const PHY_AGC_SAT_GAIN_HIGH_ADDRESS: usize = 0x2010_7114;
+const PHY_AGC_WINDOW_ADDRESS: usize = 0x2010_7104;
+const PHY_RX_CONTROL_ADDRESS: usize = 0x2010_78c8;
+const PHY_FTM_CONTROL_ADDRESS: usize = 0x2010_7d4c;
+const PHY_AGC_SAT_GAIN_VALUE: u32 = 0x0818_212d;
 
 const fn tsf_latch_mask(interface: u32) -> u32 {
     if interface == 0 {
@@ -60,6 +67,26 @@ const fn without_tx_queue_enable(value: u32) -> u32 {
 
 const fn without_fe_bb_clock_enable(value: u32) -> u32 {
     value & !0x3
+}
+
+const fn with_phy_agc_control(value: u32) -> u32 {
+    value | 0x0400_0000
+}
+
+const fn with_phy_agc_window(value: u32) -> u32 {
+    (value & !0x1ff) | 0x1c0
+}
+
+const fn with_phy_rx_control_low(value: u32) -> u32 {
+    (value & !0x7f) | 0x17
+}
+
+const fn with_phy_rx_control_high(value: u32) -> u32 {
+    (value & 0xffff_c07f) | 0x0b80
+}
+
+const fn with_phy_ftm_enable(value: u32, enable: u32) -> u32 {
+    (value & !1) | (enable & 1)
 }
 
 const fn with_phy_rx_comp_low(value: u32) -> u32 {
@@ -102,10 +129,8 @@ const fn encode_phy_gain_memory_words(
         | ((gain_72 & 7) << 31)
         | ((gain_64 & 0x3f) << 20)
         | 0x1000_0000;
-    let word_2 = ((gain_72 & 7) >> 1)
-        | ((gain_72 >> 1) & 0x1c)
-        | ((gain_32 as u32) << 15)
-        | 0x0000_7f80;
+    let word_2 =
+        ((gain_72 & 7) >> 1) | ((gain_72 >> 1) & 0x1c) | ((gain_32 as u32) << 15) | 0x0000_7f80;
     (word_0, word_1, word_2)
 }
 
@@ -273,6 +298,72 @@ pub unsafe extern "C" fn wifi_strict_phy_close_fe_bb_clk() {
     (PHY_BB_CLOCK_GATE_ADDRESS as *mut u32).write_volatile(0);
 }
 
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn write_phy_wifi_agc_sat_gain(value: u32) {
+    (PHY_AGC_SAT_GAIN_LOW_ADDRESS as *mut u32).write_volatile(value);
+    (PHY_AGC_SAT_GAIN_HIGH_ADDRESS as *mut u32).write_volatile(value);
+}
+
+/// Write the recovered Wi-Fi AGC saturation gain pair.
+///
+/// Reference: the complete rev0 ROM `phy_wifi_agc_sat_gain` body at
+/// `0x2f827db0`, size `0x0c`. It writes its argument to `0x2010_7064` and
+/// `0x2010_7114` in that order and owns no RAM state.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_wifi_agc_sat_gain(value: u32) {
+    write_phy_wifi_agc_sat_gain(value);
+}
+
+#[cfg(target_arch = "riscv32")]
+#[inline(always)]
+unsafe fn write_phy_ftm_enable(enable: u32) {
+    let control = PHY_FTM_CONTROL_ADDRESS as *mut u32;
+    control.write_volatile(with_phy_ftm_enable(control.read_volatile(), enable));
+}
+
+/// Replace the recovered one-bit PHY FTM enable field.
+///
+/// Reference: the complete pinned `libphy.a[phy_reg.o]::phy_set_ftm_en`
+/// body, size `0x14`. Only bit zero of `0x2010_7d4c` is replaced.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_set_ftm_en(enable: u32) {
+    write_phy_ftm_enable(enable);
+}
+
+/// Apply the complete recovered post-initialization PHY register update.
+///
+/// Reference: the complete pinned
+/// `libphy.a[phy_init.o]::phy_reg_update_new` body, size `0x70`, plus the
+/// complete `phy_wifi_agc_sat_gain` and `phy_set_ftm_en` leaves documented
+/// above. Every read/modify/write and the two saturation-gain writes retain
+/// vendor order, including the fresh second read of `0x2010_78c8`.
+///
+/// This is a finite MMIO-only transaction: no callback, ROM/vendor call,
+/// allocation, wait, delay, loop, or hidden mutable state remains.
+#[cfg(target_arch = "riscv32")]
+#[no_mangle]
+#[link_section = ".rwtext.wifi_strict.radio_hal"]
+pub unsafe extern "C" fn wifi_strict_phy_reg_update_new() {
+    let agc_control = PHY_AGC_CONTROL_ADDRESS as *mut u32;
+    agc_control.write_volatile(with_phy_agc_control(agc_control.read_volatile()));
+
+    write_phy_wifi_agc_sat_gain(PHY_AGC_SAT_GAIN_VALUE);
+
+    let agc_window = PHY_AGC_WINDOW_ADDRESS as *mut u32;
+    agc_window.write_volatile(with_phy_agc_window(agc_window.read_volatile()));
+
+    let rx_control = PHY_RX_CONTROL_ADDRESS as *mut u32;
+    rx_control.write_volatile(with_phy_rx_control_low(rx_control.read_volatile()));
+    rx_control.write_volatile(with_phy_rx_control_high(rx_control.read_volatile()));
+
+    write_phy_ftm_enable(1);
+}
+
 /// Encode and publish a finite PHY transmit-gain table.
 ///
 /// Reference: pinned
@@ -358,9 +449,11 @@ pub unsafe extern "C" fn wifi_strict_phy_set_tx_gain_mem_new(
 mod tests {
     use super::{
         encode_phy_gain_memory_words, join_rx_descriptor_address, tsf_latch_mask,
-        tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid,
-        with_phy_gain_memory_index, with_phy_rx_comp_high, with_phy_rx_comp_low, with_tx_cca,
-        without_fe_bb_clock_enable, without_tx_queue_enable, without_tx_queue_valid,
+        tx_baseband_gain_index, tx_queue_control_address, tx_queue_is_valid, with_phy_agc_control,
+        with_phy_agc_window, with_phy_ftm_enable, with_phy_gain_memory_index,
+        with_phy_rx_comp_high, with_phy_rx_comp_low, with_phy_rx_control_high,
+        with_phy_rx_control_low, with_tx_cca, without_fe_bb_clock_enable, without_tx_queue_enable,
+        without_tx_queue_valid,
     };
 
     #[test]
@@ -415,6 +508,20 @@ mod tests {
     }
 
     #[test]
+    fn phy_post_init_register_masks_match_the_complete_pinned_chain() {
+        assert_eq!(with_phy_agc_control(0), 0x0400_0000);
+        assert_eq!(with_phy_agc_control(u32::MAX), u32::MAX);
+        assert_eq!(with_phy_agc_window(u32::MAX), 0xffff_ffc0);
+        assert_eq!(with_phy_agc_window(0x1234_5600), 0x1234_57c0);
+        assert_eq!(with_phy_rx_control_low(u32::MAX), 0xffff_ff97);
+        assert_eq!(with_phy_rx_control_high(u32::MAX), 0xffff_cbff);
+        assert_eq!(with_phy_rx_control_high(0), 0x0000_0b80);
+        assert_eq!(with_phy_ftm_enable(0xffff_fffe, 1), u32::MAX);
+        assert_eq!(with_phy_ftm_enable(u32::MAX, 0), 0xffff_fffe);
+        assert_eq!(with_phy_ftm_enable(0, 3), 1);
+    }
+
+    #[test]
     fn phy_baseband_gain_indices_match_the_rom_leaf() {
         assert_eq!(tx_baseband_gain_index(0x0080), 1);
         assert_eq!(tx_baseband_gain_index(0x0100), 2);
@@ -436,9 +543,6 @@ mod tests {
             ),
             (0xbfde_1fff, 0x93f6_3f3c, 0x0052_ff83)
         );
-        assert_eq!(
-            with_phy_gain_memory_index(0xabc5_4321, 0x12),
-            0xabc8_9000
-        );
+        assert_eq!(with_phy_gain_memory_index(0xabc5_4321, 0x12), 0xabc8_9000);
     }
 }
