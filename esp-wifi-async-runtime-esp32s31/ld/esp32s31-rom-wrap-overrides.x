@@ -223,6 +223,15 @@ ASSERT(phy_rf_cal_data_recovery_new ==
            wifi_strict_phy_rf_cal_data_recovery_new,
        "ESP32-S31 PHY calibration recovery Rust boundary is inactive");
 
+/* Complete bounded calibration-record transform. Rust refreshes the fixed
+ * version/eFuse identity prefix and writes or validates the checksum without
+ * calling the former ROM header and byte-to-word helpers. */
+EXTERN(wifi_strict_phy_rfcal_data_check_new);
+phy_rfcal_data_check_new = wifi_strict_phy_rfcal_data_check_new;
+ASSERT(phy_rfcal_data_check_new ==
+           wifi_strict_phy_rfcal_data_check_new,
+       "ESP32-S31 PHY calibration record Rust boundary is inactive");
+
 /* Publish the ROM PHY ABI table and parameter pointer directly from Rust.
  * The replacement performs no call into phy_get_romfuncs/phy_param_addr and
  * retains the two untouched rev0 ROM callbacks only after validation. */
