@@ -1858,3 +1858,42 @@ HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and HTTP 200.
 It returned 19/19 TX and 16/16 RX owners without queue rejection, recorded
 zero allocation/reallocation/free calls, zero other-core stalls, and no
 `ppTask` entry.
+
+## Completed management-frame allocation boundary
+
+The public `ieee80211_getmgtframe` symbol is now Rust-owned. Its complete
+reference is the pinned
+`libnet80211.a[ieee80211_ets.o]::ieee80211_getmgtframe` body, size `0x5c`.
+The replacement preserves its finite transform:
+
+- checked `header + body`, rounded up to four bytes;
+- ESF kind 3 through 64 bytes, kind 2 through 256 bytes, and kind 4 above
+  256 bytes;
+- body pointer at `buffer_descriptor.data + header`;
+- original body length stored as a 16-bit value at ESF offset `0x16`.
+
+The replacement reuses the existing sixteen-entry, fixed 1,744-byte Rust ESF
+management pool and its single ownership bitmap. It introduces neither a
+second ledger nor storage. Pool exhaustion, arithmetic overflow, a body length
+larger than `u16`, or a malformed descriptor all fail immediately. There is no
+heap call, retry loop, delay, wait, or critical section in this wrapper.
+Before strict handoff it retains the already documented cold ESF fallback;
+prearmed and strict operation uses only the Rust pool.
+
+The qualified final ELF resolves `ieee80211_getmgtframe` and
+`wifi_strict_ieee80211_getmgtframe` to `0x400d067c`. Host coverage increased
+to 315 sequential tests. The 6,407-function strict audit still reports zero
+violations; runtime ownership debt decreases from
+`1 fallback + 6 stateful/unproven` to
+`1 fallback + 5 stateful/unproven`, strict vendor roots decrease from seven
+to six, and reachable vendor functions from 17 to 16. Strict leaves still
+reach zero mutable blob globals and zero ROM-ABI state cells. Internal-SRAM
+strict storage remains 313,293 bytes and the CPU0 stack remains 16,432 bytes
+because the task-context wrapper is flash-mapped.
+
+The hardware regression completed passive scan, open authentication,
+HT20/WMM association, WPA2 M1-M4, DHCP, gateway ping, DNS and HTTP 200.
+The ESF snapshot ended with zero of sixteen management slots claimed and zero
+rejected operations. It returned 18/18 TX and 15/15 RX owners, recorded zero
+allocation/reallocation/free calls, zero other-core stalls, and no `ppTask`
+entry.
