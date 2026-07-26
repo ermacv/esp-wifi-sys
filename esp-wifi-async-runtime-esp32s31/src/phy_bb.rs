@@ -33,6 +33,13 @@ pub struct PhyGainMemoryEntry {
     pub index: u8,
 }
 
+/// The two explicit `phy_param` bytes consumed by ROM `phy_reg_init`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhyRegisterInitParameters {
+    pub parameter_121: u8,
+    pub parameter_120: u8,
+}
+
 /// Reproduce the final control-register value of `phy_write_gain_mem`.
 pub const fn phy_gain_memory_control_word(current: u32, entry: PhyGainMemoryEntry) -> u32 {
     (current & PHY_GAIN_MEMORY_CONTROL_RETAIN_MASK)
@@ -262,22 +269,35 @@ impl PhyRfRxSaturationPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyBbMmioAction {
     EnableBasebandInitialization,
-    SetBasebandMode { mode: PhyBbBasebandMode },
+    SetBasebandMode {
+        mode: PhyBbBasebandMode,
+    },
     UpdateAgcRegisters,
     UpdatePostInitRegisters,
     EnableAgc,
-    SetWifiEnabled { enabled: bool },
-    ConfigureTxPowerTracking { enabled: bool },
-    ConfigureRfRxSaturation { phase: PhyRfRxSaturationPhase },
+    SetWifiEnabled {
+        enabled: bool,
+    },
+    ConfigureTxPowerTracking {
+        enabled: bool,
+    },
+    ConfigureRfRxSaturation {
+        phase: PhyRfRxSaturationPhase,
+    },
     ConfigureI2cTxRate,
     ProgramGainMemory(PhyGainMemoryEntry),
     EnableIqCorrection,
-    SetWifiAgcSaturationGain { value: u32 },
+    SetWifiAgcSaturationGain {
+        value: u32,
+    },
     ConfigureBasebandWatchdog,
     EnableMacBaseband,
     ConfigureNoiseFloorAuto,
     ConfigureAntenna,
     ConfigureBtFilter,
+    ConfigurePhyRegisters {
+        parameters: PhyRegisterInitParameters,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +362,9 @@ impl PhyBbMmioBinding {
             }
             PhyBbMmioAction::ConfigureAntenna => crate::radio_hal::configure_phy_antenna(),
             PhyBbMmioAction::ConfigureBtFilter => crate::radio_hal::configure_phy_bt_filter(),
+            PhyBbMmioAction::ConfigurePhyRegisters { parameters } => {
+                crate::radio_hal::configure_phy_registers(parameters)
+            }
         }
         PhyBbMmioCompletion {
             action: self.action,
@@ -353,10 +376,10 @@ impl PhyBbMmioBinding {
 mod tests {
     use super::{
         phy_gain_memory_control_word, phy_tx_cfr_control_word, PhyBbBasebandMode, PhyBbMmioAction,
-        PhyBbMmioBinding, PhyGainMemoryEntry, PhyRfRxSaturationPhase, PhyTxCfrAction,
-        PhyTxCfrBindingError, PhyTxCfrCompletion, PhyTxCfrEntry, PhyTxCfrMmioBinding,
-        PhyTxCfrOutcome, PhyTxCfrTransition, PhyTxCfrTransitionError, PHY_TX_CFR_ENTRY_COUNT,
-        PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
+        PhyBbMmioBinding, PhyGainMemoryEntry, PhyRegisterInitParameters, PhyRfRxSaturationPhase,
+        PhyTxCfrAction, PhyTxCfrBindingError, PhyTxCfrCompletion, PhyTxCfrEntry,
+        PhyTxCfrMmioBinding, PhyTxCfrOutcome, PhyTxCfrTransition, PhyTxCfrTransitionError,
+        PHY_TX_CFR_ENTRY_COUNT, PHY_TX_CFR_INDEX_SOURCE_ADDRESS,
     };
 
     #[test]
@@ -516,6 +539,12 @@ mod tests {
             PhyBbMmioAction::ConfigureNoiseFloorAuto,
             PhyBbMmioAction::ConfigureAntenna,
             PhyBbMmioAction::ConfigureBtFilter,
+            PhyBbMmioAction::ConfigurePhyRegisters {
+                parameters: PhyRegisterInitParameters {
+                    parameter_121: 0x4f,
+                    parameter_120: 0x4e,
+                },
+            },
         ] {
             assert_eq!(PhyBbMmioBinding::new(action).action(), action);
         }

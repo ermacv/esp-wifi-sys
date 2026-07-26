@@ -342,8 +342,7 @@ pub(crate) unsafe fn enable_phy_iq_correction() {
 /// Complete rev0 ROM `phy_wifi_agc_sat_gain`, size `0x0c`.
 #[cfg(target_arch = "riscv32")]
 pub(crate) unsafe fn set_phy_wifi_agc_saturation_gain(value: u32) {
-    (PHY_AGC_SAT_GAIN_LOW_ADDRESS as *mut u32).write_volatile(value);
-    (PHY_AGC_SAT_GAIN_HIGH_ADDRESS as *mut u32).write_volatile(value);
+    write_phy_wifi_agc_sat_gain(value);
 }
 
 /// Complete rev0 ROM `phy_bb_wdg_cfg`, size `0x2c`.
@@ -388,6 +387,115 @@ pub(crate) unsafe fn configure_phy_bt_filter() {
     set_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0200_0000);
     clear_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0040_0000);
     clear_register_bits(PHY_BT_FILTER_CONTROL_ADDRESS, 0x0180_0000);
+}
+
+/// Complete rev0 ROM `phy_agc_reg_init`, size `0xd8`.
+#[cfg(target_arch = "riscv32")]
+unsafe fn configure_phy_agc_registers(parameter_121: u8, parameter_120: u8) {
+    let gain_minus_one = u32::from(parameter_121).wrapping_sub(1);
+    replace_register_field(
+        0x2010_713c,
+        0x01fc_0000,
+        (gain_minus_one << 18) & 0x01fc_0000,
+    );
+    replace_register_field(
+        0x2010_7094,
+        0x0000_01fc,
+        (gain_minus_one << 2) & 0x0000_01fc,
+    );
+    replace_register_field(
+        0x2010_702c,
+        0x0000_7f00,
+        (u32::from(parameter_121) << 8) & 0x0000_7f00,
+    );
+    replace_register_field(0x2010_705c, 0x0007_ffff, 0x0000_0bb8);
+    replace_register_field(0x2010_08bc, 0x0000_0ff0, u32::from(parameter_121) << 4);
+    replace_register_field(
+        0x2010_08bc,
+        0x000f_f000,
+        (u32::from(parameter_120).wrapping_add(0x50) << 12) & 0x000f_f000,
+    );
+    replace_register_field(0x2010_702c, 0xff00_0000, 0x3200_0000);
+    set_register_bits(0x2010_702c, 0x0080_0000);
+    clear_register_bits(0x2010_702c, 0x0080_0000);
+    replace_register_field(0x2010_7128, 0xff00_0000, 0xd200_0000);
+}
+
+/// Complete rev0 ROM `phy_bb_reg_init`, size `0x140`, including its
+/// `phy_btbb_wifi_bb_cfg2` tail.
+#[cfg(target_arch = "riscv32")]
+unsafe fn configure_phy_baseband_registers() {
+    set_register_bits(0x2010_7400, 0x0000_6000);
+    replace_register_field(0x2010_7848, 0x00ff_ffff, 0x0004_33af);
+    replace_register_field(0x2010_7848, 0x1f00_0000, 0x1700_0000);
+    replace_register_field(0x2010_7808, 0x0000_3f80, 0x0000_3000);
+    replace_register_field(0x2010_78dc, 0x0000_3f80, 0x0000_0100);
+    clear_register_bits(0x2010_78e4, 0x0040_0000);
+    clear_register_bits(0x2010_7c30, 0x000f_f000);
+    clear_register_bits(0x2010_790c, 0x0000_0800);
+    set_register_bits(0x2010_7ca8, 0x0010_0000);
+    clear_register_bits(0x2010_7980, 0x0200_0000);
+    clear_register_bits(0x2010_7890, 0x0200_0000);
+    set_register_bits(0x2010_7890, 0x0100_0000);
+    clear_register_bits(0x2010_7a28, 0x0040_0000);
+    set_register_bits(0x2010_7cd0, 0x000f_000f);
+    set_register_bits(0x2010_7c00, 0x0000_0200);
+    set_register_bits(PHY_WIFI_ENABLE_ADDRESS, 0x0000_0800);
+    clear_register_bits(0x2010_743c, 0x0000_00c0);
+    clear_register_bits(0x2010_743c, 0x0000_0100);
+    set_register_bits(0x2010_7428, 0x0000_4000);
+    replace_register_field(0x2010_7428, 0x0000_3f00, 0x0000_1500);
+    set_register_bits(0x2010_7cd0, 0x000f_000b);
+}
+
+/// Complete rev0 ROM `phy_tx_paon_set`, size `0x78`.
+#[cfg(target_arch = "riscv32")]
+unsafe fn configure_phy_tx_pa_on() {
+    replace_register_field(0x2010_7c00, 0x001f_f800, 0x0000_a000);
+    replace_register_field(0x2010_086c, 0x0000_ff00, 0x0000_7800);
+    (0x2010_7c6c as *mut u32).write_volatile(0x0661_a45f);
+    replace_register_field(0x2010_7c30, 0x0000_03ff, 0x0000_001e);
+
+    let control = 0x2010_0870 as *mut u32;
+    control.write_volatile((control.read_volatile() & 0x0000_ffff) | 0xa0e0_0000);
+    replace_register_field(0x2010_0870, 0x0000_ff00, 0x0000_c800);
+}
+
+/// Complete both branches of rev0 ROM `phy_rx_11b_opt`, size `0xc4`.
+#[cfg(target_arch = "riscv32")]
+unsafe fn configure_phy_rx_11b_optimization(enabled: bool) {
+    if enabled {
+        set_register_bits(0x2010_7044, 0x003f_0000);
+        replace_register_field(0x2010_7044, 0x0000_3f00, 0x0000_2100);
+        replace_register_field(0x2010_7124, 0x0000_fc00, 0x0000_8400);
+        replace_register_field(0x2010_7124, 0x0000_000f, 0x0000_0003);
+        replace_register_field(0x2010_8004, 0x0000_f000, 0x0000_9000);
+    } else {
+        replace_register_field(0x2010_7044, 0x003f_0000, 0x003e_0000);
+        replace_register_field(0x2010_7044, 0x0000_3f00, 0x0000_1800);
+        replace_register_field(0x2010_7124, 0x0000_fc00, 0x0000_6000);
+        replace_register_field(0x2010_7124, 0x0000_000f, 0x0000_0004);
+        replace_register_field(0x2010_8004, 0x0000_f000, 0x0000_6000);
+    }
+    replace_register_field(0x2010_7104, 0x0000_01ff, 0x0000_01c8);
+}
+
+/// Complete rev0 ROM `phy_reg_init`, size `0x52`, with every direct and tail
+/// child reproduced by finite Rust MMIO.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn configure_phy_registers(parameters: crate::phy_bb::PhyRegisterInitParameters) {
+    enable_phy_iq_correction();
+    configure_phy_agc_registers(parameters.parameter_121, parameters.parameter_120);
+    set_phy_wifi_agc_saturation_gain(0x0008_1825);
+    configure_phy_baseband_registers();
+    configure_phy_baseband_watchdog();
+    configure_phy_tx_pa_on();
+    configure_phy_rx_11b_optimization(true);
+    configure_phy_tx_power_control_background();
+    configure_phy_noise_floor_auto();
+    configure_phy_antenna();
+    configure_phy_bt_filter();
+    enable_phy_mac_baseband();
 }
 
 const fn tsf_latch_mask(interface: u32) -> u32 {

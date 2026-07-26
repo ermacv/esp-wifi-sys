@@ -1826,7 +1826,7 @@ of `0x2010_0028` with two. It restores the latter field to zero after
 | 16 | `phy_check_rx_sat()` | sampled/deadline transition pending |
 | 17 | `phy_set_rx_gain_table(0x985, 0)` | RX gain transition pending |
 | 18 | `phy_rfrx_sat_rst(1)` | complete finite Rust MMIO |
-| 19 | `phy_reg_init()` | composed finite register graph pending |
+| 19 | `phy_reg_init()` | complete composed finite Rust MMIO |
 | 20 | `phy_bb_agc_reg_update()` | complete finite Rust MMIO |
 | 21 | `phy_reg_update_new()` | existing complete finite Rust MMIO |
 | 22 | `phy_enable_agc()` | complete finite Rust MMIO |
@@ -1866,14 +1866,15 @@ words to `0x2010_0848..=0x2010_0850`, then replaces the low 20 bits of
 `phy_set_rx_gain_table` complete: their table generation and remaining
 descendants stay outside the lowering.
 
-The first six state-free descendants of pending `phy_reg_init` are also
-lowered independently: `phy_wifi_agc_sat_gain`, `phy_bb_wdg_cfg`,
-`phy_mac_enable_bb`, `phy_noise_floor_auto_set`, `phy_ant_init`, and
-`phy_bt_filter_reg`. Each recovered body is a fixed register sequence with no
-call, branch-dependent exit, ROM-owned RAM, or indirect dispatch. The composed
-parent remains pending because `phy_agc_reg_init`, `phy_bb_reg_init`,
-`phy_tx_paon_set`, `phy_rx_11b_opt`, and the power-detector child of
-`phy_tx_pwctrl_bg_init` have not yet all been lowered.
+The complete `phy_reg_init` call graph is now one typed Rust action consuming
+only the explicit former `phy_param[0x121]` and `phy_param[0x120]` inputs.
+It includes `phy_agc_reg_init`, `phy_wifi_agc_sat_gain`, `phy_bb_reg_init` and
+its `phy_btbb_wifi_bb_cfg2` tail, `phy_bb_wdg_cfg`, `phy_tx_paon_set`, both
+branches of `phy_rx_11b_opt`, the full `phy_tx_pwctrl_bg_init` →
+`phy_en_pwdet` → `phy_pwdet_sar2_init` graph, `phy_noise_floor_auto_set`,
+`phy_ant_init`, `phy_bt_filter_reg`, and the `phy_mac_enable_bb` tail. Every
+reachable body is a fixed register sequence with no allocation, wait,
+hardware-dependent exit, ROM-owned RAM, or indirect dispatch.
 
 This baseband work is still preparatory and dead-stripped from the qualified
 image. Activation is deliberately deferred until every reachable child has
