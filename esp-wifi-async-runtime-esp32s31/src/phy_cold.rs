@@ -15,6 +15,10 @@
 //! merely to obtain its initial data.
 
 use crate::{
+    phy_dc_iq::{
+        PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqEstimateRequest,
+        PhyDcIqReadinessSnapshot,
+    },
     phy_frequency::{
         PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion,
         PhyChannelFrequencyInitControl, PhyFrequencyI2cAction, PhyFrequencyI2cCompletion,
@@ -36,11 +40,17 @@ use crate::{
         PHY_INIT_DATA_LEN, PHY_PARAM_LEN,
     },
     phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest},
+    phy_rfpll::{RfpllFrequencyAction, RfpllFrequencyCompletion},
     phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion},
+    phy_signal_power::{
+        PhySignalPowerAccumulatorSnapshot, PhySignalPowerAction, PhySignalPowerCompletion,
+        PhySignalPowerRequest,
+    },
     phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyCalibrationParameters,
         XtalDutyPassAction, XtalDutyPassCompletion, XtalDutyPrepareAction,
         XtalDutyPrepareCompletion, XtalDutyRestoreAction, XtalDutyRestoreCompletion,
+        XtalDutySearchAction, XtalDutySearchCompletion,
     },
 };
 
@@ -596,7 +606,18 @@ fn lower_prefix_i2c_request(action: PhyRfInitPrefixAction) -> Option<PhyColdI2cR
         | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::WriteByte {
             address,
             value,
-        }) => Some(PhyColdI2cRequest::write_byte(address, value)),
+        })
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::WriteByte { address, value },
+        ))
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::WriteByte { address, value },
+            )),
+        )) => Some(PhyColdI2cRequest::write_byte(address, value)),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate { address, candidate }),
+        )) => Some(PhyColdI2cRequest::write_byte(address, candidate)),
         PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ReadSdmSample { address })
         | PhyRfInitPrefixAction::ReadParameter18e { address }
         | PhyRfInitPrefixAction::I2cBbpll(I2cBbpllAction::ReadMaskedByte { address })
@@ -608,6 +629,11 @@ fn lower_prefix_i2c_request(action: PhyRfInitPrefixAction) -> Option<PhyColdI2cR
         })
         | PhyRfInitPrefixAction::ChannelFrequency(PhyChannelFrequencyInitAction::I2c(
             PhyFrequencyI2cAction::ReadByte { address },
+        ))
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::ReadByte { address },
+            )),
         )) => Some(PhyColdI2cRequest::read_byte(address)),
         PhyRfInitPrefixAction::RcCalibrationSet(RcCalibrationSetAction::MaskedWrite(
             MaskedI2cWriteAction::ReadByte { address },
@@ -646,6 +672,30 @@ fn lower_prefix_i2c_request(action: PhyRfInitPrefixAction) -> Option<PhyColdI2cR
                 low_bit,
                 value,
             },
+        ))
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::DisableCalibrationPath {
+            address,
+            high_bit,
+            low_bit,
+            value,
+        })
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::WriteMasked {
+                address,
+                high_bit,
+                low_bit,
+                value,
+            },
+        ))
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::WriteMasked {
+                    address,
+                    high_bit,
+                    low_bit,
+                    value,
+                },
+            )),
         )) => checked_masked_write(address, high_bit, low_bit, value),
         PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::ReadMasked {
             address,
@@ -661,7 +711,21 @@ fn lower_prefix_i2c_request(action: PhyRfInitPrefixAction) -> Option<PhyColdI2cR
             address,
             high_bit,
             low_bit,
-        } => checked_masked_read(address, high_bit, low_bit),
+        }
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
+            address,
+            high_bit,
+            low_bit,
+        })
+        | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::ReadMasked {
+                    address,
+                    high_bit,
+                    low_bit,
+                },
+            )),
+        )) => checked_masked_read(address, high_bit, low_bit),
         _ => None,
     }
 }
@@ -878,6 +942,131 @@ fn lower_prefix_i2c_completion(
                 value,
             }),
         )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
+                address,
+                ..
+            }),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::InitialDutyRead { address, value },
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::DisableCalibrationPath {
+                address,
+                ..
+            }),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::CalibrationPathDisabled { address },
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::WriteMasked { address, .. },
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::MaskedWrite { address }),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::WriteByte { address, .. },
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::ByteWrite { address }),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::WriteMasked {
+                        address,
+                        high_bit,
+                        low_bit,
+                        ..
+                    },
+                )),
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::MaskedWrite {
+                    address,
+                    high_bit,
+                    low_bit,
+                }),
+            )),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::WriteByte { address, .. },
+                )),
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::ByteWrite { address }),
+            )),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::ReadMasked {
+                        address,
+                        high_bit,
+                        low_bit,
+                    },
+                )),
+            )),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::MaskedRead {
+                    address,
+                    high_bit,
+                    low_bit,
+                    value,
+                }),
+            )),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::ReadByte { address },
+                )),
+            )),
+            PhyColdI2cOutcome::Read {
+                address: completed,
+                value,
+            },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::ByteRead {
+                    address,
+                    value,
+                }),
+            )),
+        )),
+        (
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate {
+                    address,
+                    candidate,
+                }),
+            )),
+            PhyColdI2cOutcome::Written { address: completed },
+        ) if address == completed => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                XtalDutySearchCompletion::CandidateWritten { address, candidate },
+            )),
+        )),
         _ => None,
     }
 }
@@ -917,9 +1106,6 @@ impl PhyColdMmioBinding {
             }
             PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay) => {
                 crate::phy_i2c::configure_open_i2c_pre_delay()
-            }
-            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse) => {
-                crate::phy_i2c::configure_open_i2c_power_and_pulse()
             }
             PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureDebugMode) => {
                 crate::radio_hal::configure_phy_pbus_debug_mode()
@@ -982,6 +1168,84 @@ impl PhyColdMmioBinding {
                 image.control_field,
                 image.words,
             ),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureCalibrationTone {
+                    enabled,
+                    selector,
+                    step,
+                }),
+            )) => crate::radio_hal::configure_phy_calibration_tone(enabled, selector, step),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureRxClock { enabled }),
+            )) => crate::radio_hal::configure_phy_rx_clock(enabled),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureTxClock { enabled }),
+            )) => crate::radio_hal::configure_phy_tx_clock(enabled),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigurePbusDebugMode),
+            )) => crate::radio_hal::configure_phy_pbus_debug_mode(),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RestoreRxDcoControl {
+                    saved_field,
+                    ..
+                }),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::RestoreRxDcoControl { saved_field, .. },
+                )),
+            )) => crate::radio_hal::restore_phy_rx_dco_control_field(saved_field),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::Configure(request),
+                ))),
+            )) => crate::radio_hal::configure_phy_dc_iq_estimator(request.control),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::SetEnable { phase, enabled, .. },
+                ))),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::SetEstimatorEnable { phase, enabled, .. },
+                )),
+            )) => crate::radio_hal::set_phy_dc_iq_estimator_enable(phase, enabled),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::ConfigureClock { clock, enabled, .. },
+                )),
+            )) => match clock {
+                crate::phy_signal_power::PhySignalPowerClock::Tx => {
+                    crate::radio_hal::configure_phy_tx_clock(enabled)
+                }
+                crate::phy_signal_power::PhySignalPowerClock::Rx => {
+                    crate::radio_hal::configure_phy_rx_clock(enabled)
+                }
+            },
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::ConfigureEstimator { control, .. },
+                )),
+            )) => crate::radio_hal::configure_phy_dc_iq_estimator(control),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureCalibrationTone {
+                    enabled,
+                    selector,
+                    step,
+                }),
+            )) => crate::radio_hal::configure_phy_calibration_tone(enabled, selector, step),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureRxClock { enabled }),
+            )) => crate::radio_hal::configure_phy_rx_clock(enabled),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureTxClock { enabled }),
+            )) => crate::radio_hal::configure_phy_tx_clock(enabled),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkModePulse),
+            )) => crate::radio_hal::configure_phy_pbus_work_mode_pulse(),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::ClearPbusWorkModePulse),
+            )) => crate::radio_hal::clear_phy_pbus_work_mode_pulse(),
             _ => return Err(PhyColdLoweringError::UnsupportedAction),
         }
         self.into_completion()
@@ -1000,9 +1264,6 @@ fn lower_prefix_mmio_completion(
         }
         PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePreDelay) => Some(
             PhyRfInitPrefixCompletion::OpenI2cXpd(OpenI2cXpdCompletion::PreDelayConfigured),
-        ),
-        PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse) => Some(
-            PhyRfInitPrefixCompletion::OpenI2cXpd(OpenI2cXpdCompletion::PowerAndPulseConfigured),
         ),
         PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureDebugMode) => Some(
             PhyRfInitPrefixCompletion::PbusClear(PhyPbusClearCompletion::DebugModeConfigured),
@@ -1080,6 +1341,192 @@ fn lower_prefix_mmio_completion(
                 PhyFrequencyI2cCompletion::NumberAddressesConfigured(image),
             ),
         )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::CalibrationToneConfigured {
+                    enabled,
+                    selector,
+                    step,
+                },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureRxClock { enabled }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RxClockConfigured { enabled },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureTxClock { enabled }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::TxClockConfigured { enabled },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigurePbusDebugMode),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::PbusDebugModeConfigured,
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RestoreRxDcoControl {
+                address,
+                saved_field,
+                ..
+            }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RxDcoControlRestored {
+                    address,
+                    saved_field,
+                },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                PhyRxDcoAction::RestoreRxDcoControl {
+                    address,
+                    saved_field,
+                    ..
+                },
+            )),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::RxDcoControlRestored {
+                    address,
+                    saved_field,
+                }),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::Configure(request),
+            ))),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                    PhyDcIqCompletion::Configured(request),
+                )),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::SetEnable {
+                    request,
+                    phase,
+                    enabled,
+                },
+            ))),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                    PhyDcIqCompletion::EnableSet {
+                        request,
+                        phase,
+                        enabled,
+                    },
+                )),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::ConfigureClock {
+                    request,
+                    clock,
+                    enabled,
+                },
+            )),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                XtalDutySearchCompletion::SignalPower(PhySignalPowerCompletion::ClockConfigured {
+                    request,
+                    clock,
+                    enabled,
+                }),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::SetEstimatorEnable {
+                    request,
+                    phase,
+                    enabled,
+                },
+            )),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                XtalDutySearchCompletion::SignalPower(
+                    PhySignalPowerCompletion::EstimatorEnableSet {
+                        request,
+                        phase,
+                        enabled,
+                    },
+                ),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::ConfigureEstimator { request, control },
+            )),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                XtalDutySearchCompletion::SignalPower(
+                    PhySignalPowerCompletion::EstimatorConfigured { request, control },
+                ),
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureCalibrationTone {
+                enabled,
+                selector,
+                step,
+            }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                XtalDutyRestoreCompletion::CalibrationToneConfigured {
+                    enabled,
+                    selector,
+                    step,
+                },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureRxClock { enabled }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                XtalDutyRestoreCompletion::RxClockConfigured { enabled },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigureTxClock { enabled }),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                XtalDutyRestoreCompletion::TxClockConfigured { enabled },
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkModePulse),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                XtalDutyRestoreCompletion::PbusWorkModePulseConfigured,
+            )),
+        )),
+        PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ClearPbusWorkModePulse),
+        )) => Some(PhyRfInitPrefixCompletion::XtalDuty(
+            XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                XtalDutyRestoreCompletion::PbusWorkModePulseCleared,
+            )),
+        )),
         _ => None,
     }
 }
@@ -1105,6 +1552,32 @@ impl PhyColdTimerBinding {
             | PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::DelayMicros(micros)) => {
                 micros
             }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::DelayMicros(micros),
+                )),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::DelayMicros { micros, .. },
+                )),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::DelayMicros { micros, .. },
+                ))),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros { micros, .. }),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::DelayMicros { micros, .. },
+                )),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::DelayMicros(micros)),
+            )) => micros,
             _ => return Err(PhyColdLoweringError::UnsupportedAction),
         };
         Ok(Self {
@@ -1138,6 +1611,79 @@ impl PhyColdTimerBinding {
             PhyRfInitPrefixAction::RfpllChargePump(RfpllChargePumpAction::DelayMicros(_)) => Ok(
                 PhyRfInitPrefixCompletion::RfpllChargePump(RfpllChargePumpCompletion::Delay),
             ),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                    RfpllFrequencyAction::DelayMicros(micros),
+                )),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::DelayElapsed(
+                        micros,
+                    )),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::DelayMicros { iteration, micros },
+                )),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DelayElapsed {
+                        iteration,
+                        micros,
+                    }),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::DelayMicros {
+                        request,
+                        phase,
+                        micros,
+                    },
+                ))),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::DelayElapsed {
+                            request,
+                            phase,
+                            micros,
+                        },
+                    )),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros { candidate, .. }),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::DelayElapsed { candidate },
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::DelayMicros {
+                        request,
+                        phase,
+                        micros,
+                    },
+                )),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(PhySignalPowerCompletion::DelayElapsed {
+                        request,
+                        phase,
+                        micros,
+                    }),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Restore(XtalDutyRestoreAction::DelayMicros(micros)),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::DelayElapsed { micros },
+                )),
+            )),
             _ => Err(PhyColdLoweringError::UnsupportedAction),
         }
     }
@@ -1179,12 +1725,68 @@ impl PhyColdExternalBinding {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyColdObservationRequest {
+    ConfigureOpenI2cPowerAndPulse,
+    CheckOpenI2cSdmDeadline {
+        started_at_cycle: u32,
+        maximum_cycles: u32,
+    },
     ConfigurePbusWorkMode,
+    MaskRxDcoControl {
+        address: usize,
+        clear_mask: u32,
+    },
+    ReadRxDcoPbus {
+        selector: u8,
+        path: u8,
+    },
+    ObserveDcIqReadiness {
+        request: PhyDcIqEstimateRequest,
+        readiness_activity_edges: u16,
+    },
+    ReadDcIqAccumulators(PhyDcIqEstimateRequest),
+    ObserveSignalPowerReadiness {
+        request: PhySignalPowerRequest,
+        readiness_activity_edges: u16,
+    },
+    ReadSignalPowerAccumulators(PhySignalPowerRequest),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PhyColdObservationResult {
-    PbusWorkMode { settle_required: bool },
+    OpenI2cPowerAndPulse {
+        started_at_cycle: u32,
+    },
+    OpenI2cSdmDeadline {
+        expired: bool,
+    },
+    PbusWorkMode {
+        settle_required: bool,
+    },
+    RxDcoControlMasked {
+        address: usize,
+        saved_field: u32,
+    },
+    RxDcoPbusRead {
+        selector: u8,
+        path: u8,
+        value: u32,
+    },
+    DcIqReadiness {
+        request: PhyDcIqEstimateRequest,
+        snapshot: PhyDcIqReadinessSnapshot,
+    },
+    DcIqAccumulators {
+        request: PhyDcIqEstimateRequest,
+        snapshot: PhyDcIqAccumulatorSnapshot,
+    },
+    SignalPowerReadiness {
+        request: PhySignalPowerRequest,
+        snapshot: PhyDcIqReadinessSnapshot,
+    },
+    SignalPowerAccumulators {
+        request: PhySignalPowerRequest,
+        snapshot: PhySignalPowerAccumulatorSnapshot,
+    },
 }
 
 /// One finite MMIO operation whose sampled value is part of the completion.
@@ -1202,10 +1804,80 @@ pub struct PhyColdObservationBinding {
 impl PhyColdObservationBinding {
     pub fn new(outer_action: PhyRfInitPrefixAction) -> Result<Self, PhyColdLoweringError> {
         let request = match outer_action {
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse) => {
+                PhyColdObservationRequest::ConfigureOpenI2cPowerAndPulse
+            }
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::CheckSdmDeadline {
+                started_at_cycle,
+                maximum_cycles,
+            }) => PhyColdObservationRequest::CheckOpenI2cSdmDeadline {
+                started_at_cycle,
+                maximum_cycles,
+            },
             PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkMode)
             | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
                 XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkMode),
             )) => PhyColdObservationRequest::ConfigurePbusWorkMode,
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::MaskRxDcoControl {
+                    address,
+                    clear_mask,
+                }),
+            ))
+            | PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::MaskRxDcoControl {
+                        address,
+                        clear_mask,
+                    },
+                )),
+            )) if address == crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS
+                && clear_mask == crate::phy_rx_dco::RX_DCO_CONTROL_FIELD_MASK =>
+            {
+                PhyColdObservationRequest::MaskRxDcoControl {
+                    address,
+                    clear_mask,
+                }
+            }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                    PhyRxDcoAction::ReadPbus { selector, path },
+                )),
+            )) if selector == 1 && path == 2 => {
+                PhyColdObservationRequest::ReadRxDcoPbus { selector, path }
+            }
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::AwaitReadinessEdge {
+                        request,
+                        readiness_activity_edges,
+                    },
+                ))),
+            )) => PhyColdObservationRequest::ObserveDcIqReadiness {
+                request,
+                readiness_activity_edges,
+            },
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::ReadAccumulators(request),
+                ))),
+            )) => PhyColdObservationRequest::ReadDcIqAccumulators(request),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::AwaitReadinessEdge {
+                        request,
+                        readiness_activity_edges,
+                    },
+                )),
+            )) => PhyColdObservationRequest::ObserveSignalPowerReadiness {
+                request,
+                readiness_activity_edges,
+            },
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::ReadAccumulators(request),
+                )),
+            )) => PhyColdObservationRequest::ReadSignalPowerAccumulators(request),
             _ => return Err(PhyColdLoweringError::UnsupportedAction),
         };
         Ok(Self {
@@ -1228,6 +1900,18 @@ impl PhyColdObservationBinding {
     ) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
         match (self.outer_action, result) {
             (
+                PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse),
+                PhyColdObservationResult::OpenI2cPowerAndPulse { started_at_cycle },
+            ) => Ok(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PowerAndPulseConfigured { started_at_cycle },
+            )),
+            (
+                PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::CheckSdmDeadline { .. }),
+                PhyColdObservationResult::OpenI2cSdmDeadline { expired },
+            ) => Ok(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DeadlineObserved { expired },
+            )),
+            (
                 PhyRfInitPrefixAction::PbusClear(PhyPbusClearAction::ConfigureWorkMode),
                 PhyColdObservationResult::PbusWorkMode { settle_required },
             ) => Ok(PhyRfInitPrefixCompletion::PbusClear(
@@ -1243,19 +1927,249 @@ impl PhyColdObservationBinding {
                     XtalDutyRestoreCompletion::PbusWorkModeConfigured { settle_required },
                 )),
             )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Prepare(XtalDutyPrepareAction::MaskRxDcoControl {
+                        address,
+                        ..
+                    }),
+                )),
+                PhyColdObservationResult::RxDcoControlMasked {
+                    address: completed,
+                    saved_field,
+                },
+            ) if address == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDcoControlMasked {
+                        address,
+                        saved_field,
+                    },
+                )),
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                        PhyRxDcoAction::MaskRxDcoControl { address, .. },
+                    )),
+                )),
+                PhyColdObservationResult::RxDcoControlMasked {
+                    address: completed,
+                    saved_field,
+                },
+            ) if address == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::RxDcoControlMasked {
+                        address,
+                        saved_field,
+                    }),
+                )),
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                        PhyRxDcoAction::ReadPbus { selector, path },
+                    )),
+                )),
+                PhyColdObservationResult::RxDcoPbusRead {
+                    selector: completed_selector,
+                    path: completed_path,
+                    value,
+                },
+            ) if selector == completed_selector && path == completed_path => {
+                Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                    XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                        XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::PbusRead {
+                            selector,
+                            path,
+                            value,
+                        }),
+                    )),
+                ))
+            }
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                        PhyRxDcoAction::DcIq(PhyDcIqAction::AwaitReadinessEdge { request, .. }),
+                    )),
+                )),
+                PhyColdObservationResult::DcIqReadiness {
+                    request: completed,
+                    snapshot,
+                },
+            ) if request == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::ReadinessObserved { request, snapshot },
+                    )),
+                )),
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                        PhyRxDcoAction::DcIq(PhyDcIqAction::ReadAccumulators(request)),
+                    )),
+                )),
+                PhyColdObservationResult::DcIqAccumulators {
+                    request: completed,
+                    snapshot,
+                },
+            ) if request == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::AccumulatorsRead { request, snapshot },
+                    )),
+                )),
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                        PhySignalPowerAction::AwaitReadinessEdge { request, .. },
+                    )),
+                )),
+                PhyColdObservationResult::SignalPowerReadiness {
+                    request: completed,
+                    snapshot,
+                },
+            ) if request == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(
+                        PhySignalPowerCompletion::ReadinessObserved { request, snapshot },
+                    ),
+                )),
+            )),
+            (
+                PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                    XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                        PhySignalPowerAction::ReadAccumulators(request),
+                    )),
+                )),
+                PhyColdObservationResult::SignalPowerAccumulators {
+                    request: completed,
+                    snapshot,
+                },
+            ) if request == completed => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(
+                        PhySignalPowerCompletion::AccumulatorsRead { request, snapshot },
+                    ),
+                )),
+            )),
             _ => Err(PhyColdLoweringError::UnexpectedOutcome),
+        }
+    }
+
+    /// Consume an independently owned Rust deadline for a readiness action.
+    ///
+    /// Ordinary sampled observations cannot fabricate a timeout. Conversely,
+    /// only the two readiness actions accept this completion; fixed MMIO
+    /// samples and the open-I2C deadline fail closed.
+    pub fn into_timeout_completion(
+        self,
+    ) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
+        match self.outer_action {
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                    PhyDcIqAction::AwaitReadinessEdge { request, .. },
+                ))),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::ReadinessTimedOut(request),
+                    )),
+                )),
+            )),
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+                XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                    PhySignalPowerAction::AwaitReadinessEdge { request, .. },
+                )),
+            )) => Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(
+                        PhySignalPowerCompletion::ReadinessTimedOut(request),
+                    ),
+                )),
+            )),
+            _ => Err(PhyColdLoweringError::UnsupportedAction),
         }
     }
 
     #[cfg(target_arch = "riscv32")]
     pub unsafe fn execute_target(self) -> Result<PhyRfInitPrefixCompletion, PhyColdLoweringError> {
         match self.request {
+            PhyColdObservationRequest::ConfigureOpenI2cPowerAndPulse => {
+                crate::phy_i2c::configure_open_i2c_power_and_pulse();
+                let started_at_cycle = crate::radio_hal::read_phy_sdm_cycle_counter();
+                self.into_completion(PhyColdObservationResult::OpenI2cPowerAndPulse {
+                    started_at_cycle,
+                })
+            }
+            PhyColdObservationRequest::CheckOpenI2cSdmDeadline {
+                started_at_cycle,
+                maximum_cycles,
+            } => {
+                let current_cycle = crate::radio_hal::read_phy_sdm_cycle_counter();
+                self.into_completion(PhyColdObservationResult::OpenI2cSdmDeadline {
+                    expired: phy_sdm_deadline_expired(
+                        started_at_cycle,
+                        current_cycle,
+                        maximum_cycles,
+                    ),
+                })
+            }
             PhyColdObservationRequest::ConfigurePbusWorkMode => {
                 let settle_required = crate::radio_hal::configure_phy_pbus_work_mode();
                 self.into_completion(PhyColdObservationResult::PbusWorkMode { settle_required })
             }
+            PhyColdObservationRequest::MaskRxDcoControl { address, .. } => {
+                let saved_field = crate::radio_hal::mask_phy_rx_dco_control_field();
+                self.into_completion(PhyColdObservationResult::RxDcoControlMasked {
+                    address,
+                    saved_field,
+                })
+            }
+            PhyColdObservationRequest::ReadRxDcoPbus { selector, path } => {
+                let value = u32::from(crate::radio_hal::read_phy_pbus_rx_dco_value());
+                self.into_completion(PhyColdObservationResult::RxDcoPbusRead {
+                    selector,
+                    path,
+                    value,
+                })
+            }
+            PhyColdObservationRequest::ObserveDcIqReadiness { request, .. } => {
+                let snapshot = crate::radio_hal::sample_phy_dc_iq_readiness();
+                self.into_completion(PhyColdObservationResult::DcIqReadiness { request, snapshot })
+            }
+            PhyColdObservationRequest::ReadDcIqAccumulators(request) => {
+                let snapshot = crate::radio_hal::read_phy_dc_iq_accumulators();
+                self.into_completion(PhyColdObservationResult::DcIqAccumulators {
+                    request,
+                    snapshot,
+                })
+            }
+            PhyColdObservationRequest::ObserveSignalPowerReadiness { request, .. } => {
+                let snapshot = crate::radio_hal::sample_phy_dc_iq_readiness();
+                self.into_completion(PhyColdObservationResult::SignalPowerReadiness {
+                    request,
+                    snapshot,
+                })
+            }
+            PhyColdObservationRequest::ReadSignalPowerAccumulators(request) => {
+                let snapshot = crate::radio_hal::read_phy_signal_power_accumulators();
+                self.into_completion(PhyColdObservationResult::SignalPowerAccumulators {
+                    request,
+                    snapshot,
+                })
+            }
         }
     }
+}
+
+const fn phy_sdm_deadline_expired(
+    started_at_cycle: u32,
+    current_cycle: u32,
+    maximum_cycles: u32,
+) -> bool {
+    current_cycle.wrapping_sub(started_at_cycle) > maximum_cycles
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1613,24 +2527,35 @@ impl PhyRfColdInit {
 #[cfg(test)]
 mod tests {
     use super::{
-        initial_parameter_image, PhyCalibrationRecord, PhyColdExternalBinding, PhyColdI2cAction,
-        PhyColdI2cBinding, PhyColdI2cObservation, PhyColdI2cOutcome, PhyColdI2cRequest,
-        PhyColdI2cTransaction, PhyColdLoweringError, PhyColdMmioBinding, PhyColdObservationBinding,
-        PhyColdObservationRequest, PhyColdObservationResult, PhyColdPbusAction, PhyColdPbusBinding,
-        PhyColdPbusHardwareResult, PhyColdPbusObservation, PhyColdState, PhyColdTimerBinding,
-        PHY_COLD_PARAMETER_LEN,
+        initial_parameter_image, phy_sdm_deadline_expired, PhyCalibrationRecord,
+        PhyColdExternalBinding, PhyColdI2cAction, PhyColdI2cBinding, PhyColdI2cObservation,
+        PhyColdI2cOutcome, PhyColdI2cRequest, PhyColdI2cTransaction, PhyColdLoweringError,
+        PhyColdMmioBinding, PhyColdObservationBinding, PhyColdObservationRequest,
+        PhyColdObservationResult, PhyColdPbusAction, PhyColdPbusBinding, PhyColdPbusHardwareResult,
+        PhyColdPbusObservation, PhyColdState, PhyColdTimerBinding, PHY_COLD_PARAMETER_LEN,
+    };
+    use crate::phy_dc_iq::{
+        PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqDelayPhase,
+        PhyDcIqEnablePhase, PhyDcIqEstimateRequest, PhyDcIqReadinessSnapshot,
     };
     use crate::phy_frequency::{PhyChannelFrequencyInitAction, PhyChannelFrequencyInitCompletion};
     use crate::phy_i2c::{
-        BiasRegAction, BiasRegCompletion, PhyI2cAddress, PhyI2cError, PhyRfInitPrefixAction,
-        PhyRfInitPrefixCompletion, RcCalibrationAction, RcCalibrationCompletion,
+        BiasRegAction, BiasRegCompletion, OpenI2cXpdAction, OpenI2cXpdCompletion, PhyI2cAddress,
+        PhyI2cError, PhyRfInitPrefixAction, PhyRfInitPrefixCompletion, RcCalibrationAction,
+        RcCalibrationCompletion,
     };
     use crate::phy_pbus::{PhyPbusClearAction, PhyPbusClearCompletion, PhyPbusForceTest};
+    use crate::phy_rfpll::{RfpllFrequencyAction, RfpllFrequencyCompletion};
     use crate::phy_rx_dco::{PhyRxDcoAction, PhyRxDcoCompletion};
+    use crate::phy_signal_power::{
+        PhySignalPowerAccumulatorSnapshot, PhySignalPowerAction, PhySignalPowerClock,
+        PhySignalPowerCompletion, PhySignalPowerRequest,
+    };
     use crate::phy_xtal_duty::{
         XtalDutyCalibrationAction, XtalDutyCalibrationCompletion, XtalDutyPassAction,
         XtalDutyPassCompletion, XtalDutyPrepareAction, XtalDutyPrepareCompletion,
-        XtalDutyRestoreAction, XtalDutyRestoreCompletion,
+        XtalDutyRestoreAction, XtalDutyRestoreCompletion, XtalDutySearchAction,
+        XtalDutySearchCompletion,
     };
 
     #[test]
@@ -1915,6 +2840,107 @@ mod tests {
     }
 
     #[test]
+    fn nested_calibration_mmio_keeps_every_parent_identity_field() {
+        let tone_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::ConfigureCalibrationTone {
+                enabled: true,
+                selector: 0x80,
+                step: 0,
+            }),
+        ));
+        assert_eq!(
+            PhyColdMmioBinding::new(tone_action)
+                .unwrap()
+                .into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::CalibrationToneConfigured {
+                        enabled: true,
+                        selector: 0x80,
+                        step: 0,
+                    }
+                ))
+            ))
+        );
+
+        let dc_iq_request = PhyDcIqEstimateRequest {
+            iteration: 4,
+            chain: 1,
+            control: 0x1234,
+            mode: 2,
+        };
+        let dc_iq_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::SetEnable {
+                    request: dc_iq_request,
+                    phase: PhyDcIqEnablePhase::Measurement,
+                    enabled: true,
+                },
+            ))),
+        ));
+        assert_eq!(
+            PhyColdMmioBinding::new(dc_iq_action)
+                .unwrap()
+                .into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::EnableSet {
+                            request: dc_iq_request,
+                            phase: PhyDcIqEnablePhase::Measurement,
+                            enabled: true,
+                        }
+                    ))
+                ))
+            ))
+        );
+
+        let signal_request = PhySignalPowerRequest {
+            measurement: 0x3a7,
+            shift: 12,
+        };
+        let signal_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::ConfigureClock {
+                    request: signal_request,
+                    clock: PhySignalPowerClock::Rx,
+                    enabled: false,
+                },
+            )),
+        ));
+        assert_eq!(
+            PhyColdMmioBinding::new(signal_action)
+                .unwrap()
+                .into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(
+                        PhySignalPowerCompletion::ClockConfigured {
+                            request: signal_request,
+                            clock: PhySignalPowerClock::Rx,
+                            enabled: false,
+                        }
+                    )
+                ))
+            ))
+        );
+
+        let restore_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::ConfigurePbusWorkModePulse),
+        ));
+        assert_eq!(
+            PhyColdMmioBinding::new(restore_action)
+                .unwrap()
+                .into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::PbusWorkModePulseConfigured
+                ))
+            ))
+        );
+    }
+
+    #[test]
     fn timer_binding_consumes_one_exact_delay_edge() {
         let outer_action =
             PhyRfInitPrefixAction::RcCalibration(RcCalibrationAction::DelayMicros(100));
@@ -1931,6 +2957,138 @@ mod tests {
         assert_eq!(
             PhyColdTimerBinding::new(PhyRfInitPrefixAction::ConfigureFeBbClock),
             Err(PhyColdLoweringError::UnsupportedAction)
+        );
+    }
+
+    #[test]
+    fn nested_calibration_timers_preserve_every_parent_identity_field() {
+        let rfpll_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::DelayMicros(20),
+            )),
+        ));
+        let rfpll = PhyColdTimerBinding::new(rfpll_action).unwrap();
+        assert_eq!(rfpll.micros(), 20);
+        assert_eq!(
+            rfpll.into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::DelayElapsed(20))
+                ))
+            ))
+        );
+
+        let rx_dco_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(
+                PhyRxDcoAction::DelayMicros {
+                    iteration: 7,
+                    micros: 10,
+                },
+            )),
+        ));
+        assert_eq!(
+            PhyColdTimerBinding::new(rx_dco_action)
+                .unwrap()
+                .into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DelayElapsed {
+                        iteration: 7,
+                        micros: 10,
+                    })
+                ))
+            ))
+        );
+
+        let dc_iq_request = PhyDcIqEstimateRequest {
+            iteration: 7,
+            chain: 1,
+            control: 0x1234,
+            mode: 2,
+        };
+        let dc_iq_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::DelayMicros {
+                    request: dc_iq_request,
+                    phase: PhyDcIqDelayPhase::Stop,
+                    micros: 1,
+                },
+            ))),
+        ));
+        assert_eq!(
+            PhyColdTimerBinding::new(dc_iq_action)
+                .unwrap()
+                .into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::DelayElapsed {
+                            request: dc_iq_request,
+                            phase: PhyDcIqDelayPhase::Stop,
+                            micros: 1,
+                        }
+                    ))
+                ))
+            ))
+        );
+
+        let search_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros {
+                candidate: 0x3a,
+                micros: 20,
+            }),
+        ));
+        assert_eq!(
+            PhyColdTimerBinding::new(search_action)
+                .unwrap()
+                .into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::DelayElapsed { candidate: 0x3a }
+                ))
+            ))
+        );
+
+        let signal_request = PhySignalPowerRequest {
+            measurement: 0x3a7,
+            shift: 12,
+        };
+        let signal_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::DelayMicros {
+                    request: signal_request,
+                    phase: PhyDcIqDelayPhase::Start,
+                    micros: 1,
+                },
+            )),
+        ));
+        assert_eq!(
+            PhyColdTimerBinding::new(signal_action)
+                .unwrap()
+                .into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(PhySignalPowerCompletion::DelayElapsed {
+                        request: signal_request,
+                        phase: PhyDcIqDelayPhase::Start,
+                        micros: 1,
+                    })
+                ))
+            ))
+        );
+
+        let restore_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Restore(XtalDutyRestoreAction::DelayMicros(2)),
+        ));
+        assert_eq!(
+            PhyColdTimerBinding::new(restore_action)
+                .unwrap()
+                .into_elapsed_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Restore(
+                    XtalDutyRestoreCompletion::DelayElapsed { micros: 2 }
+                ))
+            ))
         );
     }
 
@@ -2076,6 +3234,235 @@ mod tests {
     }
 
     #[test]
+    fn open_i2c_deadline_keeps_one_epoch_and_the_inclusive_rom_bound() {
+        assert!(!phy_sdm_deadline_expired(100, 10_099, 9_999));
+        assert!(phy_sdm_deadline_expired(100, 10_100, 9_999));
+        assert!(!phy_sdm_deadline_expired(0xffff_ff00, 0x0000_260f, 9_999));
+        assert!(phy_sdm_deadline_expired(0xffff_ff00, 0x0000_2610, 9_999));
+
+        let configure_action =
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::ConfigurePowerAndPulse);
+        let configure = PhyColdObservationBinding::new(configure_action).unwrap();
+        assert_eq!(
+            configure.request(),
+            PhyColdObservationRequest::ConfigureOpenI2cPowerAndPulse
+        );
+        assert_eq!(
+            configure.into_completion(PhyColdObservationResult::OpenI2cPowerAndPulse {
+                started_at_cycle: 0xffff_ff00,
+            }),
+            Ok(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                    started_at_cycle: 0xffff_ff00
+                }
+            ))
+        );
+
+        let deadline_action =
+            PhyRfInitPrefixAction::OpenI2cXpd(OpenI2cXpdAction::CheckSdmDeadline {
+                started_at_cycle: 0xffff_ff00,
+                maximum_cycles: 9_999,
+            });
+        let deadline = PhyColdObservationBinding::new(deadline_action).unwrap();
+        assert_eq!(
+            deadline.request(),
+            PhyColdObservationRequest::CheckOpenI2cSdmDeadline {
+                started_at_cycle: 0xffff_ff00,
+                maximum_cycles: 9_999,
+            }
+        );
+        assert_eq!(
+            deadline
+                .into_completion(PhyColdObservationResult::OpenI2cSdmDeadline { expired: false }),
+            Ok(PhyRfInitPrefixCompletion::OpenI2cXpd(
+                OpenI2cXpdCompletion::DeadlineObserved { expired: false }
+            ))
+        );
+    }
+
+    #[test]
+    fn nested_sampled_edges_are_one_shot_identity_bound_observations() {
+        let mask_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::MaskRxDcoControl {
+                address: crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS,
+                clear_mask: crate::phy_rx_dco::RX_DCO_CONTROL_FIELD_MASK,
+            }),
+        ));
+        let mask = PhyColdObservationBinding::new(mask_action).unwrap();
+        assert_eq!(
+            mask.request(),
+            PhyColdObservationRequest::MaskRxDcoControl {
+                address: crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS,
+                clear_mask: crate::phy_rx_dco::RX_DCO_CONTROL_FIELD_MASK,
+            }
+        );
+        assert_eq!(
+            mask.into_completion(PhyColdObservationResult::RxDcoControlMasked {
+                address: crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS,
+                saved_field: 0x0080_0000,
+            }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDcoControlMasked {
+                        address: crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS,
+                        saved_field: 0x0080_0000,
+                    }
+                ))
+            ))
+        );
+        assert_eq!(
+            PhyColdObservationBinding::new(PhyRfInitPrefixAction::XtalDuty(
+                XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Prepare(
+                    XtalDutyPrepareAction::MaskRxDcoControl {
+                        address: crate::phy_rx_dco::RX_DCO_CONTROL_ADDRESS + 4,
+                        clear_mask: crate::phy_rx_dco::RX_DCO_CONTROL_FIELD_MASK,
+                    }
+                ))
+            )),
+            Err(PhyColdLoweringError::UnsupportedAction)
+        );
+
+        let pbus_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::ReadPbus {
+                selector: 1,
+                path: 2,
+            })),
+        ));
+        assert_eq!(
+            PhyColdObservationBinding::new(pbus_action)
+                .unwrap()
+                .into_completion(PhyColdObservationResult::RxDcoPbusRead {
+                    selector: 1,
+                    path: 2,
+                    value: 0x1a5,
+                }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::PbusRead {
+                        selector: 1,
+                        path: 2,
+                        value: 0x1a5,
+                    })
+                ))
+            ))
+        );
+
+        let dc_iq_request = PhyDcIqEstimateRequest {
+            iteration: 6,
+            chain: 1,
+            control: 0x0fa0,
+            mode: 0,
+        };
+        let dc_iq_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::AwaitReadinessEdge {
+                    request: dc_iq_request,
+                    readiness_activity_edges: 3,
+                },
+            ))),
+        ));
+        assert_eq!(
+            PhyColdObservationBinding::new(dc_iq_action)
+                .unwrap()
+                .into_completion(PhyColdObservationResult::DcIqReadiness {
+                    request: dc_iq_request,
+                    snapshot: PhyDcIqReadinessSnapshot {
+                        ready: false,
+                        activity: true,
+                    },
+                }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::ReadinessObserved {
+                            request: dc_iq_request,
+                            snapshot: PhyDcIqReadinessSnapshot {
+                                ready: false,
+                                activity: true,
+                            },
+                        }
+                    ))
+                ))
+            ))
+        );
+        assert_eq!(
+            PhyColdObservationBinding::new(dc_iq_action)
+                .unwrap()
+                .into_timeout_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::ReadinessTimedOut(dc_iq_request)
+                    ))
+                ))
+            ))
+        );
+
+        let dc_iq_accumulators = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::RxDco(PhyRxDcoAction::DcIq(
+                PhyDcIqAction::ReadAccumulators(dc_iq_request),
+            ))),
+        ));
+        let dc_iq_snapshot = PhyDcIqAccumulatorSnapshot {
+            i: -3,
+            q: 7,
+            power: 0x1234,
+        };
+        assert_eq!(
+            PhyColdObservationBinding::new(dc_iq_accumulators)
+                .unwrap()
+                .into_completion(PhyColdObservationResult::DcIqAccumulators {
+                    request: dc_iq_request,
+                    snapshot: dc_iq_snapshot,
+                }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::RxDco(PhyRxDcoCompletion::DcIq(
+                        PhyDcIqCompletion::AccumulatorsRead {
+                            request: dc_iq_request,
+                            snapshot: dc_iq_snapshot,
+                        }
+                    ))
+                ))
+            ))
+        );
+
+        let signal_request = PhySignalPowerRequest {
+            measurement: 0x25,
+            shift: 12,
+        };
+        let signal_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::SignalPower(
+                PhySignalPowerAction::ReadAccumulators(signal_request),
+            )),
+        ));
+        let signal_snapshot = PhySignalPowerAccumulatorSnapshot {
+            sum_i: 10,
+            difference_i: -20,
+            difference_q: 30,
+            sum_q: -40,
+        };
+        assert_eq!(
+            PhyColdObservationBinding::new(signal_action)
+                .unwrap()
+                .into_completion(PhyColdObservationResult::SignalPowerAccumulators {
+                    request: signal_request,
+                    snapshot: signal_snapshot,
+                }),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::SignalPower(
+                        PhySignalPowerCompletion::AccumulatorsRead {
+                            request: signal_request,
+                            snapshot: signal_snapshot,
+                        }
+                    )
+                ))
+            ))
+        );
+    }
+
+    #[test]
     fn external_lowering_has_no_vendor_or_synchronous_fallback_variant() {
         assert!(matches!(
             PhyColdExternalBinding::lower(PhyRfInitPrefixAction::DelayMicros(10)),
@@ -2133,6 +3520,80 @@ mod tests {
                     high_bit: 7,
                     low_bit: 3,
                 }
+            ))
+        );
+    }
+
+    #[test]
+    fn xtal_and_rfpll_i2c_edges_keep_nested_identity() {
+        let initial_address = PhyI2cAddress::new(0x61, 9).unwrap();
+        let initial_action =
+            PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
+                address: initial_address,
+                high_bit: 5,
+                low_bit: 0,
+            });
+        let mut initial = PhyColdI2cBinding::new(initial_action).unwrap();
+        initial.read_started().unwrap();
+        initial.observe_read_result(Ok(0xeb)).unwrap();
+        assert_eq!(
+            initial.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::InitialDutyRead {
+                    address: initial_address,
+                    value: 0x2b,
+                }
+            ))
+        );
+
+        let rfpll_address = PhyI2cAddress::new(0x63, 6).unwrap();
+        let rfpll_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Prepare(XtalDutyPrepareAction::Rfpll(
+                RfpllFrequencyAction::WriteMasked {
+                    address: rfpll_address,
+                    high_bit: 7,
+                    low_bit: 3,
+                    value: 0x12,
+                },
+            )),
+        ));
+        let mut rfpll = PhyColdI2cBinding::new(rfpll_action).unwrap();
+        rfpll.read_started().unwrap();
+        rfpll.observe_read_result(Ok(0x05)).unwrap();
+        rfpll.write_started().unwrap();
+        rfpll.observe_write_result(Ok(())).unwrap();
+        assert_eq!(
+            rfpll.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Prepare(
+                    XtalDutyPrepareCompletion::Rfpll(RfpllFrequencyCompletion::MaskedWrite {
+                        address: rfpll_address,
+                        high_bit: 7,
+                        low_bit: 3,
+                    })
+                ))
+            ))
+        );
+
+        let candidate_address = PhyI2cAddress::new(0x61, 0x0a).unwrap();
+        let candidate_action = PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
+            XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate {
+                address: candidate_address,
+                candidate: 0x3a,
+            }),
+        ));
+        let mut candidate = PhyColdI2cBinding::new(candidate_action).unwrap();
+        candidate.write_started().unwrap();
+        candidate.observe_write_result(Ok(())).unwrap();
+        assert_eq!(
+            candidate.into_completion(),
+            Ok(PhyRfInitPrefixCompletion::XtalDuty(
+                XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
+                    XtalDutySearchCompletion::CandidateWritten {
+                        address: candidate_address,
+                        candidate: 0x3a,
+                    }
+                ))
             ))
         );
     }

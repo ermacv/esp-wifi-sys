@@ -1762,20 +1762,35 @@ single awaiting token without polling or arranging a wake; a later
 peripheral edge or Rust deadline consumes it as an exact completed or timed
 out parent completion. `PhyColdObservationBinding` separately owns the
 finite work-mode writes and their one sampled settle-condition bit for both
-PBus clear and XTAL restore. The open-I2C cycle deadline, nested RFPLL and
-DC/IQ readiness observations, and remaining nested I2C/MMIO/timer actions
-are still rejected by this lowering layer and remain the next explicit
-coverage ledger.
+PBus clear and XTAL restore.
+
+The remaining reachable crystal-duty graph is now lowered as well. Open-I2C
+captures the exact `0x2010_d800` cycle epoch after its finite power/pulse
+transaction and checks the ROM-compatible inclusive 9,999-cycle deadline
+with one later wrapping subtraction. Nested RFPLL/XTAL PHY-I2C operations,
+all RFPLL/RX-DCO/DC-IQ/signal-power/restore timer actions, tone and clock
+MMIO, estimator control, and PBus restore pulses retain their complete parent
+identity. RX-DCO field masking, fixed `phy_pbus_rd(1, 2)`, DC/IQ readiness
+and accumulators, and signal-power readiness and accumulators are separate
+one-shot sampled observations. A false readiness result does not arrange
+another sample; an independent Rust deadline consumes the same binding as a
+typed timeout. Unknown register/mask or PBus selector/path tuples fail
+closed.
+
+The full two-pass crystal-duty success traversal asserts that every reachable
+external action is accepted by `PhyColdExternalBinding`; representative
+identity tests cover every operation class and explicit timeout completions.
+Both the host library and the `riscv32imafc-unknown-none-elf`
+`strict-no-wait,hil-vendor-tx` target configuration compile.
 
 This is not yet the live cold-init implementation. The remaining work is to
-map every nested `PhyRfInitPrefixAction` to exactly one finite MMIO
-transaction, PHY-I2C transaction, PBus edge, timer deadline, or readiness
-observation, and then port the larger `phy_bb_init` calibration suffix and
-the outer `register_chipv7_phy` sequencing. Only after that graph is complete
-will the HIL publish `PhyColdState` to the temporary ROM ABI and remove the
-vendor `phy_param` definition.
+connect this completed prefix graph to the Rust cold-init executor, port the
+larger `phy_bb_init` calibration suffix, and then port the outer
+`register_chipv7_phy` sequencing. Only after that graph is complete will the
+HIL publish `PhyColdState` to the temporary ROM ABI and remove the vendor
+`phy_param` definition.
 
-All 407 host tests pass. The last qualified target strict audit covers 6,407
+All 412 host tests pass. The last qualified target strict audit covers 6,407
 functions with zero violations and reports runtime ownership debt of one
 explicit RX fallback, zero stateful/unproven runtime roots, and zero
 temporary MMIO roots. Strict

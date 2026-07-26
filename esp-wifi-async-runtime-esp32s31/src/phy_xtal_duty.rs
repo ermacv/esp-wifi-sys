@@ -35,8 +35,14 @@ pub enum XtalDutySampleKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutySearchAction {
-    WriteCandidate(u8),
-    DelayMicros(u32),
+    WriteCandidate {
+        address: PhyI2cAddress,
+        candidate: u8,
+    },
+    DelayMicros {
+        candidate: u8,
+        micros: u32,
+    },
     SignalPower(PhySignalPowerAction),
     Complete(XtalDutySearchOutcome),
     Failed(PhySignalPowerFailure),
@@ -44,7 +50,10 @@ pub enum XtalDutySearchAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XtalDutySearchCompletion {
-    CandidateWritten(u8),
+    CandidateWritten {
+        address: PhyI2cAddress,
+        candidate: u8,
+    },
     DelayElapsed {
         candidate: u8,
     },
@@ -120,6 +129,8 @@ pub struct XtalDutySearchTransition {
 }
 
 impl XtalDutySearchTransition {
+    const DUTY_ADDRESS: PhyI2cAddress = PhyI2cAddress::new_internal(0x61, 0x0a);
+
     pub const fn new() -> Self {
         Self {
             step: XtalDutySearchStep::WriteCandidate {
@@ -138,9 +149,15 @@ impl XtalDutySearchTransition {
         }
         match self.step {
             XtalDutySearchStep::WriteCandidate { candidate } => {
-                XtalDutySearchAction::WriteCandidate(candidate)
+                XtalDutySearchAction::WriteCandidate {
+                    address: Self::DUTY_ADDRESS,
+                    candidate,
+                }
             }
-            XtalDutySearchStep::Delay { .. } => XtalDutySearchAction::DelayMicros(20),
+            XtalDutySearchStep::Delay { candidate } => XtalDutySearchAction::DelayMicros {
+                candidate,
+                micros: 20,
+            },
             XtalDutySearchStep::InitialSamples { .. }
             | XtalDutySearchStep::Review { .. }
             | XtalDutySearchStep::FirstReplacement { .. }
@@ -174,14 +191,10 @@ impl XtalDutySearchTransition {
             } => Self::measurement_request(candidate, XtalDutySampleKind::Initial(count)),
             XtalDutySearchStep::FirstReplacement {
                 candidate, index, ..
-            } => {
-                Self::measurement_request(candidate, XtalDutySampleKind::FirstReplacement(index))
-            }
+            } => Self::measurement_request(candidate, XtalDutySampleKind::FirstReplacement(index)),
             XtalDutySearchStep::SecondReplacement {
                 candidate, index, ..
-            } => {
-                Self::measurement_request(candidate, XtalDutySampleKind::SecondReplacement(index))
-            }
+            } => Self::measurement_request(candidate, XtalDutySampleKind::SecondReplacement(index)),
             _ => return,
         };
         self.signal_power = Some(PhySignalPowerTransition::new(request));
@@ -359,8 +372,13 @@ impl XtalDutySearchTransition {
         self.step = match (self.step, completion) {
             (
                 XtalDutySearchStep::WriteCandidate { candidate },
-                XtalDutySearchCompletion::CandidateWritten(completed),
-            ) if candidate == completed => XtalDutySearchStep::Delay { candidate },
+                XtalDutySearchCompletion::CandidateWritten {
+                    address,
+                    candidate: completed,
+                },
+            ) if address == Self::DUTY_ADDRESS && candidate == completed => {
+                XtalDutySearchStep::Delay { candidate }
+            }
             (
                 XtalDutySearchStep::Delay { candidate },
                 XtalDutySearchCompletion::DelayElapsed {
@@ -1285,8 +1303,8 @@ mod tests {
         XtalDutyPassTransition, XtalDutyPassTransitionError, XtalDutyPrepareAction,
         XtalDutyPrepareCompletion, XtalDutyPrepareTransition, XtalDutyRestoreAction,
         XtalDutyRestoreCompletion, XtalDutyRestoreTransition, XtalDutySearchAction,
-        XtalDutySearchCompletion, XtalDutySearchOutcome,
-        XtalDutySearchTransition, XtalDutySearchTransitionError,
+        XtalDutySearchCompletion, XtalDutySearchOutcome, XtalDutySearchTransition,
+        XtalDutySearchTransitionError,
     };
     use crate::phy_dc_iq::{
         PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
@@ -1653,21 +1671,24 @@ mod tests {
                         .unwrap();
                 }
                 XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Search(
-                    XtalDutySearchAction::WriteCandidate(candidate),
+                    XtalDutySearchAction::WriteCandidate { address, candidate },
                 )) => {
                     current_candidate = Some(candidate);
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
                             XtalDutyPassCompletion::Search(
-                                XtalDutySearchCompletion::CandidateWritten(candidate),
+                                XtalDutySearchCompletion::CandidateWritten { address, candidate },
                             ),
                         ))
                         .unwrap();
                 }
                 XtalDutyCalibrationAction::Pass(XtalDutyPassAction::Search(
-                    XtalDutySearchAction::DelayMicros(20),
+                    XtalDutySearchAction::DelayMicros {
+                        candidate,
+                        micros: 20,
+                    },
                 )) => {
-                    let candidate = current_candidate.unwrap();
+                    assert_eq!(current_candidate, Some(candidate));
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
                             XtalDutyPassCompletion::Search(
@@ -1683,14 +1704,12 @@ mod tests {
                     let component = i64::from(0x80 - candidate);
                     transition
                         .advance(XtalDutyCalibrationCompletion::Pass(
-                            XtalDutyPassCompletion::Search(
-                                XtalDutySearchCompletion::SignalPower(
-                                    complete_signal_power_action(
-                                        action,
-                                        component.wrapping_mul(component),
-                                    ),
+                            XtalDutyPassCompletion::Search(XtalDutySearchCompletion::SignalPower(
+                                complete_signal_power_action(
+                                    action,
+                                    component.wrapping_mul(component),
                                 ),
-                            ),
+                            )),
                         ))
                         .unwrap();
                 }
@@ -1719,15 +1738,18 @@ mod tests {
         let mut measurements = 0;
         loop {
             match transition.action() {
-                XtalDutySearchAction::WriteCandidate(candidate) => {
+                XtalDutySearchAction::WriteCandidate { address, candidate } => {
                     writes += 1;
                     transition
-                        .advance(XtalDutySearchCompletion::CandidateWritten(candidate))
+                        .advance(XtalDutySearchCompletion::CandidateWritten { address, candidate })
                         .unwrap();
                 }
-                XtalDutySearchAction::DelayMicros(20) => {
+                XtalDutySearchAction::DelayMicros {
+                    candidate,
+                    micros: 20,
+                } => {
                     delays += 1;
-                    let candidate = 0x20 + delays - 1;
+                    assert_eq!(candidate, 0x20 + delays - 1);
                     transition
                         .advance(XtalDutySearchCompletion::DelayElapsed { candidate })
                         .unwrap();
@@ -1736,10 +1758,7 @@ mod tests {
                     measurements += 1;
                     let candidate = 0x20 + writes - 1;
                     let component = i64::from(0x80 - candidate);
-                    complete_search_measurement(
-                        &mut transition,
-                        component.wrapping_mul(component),
-                    );
+                    complete_search_measurement(&mut transition, component.wrapping_mul(component));
                 }
                 XtalDutySearchAction::Complete(outcome) => {
                     assert_eq!(
@@ -1762,8 +1781,12 @@ mod tests {
     #[test]
     fn each_outlier_uses_at_most_two_identity_bound_replacements() {
         let mut transition = XtalDutySearchTransition::new();
+        let duty_address = PhyI2cAddress::new(0x61, 0x0a).unwrap();
         transition
-            .advance(XtalDutySearchCompletion::CandidateWritten(0x20))
+            .advance(XtalDutySearchCompletion::CandidateWritten {
+                address: duty_address,
+                candidate: 0x20,
+            })
             .unwrap();
         transition
             .advance(XtalDutySearchCompletion::DelayElapsed { candidate: 0x20 })
@@ -1776,7 +1799,10 @@ mod tests {
             XtalDutySearchAction::SignalPower(_)
         ));
         assert_eq!(
-            transition.advance(XtalDutySearchCompletion::CandidateWritten(0x21)),
+            transition.advance(XtalDutySearchCompletion::CandidateWritten {
+                address: duty_address,
+                candidate: 0x21,
+            }),
             Err(XtalDutySearchTransitionError::WrongCompletion)
         );
         complete_search_measurement(&mut transition, 200);
@@ -1787,7 +1813,10 @@ mod tests {
         complete_search_measurement(&mut transition, 64);
         assert_eq!(
             transition.action(),
-            XtalDutySearchAction::WriteCandidate(0x21)
+            XtalDutySearchAction::WriteCandidate {
+                address: duty_address,
+                candidate: 0x21,
+            }
         );
     }
 

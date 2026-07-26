@@ -515,8 +515,13 @@ pub enum OpenI2cXpdAction {
     ConfigurePreDelay,
     DelayMicros(u32),
     ConfigurePowerAndPulse,
-    CheckSdmDeadline { maximum_cycles: u32 },
-    ReadSdmSample { address: PhyI2cAddress },
+    CheckSdmDeadline {
+        started_at_cycle: u32,
+        maximum_cycles: u32,
+    },
+    ReadSdmSample {
+        address: PhyI2cAddress,
+    },
     Complete(OpenI2cXpdOutcome),
 }
 
@@ -524,7 +529,7 @@ pub enum OpenI2cXpdAction {
 pub enum OpenI2cXpdCompletion {
     PreDelayConfigured,
     DelayElapsed,
-    PowerAndPulseConfigured,
+    PowerAndPulseConfigured { started_at_cycle: u32 },
     DeadlineObserved { expired: bool },
     SdmSample(u8),
 }
@@ -540,8 +545,8 @@ enum OpenI2cXpdStep {
     PreDelayConfiguration,
     Delay,
     PowerAndPulseConfiguration,
-    DeadlineCheck,
-    SdmSample,
+    DeadlineCheck { started_at_cycle: u32 },
+    SdmSample { started_at_cycle: u32 },
     Complete(OpenI2cXpdOutcome),
 }
 
@@ -581,10 +586,13 @@ impl OpenI2cXpdTransition {
             OpenI2cXpdStep::PreDelayConfiguration => OpenI2cXpdAction::ConfigurePreDelay,
             OpenI2cXpdStep::Delay => OpenI2cXpdAction::DelayMicros(100),
             OpenI2cXpdStep::PowerAndPulseConfiguration => OpenI2cXpdAction::ConfigurePowerAndPulse,
-            OpenI2cXpdStep::DeadlineCheck => OpenI2cXpdAction::CheckSdmDeadline {
-                maximum_cycles: PHY_I2C_SDM_DEADLINE_CYCLES,
-            },
-            OpenI2cXpdStep::SdmSample => OpenI2cXpdAction::ReadSdmSample {
+            OpenI2cXpdStep::DeadlineCheck { started_at_cycle } => {
+                OpenI2cXpdAction::CheckSdmDeadline {
+                    started_at_cycle,
+                    maximum_cycles: PHY_I2C_SDM_DEADLINE_CYCLES,
+                }
+            }
+            OpenI2cXpdStep::SdmSample { .. } => OpenI2cXpdAction::ReadSdmSample {
                 address: SDM_SAMPLE,
             },
             OpenI2cXpdStep::Complete(outcome) => OpenI2cXpdAction::Complete(outcome),
@@ -608,22 +616,25 @@ impl OpenI2cXpdTransition {
             }
             (
                 OpenI2cXpdStep::PowerAndPulseConfiguration,
-                OpenI2cXpdCompletion::PowerAndPulseConfigured,
-            ) => OpenI2cXpdStep::DeadlineCheck,
+                OpenI2cXpdCompletion::PowerAndPulseConfigured { started_at_cycle },
+            ) => OpenI2cXpdStep::DeadlineCheck { started_at_cycle },
             (
-                OpenI2cXpdStep::DeadlineCheck,
+                OpenI2cXpdStep::DeadlineCheck { .. },
                 OpenI2cXpdCompletion::DeadlineObserved { expired: true },
             ) => OpenI2cXpdStep::Complete(OpenI2cXpdOutcome::TimedOut),
             (
-                OpenI2cXpdStep::DeadlineCheck,
+                OpenI2cXpdStep::DeadlineCheck { started_at_cycle },
                 OpenI2cXpdCompletion::DeadlineObserved { expired: false },
-            ) => OpenI2cXpdStep::SdmSample,
-            (OpenI2cXpdStep::SdmSample, OpenI2cXpdCompletion::SdmSample(value)) => {
+            ) => OpenI2cXpdStep::SdmSample { started_at_cycle },
+            (
+                OpenI2cXpdStep::SdmSample { started_at_cycle },
+                OpenI2cXpdCompletion::SdmSample(value),
+            ) => {
                 self.samples = self.samples.saturating_add(1);
                 if value == PHY_I2C_SDM_STABLE_VALUE {
                     OpenI2cXpdStep::Complete(OpenI2cXpdOutcome::Stable)
                 } else {
-                    OpenI2cXpdStep::DeadlineCheck
+                    OpenI2cXpdStep::DeadlineCheck { started_at_cycle }
                 }
             }
             (OpenI2cXpdStep::Complete(_), _) => {
@@ -2723,6 +2734,7 @@ mod tests {
         RfpllChargePumpOutcome, RfpllChargePumpTransition, Sar2InitAction, Sar2InitCompletion,
         Sar2InitTransition, PHY_I2C_MASTER_COMMAND_COUNT,
     };
+    use crate::phy_cold::PhyColdExternalBinding;
     use crate::phy_dc_iq::{
         PhyDcIqAccumulatorSnapshot, PhyDcIqAction, PhyDcIqCompletion, PhyDcIqReadinessSnapshot,
     };
@@ -3014,7 +3026,14 @@ mod tests {
         let mut current_candidate = None;
         let mut rfpll_cap_status_reads = 0;
         loop {
-            match transition.action() {
+            let outer_action = transition.action();
+            if !matches!(outer_action, PhyRfInitPrefixAction::Complete(_)) {
+                assert!(
+                    PhyColdExternalBinding::lower(outer_action).is_ok(),
+                    "reachable crystal-duty action has no external lowering: {outer_action:?}"
+                );
+            }
+            match outer_action {
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::ReadInitialDuty {
                     address,
                     ..
@@ -3075,21 +3094,27 @@ mod tests {
                         .unwrap();
                 }
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
-                    XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate(candidate)),
+                    XtalDutyPassAction::Search(XtalDutySearchAction::WriteCandidate {
+                        address,
+                        candidate,
+                    }),
                 )) => {
                     current_candidate = Some(candidate);
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
-                                XtalDutySearchCompletion::CandidateWritten(candidate),
+                                XtalDutySearchCompletion::CandidateWritten { address, candidate },
                             )),
                         ))
                         .unwrap();
                 }
                 PhyRfInitPrefixAction::XtalDuty(XtalDutyCalibrationAction::Pass(
-                    XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros(20)),
+                    XtalDutyPassAction::Search(XtalDutySearchAction::DelayMicros {
+                        candidate,
+                        micros: 20,
+                    }),
                 )) => {
-                    let candidate = current_candidate.unwrap();
+                    assert_eq!(current_candidate, Some(candidate));
                     transition
                         .advance(PhyRfInitPrefixCompletion::XtalDuty(
                             XtalDutyCalibrationCompletion::Pass(XtalDutyPassCompletion::Search(
@@ -3921,7 +3946,9 @@ mod tests {
             .unwrap();
         transition
             .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
-                OpenI2cXpdCompletion::PowerAndPulseConfigured,
+                OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                    started_at_cycle: 0x1234_5678,
+                },
             ))
             .unwrap();
         transition
@@ -4491,7 +4518,9 @@ mod tests {
             .unwrap();
         transition
             .advance(PhyRfInitPrefixCompletion::OpenI2cXpd(
-                OpenI2cXpdCompletion::PowerAndPulseConfigured,
+                OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                    started_at_cycle: 0x1234_5678,
+                },
             ))
             .unwrap();
         transition
@@ -4529,11 +4558,14 @@ mod tests {
             OpenI2cXpdAction::ConfigurePowerAndPulse
         );
         transition
-            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                started_at_cycle: 0x1234_5678,
+            })
             .unwrap();
         assert_eq!(
             transition.action(),
             OpenI2cXpdAction::CheckSdmDeadline {
+                started_at_cycle: 0x1234_5678,
                 maximum_cycles: 9_999
             }
         );
@@ -4543,7 +4575,9 @@ mod tests {
     fn open_i2c_xpd_samples_only_after_deadline_and_i2c_edges() {
         let mut transition = OpenI2cXpdTransition::new(false);
         transition
-            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                started_at_cycle: 0xffff_ff00,
+            })
             .unwrap();
         transition
             .advance(OpenI2cXpdCompletion::DeadlineObserved { expired: false })
@@ -4561,7 +4595,10 @@ mod tests {
         assert_eq!(transition.samples(), 1);
         assert!(matches!(
             transition.action(),
-            OpenI2cXpdAction::CheckSdmDeadline { .. }
+            OpenI2cXpdAction::CheckSdmDeadline {
+                started_at_cycle: 0xffff_ff00,
+                ..
+            }
         ));
 
         transition
@@ -4585,7 +4622,9 @@ mod tests {
     fn open_i2c_xpd_deadline_is_a_terminal_outcome() {
         let mut transition = OpenI2cXpdTransition::new(false);
         transition
-            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured)
+            .advance(OpenI2cXpdCompletion::PowerAndPulseConfigured {
+                started_at_cycle: 7,
+            })
             .unwrap();
         transition
             .advance(OpenI2cXpdCompletion::DeadlineObserved { expired: true })

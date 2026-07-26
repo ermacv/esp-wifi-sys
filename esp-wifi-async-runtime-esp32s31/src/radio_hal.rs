@@ -79,6 +79,7 @@ const PHY_IQ_EST_READY_ADDRESS: usize = 0x2010_047c;
 const PHY_IQ_EST_ACTIVITY_ADDRESS: usize = 0x2010_08d0;
 const PHY_PBUS_SETTLE_CONDITION_ADDRESS: usize = 0x2010_9c18;
 const PHY_PBUS_WORK_MODE_PULSE_ADDRESS: usize = 0x2010_702c;
+const PHY_SDM_CYCLE_COUNTER_ADDRESS: usize = 0x2010_d800;
 const PHY_I2C_CLOCK_SELECTION_0_ADDRESS: usize = 0x2010_f824;
 const PHY_I2C_CLOCK_SELECTION_1_ADDRESS: usize = 0x2010_f828;
 const PHY_I2C_CLOCK_SELECTION_2_ADDRESS: usize = 0x2010_f82c;
@@ -970,6 +971,17 @@ pub(crate) unsafe fn configure_phy_pbus_work_mode_pulse() {
 pub(crate) unsafe fn clear_phy_pbus_work_mode_pulse() {
     let pulse = PHY_PBUS_WORK_MODE_PULSE_ADDRESS as *mut u32;
     pulse.write_volatile(without_phy_pbus_work_mode_pulse(pulse.read_volatile()));
+}
+
+/// Sample the free-running counter used by the ROM SDM-stability deadline.
+///
+/// Complete rev0 ROM `phy_wait_i2c_sdm_stable` at `0x2f82_3e76` samples
+/// `0x2010_d800` before and after each independently completed PHY-I2C read.
+/// This leaf performs exactly one volatile read; deadline ownership and
+/// wraparound arithmetic stay in the Rust cold-init state machine.
+#[cfg(target_arch = "riscv32")]
+pub(crate) unsafe fn read_phy_sdm_cycle_counter() -> u32 {
+    (PHY_SDM_CYCLE_COUNTER_ADDRESS as *const u32).read_volatile()
 }
 
 /// Select the two recovered TX-clock enable bits.
