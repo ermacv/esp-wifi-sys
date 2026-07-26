@@ -44,7 +44,6 @@ unsafe extern "C" {
     ) -> i32;
     fn chm_return_home_channel();
     fn __real_chm_return_home_channel();
-    fn ic_set_current_channel(channel: *const u8);
     fn hal_mac_set_csi_cbw(cbw: u32);
     fn ic_mac_init() -> i32;
 }
@@ -329,8 +328,13 @@ unsafe fn begin(channel: [u8; 2], completion: Completion) -> Result<(), ChannelS
     state.completion = completion;
     state.started = state.started.wrapping_add(1);
 
-    ic_set_current_channel(state.channel.as_ptr());
-
+    // The pinned `ic_set_current_channel` wrapper only forwards to the
+    // 26-byte `wDev_SetCurChannel` body, which copies these two bytes to
+    // `wDevCtrl[0x2c..=0x2d]`. No strict-runtime reader consumes that legacy
+    // cache. The requested selector already belongs to this state machine,
+    // while `ChannelState::current` is published only after PHY/MAC
+    // programming completes below; keep those two meanings explicit instead
+    // of maintaining a second C-owned copy.
     g_mac_deinit_count = g_mac_deinit_count.wrapping_add(1);
     let status = MAC_CONTROL.read_volatile();
     g_mac_deinit_rxing = ((status >> 14) & 1) as u8;
