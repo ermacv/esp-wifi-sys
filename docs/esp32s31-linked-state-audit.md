@@ -16,6 +16,7 @@
 - cold-PHY archive functions: 80 definitions / 21596 bytes
 - strict runtime direct ROM frontier: 3 functions / 302 bytes; unresolved externals: 0
 - cold-PHY direct ROM frontier: 119 functions / 22816 bytes; unresolved externals: 2
+- focused Wi-Fi full-cal radio graph: 65 archive definitions / 16622 bytes; 102 direct ROM functions / 11578 bytes; unresolved externals: 1
 - live mutable blob globals reached by strict leaves: 4 symbols / 1412 bytes
 - live mutable blob globals reached from `register_chipv7_phy`: 1 symbols / 508 bytes
 - ROM-ABI mutable indirection cells reached by strict leaves: 3 cells / 12 cell bytes
@@ -252,6 +253,188 @@ These symbols are called by the cold-PHY archive graph but have no definition in
 | `phy_set_channel_rfpll_freq` | 80 | `0x2f825c38` |
 | `phy_set_loopback_gain` | 116 | `0x2f82448a` |
 | `phy_set_mac_data` | 74 | `0x2f823fce` |
+| `phy_set_pbus_mem` | 384 | `0x2f82479e` |
+| `phy_set_rf_freq_offset` | 16 | `0x2f825c10` |
+| `phy_set_rfpll_freq` | 118 | `0x2f825b9a` |
+| `phy_set_rxclk_en` | 32 | `0x2f827cf6` |
+| `phy_set_txcap_reg` | 68 | `0x2f82a400` |
+| `phy_set_txclk_en` | 36 | `0x2f827cd2` |
+| `phy_tsens_temp_read` | 50 | `0x2f825eec` |
+| `phy_tsens_temp_read_local` | 94 | `0x2f825f1e` |
+| `phy_tx_pwctrl_bg_init` | 30 | `0x2f8267f6` |
+| `phy_txbbgain_to_index` | 50 | `0x2f826ac8` |
+| `phy_txcal_work_mode` | 30 | `0x2f824554` |
+| `phy_txdc_cal` | 476 | `0x2f82abbe` |
+| `phy_txiq_set_reg` | 104 | `0x2f827c16` |
+| `phy_wait_i2c_sdm_stable` | 74 | `0x2f823e76` |
+| `phy_wifi_agc_sat_gain` | 12 | `0x2f827db0` |
+| `phy_wifi_enable_set` | 24 | `0x2f828220` |
+| `phy_wr_rf_freq_mem` | 82 | `0x2f824bf4` |
+| `phy_write_gain_mem` | 42 | `0x2f8274f0` |
+| `phy_write_pll_cap` | 64 | `0x2f8259f2` |
+| `rtc_clk_xtal_freq_get` | - | unresolved external |
+
+## Focused Wi-Fi full-calibration radio graph
+
+This is the porting workset for the primary no-NVS Wi-Fi profile. Traversal stops before vendor logging/formatting and calibration-record check, backup, or recovery. Those omitted boundaries are deleted policy, not replacement targets. The table still includes BT/coexistence-named descendants reached unconditionally by the original parent; they remain candidates until register evidence or hardware qualification proves that a Wi-Fi-only parent may omit them.
+
+Omitted boundaries: `phy_printf`, `syslog`, `phy_get_rf_cal_version`, `phy_rfcal_data_check_new`, `phy_rf_cal_data_backup_new`, `phy_rf_cal_data_recovery_new`.
+
+| function | archive text bytes | archive owner |
+|---|---:|---|
+| `phy_11p_set` | 18 | `libphy.a[phy_feature.o]` |
+| `phy_bb_init` | 362 | `libphy.a[phy_init.o]` |
+| `phy_bb_txpwr_track` | 244 | `libphy.a[phy_reg.o]` |
+| `phy_bias_reg_set` | 48 | `libphy.a[phy_i2c.o]` |
+| `phy_bt_rx_mx_dgain` | 42 | `libphy.a[phy_rx_cal.o]` |
+| `phy_bt_set_tx_gain_new` | 102 | `libphy.a[phy_tx_gain.o]` |
+| `phy_bt_tx_gain_init` | 90 | `libphy.a[phy_tx_gain.o]` |
+| `phy_bt_tx_pwctrl_init` | 430 | `libphy.a[phy_tx_cal.o]` |
+| `phy_bt_txdc_cal_new` | 254 | `libphy.a[phy_tx_cal.o]` |
+| `phy_chan14_mic_cfg_new` | 70 | `libphy.a[phy_basic.o]` |
+| `phy_check_rx_sat` | 118 | `libphy.a[phy_rx_cal.o]` |
+| `phy_chip_set_chan` | 270 | `libphy.a[phy_rfpll.o]` |
+| `phy_chip_set_chan_misc_new` | 36 | `libphy.a[phy_rfpll.o]` |
+| `phy_chip_set_chan_offset` | 124 | `libphy.a[phy_rfpll.o]` |
+| `phy_dc_mem_clr` | 28 | `libphy.a[phy_reg.o]` |
+| `phy_fe_reg_update` | 50 | `libphy.a[phy_reg.o]` |
+| `phy_freq_get_i2c_data` | 520 | `libphy.a[phy_hw_freq.o]` |
+| `phy_freq_i2c_data_write` | 50 | `libphy.a[phy_hw_freq.o]` |
+| `phy_get_rf_freq_init` | 472 | `libphy.a[phy_hw_freq.o]` |
+| `phy_get_romfunc_addr` | 152 | `libphy.a[phy_init.o]` |
+| `phy_get_rxbb_dc_new` | 46 | `libphy.a[phy_rx_gain.o]` |
+| `phy_get_temp_init` | 76 | `libphy.a[phy_tsens.o]` |
+| `phy_get_tsens_value` | 8 | `libphy.a[phy_tsens.o]` |
+| `phy_get_xtal_duty` | 54 | `libphy.a[phy_rx_cal.o]` |
+| `phy_get_xtal_freq` | 64 | `libphy.a[phy_init.o]` |
+| `phy_i2c_enter_critical` | 2 | `libphy.a[phy_i2c.o]` |
+| `phy_i2c_exit_critical` | 2 | `libphy.a[phy_i2c.o]` |
+| `phy_i2c_init1` | 534 | `libphy.a[phy_i2c.o]` |
+| `phy_i2c_master_cmd_mem_init` | 1470 | `libphy.a[phy_i2c.o]` |
+| `phy_open_i2c_xpd_new` | 172 | `libphy.a[phy_reg.o]` |
+| `phy_pbus_rx_dco_cal_1step_new` | 1186 | `libphy.a[phy_rx_cal.o]` |
+| `phy_rc_cal_init` | 54 | `libphy.a[phy_init.o]` |
+| `phy_reg_update_new` | 112 | `libphy.a[phy_init.o]` |
+| `phy_rf_init` | 290 | `libphy.a[phy_init.o]` |
+| `phy_rfrx_gain_index_new` | 116 | `libphy.a[phy_rx_cal.o]` |
+| `phy_rx_table_init` | 124 | `libphy.a[phy_rx_gain.o]` |
+| `phy_rxdc_est_delta` | 218 | `libphy.a[phy_rx_cal.o]` |
+| `phy_rxdc_fine_delta` | 272 | `libphy.a[phy_rx_cal.o]` |
+| `phy_rxiq_cal_init` | 408 | `libphy.a[phy_rx_gain.o]` |
+| `phy_set_chan_freq_hw_init` | 40 | `libphy.a[phy_hw_freq.o]` |
+| `phy_set_ftm_en` | 20 | `libphy.a[phy_reg.o]` |
+| `phy_set_lb_txiq_new` | 50 | `libphy.a[phy_rx_cal.o]` |
+| `phy_set_most_tpw_new` | 26 | `libphy.a[phy_feature.o]` |
+| `phy_set_rx_gain_cal_dc_new` | 716 | `libphy.a[phy_rx_cal.o]` |
+| `phy_set_rx_gain_cal_iq_new` | 606 | `libphy.a[phy_rx_cal.o]` |
+| `phy_set_rx_gain_table` | 650 | `libphy.a[phy_rx_gain.o]` |
+| `phy_set_tsens_power` | 28 | `libphy.a[phy_tsens.o]` |
+| `phy_set_tx_cfr_mem` | 118 | `libphy.a[phy_tx_gain.o]` |
+| `phy_set_tx_gain_mem_new` | 304 | `libphy.a[phy_tx_gain.o]` |
+| `phy_start_tx_tone_step_new` | 194 | `libphy.a[phy_reg.o]` |
+| `phy_stop_tx_tone_new` | 44 | `libphy.a[phy_reg.o]` |
+| `phy_tsens_read_init` | 54 | `libphy.a[phy_tsens.o]` |
+| `phy_tx_cap_init` | 230 | `libphy.a[phy_tx_cal.o]` |
+| `phy_tx_pwctrl_init` | 154 | `libphy.a[phy_tx_cal.o]` |
+| `phy_tx_pwctrl_init_cal_new` | 396 | `libphy.a[phy_tx_cal.o]` |
+| `phy_txdc_cal_init` | 272 | `libphy.a[phy_tx_cal.o]` |
+| `phy_txdc_cal_pwdet_init` | 520 | `libphy.a[phy_tx_cal.o]` |
+| `phy_txdc_cal_pwdet_new` | 948 | `libphy.a[phy_tx_cal.o]` |
+| `phy_txiq_cal_init` | 332 | `libphy.a[phy_tx_cal.o]` |
+| `phy_wifi_set_tx_gain_new` | 114 | `libphy.a[phy_tx_gain.o]` |
+| `phy_wr_rx_gain_mem_new` | 454 | `libphy.a[phy_rx_gain.o]` |
+| `phy_xtal_duty_cal` | 914 | `libphy.a[phy_rx_cal.o]` |
+| `phy_xtal_duty_cal_init` | 116 | `libphy.a[phy_rx_cal.o]` |
+| `register_chipv7_phy` | 486 | `libphy.a[phy_init.o]` |
+| `register_chipv7_phy_init_param` | 148 | `libphy.a[phy_init.o]` |
+
+### Focused Wi-Fi direct ROM/external frontier
+
+| function | ROM text bytes | ROM address / status |
+|---|---:|---|
+| `__divdi3` | 926 | `0x2f81ce6e` |
+| `ets_delay_us` | 28 | `0x2f8036b8` |
+| `memcpy` | 224 | `0x2f80d260` |
+| `memset` | 168 | `0x2f8220c6` |
+| `phy_abs_temp` | 10 | `0x2f825fa2` |
+| `phy_adc_rate_set` | 74 | `0x2f82a6d2` |
+| `phy_bb_agc_reg_update` | 166 | `0x2f82860e` |
+| `phy_bb_cbw_chan_cfg` | 116 | `0x2f828238` |
+| `phy_bbpll_cal` | 28 | `0x2f827dbc` |
+| `phy_bt_bb_to_index` | 28 | `0x2f826b36` |
+| `phy_bt_index_to_bb` | 28 | `0x2f826b1a` |
+| `phy_chan_to_freq` | 38 | `0x2f825788` |
+| `phy_dcode_cal_init` | 128 | `0x2f82b8da` |
+| `phy_dis_hw_set_freq` | 20 | `0x2f824fb2` |
+| `phy_disable_agc` | 16 | `0x2f827460` |
+| `phy_en_hw_set_freq` | 20 | `0x2f824f9e` |
+| `phy_en_pwdet` | 38 | `0x2f8263da` |
+| `phy_enable_agc` | 40 | `0x2f827470` |
+| `phy_encode_i2c_master` | 10 | `0x2f82a81a` |
+| `phy_fe_reg_init` | 246 | `0x2f827740` |
+| `phy_filter_dcap_set` | 446 | `0x2f82a476` |
+| `phy_force_txrx_off` | 102 | `0x2f827bb0` |
+| `phy_freq_correct` | 248 | `0x2f827fae` |
+| `phy_freq_i2c_write_set` | 326 | `0x2f824d34` |
+| `phy_freq_module_resetn` | 28 | `0x2f824abe` |
+| `phy_freq_reg_init` | 96 | `0x2f824c46` |
+| `phy_gen_rx_gain_table` | 312 | `0x2f826814` |
+| `phy_get_data_sat` | 16 | `0x2f826024` |
+| `phy_get_iq_value` | 54 | `0x2f8295f2` |
+| `phy_get_power_atten` | 278 | `0x2f82b0c8` |
+| `phy_get_rfcal_rxiq_data` | 260 | `0x2f828dda` |
+| `phy_get_romfuncs` | 10 | `0x2f824a82` |
+| `phy_get_rx_sig_pwr` | 118 | `0x2f829ea2` |
+| `phy_i2c_bbpll_set` | 84 | `0x2f82a67e` |
+| `phy_i2c_clk_sel` | 104 | `0x2f829f1c` |
+| `phy_i2c_master_fill` | 14 | `0x2f82a824` |
+| `phy_i2c_master_mem_txcap` | 36 | `0x2f82a832` |
+| `phy_i2c_master_reset` | 116 | `0x2f8260d0` |
+| `phy_i2c_rc_cal_set` | 74 | `0x2f82a634` |
+| `phy_i2c_readReg` | 4 | `0x2f82a30a` |
+| `phy_i2c_readReg_Mask` | 44 | `0x2f82a37c` |
+| `phy_i2c_sar2_init_code` | 50 | `0x2f82a444` |
+| `phy_i2c_txrate_init` | 56 | `0x2f8286d0` |
+| `phy_i2c_writeReg` | 4 | `0x2f82a378` |
+| `phy_i2c_writeReg_Mask` | 88 | `0x2f82a3a8` |
+| `phy_i2cmst_reg_init` | 34 | `0x2f8276c4` |
+| `phy_index_to_txbbgain` | 32 | `0x2f826afa` |
+| `phy_iq_corr_enable` | 36 | `0x2f827d8c` |
+| `phy_iq_est_disable` | 44 | `0x2f828a88` |
+| `phy_iq_est_enable` | 180 | `0x2f8289d4` |
+| `phy_loopback_mode_en` | 44 | `0x2f825ff8` |
+| `phy_mhz2ieee` | 60 | `0x2f82574c` |
+| `phy_open_fe_bb_clk` | 56 | `0x2f823ec0` |
+| `phy_param_addr` | 10 | `0x2f824a8c` |
+| `phy_pbus_clear_reg` | 144 | `0x2f824572` |
+| `phy_pbus_debugmode` | 6 | `0x2f8242a6` |
+| `phy_pbus_force_test` | 66 | `0x2f824228` |
+| `phy_pbus_rd` | 60 | `0x2f82426a` |
+| `phy_pbus_rx_dco_cal` | 552 | `0x2f828f44` |
+| `phy_pbus_set_dco` | 62 | `0x2f8243d0` |
+| `phy_pbus_set_rxgain` | 92 | `0x2f8242b2` |
+| `phy_pbus_workmode` | 6 | `0x2f8242ac` |
+| `phy_pbus_xpd_rx_off` | 38 | `0x2f82430e` |
+| `phy_pbus_xpd_rx_on` | 98 | `0x2f824334` |
+| `phy_pbus_xpd_tx_off` | 58 | `0x2f824396` |
+| `phy_pbus_xpd_tx_on` | 124 | `0x2f82440e` |
+| `phy_pwdet_code_cal` | 76 | `0x2f82b432` |
+| `phy_pwdet_ref_code` | 118 | `0x2f82b3bc` |
+| `phy_pwdet_reg_init` | 92 | `0x2f82634a` |
+| `phy_rc_cal` | 264 | `0x2f826242` |
+| `phy_read_pll_cap` | 52 | `0x2f825a32` |
+| `phy_reg_init` | 82 | `0x2f823ef8` |
+| `phy_rfcal_pwrctrl` | 462 | `0x2f82b586` |
+| `phy_rfcal_txcap` | 264 | `0x2f82b47e` |
+| `phy_rfcal_txiq` | 306 | `0x2f82b1de` |
+| `phy_rfpll_chgp_cal` | 244 | `0x2f825cd4` |
+| `phy_rfpll_set_freq` | 162 | `0x2f8258ca` |
+| `phy_rfrx_sat_rst` | 66 | `0x2f828944` |
+| `phy_rxdc_est_min` | 152 | `0x2f82916c` |
+| `phy_set_chan_reg` | 80 | `0x2f826080` |
+| `phy_set_channel_dcode` | 54 | `0x2f82b95a` |
+| `phy_set_channel_rfpll_freq` | 80 | `0x2f825c38` |
+| `phy_set_loopback_gain` | 116 | `0x2f82448a` |
 | `phy_set_pbus_mem` | 384 | `0x2f82479e` |
 | `phy_set_rf_freq_offset` | 16 | `0x2f825c10` |
 | `phy_set_rfpll_freq` | 118 | `0x2f825b9a` |

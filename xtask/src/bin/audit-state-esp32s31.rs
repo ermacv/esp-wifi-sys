@@ -70,6 +70,18 @@ const ROM_ABI_BACKINGS: &[(&str, &str)] = &[
 const RUST_OWNED_ABI_DATA_ALIASES: &[(&str, &str, u64)] =
     &[("g_phyFuns", "wifi_strict_phy_rom_function_table_binding", 4)];
 
+// The primary deblob profile performs a full cold calibration and owns any
+// future calibration record in Rust. It deliberately omits vendor formatting,
+// logging, and calibration-record persistence rather than porting them.
+const WIFI_FULL_CAL_OMITTED_COLD_BOUNDARIES: &[&str] = &[
+    "phy_printf",
+    "syslog",
+    "phy_get_rf_cal_version",
+    "phy_rfcal_data_check_new",
+    "phy_rf_cal_data_backup_new",
+    "phy_rf_cal_data_recovery_new",
+];
+
 #[derive(Clone)]
 struct Symbol {
     address: u64,
@@ -185,6 +197,11 @@ fn build_report(
     let rust_owned_data_aliases = validate_rust_owned_data_aliases(&final_symbols, &sections)?;
     let reachable = reachable_vendor_functions(&inventory.calls);
     let cold_phy_reachable = reachable_from_roots(&inventory.calls, &["register_chipv7_phy"], &[]);
+    let wifi_full_cal_reachable = reachable_from_roots(
+        &inventory.calls,
+        &["register_chipv7_phy"],
+        WIFI_FULL_CAL_OMITTED_COLD_BOUNDARIES,
+    );
     let runtime_archive_functions = archive_function_rows(
         &reachable,
         &inventory.function_owners,
@@ -205,6 +222,16 @@ fn build_report(
         .filter(|name| !inventory.function_owners.contains_key(*name))
         .cloned()
         .collect::<Vec<_>>();
+    let wifi_full_cal_archive_functions = archive_function_rows(
+        &wifi_full_cal_reachable,
+        &inventory.function_owners,
+        &inventory.function_sizes,
+    );
+    let wifi_full_cal_external_frontier = wifi_full_cal_reachable
+        .iter()
+        .filter(|name| !inventory.function_owners.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
     let runtime_archive_function_bytes = runtime_archive_functions
         .iter()
         .map(|(_, _, size)| size)
@@ -213,14 +240,22 @@ fn build_report(
         .iter()
         .map(|(_, _, size)| size)
         .sum::<u64>();
+    let wifi_full_cal_archive_function_bytes = wifi_full_cal_archive_functions
+        .iter()
+        .map(|(_, _, size)| size)
+        .sum::<u64>();
     let (runtime_rom_frontier_count, runtime_rom_frontier_bytes) =
         rom_frontier_metrics(&runtime_external_frontier, &rom_symbols);
     let (cold_phy_rom_frontier_count, cold_phy_rom_frontier_bytes) =
         rom_frontier_metrics(&cold_phy_external_frontier, &rom_symbols);
+    let (wifi_full_cal_rom_frontier_count, wifi_full_cal_rom_frontier_bytes) =
+        rom_frontier_metrics(&wifi_full_cal_external_frontier, &rom_symbols);
     let runtime_unresolved_external_count =
         runtime_external_frontier.len() - runtime_rom_frontier_count;
     let cold_phy_unresolved_external_count =
         cold_phy_external_frontier.len() - cold_phy_rom_frontier_count;
+    let wifi_full_cal_unresolved_external_count =
+        wifi_full_cal_external_frontier.len() - wifi_full_cal_rom_frontier_count;
     let mut reverse_references = reverse_references(&inventory.references);
     let pointer_backings = augment_pointer_backing_references(
         &mut reverse_references,
@@ -468,6 +503,17 @@ fn build_report(
     pushln(
         &mut report,
         &format!(
+            "- focused Wi-Fi full-cal radio graph: {} archive definitions / {} bytes; {} direct ROM functions / {} bytes; unresolved externals: {}",
+            wifi_full_cal_archive_functions.len(),
+            wifi_full_cal_archive_function_bytes,
+            wifi_full_cal_rom_frontier_count,
+            wifi_full_cal_rom_frontier_bytes,
+            wifi_full_cal_unresolved_external_count
+        ),
+    );
+    pushln(
+        &mut report,
+        &format!(
             "- live mutable blob globals reached by strict leaves: {} symbols / {} bytes",
             runtime_globals.len(),
             runtime_bytes
@@ -607,6 +653,42 @@ fn build_report(
     );
     pushln(&mut report, "|---|---:|---|");
     push_frontier_rows(&mut report, &cold_phy_external_frontier, &rom_symbols);
+
+    pushln(&mut report, "");
+    pushln(&mut report, "## Focused Wi-Fi full-calibration radio graph");
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "This is the porting workset for the primary no-NVS Wi-Fi profile. Traversal stops before vendor logging/formatting and calibration-record check, backup, or recovery. Those omitted boundaries are deleted policy, not replacement targets. The table still includes BT/coexistence-named descendants reached unconditionally by the original parent; they remain candidates until register evidence or hardware qualification proves that a Wi-Fi-only parent may omit them.",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        &format!(
+            "Omitted boundaries: `{}`.",
+            WIFI_FULL_CAL_OMITTED_COLD_BOUNDARIES.join("`, `")
+        ),
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "| function | archive text bytes | archive owner |",
+    );
+    pushln(&mut report, "|---|---:|---|");
+    push_function_rows(&mut report, &wifi_full_cal_archive_functions);
+
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "### Focused Wi-Fi direct ROM/external frontier",
+    );
+    pushln(&mut report, "");
+    pushln(
+        &mut report,
+        "| function | ROM text bytes | ROM address / status |",
+    );
+    pushln(&mut report, "|---|---:|---|");
+    push_frontier_rows(&mut report, &wifi_full_cal_external_frontier, &rom_symbols);
 
     pushln(&mut report, "");
     pushln(

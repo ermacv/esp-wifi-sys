@@ -219,6 +219,66 @@ ROM-ABI cells, strict static storage, the vendor call graph, cold PHY state, or
 other linked mutable blob state; every ownership transfer may reduce those
 bounds.
 
+## Focused radio-only porting set
+
+The complete source graph is intentionally not the porting backlog. The
+primary profile performs a full cold calibration, has no NVS dependency, and
+does not retain vendor diagnostic output. Stopping traversal before
+`phy_printf`, `syslog`, `phy_get_rf_cal_version`,
+`phy_rfcal_data_check_new`, `phy_rf_cal_data_backup_new`, and
+`phy_rf_cal_data_recovery_new` removes 15 archive definitions / 4,974 bytes
+and 17 direct ROM definitions / 11,238 bytes. The removed archive closure is
+the printf formatter plus calibration-record check/copy helpers. The removed
+ROM closure is floating-point formatting plus `phy_byte_to_word` and
+`phy_set_mac_data`. There is no NVS function in the resulting graph.
+
+The resulting raw Wi-Fi full-calibration graph has 65 archive definitions /
+16,622 bytes and 102 direct ROM definitions / 11,578 bytes. These are still
+source-oracle counts, not “functions left to rewrite”:
+
+- `memcpy`, `memset`, and `__divdi3` become ordinary Rust/core operations;
+- `ets_delay_us` becomes a Rust async timer edge, never a copied delay body;
+- `rtc_clk_xtal_freq_get` is an explicit clock input supplied by the HAL;
+- `phy_get_romfuncs`, `phy_param_addr`, and archive
+  `phy_get_romfunc_addr` are ABI plumbing to delete;
+- `phy_i2c_enter_critical` and `phy_i2c_exit_critical` disappear under the
+  unique radio owner;
+- many remaining radio leaves already have Rust transitions or finite MMIO
+  implementations and therefore are retained only as differential oracles.
+
+For the active runtime, none of the 11 fallback archive bodies should be
+ported wholesale. Completing the missing RX descriptor/control/optional
+metadata cases in the existing Rust dispatcher removes the whole fallback
+frontier and simultaneously releases `TxRxCxt`, `wDevCtrl`,
+`g_wifi_menuconfig`, `g_lmac_cnt`, `wifi_sta_rx_probe_req`, `g_osi_funcs_p`,
+and `pTxRx` from the runtime ownership graph.
+
+Within cold PHY, the immediate unresolved `phy_bb_init`/channel frontier is 13
+unique child roots with 3,564 bytes of direct reference bodies:
+
+| child root | reference bytes | source | current decision |
+|---|---:|---|---|
+| `phy_txdc_cal_init` | 272 | archive | port calibration transition |
+| `phy_pwdet_code_cal` | 76 | ROM | port calibration transition |
+| `phy_tx_cap_init` | 230 | archive | port calibration transition |
+| `phy_tsens_temp_read` | 50 | ROM | expose temperature completion |
+| `phy_tx_pwctrl_init` | 154 | archive | port calibration transition |
+| `phy_txdc_cal_pwdet_init` | 520 | archive | port calibration transition |
+| `phy_dcode_cal_init` | 128 | ROM | port calibration transition |
+| `phy_txiq_cal_init` | 332 | archive | port calibration transition |
+| `phy_bt_tx_gain_init` | 90 | archive | retain as conditional shared/coex evidence until omission is proved |
+| `phy_set_pbus_mem` | 384 | ROM | port finite PBus table |
+| `phy_rxiq_cal_init` | 408 | archive | port calibration transition |
+| `phy_set_rx_gain_table` | 650 | archive | port RX gain transition |
+| `phy_chip_set_chan` | 270 | archive | port cold channel transition |
+
+`phy_check_rx_sat` is no longer in that code backlog: its Rust transition and
+owned `phy_param` mutation are complete. Its target-side 100-sample capture
+producer remains a separate hardware binding. After the 13 roots, the work is
+to compose `phy_bb_init` (362 bytes of reference parent), port the remaining
+outer `register_chipv7_phy` sequencing (486 bytes), and activate the complete
+graph without publishing `phy_param` or `g_phyFuns`.
+
 ## Completed slice: typed large-RX ownership
 
 The kind-7 ESF receive path now has an explicit ownership state independent of
